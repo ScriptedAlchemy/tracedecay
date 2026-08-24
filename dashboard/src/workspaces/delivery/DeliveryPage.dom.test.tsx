@@ -6,6 +6,7 @@ import type {
   DeliveryOverviewV1,
   DeliveryPullRequestV1,
 } from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
 
@@ -336,7 +337,9 @@ const DELIVERY_OVERVIEW = {
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    const hit = Object.entries(routes).find(([path]) => url.includes(path));
+    // Project-scoped dashboard reads travel through the gateway prefix.
+    const canonicalUrl = url.replace(/\/api\/projects\/[^/]+\//, '/api/');
+    const hit = Object.entries(routes).find(([path]) => canonicalUrl.includes(path));
     const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
     return {
       ok: status >= 200 && status < 300,
@@ -374,9 +377,44 @@ function renderDelivery(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.setState({ scope: { kind: 'all' } });
 });
 
 describe('DeliveryPage', () => {
+  it('scopes delivery overview to the selected project gateway', async () => {
+    const fetchMock = serve({
+      '/api/projects': { status: 200, body: fixtureEnvelope(PROJECTS) },
+      '/api/delivery/overview': { status: 200, body: DELIVERY_OVERVIEW },
+    });
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'p1',
+        label: 'repo',
+        activation: 'selected',
+      },
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <DeliveryPage />
+      </QueryClientProvider>,
+    );
+    await screen.findByText('Changes & commits');
+    const requested = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested.some((url) => url.includes('/api/projects/p1/delivery/overview'))).toBe(
+      true,
+    );
+    expect(
+      requested.some(
+        (url) => url.includes('/api/delivery/overview') && !url.includes('/api/projects/'),
+      ),
+    ).toBe(false);
+  });
+
   it('says the recency axis is index time, not commit time', async () => {
     renderDelivery();
     await screen.findByText('last indexed across · branches up');

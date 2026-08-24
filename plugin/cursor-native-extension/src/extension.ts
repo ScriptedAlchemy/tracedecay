@@ -11,7 +11,7 @@ import {
   type NativeDiagnosticInput,
   admitNativeWorkspace,
   createNativeDiagnosticsPayload,
-  limitAdmittedNativeDiagnosticDocuments,
+  batchAdmittedNativeDiagnosticDocuments,
   resolveInstalledTraceDecayBinary,
   traceDecayInitializationOptions,
   toLspDiagnosticSeverity,
@@ -193,28 +193,30 @@ class CursorNativeDiagnosticsSession implements vscode.Disposable {
     if (this.disposed) {
       return;
     }
-    for (const uri of limitAdmittedNativeDiagnosticDocuments(
+    for (const batch of batchAdmittedNativeDiagnosticDocuments(
       uris,
       (candidate) => isAdmittedWorkspaceDocument(candidate, this.workspaceFolder),
     )) {
-      const document = vscode.workspace.textDocuments.find(
-        (candidate) => candidate.uri.toString() === uri.toString(),
-      );
-      if (document === undefined) {
-        continue;
+      for (const uri of batch) {
+        const document = vscode.workspace.textDocuments.find(
+          (candidate) => candidate.uri.toString() === uri.toString(),
+        );
+        if (document === undefined) {
+          continue;
+        }
+        const payload = createNativeDiagnosticsPayload(
+          uri.toString(),
+          document.version,
+          vscode.languages.getDiagnostics(uri).map(toNativeDiagnosticInput),
+        );
+        void this.client
+          .sendNotification(TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD, payload)
+          .catch((error: unknown) => {
+            this.client.warn(
+              `TraceDecay native diagnostic notification was not delivered: ${String(error)}`,
+            );
+          });
       }
-      const payload = createNativeDiagnosticsPayload(
-        uri.toString(),
-        document.version,
-        vscode.languages.getDiagnostics(uri).map(toNativeDiagnosticInput),
-      );
-      void this.client
-        .sendNotification(TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD, payload)
-        .catch((error: unknown) => {
-          this.client.warn(
-            `TraceDecay native diagnostic notification was not delivered: ${String(error)}`,
-          );
-        });
     }
   }
 }

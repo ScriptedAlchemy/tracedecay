@@ -28,12 +28,15 @@ use super::TraceDecay;
 /// project's canonical/display root to a transient path. `tracked_branches`
 /// and the artifact mtimes catch every other observable change (branch
 /// tracking, store file replacement) that this function is responsible for
-/// publishing.
+/// publishing. `git_remote_url` is included because `git remote set-url`
+/// changes origin identity without touching those other fields, and the
+/// registry writes the remote (and its search alias) on every registration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegistrationDigest {
     project_id: String,
     canonical_root: PathBuf,
     git_common_dir: Option<PathBuf>,
+    git_remote_url: Option<String>,
     tracked_branches: BTreeSet<String>,
     artifact_mtimes: Vec<Option<SystemTime>>,
 }
@@ -115,10 +118,12 @@ impl TraceDecay {
                 .as_deref()
                 .and_then(artifact_mtime),
         ];
+        let git_remote_url = git_remote_url(&self.project_root);
         let digest = RegistrationDigest {
             project_id: project_id.to_string(),
             canonical_root: registration_root.to_path_buf(),
             git_common_dir: git_common_dir.clone(),
+            git_remote_url: git_remote_url.clone(),
             tracked_branches,
             artifact_mtimes,
         };
@@ -143,8 +148,6 @@ impl TraceDecay {
                 return Ok(());
             }
         }
-
-        let git_remote_url = git_remote_url(&self.project_root);
 
         let previous_canonical_root = if primary_root.is_some() {
             // Propagated: a database fault here must not read as "no prior
@@ -373,6 +376,7 @@ mod tests {
             project_id: "proj-1".to_string(),
             canonical_root: PathBuf::from(canonical_root),
             git_common_dir: Some(PathBuf::from("/repo/.git")),
+            git_remote_url: Some("https://example.com/repo.git".to_string()),
             tracked_branches: branches.iter().map(ToString::to_string).collect(),
             artifact_mtimes: vec![None, None, None, None],
         }
@@ -456,6 +460,23 @@ mod tests {
         assert_eq!(
             register_calls, 2,
             "a changed git_common_dir must force re-registration"
+        );
+    }
+
+    #[test]
+    fn changed_git_remote_does_not_skip() {
+        let mut cache = HashMap::new();
+        let mut register_calls = 0;
+        let first = digest("/repo", &["main"]);
+        let mut second = first.clone();
+        second.git_remote_url = Some("https://example.com/fork.git".to_string());
+
+        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
+        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
+
+        assert_eq!(
+            register_calls, 2,
+            "a changed git remote must force re-registration"
         );
     }
 
