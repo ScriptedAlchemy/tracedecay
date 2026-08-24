@@ -115,7 +115,9 @@ fn parallel_collection_contains_a_panicking_unit_without_poisoning_the_rest() {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = collect_bounded_ordered(&items, |item, _worker| {
-        assert_ne!(*item, 200, "synthetic per-file panic");
+        if *item == 200 {
+            panic!("synthetic per-file panic");
+        }
         completed.fetch_add(1, Ordering::Relaxed);
         Ok::<_, WorkerTestError>(*item)
     });
