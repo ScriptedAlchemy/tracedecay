@@ -10,6 +10,8 @@ use std::time::Duration;
 use crate::common::http_agent;
 use serde_json::json;
 #[cfg(feature = "test-transport")]
+use serde_json::Value;
+#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
