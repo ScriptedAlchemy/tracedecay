@@ -55,8 +55,25 @@ use retained_hook_tasks::RetainedHookTasks;
 pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 pub(crate) use profile_memory::open_user_memory_db;
 
-const MAX_RETAINED_PROJECT_RUNTIME_OWNERS: usize = 8;
-const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = 8;
+/// Sanity ceilings on concurrently mounted owners, not a bound on how many
+/// projects a profile may enrol.
+///
+/// These were 8, which is where enrolment actually stopped: a profile with
+/// four projects was refused, and once the budget was exhausted even a
+/// read-only `projects list` failed. Nothing about 8 was derived — the working
+/// set of a developer with a few dozen checkouts is far above it.
+///
+/// Sizing is honest about what does and does not bound this today. File
+/// descriptors are not the constraint (the process ceiling is ~1M here and a
+/// mount holds a handful). Resident memory *is* the constraint, and it is
+/// currently ungoverned for these owners: no resident-memory gate covers a
+/// mounted project runtime, and `reserve_capacity_eviction` cannot reclaim one
+/// (see the note there), so a ceiling this high means residency grows with the
+/// number of projects actually touched. That is the deliberate trade — a
+/// refusal at 4 projects was the worse failure — and the real fix is idle
+/// project hibernation, which is follow-up work.
+const MAX_RETAINED_PROJECT_RUNTIME_OWNERS: usize = 4_096;
+const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = 4_096;
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
