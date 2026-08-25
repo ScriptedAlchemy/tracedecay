@@ -669,6 +669,7 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   last_progress_micros: z.number().int().safe(),
   lexical_bytes_per_second: z.number().nullable(),
   phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
+  producer_incarnation: z.number().int().safe().min(0),
   progress_epoch: z.number().int().safe().min(0),
   sealed_source_digest: z.string(),
   total_files: z.number().int().safe().min(0),

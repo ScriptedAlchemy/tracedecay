@@ -694,6 +694,9 @@ impl Drop for PendingWakeClaimV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
+    /// Durable daemon-authority epoch shared by every progress producer in
+    /// this registry. This is never derived from wall-clock time.
+    pub(super) progress_producer_incarnation: u64,
     pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
@@ -1933,6 +1936,7 @@ impl CodeIndexSchedulerRegistryV1 {
         )
         .map(|mut scheduler| {
             scheduler.bind_resident_memory(Arc::clone(&self.resident_memory));
+            scheduler.bind_progress_producer_incarnation(self.progress_producer_incarnation);
             scheduler
         })
     }
@@ -2164,6 +2168,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_semantic_schedule = semantic_schedule.clone();
         let open_resident_memory = Arc::clone(&self.resident_memory);
+        let progress_producer_incarnation = self.progress_producer_incarnation;
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);
@@ -2178,6 +2183,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut opened = opened?;
             opened.replace_semantic_schedule_hook(open_semantic_schedule);
             opened.bind_resident_memory(open_resident_memory);
+            opened.bind_progress_producer_incarnation(progress_producer_incarnation);
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
         })
         .await

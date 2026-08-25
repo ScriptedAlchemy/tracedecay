@@ -1705,6 +1705,9 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     text_progress_state: Arc<Mutex<CodeIndexBuildProgressStateV1>>,
     text_progress_slot: CodeIndexBuildProgressSlotV1,
     text_progress_owner_epoch: u64,
+    /// Existing durable daemon-authority epoch. It orders progress across
+    /// process restarts; the slot epoch orders only within this incarnation.
+    text_progress_producer_incarnation: u64,
     /// The durable text-artifact store for this generation's store root.
     text_artifact_store: DaemonCodeTextArtifactStoreV1,
     /// Exact scheduler authorities for shutdown and superseding source epochs.
@@ -2526,6 +2529,7 @@ impl LatestCompleteCodeIndexV1 {
             state.rates_and_eta(total_lexical_bytes);
         let snapshot = CodeIndexBuildProgressV1 {
             generation_id: self.generation.manifest().generation_id.as_str().to_owned(),
+            producer_incarnation: self.text_progress_producer_incarnation,
             progress_epoch: 0,
             sealed_source_digest: build.sealed_identity.digest.as_str().to_owned(),
             phase,
@@ -2570,6 +2574,7 @@ impl LatestCompleteCodeIndexV1 {
             .elapsed_micros();
         Ok(CodeIndexBuildProgressV1 {
             generation_id: generation_id.as_str().to_owned(),
+            producer_incarnation: self.text_progress_producer_incarnation,
             progress_epoch: 0,
             sealed_source_digest: sealed_identity.digest.as_str().to_owned(),
             phase: CodeIndexBuildPhaseV1::Ready,
@@ -3356,6 +3361,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
     build_progress: CodeIndexBuildProgressSlotV1,
+    /// Durable daemon-authority epoch bound by the process registry at mount.
+    progress_producer_incarnation: u64,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -3460,6 +3467,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_source_admissions: Vec::new(),
             query_owners: Mutex::new(None),
             build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
+            progress_producer_incarnation: 1,
             semantic_schedule: None,
         };
         Ok(scheduler)
@@ -3474,6 +3482,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub(super) fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+    }
+
+    pub(super) fn bind_progress_producer_incarnation(&mut self, producer_incarnation: u64) {
+        self.progress_producer_incarnation = producer_incarnation.max(1);
     }
 
     pub(super) fn build_progress_slot(&self) -> CodeIndexBuildProgressSlotV1 {
@@ -4336,6 +4348,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_progress_state,
             text_progress_slot: Arc::clone(&self.build_progress),
             text_progress_owner_epoch,
+            text_progress_producer_incarnation: self.progress_producer_incarnation,
             text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
                 &self.store_root,
                 &self.publication,
@@ -4407,6 +4420,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             )),
                             text_progress_slot: Arc::new(RwLock::new(progress_slot)),
                             text_progress_owner_epoch,
+                            text_progress_producer_incarnation: self.progress_producer_incarnation,
                             text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
                                 &self.store_root,
                                 &self.publication,

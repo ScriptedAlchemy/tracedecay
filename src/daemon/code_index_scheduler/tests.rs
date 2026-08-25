@@ -218,6 +218,7 @@ fn progress_snapshot_for_generation(
 ) -> crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
     crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
         generation_id: generation_id.as_str().to_owned(),
+        producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
         phase: crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,

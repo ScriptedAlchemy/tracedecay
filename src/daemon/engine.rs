@@ -136,6 +136,12 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
 
 #[cfg(unix)]
 impl DaemonEngine {
+    pub(super) fn with_progress_producer_incarnation(mut self, producer_incarnation: u64) -> Self {
+        self.invocation =
+            DaemonInvocationState::with_progress_producer_incarnation(producer_incarnation);
+        self
+    }
+
     pub(super) fn with_profile_identity(
         mut self,
         profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,

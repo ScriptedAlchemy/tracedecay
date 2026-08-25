@@ -58,6 +58,12 @@ pub enum CodeIndexBuildBlockedReasonV1 {
 pub struct CodeIndexBuildProgressV1 {
     /// Exact generation receiving the committed build work.
     pub generation_id: String,
+    /// Durable daemon-authority epoch that produced this snapshot.
+    ///
+    /// This orders snapshots across daemon restarts without relying on wall
+    /// clock time. `progress_epoch` is comparable only within one producer
+    /// incarnation.
+    pub producer_incarnation: u64,
     /// Monotonic publication epoch for replacing delayed progress reads.
     pub progress_epoch: u64,
     /// Identity of the sealed source whose authenticated bounds define progress.
@@ -348,6 +354,7 @@ mod tests {
                     coverage: "complete".to_owned(),
                     progress: Some(CodeIndexBuildProgressV1 {
                         generation_id: "generation.catchup.01".to_owned(),
+                        producer_incarnation: 11,
                         progress_epoch: 7,
                         sealed_source_digest: "sha256:sealed-source-catchup".to_owned(),
                         phase: CodeIndexBuildPhaseV1::BulkCommit,
