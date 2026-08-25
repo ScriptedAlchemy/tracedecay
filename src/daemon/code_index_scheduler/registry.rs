@@ -574,6 +574,14 @@ impl Default for PendingWakeV1 {
 }
 
 impl PendingWakeV1 {
+    fn has_pending_arrival(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .micros
+            != 0
+    }
+
     #[cfg(test)]
     fn note_foreign_wake_attempt_for_test(&self) {
         let gate = self
@@ -696,7 +704,11 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     /// Durable daemon-authority epoch shared by every progress producer in
     /// this registry. This is never derived from wall-clock time.
-    pub(super) progress_producer_incarnation: u64,
+    pub(super) progress_daemon_incarnation: u64,
+    /// Next scheduler-owner token within `progress_daemon_incarnation`.
+    /// Cloned registries share this authority, so same-daemon retire/remounts
+    /// cannot reuse a progress ordering key.
+    pub(super) next_progress_producer_incarnation: Arc<AtomicU64>,
     pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
@@ -726,6 +738,22 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
+        !pending_wake.has_pending_arrival()
+    }
+
+    fn mint_progress_producer_incarnation(&self) -> Result<u64, CodeIndexSchedulerErrorV1> {
+        self.next_progress_producer_incarnation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "code-index progress producer incarnation authority is exhausted".to_owned(),
+                )
+            })
+    }
+
     #[hotpath::measure]
     pub(in crate::daemon) fn register_activation(
         &self,
@@ -1928,6 +1956,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is zero".to_owned(),
             ));
         }
+        let producer_incarnation = self.mint_progress_producer_incarnation()?;
         CodeIndexWorktreeSchedulerV1::open(
             project_id,
             project_root,
@@ -1936,7 +1965,8 @@ impl CodeIndexSchedulerRegistryV1 {
         )
         .map(|mut scheduler| {
             scheduler.bind_resident_memory(Arc::clone(&self.resident_memory));
-            scheduler.bind_progress_producer_incarnation(self.progress_producer_incarnation);
+            scheduler
+                .bind_progress_incarnations(self.progress_daemon_incarnation, producer_incarnation);
             scheduler
         })
     }
@@ -2168,7 +2198,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_semantic_schedule = semantic_schedule.clone();
         let open_resident_memory = Arc::clone(&self.resident_memory);
-        let progress_producer_incarnation = self.progress_producer_incarnation;
+        let progress_daemon_incarnation = self.progress_daemon_incarnation;
+        let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);
@@ -2183,7 +2214,10 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut opened = opened?;
             opened.replace_semantic_schedule_hook(open_semantic_schedule);
             opened.bind_resident_memory(open_resident_memory);
-            opened.bind_progress_producer_incarnation(progress_producer_incarnation);
+            opened.bind_progress_incarnations(
+                progress_daemon_incarnation,
+                progress_producer_incarnation,
+            );
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
         })
         .await
@@ -2326,6 +2360,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
+                let mut text_slice_incomplete = false;
                 if let Some(latest) = text_generation
                     && latest.text_serving_needs_work()
                 {
@@ -2338,7 +2373,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok(Ok(true)) => {}
                         Ok(Ok(false)) => {
                             worker_wake.notify_one();
-                            continue;
+                            text_slice_incomplete = true;
                         }
                         Ok(Err(error)) => {
                             tracing::warn!(
@@ -2356,6 +2391,18 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                         }
                     }
+                }
+                if worker_shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                if text_slice_incomplete {
+                    if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("query.artifact.slice.continue_total").inc(1_u64);
+                        continue;
+                    }
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("query.artifact.slice.yield_to_reconcile_total").inc(1_u64);
                 }
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
@@ -4042,6 +4089,40 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.wake.notify_one();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod text_slice_fairness_tests {
+    use super::{CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1};
+
+    #[test]
+    fn pending_reconcile_is_serviced_between_bounded_text_slices() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        assert!(
+            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "a text-only self-wake may advance the next bounded slice"
+        );
+
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::HookHint,
+        );
+        assert!(
+            !CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "a pending source reconcile must win before another text slice"
+        );
+
+        let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "text continuation resumes only after reconcile claims the pending arrival"
+        );
     }
 }
 

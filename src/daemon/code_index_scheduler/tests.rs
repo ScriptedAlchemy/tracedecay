@@ -218,6 +218,7 @@ fn progress_snapshot_for_generation(
 ) -> crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
     crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
         generation_id: generation_id.as_str().to_owned(),
+        daemon_incarnation: 1,
         producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
@@ -3853,6 +3854,105 @@ fn ordinary_background_reconcile_does_not_supersede_in_flight_text_work() {
 }
 
 #[test]
+fn same_daemon_scheduler_retire_remount_mints_new_progress_producer() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn producer_epoch() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let first = registry
+        .open_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .expect("first scheduler owner");
+    let (first_daemon, first_producer) = first.progress_incarnations_for_test();
+    drop(first);
+    let second = registry
+        .open_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .expect("replacement scheduler owner");
+    let (second_daemon, second_producer) = second.progress_incarnations_for_test();
+
+    assert_eq!(second_daemon, first_daemon);
+    assert!(
+        second_producer > first_producer,
+        "same-daemon scheduler replacement must outrank delayed low-epoch progress"
+    );
+}
+
+#[test]
+fn source_epoch_advance_does_not_discard_immutable_text_progress() {
+    let mut source = String::new();
+    for ordinal in 0..600 {
+        writeln!(
+            source,
+            "pub fn immutable_symbol_{ordinal}() -> usize {{ {ordinal} }}"
+        )
+        .expect("write immutable source fixture");
+    }
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let admitted = latest.text_execution_control();
+
+    // Reproduce a hook arriving after a text pass captures its control but
+    // before the sealed source's first cancellation checkpoint.
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+    let result = {
+        let mut build = latest
+            .text_projection_build
+            .lock()
+            .expect("generation text projection");
+        latest.advance_artifact_text_serving(&mut build, 1, &admitted)
+    };
+
+    assert!(
+        matches!(result, Ok(false) | Ok(true)),
+        "a worktree freshness epoch must not cancel immutable generation work: {result:?}"
+    );
+    assert!(
+        latest
+            .text_projection_build
+            .lock()
+            .expect("retained text projection")
+            .is_some()
+            || latest.query_owners_are_warm(),
+        "the bounded pass must retain or complete its generation-owned progress"
+    );
+}
+
+#[test]
+fn shutdown_cancels_generation_owned_text_work() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown_text_work() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    scheduler
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    assert_eq!(
+        latest.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled),
+        "daemon shutdown must remain a cancellation fence for immutable text work"
+    );
+}
+
+#[test]
 fn generation_replacement_drops_incomplete_text_projection_state() {
     let fixture = GitFixture::new(&[
         ("src/first.rs", "pub fn first() {}\n"),
@@ -3867,6 +3967,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     published(scheduler.reconcile_now().expect("publish first generation"));
     let original = scheduler.latest_complete().expect("original generation");
+    let original_control = original.text_execution_control();
     assert!(
         !original
             .advance_text_serving(1)
@@ -3886,6 +3987,18 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     assert_ne!(
         replacement.generation().manifest().generation_id,
         original_generation
+    );
+    let superseded_result = {
+        let mut build = original
+            .text_projection_build
+            .lock()
+            .expect("superseded projection state");
+        original.advance_artifact_text_serving(&mut build, 1, &original_control)
+    };
+    assert_eq!(
+        superseded_result,
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled),
+        "a replacement serving generation must retire the prior text owner"
     );
     assert!(!Arc::ptr_eq(
         &original.text_projection_build,
@@ -3936,8 +4049,8 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
             .text_projection_build
             .lock()
             .expect("replacement projection state")
-            .is_none(),
-        "a replacement generation starts with independent empty projection state"
+            .is_some(),
+        "publishing the replacement baseline initializes only its independent projection state"
     );
 }
 
