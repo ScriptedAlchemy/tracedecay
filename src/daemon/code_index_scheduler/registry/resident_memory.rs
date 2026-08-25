@@ -20,7 +20,7 @@ impl CodeIndexSchedulerRegistryV1 {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub fn with_resident_memory(
         max_worktrees: usize,
         resident_memory: Arc<ProcessResidentMemoryV1>,

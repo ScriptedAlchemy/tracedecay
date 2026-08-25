@@ -93,7 +93,7 @@ impl CaptureProgressV1 {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub(super) fn observe_candidate(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
@@ -109,7 +109,7 @@ impl CaptureProgressV1 {
         let _ = bytes;
     }
 
-    #[inline(always)]
+    #[inline]
     pub(super) fn observe_processed(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
@@ -125,7 +125,7 @@ impl CaptureProgressV1 {
         let _ = bytes;
     }
 
-    #[inline(always)]
+    #[inline]
     pub(super) fn observe_captured(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
@@ -863,8 +863,7 @@ mod tests {
         let captured = scheduler
             .capture_exact_git_tree_snapshot(
                 &ExactGitTreeSourceV1 {
-                    reference: tracedecay_domain::RefId::new("refs/heads/main")
-                        .expect("reference"),
+                    reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
                     revision: tracedecay_domain::CommitId::new(revision).expect("revision"),
                     tree: tracedecay_domain::TreeId::new(tree).expect("tree"),
                 },
