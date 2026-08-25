@@ -41,7 +41,7 @@ pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 /// is a target the engine may transiently exceed, per-statement and
 /// allocator metadata overhead are unaccounted, and `temp_store = FILE`
 /// keeps temporary b-trees on disk rather than bounding them in memory.
-pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 768 * 1024 * 1024;
+pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 1536 * 1024 * 1024;
 /// Maximum reader cache budget: the stored metadata copy plus the SQLite
 /// page-cache grant, which stays inside the kernel SQLite window ([2, 64]
 /// MiB page cache, mmap disabled). The reader's retained claim is the

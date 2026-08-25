@@ -49,8 +49,10 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBatchLimitV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
@@ -1722,34 +1724,157 @@ fn disk_artifact_admission_keeps_real_pages_wide_until_the_actual_limit() {
 }
 
 #[test]
-fn disk_artifact_large_build_authority_commits_thirty_two_real_pages() {
-    let fixture = real_lexical_source_fixture_with_files(32);
-    let (pages, _) = drain_verified_pages(&fixture, 1);
+fn disk_artifact_widened_reservation_commits_high_ngram_window_atomically() {
+    const PRIOR_BUILD_BUDGET_BYTES: usize = 768 * 1024 * 1024;
+    const WIDENED_BUILD_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+    const SOURCE_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+    const MAXIMUM_PREPARED_BATCH_ROWS: usize = 2_000_000;
+    const MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES: usize = 256 * 1024 * 1024;
+
+    let sources = (0..32)
+        .map(|file_ordinal| {
+            let mut source = String::with_capacity(128 * 1024);
+            for symbol_ordinal in 0..128 {
+                let mut state = u64::try_from(file_ordinal * 128 + symbol_ordinal + 1)
+                    .expect("fixture seed");
+                let token = (0..240)
+                    .map(|_| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        let alphabet_ordinal =
+                            usize::try_from((state >> 32) % 26).expect("alphabet ordinal");
+                        char::from(b'a' + u8::try_from(alphabet_ordinal).expect("ASCII letter"))
+                    })
+                    .collect::<String>();
+                source.push_str(&format!(
+                    "export function symbol_{file_ordinal:02}_{symbol_ordinal:03}(value: string) {{ return value + '{token}'; }}\n"
+                ));
+            }
+            (
+                format!("file.artifact.high-ngram.{file_ordinal:02}"),
+                format!("src/high-ngram-{file_ordinal:02}.ts"),
+                source.into_bytes(),
+            )
+        })
+        .collect();
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let (pages, _) = drain_verified_pages(&fixture, 128);
     assert!(
         pages.len() >= 32,
-        "the parser-backed corpus must expose a full 32-page source window"
+        "the parser-backed high-ngram corpus must expose a full 32-page source window"
     );
+    let pages = &pages[..32];
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("thirty-two-page-batch.sqlite");
-    let mut builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-        &artifact_path,
-        fixture.metadata,
-        768 * 1024 * 1024,
+
+    let prior_path = directory.path().join("prior-reservation.sqlite");
+    let mut prior = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &prior_path,
+        fixture.metadata.clone(),
+        PRIOR_BUILD_BUDGET_BYTES,
     )
-    .expect("create builder with the production large-batch authority");
+    .expect("create builder with the prior reservation");
+    let batch_charge = prior
+        .fixed_ledger_charge_bytes()
+        .checked_add(
+            prior
+                .page_batch_ledger_charge_bytes(pages)
+                .expect("measure high-ngram window"),
+        )
+        .expect("high-ngram window ledger charge");
+    assert!(
+        batch_charge > PRIOR_BUILD_BUDGET_BYTES,
+        "the production-shaped window must reproduce the measured 768 MiB memory limit: {batch_charge}"
+    );
+    assert!(
+        batch_charge <= WIDENED_BUILD_BUDGET_BYTES,
+        "the same bounded window must fit the widened reservation: {batch_charge}"
+    );
+    assert!(
+        prior
+            .largest_admissible_page_prefix(pages)
+            .expect("select prior reservation prefix")
+            < pages.len(),
+        "the prior reservation must stop before the complete high-ngram window"
+    );
+    assert!(matches!(
+        prior.append_pages(pages, &ArtifactControl { cancelled: false }),
+        Err(CodeLexicalArtifactErrorV1::BatchTooLarge {
+            limit: CodeLexicalArtifactBatchLimitV1::Memory,
+            required,
+            maximum: PRIOR_BUILD_BUDGET_BYTES,
+        }) if required == batch_charge
+    ));
+    assert_eq!(
+        prior
+            .progress()
+            .expect("progress after typed reservation denial")
+            .next_page_ordinal,
+        0,
+        "the memory denial must precede the atomic staging transaction"
+    );
+    drop(prior);
+
+    assert_eq!(
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, WIDENED_BUILD_BUDGET_BYTES,
+        "the canonical reservation must cover the measured production window"
+    );
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create builder with the canonical widened reservation");
+    assert_eq!(
+        builder
+            .largest_admissible_page_prefix(pages)
+            .expect("select widened reservation prefix"),
+        pages.len(),
+        "the widened memory authority must admit the complete window"
+    );
+    let source_retained_bytes = pages
+        .iter()
+        .map(VerifiedSealedLexicalPageV1::retained_owned_bytes)
+        .sum::<usize>();
+    assert!(
+        source_retained_bytes <= SOURCE_WINDOW_BYTES,
+        "the fixture must remain inside the 64 MiB source window: {source_retained_bytes}"
+    );
+    assert!(
+        pages.iter().all(|page| {
+            page.retained_owned_bytes() <= CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1
+        }),
+        "every source page must remain inside its unchanged retained-byte bound"
+    );
     let control = ArtifactControl { cancelled: false };
     let prepared = builder
-        .prepare_admissible_page_prefix(&pages[..32], &control)
+        .prepare_pages(pages, &control)
         .expect("prepare one full production source window");
-    assert_eq!(
-        prepared.accepted_prefix().get(),
-        32,
-        "the tracked memory, row, and write authorities must admit the complete real prefix"
+    let estimated_rows = prepared
+        .iter()
+        .map(|page| page.estimated_write_rows())
+        .sum::<usize>();
+    let estimated_write_bytes = prepared
+        .iter()
+        .map(|page| page.estimated_write_bytes())
+        .sum::<usize>();
+    assert!(
+        estimated_rows <= MAXIMUM_PREPARED_BATCH_ROWS,
+        "the high-ngram window must remain inside the unchanged row bound: {estimated_rows}"
+    );
+    assert!(
+        estimated_write_bytes <= MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES,
+        "the high-ngram window must remain inside the unchanged write bound: {estimated_write_bytes}"
     );
     let progress = builder
-        .append_prepared_pages(prepared.prepared_pages(), &control)
+        .append_prepared_pages(&prepared, &control)
         .expect("commit the complete real prefix atomically");
     assert_eq!(progress.next_page_ordinal, 32);
+    assert_eq!(
+        staged_row_cardinality(&artifact_path).0,
+        pages
+            .iter()
+            .map(VerifiedSealedLexicalPageV1::chunk_count)
+            .sum::<u64>(),
+        "one transaction must make every page row visible together"
+    );
 }
 
 #[test]
