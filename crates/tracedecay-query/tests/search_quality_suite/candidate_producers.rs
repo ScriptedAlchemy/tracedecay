@@ -1724,6 +1724,179 @@ fn disk_artifact_admission_keeps_real_pages_wide_until_the_actual_limit() {
 }
 
 #[test]
+fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
+    let (fixture, pages, _) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("term-insert-order.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    let trace = rusqlite::Connection::open(&artifact_path).expect("open term insert observer");
+    trace
+        .execute_batch(
+            "CREATE TABLE term_insert_trace (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                field TEXT NOT NULL,
+                term TEXT NOT NULL,
+                document_id INTEGER NOT NULL
+            );
+            CREATE TRIGGER trace_term_insert AFTER INSERT ON term_postings BEGIN
+                INSERT INTO term_insert_trace(field, term, document_id)
+                VALUES (NEW.field, NEW.term, NEW.document_id);
+            END;",
+        )
+        .expect("install term insert observer");
+    drop(trace);
+
+    builder
+        .append_pages(&pages, &ArtifactControl { cancelled: false })
+        .expect("append observed term postings");
+    let trace = rusqlite::Connection::open(&artifact_path).expect("read term insert observer");
+    let keys = trace
+        .prepare("SELECT field, term, document_id FROM term_insert_trace ORDER BY sequence")
+        .expect("prepare term insert trace")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .expect("query term insert trace")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read term insert trace");
+    assert!(keys.len() > 1, "fixture must emit multiple term postings");
+    let resets = keys.windows(2).filter(|pair| pair[1] < pair[0]).count();
+    assert_eq!(
+        resets, 0,
+        "term INSERT execution must follow the WITHOUT ROWID primary key"
+    );
+}
+
+#[test]
+fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() {
+    const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
+
+    let (fixture, pages, _) = real_verified_pages();
+    let pages = &pages[..1];
+    let metadata = fixture.metadata;
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let probe_path = directory.path().join("term-plan-probe.sqlite");
+    let mut probe = CodeLexicalArtifactBuilderV1::create(&probe_path, metadata.clone())
+        .expect("create term plan probe");
+    let control = ArtifactControl { cancelled: false };
+    let prepared = probe
+        .prepare_pages(pages, &control)
+        .expect("prepare term plan fixture");
+    let prepared_ledger = prepared[0]
+        .ledger_charge_bytes()
+        .expect("prepared page ledger charge");
+    let fixed_ledger = probe.fixed_ledger_charge_bytes();
+    probe
+        .append_prepared_pages(&prepared, &control)
+        .expect("append term plan probe");
+    let term_rows = rusqlite::Connection::open(&probe_path)
+        .expect("open term plan probe")
+        .query_row("SELECT COUNT(*) FROM term_postings", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("count prepared term rows");
+    let term_rows = usize::try_from(term_rows).expect("term row count");
+    assert!(term_rows > 0, "fixture must emit term postings");
+    let plan_ledger = term_rows
+        .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
+        .expect("term plan ledger charge");
+    let exact_budget = fixed_ledger
+        .checked_add(prepared_ledger)
+        .and_then(|bytes| bytes.checked_add(plan_ledger))
+        .expect("exact term plan budget");
+    drop(probe);
+
+    let refused_path = directory.path().join("term-plan-refused.sqlite");
+    let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &refused_path,
+        metadata.clone(),
+        exact_budget - 1,
+    )
+    .expect("create one-byte-under term plan builder");
+    assert_eq!(refused.fixed_ledger_charge_bytes(), fixed_ledger);
+    assert!(matches!(
+        refused.append_prepared_pages(&prepared, &control),
+        Err(CodeLexicalArtifactErrorV1::BatchTooLarge {
+            limit: CodeLexicalArtifactBatchLimitV1::Memory,
+            required,
+            maximum,
+        }) if required == exact_budget && maximum == exact_budget - 1
+    ));
+    assert_eq!(
+        refused
+            .progress()
+            .expect("progress after term plan refusal")
+            .next_page_ordinal,
+        0
+    );
+    assert_eq!(staged_row_cardinality(&refused_path), (0, 0));
+    let refused_term_rows: i64 = rusqlite::Connection::open(&refused_path)
+        .expect("open refused term plan artifact")
+        .query_row("SELECT COUNT(*) FROM term_postings", [], |row| row.get(0))
+        .expect("count refused term rows");
+    assert_eq!(refused_term_rows, 0);
+    drop(refused);
+
+    let interrupted_path = directory.path().join("term-plan-interrupted.sqlite");
+    let mut interrupted = CodeLexicalArtifactBuilderV1::create(&interrupted_path, metadata.clone())
+        .expect("create interrupted term plan builder");
+    let documents = usize::try_from(prepared[0].chunk_count()).expect("prepared document count");
+    // append entry + plan entry + page/document count pass + page/document
+    // collection pass + the post-sort checkpoint.
+    let post_sort_observation = documents
+        .checked_mul(2)
+        .and_then(|observations| observations.checked_add(5))
+        .expect("post-sort observation");
+    let cancellation = CancelAtObservation::new(post_sort_observation);
+    assert!(matches!(
+        interrupted.append_prepared_pages(&prepared, &cancellation),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+    assert_eq!(
+        interrupted
+            .progress()
+            .expect("progress after term plan interruption")
+            .next_page_ordinal,
+        0,
+        "post-sort cancellation must precede transaction entry"
+    );
+    assert_eq!(staged_row_cardinality(&interrupted_path), (0, 0));
+    drop(interrupted);
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &interrupted_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume after term plan interruption");
+    assert_eq!(
+        resumed
+            .append_prepared_pages(&prepared, &control)
+            .expect("resume exact prepared batch")
+            .next_page_ordinal,
+        1
+    );
+    drop(resumed);
+
+    let exact_path = directory.path().join("term-plan-exact.sqlite");
+    let mut exact = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &exact_path,
+        metadata,
+        exact_budget,
+    )
+    .expect("create exact term plan builder");
+    let progress = exact
+        .append_prepared_pages(&prepared, &control)
+        .expect("accept exact term plan boundary");
+    assert_eq!(progress.next_page_ordinal, 1);
+}
+
+#[test]
 fn disk_artifact_widened_reservation_commits_high_ngram_window_atomically() {
     const PRIOR_BUILD_BUDGET_BYTES: usize = 768 * 1024 * 1024;
     const WIDENED_BUILD_BUDGET_BYTES: usize = 1536 * 1024 * 1024;

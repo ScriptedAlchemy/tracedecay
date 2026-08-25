@@ -37,7 +37,9 @@ use super::format::{
     verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
-use super::prepared::{PreparedCodeLexicalArtifactPageV1, prepare_page as prepare_page_values};
+use super::prepared::{
+    PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1, prepare_page as prepare_page_values,
+};
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
@@ -54,6 +56,11 @@ const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+// A plan entry owns one document id and one posting reference. Three words
+// cover its portable 32-bit layout and conservatively exceed its 64-bit
+// layout; general allocator metadata remains outside the ledger contract.
+const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
+const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
 // This gate serializes mutation within the private-profile/stable-handle
 // authority. It denies ordinary second-connection DML, but is not a
 // cryptographic defense against malicious same-UID code that deliberately
@@ -61,6 +68,13 @@ const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const BUILDER_MUTATION_GATE_FUNCTION: &str = "tracedecay_lexical_builder_append_authorized";
 const BUILDER_MUTATION_IDLE: u8 = 0;
 const BUILDER_MUTATION_APPEND: u8 = 1;
+
+#[derive(Clone, Copy)]
+struct PreparedTermInsertRefV1<'a> {
+    document_id: i64,
+    posting: &'a PreparedTermPostingV1,
+}
+
 const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
     ("builder_gate_source_pages_insert", "source_pages", "INSERT"),
     (
@@ -999,7 +1013,11 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let (replayed_prefix, mut prepared) =
             self.prepare_pages_inner(&pages[..memory_prefix], control)?;
-        let (fresh_prefix, exact_limit) = largest_exact_prepared_prefix(&prepared)?;
+        let (fresh_prefix, exact_limit) = largest_exact_prepared_prefix(
+            &prepared,
+            self.fixed_ledger_charge_bytes,
+            self.memory_budget_bytes,
+        )?;
         if fresh_prefix == 0 && !prepared.is_empty() {
             let exceeded = exact_limit.ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
@@ -1166,6 +1184,15 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             pages,
         )?;
+        let term_insert_plan = hotpath::measure_block!(
+            "query.artifact.batch.term_order",
+            prepare_term_insert_plan(
+                self.fixed_ledger_charge_bytes,
+                self.memory_budget_bytes,
+                pages,
+                control,
+            )
+        )?;
         hotpath::measure_block!("query.artifact.batch.sqlite", {
             let _mutation_authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
@@ -1184,7 +1211,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 record_batch_row_metrics(pages);
                 hotpath::measure_block!(
                     "query.artifact.batch.postings",
-                    append_prepared_postings(&transaction, pages, control)
+                    append_prepared_postings(&transaction, pages, &term_insert_plan, control)
                 )?;
                 record_batch_posting_metrics(pages);
                 hotpath::measure_block!("query.artifact.batch.receipts", {
@@ -1763,6 +1790,8 @@ impl CanonicalBatchLimitLedgerV1 {
 
 fn largest_exact_prepared_prefix(
     pages: &[PreparedCodeLexicalArtifactPageV1],
+    fixed_ledger_charge_bytes: usize,
+    memory_budget_bytes: usize,
 ) -> Result<(usize, Option<BatchLimitExceededV1>), CodeLexicalArtifactErrorV1> {
     let mut ledger = CanonicalBatchLimitLedgerV1::default();
     for (index, page) in pages.iter().enumerate() {
@@ -1770,6 +1799,20 @@ fn largest_exact_prepared_prefix(
             ledger.try_admit(page.estimated_write_rows(), page.estimated_write_bytes())?
         {
             return Ok((index, Some(exceeded)));
+        }
+        let required = prepared_batch_memory_with_term_plan_required_bytes(
+            fixed_ledger_charge_bytes,
+            &pages[..=index],
+        )?;
+        if required > memory_budget_bytes {
+            return Ok((
+                index,
+                Some(BatchLimitExceededV1 {
+                    limit: CodeLexicalArtifactBatchLimitV1::Memory,
+                    required,
+                    maximum: memory_budget_bytes,
+                }),
+            ));
         }
     }
     Ok((pages.len(), None))
@@ -1810,11 +1853,10 @@ fn admit_page_batch_within_memory_budget(
     Ok(())
 }
 
-fn admit_prepared_page_batch(
+fn prepared_batch_memory_required_bytes(
     fixed_ledger_charge_bytes: usize,
-    memory_budget_bytes: usize,
     pages: &[PreparedCodeLexicalArtifactPageV1],
-) -> Result<(), CodeLexicalArtifactErrorV1> {
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let source_retained = pages.iter().try_fold(0usize, |total, page| {
         total
             .checked_add(page.source_retained_bytes())
@@ -1848,7 +1890,7 @@ fn admit_prepared_page_batch(
                 "prepared lexical batch active-worker scratch charge overflowed".to_owned(),
             )
         })?;
-    let required = fixed_ledger_charge_bytes
+    fixed_ledger_charge_bytes
         .checked_add(source_retained)
         .and_then(|bytes| bytes.checked_add(prepared_retained))
         .and_then(|bytes| bytes.checked_add(active_scratch))
@@ -1856,7 +1898,43 @@ fn admit_prepared_page_batch(
             CodeLexicalArtifactErrorV1::Contract(
                 "prepared lexical batch total ledger charge overflowed".to_owned(),
             )
-        })?;
+        })
+}
+
+fn prepared_term_row_count(
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    pages
+        .iter()
+        .flat_map(|page| &page.documents)
+        .try_fold(0usize, |rows, document| {
+            rows.checked_add(document.term_postings.len())
+                .ok_or_else(batch_ledger_overflow)
+        })
+}
+
+fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    term_rows
+        .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
+        .ok_or_else(batch_ledger_overflow)
+}
+
+fn prepared_batch_memory_with_term_plan_required_bytes(
+    fixed_ledger_charge_bytes: usize,
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let base = prepared_batch_memory_required_bytes(fixed_ledger_charge_bytes, pages)?;
+    let plan = term_insert_plan_ledger_bytes(prepared_term_row_count(pages)?)?;
+    base.checked_add(plan).ok_or_else(batch_ledger_overflow)
+}
+
+fn admit_prepared_page_batch(
+    fixed_ledger_charge_bytes: usize,
+    memory_budget_bytes: usize,
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let required =
+        prepared_batch_memory_with_term_plan_required_bytes(fixed_ledger_charge_bytes, pages)?;
     if required > memory_budget_bytes {
         return Err(batch_limit(
             CodeLexicalArtifactBatchLimitV1::Memory,
@@ -1889,6 +1967,79 @@ fn admit_prepared_page_batch(
         ));
     }
     Ok(())
+}
+
+fn prepare_term_insert_plan<'a>(
+    fixed_ledger_charge_bytes: usize,
+    memory_budget_bytes: usize,
+    pages: &'a [PreparedCodeLexicalArtifactPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Vec<PreparedTermInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let mut term_rows = 0usize;
+    for page in pages {
+        checkpoint(control)?;
+        for document in &page.documents {
+            checkpoint(control)?;
+            term_rows = term_rows
+                .checked_add(document.term_postings.len())
+                .ok_or_else(batch_ledger_overflow)?;
+            if term_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1 {
+                return Err(batch_limit(
+                    CodeLexicalArtifactBatchLimitV1::PreparedRows,
+                    term_rows,
+                    CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1,
+                ));
+            }
+        }
+    }
+    let plan_bytes = term_insert_plan_ledger_bytes(term_rows)?;
+    let required = prepared_batch_memory_required_bytes(fixed_ledger_charge_bytes, pages)?
+        .checked_add(plan_bytes)
+        .ok_or_else(batch_ledger_overflow)?;
+    if required > memory_budget_bytes {
+        return Err(batch_limit(
+            CodeLexicalArtifactBatchLimitV1::Memory,
+            required,
+            memory_budget_bytes,
+        ));
+    }
+
+    let mut plan = Vec::new();
+    plan.try_reserve_exact(term_rows).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "bounded lexical term insert plan allocation failed: {error}"
+        ))
+    })?;
+    for page in pages {
+        checkpoint(control)?;
+        for document in &page.documents {
+            checkpoint(control)?;
+            plan.extend(
+                document
+                    .term_postings
+                    .iter()
+                    .map(|posting| PreparedTermInsertRefV1 {
+                        document_id: document.document_id,
+                        posting,
+                    }),
+            );
+        }
+    }
+    plan.sort_unstable_by(|left, right| {
+        (
+            left.posting.field.as_str(),
+            left.posting.term.as_str(),
+            left.document_id,
+        )
+            .cmp(&(
+                right.posting.field.as_str(),
+                right.posting.term.as_str(),
+                right.document_id,
+            ))
+    });
+    checkpoint(control)?;
+    Ok(plan)
 }
 
 fn sum_prepared_metric(
@@ -2397,6 +2548,7 @@ fn append_prepared_imports(
 fn append_prepared_postings(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
+    term_insert_plan: &[PreparedTermInsertRefV1<'_>],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut term_statement = transaction
@@ -2414,19 +2566,22 @@ fn append_prepared_postings(
             "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(sqlite_error)?;
+    for (ordinal, entry) in term_insert_plan.iter().enumerate() {
+        if ordinal.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+            checkpoint(control)?;
+        }
+        term_statement
+            .execute(params![
+                entry.posting.field.as_str(),
+                entry.posting.term.as_str(),
+                entry.document_id,
+                entry.posting.frequency
+            ])
+            .map_err(sqlite_error)?;
+    }
     for page in pages {
         for document in &page.documents {
             checkpoint(control)?;
-            for posting in &document.term_postings {
-                term_statement
-                    .execute(params![
-                        posting.field.as_str(),
-                        posting.term.as_str(),
-                        document.document_id,
-                        posting.frequency
-                    ])
-                    .map_err(sqlite_error)?;
-            }
             for (field, term) in &document.exact_postings {
                 exact_statement
                     .execute(params![
