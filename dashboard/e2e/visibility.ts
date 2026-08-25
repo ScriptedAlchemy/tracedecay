@@ -1,10 +1,10 @@
 /**
- * The pre-scan visibility guard, split out of `axe-harness.ts` so it carries no
- * Playwright import and can be exercised against a real DOM in `vitest`.
+ * The render-visibility guard. Carries no Playwright import, so it can be
+ * exercised against a real DOM in `vitest`.
  *
- * A clean Axe score on a blank page is the worst kind of evidence: the scan
- * reads `textContent`, which `opacity: 0` does not remove. So every capture is
- * gated on the page having actually rendered.
+ * A pass on a blank page is the worst kind of evidence: a check that reads
+ * `textContent` still sees text that `opacity: 0` has hidden. So every capture
+ * is gated on the page having actually rendered.
  */
 
 /** What the in-page probe measures. Plain data, so the policy is pure. */

@@ -526,8 +526,8 @@ export function WorkspaceHeader({
 }) {
   return (
     // `min-h`, not `h`: the header wraps rather than clipping. Every
-    // workspace's header is this element, and `e2e/responsive.ts` asserts
-    // nothing renders outside its padding box.
+    // workspace's header is this element, so nothing should render outside
+    // its padding box.
     <header
       data-workspace-header
       className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 py-1 px-3"
