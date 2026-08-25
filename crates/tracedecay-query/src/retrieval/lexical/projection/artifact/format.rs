@@ -24,10 +24,12 @@ use super::CodeLexicalArtifactErrorV1;
 // immutable before one authenticated digest pass, defers every serving index
 // until resumable finalization, and keeps ngram catch-up document-leading.
 // Revision 7 replaces one row per document n-gram with deterministic
-// source-page Roaring bitmap shards.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 7;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v7\0";
-const REQUIRED_ARTIFACT_INDEXES_V7: [(&str, &str, &[&str]); 7] = [
+// source-page Roaring bitmap shards. Revision 8 adds source-page receipts for
+// every append-only base section so sealing and reopening need not rescan the
+// relational base after the private builder connection has admitted it.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 8;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v8\0";
+const REQUIRED_ARTIFACT_INDEXES_V8: [(&str, &str, &[&str]); 7] = [
     ("rows", "rows_by_chunk", &["chunk_id"]),
     (
         "term_postings",
@@ -70,6 +72,249 @@ pub(super) const SECTION_NAMES: [&str; 11] = [
     "term_stats",
     "vocabulary",
 ];
+pub(super) const BASE_SECTION_NAMES: [&str; 7] = [
+    "document_integrity",
+    "import_integrity",
+    "import_evidence",
+    "rows",
+    "term_postings",
+    "exact_postings",
+    "ngram_postings",
+];
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodeLexicalArtifactPageBaseSectionsReceiptV1 {
+    page_ordinal: u64,
+    sections: Vec<CodeLexicalArtifactSectionDigestV1>,
+}
+
+pub(super) struct PageBaseSectionReceiptBuilderV1 {
+    page_ordinal: u64,
+    name: &'static str,
+    row_count: u64,
+    hasher: Sha256,
+}
+
+impl PageBaseSectionReceiptBuilderV1 {
+    pub(super) fn new(
+        page_ordinal: u64,
+        name: &'static str,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.code-lexical-artifact-page-section.v1\0");
+        hasher.update(page_ordinal.to_le_bytes());
+        hasher.update(
+            u64::try_from(name.len())
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+                .to_le_bytes(),
+        );
+        hasher.update(name.as_bytes());
+        Ok(Self {
+            page_ordinal,
+            name,
+            row_count: 0,
+            hasher,
+        })
+    }
+
+    pub(super) fn begin_row(&mut self) -> Result<(), CodeLexicalArtifactErrorV1> {
+        self.hasher.update(b"row\0");
+        self.hasher.update(self.row_count.to_le_bytes());
+        self.row_count = self.row_count.checked_add(1).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact page-section row count overflowed".to_owned(),
+            )
+        })?;
+        Ok(())
+    }
+
+    pub(super) fn integer(&mut self, value: i64) {
+        self.hasher.update([1]);
+        self.hasher.update(value.to_le_bytes());
+    }
+
+    pub(super) fn text(&mut self, value: &str) -> Result<(), CodeLexicalArtifactErrorV1> {
+        self.hasher.update([3]);
+        hash_receipt_bytes(&mut self.hasher, value.as_bytes())
+    }
+
+    pub(super) fn blob(&mut self, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
+        self.hasher.update([4]);
+        hash_receipt_bytes(&mut self.hasher, value)
+    }
+
+    pub(super) fn finish(
+        mut self,
+    ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
+        self.hasher.update(b"end\0");
+        self.hasher.update(self.page_ordinal.to_le_bytes());
+        self.hasher.update(self.row_count.to_le_bytes());
+        let digest = ManifestDigest::from_sha256_bytes(&self.hasher.finalize())
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        Ok(CodeLexicalArtifactSectionDigestV1 {
+            name: self.name.to_owned(),
+            row_count: self.row_count,
+            digest,
+        })
+    }
+}
+
+fn hash_receipt_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
+    hasher.update(
+        u64::try_from(value.len())
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+            .to_le_bytes(),
+    );
+    hasher.update(value);
+    Ok(())
+}
+
+pub(super) fn encode_page_base_sections_receipt(
+    page_ordinal: u64,
+    sections: Vec<CodeLexicalArtifactSectionDigestV1>,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    validate_page_base_sections(page_ordinal, &sections)?;
+    serde_json::to_vec(&CodeLexicalArtifactPageBaseSectionsReceiptV1 {
+        page_ordinal,
+        sections,
+    })
+    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+pub(super) fn decode_page_base_sections_receipt(
+    expected_page_ordinal: u64,
+    bytes: &[u8],
+) -> Result<CodeLexicalArtifactPageBaseSectionsReceiptV1, CodeLexicalArtifactErrorV1> {
+    let receipt: CodeLexicalArtifactPageBaseSectionsReceiptV1 = serde_json::from_slice(bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    validate_page_base_sections(expected_page_ordinal, &receipt.sections)?;
+    if receipt.page_ordinal != expected_page_ordinal
+        || serde_json::to_vec(&receipt)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+            != bytes
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact page base-section receipt is not canonical".to_owned(),
+        ));
+    }
+    Ok(receipt)
+}
+
+impl CodeLexicalArtifactPageBaseSectionsReceiptV1 {
+    pub(super) fn sections(&self) -> &[CodeLexicalArtifactSectionDigestV1] {
+        &self.sections
+    }
+}
+
+pub(super) fn initial_base_section_receipt_fold()
+-> Result<(Vec<u64>, Vec<Vec<u8>>), CodeLexicalArtifactErrorV1> {
+    let row_counts = vec![0; BASE_SECTION_NAMES.len()];
+    let accumulators = BASE_SECTION_NAMES
+        .into_iter()
+        .map(|name| {
+            let mut hasher = Sha256::new();
+            hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0initial");
+            hash_receipt_bytes(&mut hasher, name.as_bytes())?;
+            Ok(hasher.finalize().to_vec())
+        })
+        .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()?;
+    Ok((row_counts, accumulators))
+}
+
+pub(super) fn absorb_page_base_sections_receipt(
+    page_ordinal: u64,
+    bytes: &[u8],
+    row_counts: &mut [u64],
+    accumulators: &mut [Vec<u8>],
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if row_counts.len() != BASE_SECTION_NAMES.len()
+        || accumulators.len() != BASE_SECTION_NAMES.len()
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact base-section receipt fold has the wrong width".to_owned(),
+        ));
+    }
+    let receipt = decode_page_base_sections_receipt(page_ordinal, bytes)?;
+    for (ordinal, section) in receipt.sections().iter().enumerate() {
+        let previous: [u8; 32] = accumulators[ordinal].as_slice().try_into().map_err(|_| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact base-section receipt accumulator has the wrong length".to_owned(),
+            )
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0page");
+        hash_receipt_bytes(&mut hasher, section.name.as_bytes())?;
+        hasher.update(page_ordinal.to_le_bytes());
+        hasher.update(section.row_count.to_le_bytes());
+        hash_receipt_bytes(&mut hasher, section.digest.as_str().as_bytes())?;
+        hasher.update(previous);
+        accumulators[ordinal] = hasher.finalize().to_vec();
+        row_counts[ordinal] = row_counts[ordinal]
+            .checked_add(section.row_count)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact base-section receipt row count overflowed".to_owned(),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+pub(super) fn finish_base_section_receipt_fold(
+    row_counts: &[u64],
+    accumulators: &[Vec<u8>],
+) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
+    if row_counts.len() != BASE_SECTION_NAMES.len()
+        || accumulators.len() != BASE_SECTION_NAMES.len()
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact base-section receipt fold has the wrong width".to_owned(),
+        ));
+    }
+    BASE_SECTION_NAMES
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, name)| {
+            let accumulator: [u8; 32] =
+                accumulators[ordinal].as_slice().try_into().map_err(|_| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact base-section receipt accumulator has the wrong length"
+                            .to_owned(),
+                    )
+                })?;
+            let mut hasher = Sha256::new();
+            hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0final");
+            hash_receipt_bytes(&mut hasher, name.as_bytes())?;
+            hasher.update(row_counts[ordinal].to_le_bytes());
+            hasher.update(accumulator);
+            let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+            Ok(CodeLexicalArtifactSectionDigestV1 {
+                name: name.to_owned(),
+                row_count: row_counts[ordinal],
+                digest,
+            })
+        })
+        .collect()
+}
+
+fn validate_page_base_sections(
+    page_ordinal: u64,
+    sections: &[CodeLexicalArtifactSectionDigestV1],
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if sections.len() != BASE_SECTION_NAMES.len()
+        || sections
+            .iter()
+            .zip(BASE_SECTION_NAMES)
+            .any(|(section, expected)| section.name != expected)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
+            "lexical artifact page {page_ordinal} base-section receipt is malformed"
+        )));
+    }
+    Ok(())
+}
 
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
@@ -82,7 +327,7 @@ pub(super) fn verify_required_artifact_indexes(
                 "artifact index schema is unreadable: {error}"
             ))
         })?;
-    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V7 {
+    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V8 {
         let partial: Option<i64> = connection
             .query_row(
                 "SELECT partial FROM pragma_index_list(?1) WHERE name = ?2",
@@ -133,6 +378,51 @@ pub(super) fn verify_required_artifact_indexes(
 pub(super) fn verify_artifact_table_layout(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let source_columns = connection
+        .prepare(
+            "SELECT name, type, [notnull], pk FROM pragma_table_xinfo('source_pages') WHERE hidden = 0 ORDER BY cid",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact source-page columns are unreadable: {error}"
+            ))
+        })?;
+    let expected_source_columns = [
+        ("page_ordinal", "INTEGER", 0, 1),
+        ("page_digest", "TEXT", 1, 0),
+        ("cumulative_digest", "TEXT", 1, 0),
+        ("chunk_count", "INTEGER", 1, 0),
+        ("payload_bytes", "INTEGER", 1, 0),
+        ("import_count", "INTEGER", 1, 0),
+        ("import_payload_bytes", "INTEGER", 1, 0),
+        ("import_dictionary_digest", "TEXT", 1, 0),
+        ("ngram_digest", "TEXT", 1, 0),
+        ("base_sections_receipt", "BLOB", 1, 0),
+        ("next_cursor", "BLOB", 1, 0),
+    ];
+    if !source_columns
+        .iter()
+        .map(|(name, column_type, not_null, primary_key)| {
+            (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+        })
+        .eq(expected_source_columns)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact source-page table has columns {source_columns:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires append receipts"
+        )));
+    }
     let without_rowid: Option<i64> = connection
         .query_row(
             "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'ngram_postings' AND type = 'table'",

@@ -10,7 +10,8 @@ use super::super::{
     exact_field_for_kind,
 };
 use super::format::{
-    ArtifactRowV1, encode_exact_field, encode_field, encode_ngram_bitmap, ngram_page_digest,
+    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
+    encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
 use super::{
@@ -33,6 +34,7 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) documents: Vec<PreparedDocumentV1>,
     pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
     pub(super) ngram_digest: ManifestDigest,
+    pub(super) base_sections_receipt: Vec<u8>,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
     preparation_scratch_bytes: usize,
@@ -204,6 +206,13 @@ pub(super) fn prepare_page(
             )
         }),
     )?;
+    let base_sections_receipt = prepare_base_sections_receipt(
+        page.page_ordinal(),
+        &imports,
+        &documents,
+        &ngram_shards,
+        control,
+    )?;
     let aggregation_scratch_bytes = logical_ngram_postings
         .checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1)
         .ok_or_else(|| {
@@ -233,6 +242,7 @@ pub(super) fn prepare_page(
         documents,
         ngram_shards,
         ngram_digest,
+        base_sections_receipt,
         source_retained_bytes: page.retained_owned_bytes(),
         prepared_retained_bytes: 0,
         preparation_scratch_bytes,
@@ -245,6 +255,88 @@ pub(super) fn prepare_page(
         prepared.estimated_write_bytes,
     ) = estimated_sqlite_writes(&prepared)?;
     Ok(prepared)
+}
+
+fn prepare_base_sections_receipt(
+    page_ordinal: u64,
+    imports: &[PreparedImportV1],
+    documents: &[PreparedDocumentV1],
+    ngram_shards: &[PreparedNgramShardV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    let mut document_integrity =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[0])?;
+    let mut import_integrity =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[1])?;
+    let mut import_evidence =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[2])?;
+    let mut rows = PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[3])?;
+    let mut term_postings =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[4])?;
+    let mut exact_postings =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[5])?;
+    let mut ngram_postings =
+        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[6])?;
+
+    for import in imports {
+        checkpoint(control)?;
+        import_integrity.begin_row()?;
+        import_integrity.blob(&import.canonical)?;
+        import_integrity.text(import.integrity_digest.as_str())?;
+        import_evidence.begin_row()?;
+        import_evidence.blob(&import.canonical)?;
+        import_evidence.blob(&import.canonical)?;
+    }
+    for document in documents {
+        checkpoint(control)?;
+        document_integrity.begin_row()?;
+        document_integrity.integer(document.document_id);
+        document_integrity.text(&document.chunk_id)?;
+        document_integrity.text(document.integrity_digest.as_str())?;
+
+        rows.begin_row()?;
+        rows.integer(document.document_id);
+        rows.text(&document.chunk_id)?;
+        rows.blob(&document.row)?;
+
+        for posting in &document.term_postings {
+            checkpoint(control)?;
+            term_postings.begin_row()?;
+            term_postings.text(&posting.field)?;
+            term_postings.text(&posting.term)?;
+            term_postings.integer(document.document_id);
+            term_postings.integer(posting.frequency);
+        }
+        for (field, term) in &document.exact_postings {
+            checkpoint(control)?;
+            exact_postings.begin_row()?;
+            exact_postings.text(field)?;
+            exact_postings.blob(term)?;
+            exact_postings.integer(document.document_id);
+        }
+    }
+    for shard in ngram_shards {
+        checkpoint(control)?;
+        ngram_postings.begin_row()?;
+        ngram_postings.integer(i64::try_from(page_ordinal).map_err(contract_number)?);
+        ngram_postings.integer(shard.kind);
+        ngram_postings.integer(shard.ngram);
+        ngram_postings.blob(&shard.documents)?;
+        ngram_postings.integer(i64::try_from(shard.cardinality).map_err(contract_number)?);
+    }
+
+    encode_page_base_sections_receipt(
+        page_ordinal,
+        vec![
+            document_integrity.finish()?,
+            import_integrity.finish()?,
+            import_evidence.finish()?,
+            rows.finish()?,
+            term_postings.finish()?,
+            exact_postings.finish()?,
+            ngram_postings.finish()?,
+        ],
+    )
 }
 
 fn prepare_document(
@@ -491,6 +583,7 @@ fn prepared_retained_bytes(
             )
         })
         .and_then(|bytes| bytes.checked_add(page.ngram_digest.as_str().len()))
+        .and_then(|bytes| bytes.checked_add(page.base_sections_receipt.capacity()))
         .ok_or_else(prepared_charge_overflow)?;
     for import in &page.imports {
         bytes = bytes
@@ -550,6 +643,7 @@ fn estimated_sqlite_writes(
         page.cumulative_digest.as_str(),
         page.import_dictionary_digest.as_str(),
         page.ngram_digest.as_str(),
+        &page.base_sections_receipt,
         &page.next_cursor,
     )?;
     for import in &page.imports {
@@ -599,6 +693,7 @@ fn estimated_source_page_receipt_write_bytes(
     cumulative_digest: &str,
     import_dictionary_digest: &str,
     ngram_digest: &str,
+    base_sections_receipt: &[u8],
     next_cursor: &[u8],
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     page_digest
@@ -606,6 +701,7 @@ fn estimated_source_page_receipt_write_bytes(
         .checked_add(cumulative_digest.len())
         .and_then(|bytes| bytes.checked_add(import_dictionary_digest.len()))
         .and_then(|bytes| bytes.checked_add(ngram_digest.len()))
+        .and_then(|bytes| bytes.checked_add(base_sections_receipt.len()))
         .and_then(|bytes| bytes.checked_add(next_cursor.len()))
         .ok_or_else(prepared_write_overflow)
 }
@@ -633,10 +729,10 @@ mod tests {
     #[test]
     fn source_page_write_charge_includes_the_ngram_receipt_exactly() {
         let without_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "", b"cursor")
+            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "", b"", b"cursor")
                 .expect("receipt charge without ngram digest");
         let with_ngram =
-            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "nnnnn", b"cursor")
+            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "nnnnn", b"", b"cursor")
                 .expect("receipt charge with ngram digest");
 
         assert_eq!(without_ngram, 1 + 2 + 3 + 6);

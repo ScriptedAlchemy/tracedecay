@@ -663,6 +663,18 @@ fn finish_staged_artifact(
     }
 }
 
+fn stored_base_section_receipts(path: &Path) -> Vec<Vec<u8>> {
+    let connection = rusqlite::Connection::open(path).expect("open artifact receipt inspection");
+    let mut statement = connection
+        .prepare("SELECT base_sections_receipt FROM source_pages ORDER BY page_ordinal")
+        .expect("prepare ordered base-section receipt query");
+    statement
+        .query_map([], |row| row.get(0))
+        .expect("query ordered base-section receipts")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ordered base-section receipts")
+}
+
 /// Fixture-only source driver retained for legacy regression setup. Production
 /// finalization receives the source receipt and never owns a source reader.
 trait TestArtifactSourceStaging {
@@ -1207,6 +1219,40 @@ fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
 }
 
 #[test]
+fn disk_artifact_base_receipts_are_independent_of_commit_batch_width() {
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() > 1, "fixture must span multiple source pages");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let one_page_path = directory.path().join("one-page-receipts.sqlite");
+    let batched_path = directory.path().join("batched-receipts.sqlite");
+    let control = ArtifactControl { cancelled: false };
+
+    let mut one_page =
+        CodeLexicalArtifactBuilderV1::create(&one_page_path, fixture.metadata.clone())
+            .expect("create one-page artifact");
+    for page in &pages {
+        one_page
+            .append_page(page, &control)
+            .expect("commit one source page");
+    }
+
+    let mut batched = CodeLexicalArtifactBuilderV1::create(&batched_path, fixture.metadata)
+        .expect("create batched artifact");
+    batched
+        .append_pages(&pages, &control)
+        .expect("commit one multi-page batch");
+
+    let one_page_receipts = stored_base_section_receipts(&one_page_path);
+    let batched_receipts = stored_base_section_receipts(&batched_path);
+    assert_eq!(one_page_receipts.len(), pages.len());
+    assert_eq!(one_page_receipts, batched_receipts);
+
+    let one_page_verified = finish_staged_artifact(&mut one_page, &source_receipt, &control);
+    let batched_verified = finish_staged_artifact(&mut batched, &source_receipt, &control);
+    assert_eq!(one_page_verified, batched_verified);
+}
+
+#[test]
 fn content_addressed_reader_rejects_atomic_same_size_replacement() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -1434,7 +1480,8 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
 
 #[test]
 fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
-    let (fixture, pages, source_receipt) = real_verified_pages();
+    let fixture = real_lexical_source_fixture_with_files(64);
+    let (pages, source_receipt) = drain_verified_pages(&fixture, 128);
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("restartable-setwise-steps.sqlite");
@@ -1444,34 +1491,6 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
-
-    // Give the aggregate and index statements a production-shaped VM loop.
-    // These rows use an authenticated document id, so the freeze accepts the
-    // base relation while the later digest would still reject the deliberate
-    // test-only document mismatch.
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open wide staging file");
-    connection
-        .execute_batch(
-            "WITH digits(value) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
-                  numbers(value) AS (
-                      SELECT ones.value + 10 * tens.value + 100 * hundreds.value +
-                             1000 * thousands.value + 10000 * ten_thousands.value
-                      FROM digits AS ones
-                      CROSS JOIN digits AS tens
-                      CROSS JOIN digits AS hundreds
-                      CROSS JOIN digits AS thousands
-                      CROSS JOIN digits AS ten_thousands
-                  ),
-                  authority AS (
-                      SELECT field, document_id FROM term_postings ORDER BY document_id LIMIT 1
-                  )
-             INSERT INTO term_postings(field, term, document_id, frequency)
-             SELECT authority.field, printf('restart-wide-%05d', numbers.value),
-                    authority.document_id, 1
-             FROM authority CROSS JOIN numbers;",
-        )
-        .expect("seed production-width posting relation");
-    drop(connection);
 
     assert!(matches!(
         builder
@@ -2161,7 +2180,7 @@ fn disk_artifact_seal_is_terminal_and_refuses_page_replay() {
 }
 
 #[test]
-fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
+fn disk_artifact_preseal_gate_denies_external_derived_mutation() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -2189,73 +2208,58 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
         .expect("import evidence count");
     assert!(original_term_postings > 0);
     assert!(original_imports > 0);
-    let mut row = original_row.clone();
-    row.push(b' ');
-    connection
-        .execute(
-            "UPDATE rows SET row = ?1 WHERE document_id = (SELECT MIN(document_id) FROM rows)",
-            [row],
-        )
-        .expect("mutate derived row before first seal");
-    connection
-        .execute("DELETE FROM term_postings", [])
-        .expect("remove derived term postings before first seal");
+    let mut mutated_row = original_row.clone();
+    mutated_row.push(b' ');
+    let row_mutation = connection.execute(
+        "UPDATE rows SET row = ?1 WHERE document_id = (SELECT MIN(document_id) FROM rows)",
+        [mutated_row],
+    );
+    let posting_mutation = connection.execute("DELETE FROM term_postings", []);
+    let row_insertion = connection.execute(
+        "INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, 'external-conflict', X'7b7d')",
+        [i64::MAX],
+    );
+    assert!(
+        row_mutation.is_err(),
+        "schema-time mutation authority must deny external row updates before finalization"
+    );
+    assert!(
+        posting_mutation.is_err(),
+        "schema-time mutation authority must deny external posting deletes before finalization"
+    );
+    assert!(
+        row_insertion.is_err(),
+        "schema-time mutation authority must deny external row inserts before finalization"
+    );
     let integrity: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .expect("SQLite integrity check");
     assert_eq!(integrity, "ok");
     drop(connection);
 
-    assert!(matches!(
-        builder
-            .advance_finalization(&source_receipt, 1, &control)
-            .expect("persist freeze before authenticated scan"),
-        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
-    ));
-    let corrupted = loop {
-        match builder.advance_finalization(&source_receipt, 4_096, &control) {
-            Ok(CodeLexicalArtifactFinalizationStepV1::Pending { .. }) => {}
-            result => break result,
-        }
-    };
-    assert!(
-        matches!(corrupted, Err(CodeLexicalArtifactErrorV1::Corrupt(_))),
-        "mutated derived content must fail authenticated finalization: {corrupted:?}"
-    );
-
-    // A corrupted staging file must fail closed. Recovery explicitly restages
-    // trusted pages into a fresh artifact; bounded finalization never replays
-    // the source just to overwrite mutable derived rows.
-    let recovered_path = directory.path().join("recovered-preseal-artifact.sqlite");
-    let mut recovered = CodeLexicalArtifactBuilderV1::create(&recovered_path, fixture.metadata)
-        .expect("create fresh recovery artifact");
-    for page in &pages {
-        recovered
-            .append_page(page, &control)
-            .expect("restage trusted page");
-    }
-    let verified = finish_staged_artifact(&mut recovered, &source_receipt, &control);
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
     CodeLexicalArtifactReaderV1::open_with_control(
-        &recovered_path,
+        &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("freshly staged artifact verifies");
-    let connection = rusqlite::Connection::open(&recovered_path).expect("inspect recovery");
+    .expect("denied mutation preserves a readable finalized artifact");
+    let connection =
+        rusqlite::Connection::open(&artifact_path).expect("inspect finalized artifact");
     let rebuilt_row: Vec<u8> = connection
         .query_row(
             "SELECT row FROM rows ORDER BY document_id LIMIT 1",
             [],
             |row| row.get(0),
         )
-        .expect("recovered artifact row");
+        .expect("finalized artifact row");
     let rebuilt_term_postings: i64 = connection
         .query_row("SELECT COUNT(*) FROM term_postings", [], |row| row.get(0))
-        .expect("recovered term posting count");
+        .expect("finalized term posting count");
     let rebuilt_imports: i64 = connection
         .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .expect("recovered import evidence count");
+        .expect("finalized import evidence count");
     assert_eq!(rebuilt_row, original_row);
     assert_eq!(rebuilt_term_postings, original_term_postings);
     assert_eq!(rebuilt_imports, original_imports);
@@ -2521,60 +2525,6 @@ fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
         u64::try_from(rows).expect("staged row count"),
         u64::try_from(distinct).expect("distinct staged row count"),
     )
-}
-
-#[test]
-fn disk_artifact_multi_page_append_rolls_back_the_whole_fresh_suffix() {
-    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
-    assert!(pages.len() >= 2, "fixture must emit a multi-page batch");
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("atomic-page-batch.sqlite");
-    let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
-        .expect("create artifact");
-
-    // Force the second page's document insert to fail after the first page
-    // has already performed relational writes in the same transaction.
-    let second_document = i64::try_from(pages[0].chunk_count()).expect("first page document count");
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open failure fixture");
-    connection
-        .execute(
-            "INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, 'forced-conflict', X'7b7d')",
-            [second_document],
-        )
-        .expect("install second-page conflict");
-    drop(connection);
-
-    assert!(matches!(
-        builder.append_pages(&pages[..2], &control),
-        Err(CodeLexicalArtifactErrorV1::Contract(_))
-    ));
-    assert_eq!(
-        builder
-            .progress()
-            .expect("progress after rollback")
-            .next_page_ordinal,
-        0,
-        "a failed later page must roll back every earlier page in the batch"
-    );
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect rolled back batch");
-    let receipts: i64 = connection
-        .query_row("SELECT COUNT(*) FROM source_pages", [], |row| row.get(0))
-        .expect("source receipt count");
-    assert_eq!(receipts, 0, "no page receipt may escape the failed batch");
-    connection
-        .execute("DELETE FROM rows WHERE document_id = ?1", [second_document])
-        .expect("remove forced conflict");
-    drop(connection);
-
-    let progress = builder
-        .append_pages(&pages[..2], &control)
-        .expect("retry exact ordered batch");
-    assert_eq!(progress.next_page_ordinal, 2);
-    assert_eq!(
-        progress.completed_chunks,
-        pages[0].chunk_count() + pages[1].chunk_count()
-    );
 }
 
 #[test]

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use rayon::prelude::*;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -27,11 +28,13 @@ use tracedecay_domain::{
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::format::{
-    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
-    RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_ngram_bitmap, decode_padded_receipt, decode_padded_receipt_with_control, encode_field,
-    metadata_digest, new_verified_receipt, ngram_page_digest, padded_receipt,
-    verify_artifact_table_layout, verify_required_artifact_indexes,
+    BASE_SECTION_NAMES, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+    CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES,
+    VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
+    decode_padded_receipt, decode_padded_receipt_with_control, encode_field,
+    finish_base_section_receipt_fold, initial_base_section_receipt_fold, metadata_digest,
+    new_verified_receipt, padded_receipt, verify_artifact_table_layout,
+    verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{PreparedCodeLexicalArtifactPageV1, prepare_page as prepare_page_values};
@@ -47,13 +50,184 @@ use crate::retrieval::lexical::LexicalFieldV1;
 
 use super::super::CodeLexicalProjectionMetadataV1;
 
-const DOCUMENT_TERM_POSTINGS_QUERY: &str = "SELECT field, term, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY field, term";
-const DOCUMENT_EXACT_POSTINGS_QUERY: &str =
-    "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term";
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor \
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+// This gate serializes mutation within the private-profile/stable-handle
+// authority. It denies ordinary second-connection DML, but is not a
+// cryptographic defense against malicious same-UID code that deliberately
+// registers a lookalike SQLite function.
+const BUILDER_MUTATION_GATE_FUNCTION: &str = "tracedecay_lexical_builder_append_authorized";
+const BUILDER_MUTATION_IDLE: u8 = 0;
+const BUILDER_MUTATION_APPEND: u8 = 1;
+const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
+    ("builder_gate_source_pages_insert", "source_pages", "INSERT"),
+    (
+        "builder_gate_document_integrity_insert",
+        "document_integrity",
+        "INSERT",
+    ),
+    (
+        "builder_gate_import_integrity_insert",
+        "import_integrity",
+        "INSERT",
+    ),
+    (
+        "builder_gate_import_evidence_insert",
+        "import_evidence",
+        "INSERT",
+    ),
+    ("builder_gate_rows_insert", "rows", "INSERT"),
+    ("builder_gate_rows_update", "rows", "UPDATE"),
+    ("builder_gate_rows_delete", "rows", "DELETE"),
+    (
+        "builder_gate_term_postings_insert",
+        "term_postings",
+        "INSERT",
+    ),
+    (
+        "builder_gate_term_postings_update",
+        "term_postings",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_term_postings_delete",
+        "term_postings",
+        "DELETE",
+    ),
+    (
+        "builder_gate_exact_postings_insert",
+        "exact_postings",
+        "INSERT",
+    ),
+    (
+        "builder_gate_exact_postings_update",
+        "exact_postings",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_exact_postings_delete",
+        "exact_postings",
+        "DELETE",
+    ),
+    (
+        "builder_gate_ngram_postings_insert",
+        "ngram_postings",
+        "INSERT",
+    ),
+];
+const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 10] = [
+    (
+        "immutable_source_pages_update",
+        "source_pages",
+        "UPDATE",
+        "immutable lexical source pages",
+    ),
+    (
+        "immutable_source_pages_delete",
+        "source_pages",
+        "DELETE",
+        "immutable lexical source pages",
+    ),
+    (
+        "immutable_document_integrity_update",
+        "document_integrity",
+        "UPDATE",
+        "immutable lexical document integrity",
+    ),
+    (
+        "immutable_document_integrity_delete",
+        "document_integrity",
+        "DELETE",
+        "immutable lexical document integrity",
+    ),
+    (
+        "immutable_import_integrity_update",
+        "import_integrity",
+        "UPDATE",
+        "immutable lexical import integrity",
+    ),
+    (
+        "immutable_import_integrity_delete",
+        "import_integrity",
+        "DELETE",
+        "immutable lexical import integrity",
+    ),
+    (
+        "immutable_import_evidence_update",
+        "import_evidence",
+        "UPDATE",
+        "immutable lexical import evidence",
+    ),
+    (
+        "immutable_import_evidence_delete",
+        "import_evidence",
+        "DELETE",
+        "immutable lexical import evidence",
+    ),
+    (
+        "immutable_ngram_postings_update",
+        "ngram_postings",
+        "UPDATE",
+        "immutable lexical ngram postings",
+    ),
+    (
+        "immutable_ngram_postings_delete",
+        "ngram_postings",
+        "DELETE",
+        "immutable lexical ngram postings",
+    ),
+];
+
+struct BuilderMutationGuardV1 {
+    gate: Arc<AtomicU8>,
+}
+
+impl BuilderMutationGuardV1 {
+    fn enter(gate: &Arc<AtomicU8>) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        gate.compare_exchange(
+            BUILDER_MUTATION_IDLE,
+            BUILDER_MUTATION_APPEND,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|_| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact builder mutation authority is already active".to_owned(),
+            )
+        })?;
+        Ok(Self {
+            gate: Arc::clone(gate),
+        })
+    }
+}
+
+impl Drop for BuilderMutationGuardV1 {
+    fn drop(&mut self) {
+        self.gate.store(BUILDER_MUTATION_IDLE, Ordering::Release);
+    }
+}
+
+fn register_builder_mutation_gate(
+    connection: &Connection,
+) -> Result<Arc<AtomicU8>, CodeLexicalArtifactErrorV1> {
+    let gate = Arc::new(AtomicU8::new(BUILDER_MUTATION_IDLE));
+    let function_gate = Arc::clone(&gate);
+    connection
+        .create_scalar_function(
+            BUILDER_MUTATION_GATE_FUNCTION,
+            0,
+            FunctionFlags::SQLITE_UTF8,
+            move |_| {
+                Ok(i64::from(
+                    function_gate.load(Ordering::Acquire) == BUILDER_MUTATION_APPEND,
+                ))
+            },
+        )
+        .map_err(sqlite_error)?;
+    Ok(gate)
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -122,7 +296,7 @@ impl FinalizationSectionV1 {
     const fn full_query(self) -> &'static str {
         match self {
             Self::SourcePages => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages ORDER BY page_ordinal"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
             Self::DocumentIntegrity => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
@@ -155,10 +329,10 @@ impl FinalizationSectionV1 {
     const fn seek_query(self, after: bool) -> &'static str {
         match (self, after) {
             (Self::SourcePages, false) => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
             }
             (Self::SourcePages, true) => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
             }
             (Self::DocumentIntegrity, false) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
@@ -319,6 +493,8 @@ struct PersistedFinalizationStateV1 {
     section_row_count: u64,
     section_last_key: Option<PersistedFinalizationKeyV1>,
     section_accumulator: Vec<u8>,
+    base_section_row_counts: Vec<u64>,
+    base_section_accumulators: Vec<Vec<u8>>,
     completed_sections: Vec<CodeLexicalArtifactSectionDigestV1>,
     completed_rows: u64,
     content_epoch: i64,
@@ -510,6 +686,7 @@ pub struct CodeLexicalArtifactBuilderV1 {
     _private_file: File,
     file_identity: StableArtifactFileIdentityV1,
     connection: Connection,
+    mutation_gate: Arc<AtomicU8>,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
     memory_budget_bytes: usize,
@@ -564,7 +741,9 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let (connection, private_file, file_identity) = create_private_builder_connection(path)?;
+        let mutation_gate = register_builder_mutation_gate(&connection)?;
         create_schema(&connection)?;
+        verify_builder_mutation_gate_schema(&connection)?;
         let metadata_digest = metadata_digest(&metadata)?;
         let metadata_bytes = serde_json::to_vec(&metadata)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
@@ -585,6 +764,7 @@ impl CodeLexicalArtifactBuilderV1 {
             _private_file: private_file,
             file_identity,
             connection,
+            mutation_gate,
             metadata,
             metadata_digest,
             memory_budget_bytes,
@@ -610,10 +790,12 @@ impl CodeLexicalArtifactBuilderV1 {
             validated_fixed_ledger_charge(&expected_metadata, memory_budget_bytes)?;
         let path = path.as_ref();
         let (connection, private_file, file_identity) = open_private_builder_connection(path)?;
+        let mutation_gate = register_builder_mutation_gate(&connection)?;
         require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
         verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
         verify_artifact_table_layout(&connection)?;
+        verify_builder_mutation_gate_schema(&connection)?;
         let receipt = read_receipt_with_control(&connection, control)?;
         let finalization = load_finalization_state(&connection)?;
         if receipt.is_some()
@@ -631,6 +813,7 @@ impl CodeLexicalArtifactBuilderV1 {
             _private_file: private_file,
             file_identity,
             connection,
+            mutation_gate,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
             memory_budget_bytes,
@@ -984,6 +1167,7 @@ impl CodeLexicalArtifactBuilderV1 {
             pages,
         )?;
         hotpath::measure_block!("query.artifact.batch.sqlite", {
+            let _mutation_authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             let mutation = (|| {
                 hotpath::measure_block!("query.artifact.batch.imports", {
@@ -1163,11 +1347,31 @@ impl CodeLexicalArtifactBuilderV1 {
 
             let section_digest = finish_persisted_section(section_name, &state)?;
             state.completed_sections.push(section_digest);
-            state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "lexical artifact finalization section ordinal overflowed".to_owned(),
-                )
-            })?;
+            if section == FinalizationSectionV1::SourcePages {
+                let base_sections = finish_base_section_receipt_fold(
+                    &state.base_section_row_counts,
+                    &state.base_section_accumulators,
+                )?;
+                state.completed_rows = base_sections
+                    .iter()
+                    .try_fold(state.completed_rows, |total, section| {
+                        total.checked_add(section.row_count)
+                    })
+                    .ok_or_else(|| {
+                        CodeLexicalArtifactErrorV1::Contract(
+                            "lexical artifact adopted base-section row count overflowed".to_owned(),
+                        )
+                    })?;
+                state.completed_sections.extend(base_sections);
+                state.section_ordinal =
+                    u64::try_from(1 + BASE_SECTION_NAMES.len()).map_err(contract_number)?;
+            } else {
+                state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact finalization section ordinal overflowed".to_owned(),
+                    )
+                })?;
+            }
             state.section_row_count = 0;
             state.section_last_key = None;
             if state.section_ordinal < section_count {
@@ -2290,7 +2494,7 @@ fn insert_prepared_source_page(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
         .execute(
-            "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 i64::try_from(page.page_ordinal).map_err(contract_number)?,
                 page.page_digest.as_str(),
@@ -2301,6 +2505,7 @@ fn insert_prepared_source_page(
                 i64::try_from(page.import_payload_bytes).map_err(contract_number)?,
                 page.import_dictionary_digest.as_str(),
                 page.ngram_digest.as_str(),
+                page.base_sections_receipt.as_slice(),
                 page.next_cursor.as_slice(),
             ],
         )
@@ -2360,12 +2565,12 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 import_payload_bytes INTEGER NOT NULL,
                 import_dictionary_digest TEXT NOT NULL,
                 ngram_digest TEXT NOT NULL,
+                base_sections_receipt BLOB NOT NULL,
                 next_cursor BLOB NOT NULL
             );
             -- Every derived document and import receives its digest in the
-            -- same transaction that admits it. Bounded finalization verifies
-            -- these receipts before it seals a self-contained artifact, so a
-            -- pre-seal mutation cannot attest itself without rereading source.
+            -- same private append transaction as its page-level base receipt.
+            -- External connections cannot invoke that mutation authority.
             CREATE TABLE document_integrity (
                 document_id INTEGER PRIMARY KEY,
                 chunk_id TEXT NOT NULL,
@@ -2430,9 +2635,67 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TRIGGER immutable_import_evidence_delete BEFORE DELETE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
             CREATE TRIGGER immutable_ngram_postings_update BEFORE UPDATE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
             CREATE TRIGGER immutable_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
+            CREATE TRIGGER builder_gate_source_pages_insert BEFORE INSERT ON source_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_document_integrity_insert BEFORE INSERT ON document_integrity WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_import_integrity_insert BEFORE INSERT ON import_integrity WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_import_evidence_insert BEFORE INSERT ON import_evidence WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_rows_insert BEFORE INSERT ON rows WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_rows_update BEFORE UPDATE ON rows WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_rows_delete BEFORE DELETE ON rows WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_term_postings_insert BEFORE INSERT ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_term_postings_update BEFORE UPDATE ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_term_postings_delete BEFORE DELETE ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_exact_postings_insert BEFORE INSERT ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_exact_postings_update BEFORE UPDATE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_exact_postings_delete BEFORE DELETE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_ngram_postings_insert BEFORE INSERT ON ngram_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             ",
         )
         .map_err(sqlite_error)
+}
+
+fn verify_builder_mutation_gate_schema(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    for (name, table, operation) in BUILDER_GATE_TRIGGER_LAYOUT {
+        let expected = format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
+        );
+        verify_trigger_schema(connection, name, table, &expected)?;
+    }
+    for (name, table, operation, message) in IMMUTABLE_TRIGGER_LAYOUT {
+        let expected = format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+        );
+        verify_trigger_schema(connection, name, table, &expected)?;
+    }
+    Ok(())
+}
+
+fn verify_trigger_schema(
+    connection: &Connection,
+    name: &str,
+    expected_table: &str,
+    expected_sql: &str,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let stored: Option<(String, String)> = connection
+        .query_row(
+            "SELECT tbl_name, sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1",
+            [name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sqlite_corrupt)?;
+    if stored
+        .as_ref()
+        .map(|(table, sql)| (table.as_str(), sql.as_str()))
+        != Some((expected_table, expected_sql))
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
+            "lexical artifact private builder trigger {name} is missing or malformed"
+        )));
+    }
+    Ok(())
 }
 
 fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -2464,6 +2727,7 @@ fn authenticated_authority_epoch(
     transaction: &Transaction<'_>,
     source: &VerifiedSealedLexicalSourceReceiptV1,
 ) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    verify_builder_mutation_gate_schema(transaction)?;
     let (pages, documents, import_integrity, import_evidence): (i64, i64, i64, i64) = transaction
         .query_row(
             "SELECT (SELECT COUNT(*) FROM source_pages), (SELECT COUNT(*) FROM document_integrity), (SELECT COUNT(*) FROM import_integrity), (SELECT COUNT(*) FROM import_evidence)",
@@ -2489,31 +2753,6 @@ fn authenticated_authority_epoch(
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact authenticated authority disagrees with its source receipt".to_owned(),
-        ));
-    }
-    let orphaned: i64 = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM rows AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
-                UNION ALL SELECT 1 FROM term_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
-                UNION ALL SELECT 1 FROM exact_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
-                UNION ALL SELECT 1 FROM ngram_postings AS content LEFT JOIN source_pages AS authority USING(page_ordinal) WHERE authority.page_ordinal IS NULL
-            )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_error)?;
-    let mismatched_rows: i64 = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM document_integrity AS authority LEFT JOIN rows AS content USING(document_id) WHERE content.document_id IS NULL OR content.chunk_id != authority.chunk_id)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_error)?;
-    if orphaned != 0 || mismatched_rows != 0 {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact base rows are not covered by authenticated document authority"
-                .to_owned(),
         ));
     }
     Ok(actual_epoch)
@@ -2792,12 +3031,16 @@ impl PersistedFinalizationStateV1 {
                 "lexical artifact mutation epoch is negative".to_owned(),
             ));
         }
+        let (base_section_row_counts, base_section_accumulators) =
+            initial_base_section_receipt_fold()?;
         Ok(Self {
             phase: PersistedFinalizationPhaseV1::Statistics,
             section_ordinal: 0,
             section_row_count: 0,
             section_last_key: None,
             section_accumulator: initial_section_accumulator(SECTION_NAMES[0])?.to_vec(),
+            base_section_row_counts,
+            base_section_accumulators,
             completed_sections: Vec::new(),
             completed_rows: 0,
             content_epoch,
@@ -2927,9 +3170,19 @@ fn validate_finalization_state(
         PersistedFinalizationPhaseV1::Digest => section_count,
     };
     if state.section_ordinal > maximum_ordinal
+        || (state.phase == PersistedFinalizationPhaseV1::Digest
+            && state.section_ordinal > 0
+            && state.section_ordinal
+                < u64::try_from(1 + BASE_SECTION_NAMES.len()).map_err(contract_number)?)
         || state.completed_sections.len() != completed_section_count
         || state.completed_sections.len() > SECTION_NAMES.len()
         || state.section_accumulator.len() != 32
+        || state.base_section_row_counts.len() != BASE_SECTION_NAMES.len()
+        || state.base_section_accumulators.len() != BASE_SECTION_NAMES.len()
+        || state
+            .base_section_accumulators
+            .iter()
+            .any(|accumulator| accumulator.len() != 32)
         || state.content_epoch < 0
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -3127,13 +3380,20 @@ fn advance_native_section_rows<P: rusqlite::Params>(
                 "lexical artifact finalization keyset did not advance".to_owned(),
             ));
         }
-        if matches!(
-            section,
-            FinalizationSectionV1::SourcePages
-                | FinalizationSectionV1::DocumentIntegrity
-                | FinalizationSectionV1::ImportIntegrity
-        ) {
-            verify_integrity_row(transaction, section, row, control)?;
+        if section == FinalizationSectionV1::SourcePages {
+            let page_ordinal =
+                u64::try_from(row.get::<_, i64>(0).map_err(sqlite_error)?).map_err(|_| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact base-section receipt has a negative page".to_owned(),
+                    )
+                })?;
+            let receipt: Vec<u8> = row.get(9).map_err(sqlite_error)?;
+            absorb_page_base_sections_receipt(
+                page_ordinal,
+                &receipt,
+                &mut state.base_section_row_counts,
+                &mut state.base_section_accumulators,
+            )?;
         }
         absorb_section_row(
             section.name(),
@@ -3200,81 +3460,6 @@ fn native_row_key(
             term: row.get(1).map_err(sqlite_error)?,
         }),
     }
-}
-
-fn verify_integrity_row(
-    transaction: &Transaction<'_>,
-    section: FinalizationSectionV1,
-    row: &rusqlite::Row<'_>,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let expected_column = match section {
-        FinalizationSectionV1::SourcePages => 8,
-        FinalizationSectionV1::DocumentIntegrity => 2,
-        FinalizationSectionV1::ImportIntegrity => 1,
-        _ => {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact integrity verification selected the wrong section".to_owned(),
-            ));
-        }
-    };
-    let expected: String = row.get(expected_column).map_err(sqlite_error)?;
-    let actual = match section {
-        FinalizationSectionV1::SourcePages => match row.get_ref(0).map_err(sqlite_error)? {
-            ValueRef::Integer(page_ordinal) if page_ordinal >= 0 => {
-                ngram_page_integrity_digest(transaction, page_ordinal, control)?
-            }
-            _ => {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact source-page ngram receipt has an invalid key".to_owned(),
-                ));
-            }
-        },
-        FinalizationSectionV1::DocumentIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
-            ValueRef::Integer(document) if document >= 0 => {
-                document_integrity_digest(transaction, document, control)?
-            }
-            _ => {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact document integrity receipt has an invalid key".to_owned(),
-                ));
-            }
-        },
-        FinalizationSectionV1::ImportIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
-            ValueRef::Blob(canonical) => {
-                let evidence: Option<Vec<u8>> = transaction
-                    .query_row(
-                        "SELECT evidence FROM import_evidence WHERE canonical = ?1",
-                        [canonical],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(sqlite_error)?;
-                let evidence = evidence.ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Corrupt(
-                        "lexical artifact import integrity receipt has no evidence".to_owned(),
-                    )
-                })?;
-                import_integrity_digest(canonical, &evidence)?
-            }
-            _ => {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact import integrity receipt has an invalid key".to_owned(),
-                ));
-            }
-        },
-        _ => {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact integrity verification selected the wrong section".to_owned(),
-            ));
-        }
-    };
-    if actual.as_str() != expected {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact derived content differs from its append receipt".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn initial_section_accumulator(name: &str) -> Result<[u8; 32], CodeLexicalArtifactErrorV1> {
@@ -3476,162 +3661,6 @@ fn verify_final_sections_against_source(
     Ok(())
 }
 
-fn document_integrity_digest(
-    transaction: &Transaction<'_>,
-    document: i64,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    checkpoint(control)?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
-    hasher.update(document.to_le_bytes());
-    let row_count = hash_document_table(
-        transaction,
-        &mut hasher,
-        "row",
-        "SELECT chunk_id, row FROM rows WHERE document_id = ?1",
-        document,
-        control,
-    )?;
-    if row_count != 1 {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
-            "lexical artifact document {document} is missing its derived row"
-        )));
-    }
-    hash_document_table(
-        transaction,
-        &mut hasher,
-        "term_posting",
-        DOCUMENT_TERM_POSTINGS_QUERY,
-        document,
-        control,
-    )?;
-    hash_document_table(
-        transaction,
-        &mut hasher,
-        "exact_posting",
-        DOCUMENT_EXACT_POSTINGS_QUERY,
-        document,
-        control,
-    )?;
-    integrity_digest(hasher)
-}
-
-fn ngram_page_integrity_digest(
-    transaction: &Transaction<'_>,
-    page_ordinal: i64,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    checkpoint(control)?;
-    let (chunk_count, cursor_bytes): (i64, Vec<u8>) = transaction
-        .query_row(
-            "SELECT chunk_count, next_cursor FROM source_pages WHERE page_ordinal = ?1",
-            [page_ordinal],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(sqlite_error)?;
-    let chunk_count = u64::try_from(chunk_count).map_err(contract_number)?;
-    let cursor = decode_cursor(&cursor_bytes)?;
-    let first_document = cursor
-        .emitted_chunks()
-        .checked_sub(chunk_count)
-        .ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact ngram page cursor regressed its chunk count".to_owned(),
-            )
-        })?;
-    let final_document = cursor.emitted_chunks();
-    let mut statement = transaction
-        .prepare(
-            "SELECT kind, ngram, documents, cardinality FROM ngram_postings WHERE page_ordinal = ?1 ORDER BY kind, ngram",
-        )
-        .map_err(sqlite_error)?;
-    let mut query = statement.query([page_ordinal]).map_err(sqlite_error)?;
-    let mut shards = Vec::<(i64, i64, Vec<u8>, u64)>::new();
-    while let Some(row) = query.next().map_err(sqlite_error)? {
-        checkpoint(control)?;
-        let kind = row.get(0).map_err(sqlite_error)?;
-        let ngram = row.get(1).map_err(sqlite_error)?;
-        let documents: Vec<u8> = row.get(2).map_err(sqlite_error)?;
-        let cardinality: i64 = row.get(3).map_err(sqlite_error)?;
-        let bitmap = decode_ngram_bitmap(&documents)?;
-        if i64::try_from(bitmap.len()).map_err(contract_number)? != cardinality
-            || bitmap.iter().any(|document| {
-                let document = u64::from(document);
-                document < first_document || document >= final_document
-            })
-        {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact ngram bitmap disagrees with its source page".to_owned(),
-            ));
-        }
-        shards.push((
-            kind,
-            ngram,
-            documents,
-            u64::try_from(cardinality).map_err(contract_number)?,
-        ));
-    }
-    ngram_page_digest(
-        u64::try_from(page_ordinal).map_err(contract_number)?,
-        shards.iter().map(|(kind, ngram, documents, cardinality)| {
-            (*kind, *ngram, documents.as_slice(), *cardinality)
-        }),
-    )
-}
-
-fn hash_document_table(
-    transaction: &Transaction<'_>,
-    hasher: &mut Sha256,
-    table: &str,
-    query: &str,
-    document: i64,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<u64, CodeLexicalArtifactErrorV1> {
-    checkpoint(control)?;
-    hasher.update(
-        u64::try_from(table.len())
-            .map_err(contract_number)?
-            .to_le_bytes(),
-    );
-    hasher.update(table.as_bytes());
-    let mut statement = transaction.prepare(query).map_err(sqlite_error)?;
-    let column_count = statement.column_count();
-    let mut rows = statement.query([document]).map_err(sqlite_error)?;
-    let mut count = 0u64;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        checkpoint(control)?;
-        hasher.update(b"row\0");
-        for column in 0..column_count {
-            hash_value(hasher, row.get_ref(column).map_err(sqlite_error)?)?;
-        }
-        count = count.checked_add(1).ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact document integrity row count overflowed".to_owned(),
-            )
-        })?;
-    }
-    hasher.update(b"end\0");
-    hasher.update(count.to_le_bytes());
-    Ok(count)
-}
-
-fn import_integrity_digest(
-    canonical: &[u8],
-    evidence: &[u8],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-import.v1\0");
-    hash_bytes(&mut hasher, canonical)?;
-    hash_bytes(&mut hasher, evidence)?;
-    integrity_digest(hasher)
-}
-
-fn integrity_digest(hasher: Sha256) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    ManifestDigest::from_sha256_bytes(&hasher.finalize())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
-}
-
 /// One staged `source_pages` receipt row: page and cumulative digests, chunk
 /// and payload counts, import counts, dictionary digest, and cursor bytes.
 type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8>);
@@ -3795,10 +3824,71 @@ pub(super) fn compute_section_digests(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
-    FinalizationSectionV1::ALL
-        .into_iter()
-        .map(|section| digest_query(connection, section, control))
-        .collect()
+    let (source_pages, base_sections) = digest_source_pages_and_base_receipts(connection, control)?;
+    let mut sections = Vec::with_capacity(SECTION_NAMES.len());
+    sections.push(source_pages);
+    sections.extend(base_sections);
+    for section in [
+        FinalizationSectionV1::FieldStatistics,
+        FinalizationSectionV1::TermStatistics,
+        FinalizationSectionV1::Vocabulary,
+    ] {
+        sections.push(digest_query(connection, section, control)?);
+    }
+    Ok(sections)
+}
+
+fn digest_source_pages_and_base_receipts(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<
+    (
+        CodeLexicalArtifactSectionDigestV1,
+        Vec<CodeLexicalArtifactSectionDigestV1>,
+    ),
+    CodeLexicalArtifactErrorV1,
+> {
+    let section = FinalizationSectionV1::SourcePages;
+    let mut row_count = 0u64;
+    let mut accumulator = initial_section_accumulator(section.name())?.to_vec();
+    let (mut base_row_counts, mut base_accumulators) = initial_base_section_receipt_fold()?;
+    let mut statement = connection
+        .prepare(section.full_query())
+        .map_err(sqlite_error)?;
+    let column_count = statement.column_count();
+    let mut rows = statement.query([]).map_err(sqlite_error)?;
+    while let Some(row) = rows.next().map_err(sqlite_error)? {
+        checkpoint(control)?;
+        let page_ordinal =
+            u64::try_from(row.get::<_, i64>(0).map_err(sqlite_error)?).map_err(|_| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact base-section receipt has a negative page".to_owned(),
+                )
+            })?;
+        let receipt: Vec<u8> = row.get(9).map_err(sqlite_error)?;
+        absorb_page_base_sections_receipt(
+            page_ordinal,
+            &receipt,
+            &mut base_row_counts,
+            &mut base_accumulators,
+        )?;
+        absorb_section_row(
+            section.name(),
+            row_count,
+            &mut accumulator,
+            row,
+            column_count,
+        )?;
+        row_count = row_count.checked_add(1).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact source-page receipt count overflowed".to_owned(),
+            )
+        })?;
+    }
+    Ok((
+        finish_section(section.name(), row_count, &accumulator)?,
+        finish_base_section_receipt_fold(&base_row_counts, &base_accumulators)?,
+    ))
 }
 
 fn digest_query(
@@ -4196,7 +4286,7 @@ mod tests {
     use super::*;
     use roaring::RoaringBitmap;
     use rusqlite::StatementStatus;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use rusqlite::hooks::{AuthAction, Authorization};
     use tracedecay_domain::{
         CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ScoreDomainId,
         SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
@@ -4212,11 +4302,6 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
-    }
-
-    struct CancelAtCheckpoint {
-        checkpoint: usize,
-        observations: AtomicUsize,
     }
 
     fn test_metadata() -> CodeLexicalProjectionMetadataV1 {
@@ -4248,14 +4333,11 @@ mod tests {
         }
     }
 
-    impl CodeIndexExecutionControlV1 for CancelAtCheckpoint {
-        fn is_cancelled(&self) -> bool {
-            self.observations.fetch_add(1, Ordering::SeqCst) + 1 >= self.checkpoint
-        }
-
-        fn is_deadline_exceeded(&self) -> bool {
-            false
-        }
+    fn create_mutable_test_schema(connection: &Connection) -> BuilderMutationGuardV1 {
+        let gate =
+            register_builder_mutation_gate(connection).expect("register builder mutation gate");
+        create_schema(connection).expect("create artifact schema");
+        BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
     }
 
     #[test]
@@ -4310,9 +4392,37 @@ mod tests {
     }
 
     #[test]
+    fn receipt_verification_does_not_read_append_only_base_tables() {
+        let connection = Connection::open_in_memory().expect("open artifact database");
+        let _mutation_authority = create_mutable_test_schema(&connection);
+        connection
+            .authorizer(Some(
+                |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                    AuthAction::Read { table_name, .. }
+                        if BASE_SECTION_NAMES.contains(&table_name) =>
+                    {
+                        Authorization::Deny
+                    }
+                    _ => Authorization::Allow,
+                },
+            ))
+            .expect("deny exhaustive base-table verification reads");
+
+        let sections = compute_section_digests(&connection, &ActiveControl)
+            .expect("verify only source-page receipts and derived sections");
+        assert_eq!(
+            sections
+                .iter()
+                .map(|section| section.name.as_str())
+                .collect::<Vec<_>>(),
+            SECTION_NAMES
+        );
+    }
+
+    #[test]
     fn finalization_monitor_spawn_failure_is_typed_and_leaves_sqlite_reusable() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
+        let _mutation_authority = create_mutable_test_schema(&connection);
         let transaction = connection.transaction().expect("start transaction");
         fail_next_finalization_monitor_spawn();
         let operation_ran = AtomicBool::new(false);
@@ -4337,7 +4447,7 @@ mod tests {
     #[test]
     fn ngram_staging_key_preserves_source_page_order_without_a_serving_index() {
         let connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
+        let _mutation_authority = create_mutable_test_schema(&connection);
         for (page_ordinal, ngram, document) in
             [(0i64, 90i64, 0u32), (0, 100, 0), (1, 10, 1), (1, 20, 1)]
         {
@@ -4390,7 +4500,7 @@ mod tests {
     #[test]
     fn deferred_ngram_serving_index_is_unique_and_query_selective() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
+        let _mutation_authority = create_mutable_test_schema(&connection);
         for (page_ordinal, ngram, documents) in [
             (0i64, 10i64, vec![1u32, 2]),
             (0, 20, vec![1]),
@@ -4540,7 +4650,7 @@ mod tests {
     #[test]
     fn one_document_integrity_row_does_not_visit_unrelated_relational_rows() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
+        let _mutation_authority = create_mutable_test_schema(&connection);
         let transaction = connection.transaction().expect("start seed transaction");
         for document_id in 0..2_048i64 {
             transaction
@@ -4566,7 +4676,10 @@ mod tests {
         }
         transaction.commit().expect("commit integrity index");
 
-        for query in [DOCUMENT_TERM_POSTINGS_QUERY, DOCUMENT_EXACT_POSTINGS_QUERY] {
+        for query in [
+            "SELECT field, term, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY field, term",
+            "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term",
+        ] {
             let mut statement = connection.prepare(query).expect("prepare integrity query");
             {
                 let mut rows = statement.query([1_024i64]).expect("query one document");
@@ -4587,82 +4700,12 @@ mod tests {
     }
 
     #[test]
-    fn document_integrity_hashing_cancels_without_advancing_finalization() {
-        let mut connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
-        let transaction = connection
-            .transaction()
-            .expect("start artifact transaction");
-        transaction
-            .execute(
-                "INSERT INTO rows(document_id, chunk_id, row) VALUES (0, 'chunk', X'01')",
-                [],
-            )
-            .expect("seed row");
-        for ordinal in 0..64i64 {
-            transaction
-                .execute(
-                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('body', ?1, 0, 1)",
-                    [format!("term-{ordinal:02}")],
-                )
-                .expect("seed term posting");
-        }
-        build_serving_index_step(&transaction, 2).expect("build document integrity index");
-        let digest = document_integrity_digest(&transaction, 0, &ActiveControl)
-            .expect("derive append receipt");
-        transaction
-            .execute(
-                "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (0, 'chunk', ?1)",
-                [digest.as_str()],
-            )
-            .expect("seed document receipt");
-
-        let mut state = PersistedFinalizationStateV1 {
-            phase: PersistedFinalizationPhaseV1::Digest,
-            section_ordinal: 1,
-            section_row_count: 0,
-            section_last_key: None,
-            section_accumulator: initial_section_accumulator("document_integrity")
-                .expect("initial accumulator")
-                .to_vec(),
-            completed_sections: Vec::new(),
-            completed_rows: 0,
-            content_epoch: 0,
-            source_state_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .expect("test source-state digest"),
-        };
-        let control = CancelAtCheckpoint {
-            checkpoint: 8,
-            observations: AtomicUsize::new(0),
-        };
-        let error = advance_native_section_rows(
-            &transaction,
-            FinalizationSectionV1::DocumentIntegrity,
-            FinalizationSectionV1::DocumentIntegrity.seek_query(false),
-            params![1i64],
-            &mut state,
-            &control,
-        )
-        .expect_err("cancel nested document hashing");
-
-        assert!(matches!(
-            error,
-            CodeLexicalArtifactErrorV1::Interrupted(
-                tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled
-            )
-        ));
-        assert_eq!(state.section_row_count, 0);
-        assert_eq!(state.completed_rows, 0);
-        assert_eq!(state.section_last_key, None);
-    }
-
-    #[test]
     fn bounded_finalization_resume_seeks_each_native_section_index() {
         let connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
+        let _mutation_authority = create_mutable_test_schema(&connection);
         connection
             .execute(
-                "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor) VALUES (0, 'page', 'cumulative', 1, 1, 1, 1, 'imports', 'ngrams', X'00')",
+                "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor) VALUES (0, 'page', 'cumulative', 1, 1, 1, 1, 'imports', 'ngrams', X'00', X'00')",
                 [],
             )
             .expect("seed source page");
