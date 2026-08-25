@@ -38,7 +38,7 @@ use tracedecay_private_fs::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    ResidentMemoryAdjustmentFailureV1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
 };
 use tracedecay_usecases::code_index::{
@@ -3387,8 +3387,6 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     SnapshotMemoryAdmission(ResidentMemoryAdmissionFailureV1),
     #[error("code-index retained-source resident-memory capacity is unavailable")]
     SnapshotMemoryCapacityUnavailable,
-    #[error("code-index retained-source resident-memory adjustment failed: {0}")]
-    SnapshotMemoryAdjustment(ResidentMemoryAdjustmentFailureV1),
     #[error("code-index worker plan refused: {0}")]
     WorkerPlan(#[from] tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1),
     #[cfg(not(test))]
@@ -3435,7 +3433,6 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::WorkerMemoryAdmission(_)
             | Self::SnapshotMemoryAdmission(_)
             | Self::SnapshotMemoryCapacityUnavailable
-            | Self::SnapshotMemoryAdjustment(_)
             | Self::WorkerPlan(_) => false,
             #[cfg(not(test))]
             Self::WorkerPlanNotInstalled => false,
