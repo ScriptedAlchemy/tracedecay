@@ -582,6 +582,67 @@ fn read_active_code_generation(
     .ok()
 }
 
+/// Proves the evaluated profile is both selected through the public configuration
+/// authority and ready through the mounted runtime authority before TaskSession
+/// selection. TaskSession anchors deliberately retain only TaskSession provenance.
+pub(super) fn wait_for_evaluated_semantic_profile_current(
+    home: &Path,
+    project: &Path,
+    client: &Client,
+) {
+    let configured = client
+        .execute::<ApplicationConfigurationGet>(
+            &tracedecay_application::configuration::ConfigurationGetRequestV1 {
+                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
+                    .expect("semantic runtime setting key"),
+            },
+        )
+        .expect("read activated semantic runtime configuration through typed SDK")
+        .result;
+    let ConfigurationValueV1::Text(value) = &configured.effective_value else {
+        panic!(
+            "activated semantic runtime must retain its typed configuration text: {configured:?}"
+        );
+    };
+    let semantic_config: SemanticConfig = serde_json::from_str(value)
+        .unwrap_or_else(|error| panic!("decode activated semantic runtime configuration: {error}"));
+    let active_profile = semantic_config
+        .active_profile
+        .as_ref()
+        .expect("evaluated semantic profile must remain active through the typed SDK");
+    assert_eq!(
+        active_profile.profile_id, EVALUATED_PROFILE_ID,
+        "the evaluated semantic profile selected through the typed SDK must remain active"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let status = semantic_runtime_status(home, project)
+            .unwrap_or_else(|| panic!("runtime returned an invalid semantic status"));
+        if let SemanticRuntimeStateV1::Current { receipt } = &status.state {
+            let runtime_configuration = status
+                .configuration
+                .as_ref()
+                .expect("ready semantic runtime must report its activation configuration");
+            assert_eq!(
+                runtime_configuration.effective_behavior_digest,
+                configured.effective_behavior_digest,
+                "the runtime readiness receipt must authorize the exact evaluated configuration selected through the SDK"
+            );
+            assert_eq!(
+                receipt.configuration, *runtime_configuration,
+                "the ready semantic receipt must retain the runtime's exact activation configuration"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for activated semantic runtime: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn semantic_runtime_status(home: &Path, project: &Path) -> Option<SemanticRuntimeStatusV1> {
     let value = serve_tool_call(
         home,
