@@ -2753,7 +2753,7 @@ mod lexical_page_source_tests {
             snapshot,
             captured_files: vec![CodeIndexCapturedFileV1 {
                 file_occurrence_id: file.file_occurrence_id,
-                sanitized_bytes: source.to_vec(),
+                sanitized_bytes: Arc::from(source),
                 sensitivity_level: SensitivityLevelV1::Public,
             }],
             changed_files: BTreeSet::new(),
