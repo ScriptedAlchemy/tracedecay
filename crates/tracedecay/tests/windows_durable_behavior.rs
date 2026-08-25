@@ -4,7 +4,6 @@
 //! helpers as the ordinary suites. CI selects this binary as a whole instead
 //! of maintaining module-prefix filters or expected test counts.
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 #[path = "storage_suite/support.rs"]
 mod support;

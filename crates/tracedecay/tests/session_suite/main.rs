@@ -6,7 +6,7 @@
 //! link steps while keeping every test (names gain a module prefix, e.g.
 //! `lcm_compression::...`).
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod anchor_resolution;

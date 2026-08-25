@@ -108,7 +108,6 @@ use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
 #[path = "advisory_runtime_acceptance/code_graph.rs"]
 mod code_graph;
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use code_graph::hermetic_advisory_code_graph;

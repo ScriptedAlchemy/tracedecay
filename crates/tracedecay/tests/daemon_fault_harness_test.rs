@@ -1,4 +1,3 @@
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -5,7 +5,7 @@
 //! binaries: each integration test binary links the full `tracedecay` crate
 //! separately, and link time dominates Windows CI.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod support;

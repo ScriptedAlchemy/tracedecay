@@ -4,7 +4,7 @@
 //! Merging these formerly separate integration-test binaries into one binary
 //! cuts Windows CI link time (each `tests/*.rs` file links separately).
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 /// Hermetic profile shard for a fixture project, pinned inside the fixture's

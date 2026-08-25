@@ -6,7 +6,7 @@
 //! names gain a module prefix (e.g. `agent_test::test_get_all_integrations`)
 //! but coverage is unchanged.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod agent_registry_test;

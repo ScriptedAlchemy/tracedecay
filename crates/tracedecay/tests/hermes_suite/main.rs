@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod lcm_bridge;

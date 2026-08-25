@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};

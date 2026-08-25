@@ -38,7 +38,6 @@
 //! inspects source files or shells out to a scanner; each assertion is a
 //! product call.
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};

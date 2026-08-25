@@ -5,7 +5,6 @@
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use std::path::Path;

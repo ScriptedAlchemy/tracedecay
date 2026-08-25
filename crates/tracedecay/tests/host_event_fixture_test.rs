@@ -29,7 +29,6 @@ use tracedecay_usecases::host_admission::{
 };
 use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use common::{

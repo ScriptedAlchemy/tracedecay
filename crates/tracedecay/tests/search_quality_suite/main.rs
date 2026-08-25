@@ -6,7 +6,7 @@
 //! workload/fixture contract that is bound to the root-owned `search_eval`
 //! module and the root-checked-in fixture corpus.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod workload_fixture;

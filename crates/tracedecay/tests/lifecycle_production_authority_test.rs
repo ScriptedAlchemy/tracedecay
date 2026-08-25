@@ -1,7 +1,6 @@
 use crate::common::fixture::{GitFixture, TestProfile};
 use tracedecay::tracedecay::TraceDecay;
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 #[tokio::test]

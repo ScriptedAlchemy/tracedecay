@@ -35,7 +35,6 @@
 //!   refuses any store whose relational shape is not byte-for-byte the exact
 //!   final shape this binary creates, returning `ResetRequired` with a
 //!   `Reset`-only legal action for every subsequent open of that store.
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 /// The HTTP, MCP-host, and Rust SDK legs of this same journey.
 ///

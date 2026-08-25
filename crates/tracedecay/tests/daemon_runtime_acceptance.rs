@@ -31,7 +31,6 @@ use tracedecay_hooks::{
 };
 use tracedecay_tool_catalog::BindingSurface;
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 fn id<T>(value: &str) -> T

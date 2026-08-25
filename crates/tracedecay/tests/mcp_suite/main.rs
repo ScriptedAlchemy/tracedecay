@@ -7,7 +7,7 @@
 //! `mcp_handler_test::…`) and `.config/nextest.toml` can keep the original
 //! Windows test-group assignments per module.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod analytics_test;

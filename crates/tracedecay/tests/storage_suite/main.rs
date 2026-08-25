@@ -5,7 +5,7 @@
 //! Windows CI time. Migration engine coverage now lives beside the private
 //! runtime APIs in `db::schema::tests`.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 mod home_env_lock;
 mod support;

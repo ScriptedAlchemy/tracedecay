@@ -27,7 +27,7 @@ fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
         .chain(include_bytes!(
             "../../../../crates/tracedecay-runtime-core/src/db/engine/test_support.rs"
         ))
-        .chain(include_bytes!("../../../../tests/common/mod.rs"))
+        .chain(include_bytes!("../common/mod.rs"))
         .chain(name.as_bytes())
         .chain(builder_fingerprint)
     {

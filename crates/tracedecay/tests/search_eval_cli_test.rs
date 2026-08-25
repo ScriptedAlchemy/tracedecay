@@ -1,6 +1,5 @@
 #![allow(clippy::option_env_unwrap)]
 
-#[path = "../../../tests/common/mod.rs"]
 mod common;
 
 use std::process::{Command, Output};

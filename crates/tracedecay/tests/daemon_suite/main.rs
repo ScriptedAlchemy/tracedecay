@@ -12,7 +12,7 @@
 //! classification, heartbeat staleness) is unit-tested inline in
 //! `src/daemon/git_watch.rs`.
 
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 mod advanced_workflow_journey_test;
