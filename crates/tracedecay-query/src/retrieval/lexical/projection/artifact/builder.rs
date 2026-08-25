@@ -54,6 +54,16 @@ const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_FINALIZATION_MONITOR_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_finalization_monitor_spawn() {
+    FAIL_NEXT_FINALIZATION_MONITOR_SPAWN.with(|failure| failure.set(true));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalizationSectionV1 {
     SourcePages,
@@ -651,9 +661,10 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 
     /// Return the largest contiguous input prefix whose complete retained,
-    /// prepared-output, and active-worker scratch claim fits this builder.
-    /// Zero is truthful when even the first page cannot be admitted; callers
-    /// retain the source cursor and can surface the existing typed bound.
+    /// prepared-output, active-worker scratch, prepared-row, and estimated
+    /// SQLite-write claims fit every canonical batch limit. Zero is truthful
+    /// when even the first page cannot be admitted; callers retain the source
+    /// cursor and can surface the existing typed bound.
     pub fn largest_admissible_page_prefix(
         &self,
         pages: &[VerifiedSealedLexicalPageV1],
@@ -664,6 +675,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let mut prepared = 0usize;
         let mut active_scratch = 0usize;
         let mut largest_scratch = BinaryHeap::<Reverse<usize>>::new();
+        let mut canonical_limits = CanonicalBatchLimitLedgerV1::default();
         for (index, page) in pages.iter().enumerate() {
             if page.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1 {
                 return Err(CodeLexicalArtifactErrorV1::Contract(format!(
@@ -703,6 +715,11 @@ impl CodeLexicalArtifactBuilderV1 {
                 .and_then(|bytes| bytes.checked_add(active_scratch))
                 .ok_or_else(batch_ledger_overflow)?;
             if required > self.memory_budget_bytes {
+                return Ok(index);
+            }
+            let (estimated_rows, estimated_write_bytes) =
+                page_prepared_write_upper_bounds(&self.metadata, page)?;
+            if !canonical_limits.try_admit(estimated_rows, estimated_write_bytes)? {
                 return Ok(index);
             }
         }
@@ -953,7 +970,7 @@ impl CodeLexicalArtifactBuilderV1 {
     /// observes cancellation during that statement. During digest
     /// verification, `maximum_work` bounds the number of staged rows (or empty
     /// section completions) this call may consume.
-    #[hotpath::measure(label = "query.artifact.finalization.digest_verify_wake")]
+    #[hotpath::measure(label = "query.artifact.finalization.advance_wake")]
     pub fn advance_finalization(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -1395,6 +1412,96 @@ fn page_batch_ledger_charge_bytes(
                 "lexical artifact batch ledger charge overflowed".to_owned(),
             )
         })
+}
+
+#[derive(Default)]
+struct CanonicalBatchLimitLedgerV1 {
+    estimated_rows: usize,
+    estimated_write_bytes: usize,
+}
+
+impl CanonicalBatchLimitLedgerV1 {
+    fn try_admit(
+        &mut self,
+        page_rows: usize,
+        page_write_bytes: usize,
+    ) -> Result<bool, CodeLexicalArtifactErrorV1> {
+        let estimated_rows = self.estimated_rows.checked_add(page_rows).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact batch row preflight overflowed".to_owned(),
+            )
+        })?;
+        let estimated_write_bytes = self
+            .estimated_write_bytes
+            .checked_add(page_write_bytes)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact batch write preflight overflowed".to_owned(),
+                )
+            })?;
+        if estimated_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1
+            || estimated_write_bytes > CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1
+        {
+            return Ok(false);
+        }
+        self.estimated_rows = estimated_rows;
+        self.estimated_write_bytes = estimated_write_bytes;
+        Ok(true)
+    }
+}
+
+/// Allocation-free upper bounds for the two canonical post-preparation
+/// admission metrics. The retained-output authority already covers every
+/// serialized row, posting key, and n-gram tuple; import evidence needs one
+/// additional canonical copy because SQLite writes it to two authority
+/// tables.
+fn page_prepared_write_upper_bounds(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    page: &VerifiedSealedLexicalPageV1,
+) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
+    let mut rows = 1usize;
+    let mut write_bytes = page_prepared_retained_upper_bound_bytes(metadata, page)?;
+    for evidence in page.imports() {
+        rows = rows.checked_add(2).ok_or_else(batch_ledger_overflow)?;
+        write_bytes = write_bytes
+            .checked_add(import_transient_bytes(evidence)?)
+            .and_then(|bytes| bytes.checked_add(page.page_digest().as_str().len()))
+            .ok_or_else(batch_ledger_overflow)?;
+    }
+    for admitted in page.chunks() {
+        let chunk = admitted.chunk();
+        let text_bytes = chunk.sanitized_text.as_str().len();
+        let (normalized_ngrams, _) = document_ngram_scratch(text_bytes)?;
+        let raw_ngrams = if chunk
+            .sanitized_text
+            .as_str()
+            .as_bytes()
+            .iter()
+            .any(u8::is_ascii_uppercase)
+        {
+            document_ngram_scratch(text_bytes)?.0
+        } else {
+            0
+        };
+        let term_postings = text_bytes
+            .checked_add(1)
+            .and_then(|count| count.checked_add(chunk.subtokens.len()))
+            .and_then(|count| count.checked_add(chunk.exact_terms.len().checked_mul(2)?))
+            .ok_or_else(batch_ledger_overflow)?;
+        let exact_postings = chunk
+            .exact_terms
+            .len()
+            .checked_add(1)
+            .ok_or_else(batch_ledger_overflow)?;
+        rows = rows
+            .checked_add(2)
+            .and_then(|count| count.checked_add(term_postings))
+            .and_then(|count| count.checked_add(exact_postings))
+            .and_then(|count| count.checked_add(normalized_ngrams))
+            .and_then(|count| count.checked_add(raw_ngrams))
+            .ok_or_else(batch_ledger_overflow)?;
+    }
+    Ok((rows, write_bytes))
 }
 
 /// Refuse a batch unless its retained source pages, all prepared outputs, and
@@ -2372,7 +2479,6 @@ fn with_cancellable_sqlite_statement<T>(
     checkpoint(control)?;
     let interruption = Arc::new(AtomicU8::new(0));
     let finished = Arc::new(AtomicBool::new(false));
-    let monitor_ready = Arc::new(AtomicBool::new(false));
     let progress_interruption = Arc::clone(&interruption);
     transaction
         .progress_handler(
@@ -2381,11 +2487,12 @@ fn with_cancellable_sqlite_statement<T>(
         )
         .map_err(sqlite_error)?;
 
-    let outcome = std::thread::scope(|scope| {
+    let monitored = std::thread::scope(|scope| {
         let monitor_interruption = Arc::clone(&interruption);
         let monitor_finished = Arc::clone(&finished);
-        let monitor_ready_signal = Arc::clone(&monitor_ready);
-        scope.spawn(move || {
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(0);
+        let monitor = spawn_finalization_control_monitor(scope, move || {
+            let mut ready = false;
             loop {
                 let reason = if control.is_cancelled() {
                     1
@@ -2397,25 +2504,54 @@ fn with_cancellable_sqlite_statement<T>(
                 if reason != 0 {
                     monitor_interruption.store(reason, Ordering::Release);
                 }
-                monitor_ready_signal.store(true, Ordering::Release);
+                if !ready {
+                    let _ = ready_sender.send(());
+                    ready = true;
+                }
                 if reason != 0 || monitor_finished.load(Ordering::Acquire) {
                     break;
                 }
                 std::thread::sleep(FINALIZATION_CONTROL_POLL_INTERVAL);
             }
-        });
-        while !monitor_ready.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        let outcome = catch_unwind(AssertUnwindSafe(operation));
+        })?;
+        let readiness = ready_receiver.recv();
+        let outcome = readiness
+            .as_ref()
+            .ok()
+            .map(|_| catch_unwind(AssertUnwindSafe(operation)));
         finished.store(true, Ordering::Release);
-        outcome
+        Ok::<_, std::io::Error>((readiness, outcome, monitor.join()))
     });
-    transaction
+    let clear = transaction
         .progress_handler(FINALIZATION_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>)
-        .map_err(sqlite_error)?;
+        .map_err(sqlite_error);
+    clear?;
 
-    let outcome = match outcome {
+    let (readiness, outcome, monitor) = monitored.map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact finalization cancellation monitor could not start: {error}"
+        ))
+    })?;
+    if let Err(payload) = monitor {
+        return Err(CodeLexicalArtifactErrorV1::Io(
+            tracedecay_code_index::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                0, &*payload,
+            )
+            .to_string(),
+        ));
+    }
+    readiness.map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact finalization cancellation monitor stopped before readiness: {error}"
+        ))
+    })?;
+
+    let outcome = match outcome.ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Io(
+            "lexical artifact finalization cancellation monitor produced no operation outcome"
+                .to_owned(),
+        )
+    })? {
         Ok(outcome) => outcome,
         Err(payload) => resume_unwind(payload),
     };
@@ -2428,6 +2564,24 @@ fn with_cancellable_sqlite_statement<T>(
         )),
         _ => outcome,
     }
+}
+
+fn spawn_finalization_control_monitor<'scope, 'environment>(
+    scope: &'scope std::thread::Scope<'scope, 'environment>,
+    monitor: impl FnOnce() + Send + 'scope,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+where
+    'environment: 'scope,
+{
+    #[cfg(test)]
+    if FAIL_NEXT_FINALIZATION_MONITOR_SPAWN.with(std::cell::Cell::take) {
+        return Err(std::io::Error::other(
+            "injected finalization monitor spawn failure",
+        ));
+    }
+    std::thread::Builder::new()
+        .name("tracedecay-lexical-finalization-control".to_owned())
+        .spawn_scoped(scope, monitor)
 }
 
 fn derive_statistics_step(
@@ -2480,28 +2634,54 @@ fn build_serving_index_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let sql = match ordinal {
-        0 => "CREATE UNIQUE INDEX rows_by_chunk ON rows(chunk_id)",
-        1 => "CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id)",
-        2 => {
-            "CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency)"
-        }
-        3 => {
-            "CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency)"
-        }
-        4 => "CREATE INDEX term_stats_by_term ON term_stats(term, field)",
-        5 => "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
-        6 => "CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram)",
+    match ordinal {
+        0 => hotpath::measure_block!(
+            "query.artifact.finalization.index.rows_by_chunk",
+            transaction.execute_batch("CREATE UNIQUE INDEX rows_by_chunk ON rows(chunk_id)")
+        ),
+        1 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id)",
+            )
+        ),
+        2 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency)",
+            )
+        ),
+        3 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_document_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency)",
+            )
+        ),
+        4 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_stats_by_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_stats_by_term ON term_stats(term, field)",
+            )
+        ),
+        5 => hotpath::measure_block!(
+            "query.artifact.finalization.index.exact_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
+            )
+        ),
+        6 => hotpath::measure_block!(
+            "query.artifact.finalization.index.ngram_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram)",
+            )
+        ),
         _ => {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact selected an unknown serving-index step".to_owned(),
             ));
         }
-    };
-    hotpath::measure_block!(
-        "query.artifact.finalization.build_serving_index",
-        transaction.execute_batch(sql).map_err(sqlite_error)
-    )
+    }
+    .map_err(sqlite_error)
 }
 
 impl PersistedFinalizationStateV1 {
@@ -3838,6 +4018,53 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn canonical_batch_limits_select_a_multi_page_prefix_without_stalling() {
+        let page_bounds = [
+            (700_000usize, 80 * 1024 * 1024usize),
+            (700_000, 80 * 1024 * 1024),
+            (700_000, 80 * 1024 * 1024),
+        ];
+        let mut ledger = CanonicalBatchLimitLedgerV1::default();
+        let selected = page_bounds
+            .into_iter()
+            .take_while(|(rows, bytes)| {
+                ledger
+                    .try_admit(*rows, *bytes)
+                    .expect("extend canonical limit ledger")
+            })
+            .count();
+        assert_eq!(
+            selected, 2,
+            "two pages fit both canonical caps and the third must remain for the next wake"
+        );
+    }
+
+    #[test]
+    fn finalization_monitor_spawn_failure_is_typed_and_leaves_sqlite_reusable() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        let transaction = connection.transaction().expect("start transaction");
+        fail_next_finalization_monitor_spawn();
+        let operation_ran = AtomicBool::new(false);
+        let error = with_cancellable_sqlite_statement(&transaction, &ActiveControl, || {
+            operation_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("injected monitor spawn failure must be typed");
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Io(_)));
+        assert!(
+            !operation_ran.load(Ordering::SeqCst),
+            "SQLite work must not start without its cancellation monitor"
+        );
+        with_cancellable_sqlite_statement(&transaction, &ActiveControl, || {
+            transaction
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .map_err(sqlite_error)
+        })
+        .expect("progress handler is cleared after spawn failure");
     }
 
     #[test]

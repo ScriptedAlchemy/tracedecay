@@ -1590,6 +1590,55 @@ fn disk_artifact_admission_selects_the_exact_largest_contiguous_prefix() {
 }
 
 #[test]
+fn disk_artifact_admission_keeps_real_pages_wide_until_the_actual_limit() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(
+        pages.len() >= 3,
+        "parser-backed fixture must expose a three-page boundary"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let probe = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("wide-prefix-probe.sqlite"),
+        fixture.metadata.clone(),
+    )
+    .expect("create admission probe");
+    let two_page_charge = probe
+        .page_batch_ledger_charge_bytes(&pages[..2])
+        .expect("measure two-page charge");
+    let three_page_charge = probe
+        .page_batch_ledger_charge_bytes(&pages[..3])
+        .expect("measure three-page charge");
+    let exact_budget = probe
+        .fixed_ledger_charge_bytes()
+        .checked_add(two_page_charge)
+        .expect("exact two-page budget");
+    assert!(
+        probe.fixed_ledger_charge_bytes() + three_page_charge > exact_budget,
+        "the third real page must be the actual memory authority boundary"
+    );
+    drop(probe);
+
+    let artifact_path = directory.path().join("wide-prefix.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &artifact_path,
+        fixture.metadata,
+        exact_budget,
+    )
+    .expect("create exactly bounded builder");
+    let selected = builder
+        .largest_admissible_page_prefix(&pages)
+        .expect("select real parser-backed prefix");
+    assert_eq!(
+        selected, 2,
+        "all-limit preflight must preserve a two-page batch and stop at its real third-page bound"
+    );
+    let progress = builder
+        .append_pages(&pages[..selected], &ArtifactControl { cancelled: false })
+        .expect("the selected multi-page prefix must pass exact post-preparation admission");
+    assert_eq!(progress.next_page_ordinal, 2);
+}
+
+#[test]
 fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
     let (mut fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
     let metadata = fixture.metadata.clone();
