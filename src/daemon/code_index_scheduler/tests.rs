@@ -2541,6 +2541,66 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
 }
 
 #[test]
+fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+    }
+
+    let mut reopened = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert_eq!(reopened.sealed_decode_count(), 0);
+    let text = reopened
+        .servable_retained_text_generation()
+        .expect("active durable text generation");
+    let scan = build_progress_snapshot(&reopened);
+    assert_eq!(scan.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert!(scan.total_lexical_bytes > 0);
+    assert_eq!(scan.completed_lexical_bytes, scan.total_lexical_bytes);
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "binding authenticated text metadata must not decode the full generation"
+    );
+    while !text
+        .advance_text_serving(64)
+        .expect("advance retained text generation")
+    {}
+    assert!(text.query_owners_are_warm());
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "exact and lexical owners must not require the full generation"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn caller() { replacement(); }\npub fn replacement() {}\n",
+    );
+    published(
+        reopened
+            .reconcile_now()
+            .expect("publish superseding generation"),
+    );
+    assert!(matches!(
+        text.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    ));
+}
+
+#[test]
 fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     use std::sync::{Condvar, Mutex, mpsc};
     use std::thread;
@@ -2643,7 +2703,7 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     let publisher = thread::spawn(move || {
         artifact_store.publish(
             &staging,
-            &generation,
+            &generation.manifest().generation_id,
             &sealed_identity,
             publish_control.as_ref(),
         )
@@ -2769,7 +2829,12 @@ fn text_artifact_publish_rejects_a_permissive_artifacts_root() {
 
     assert!(
         matches!(
-            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            artifact_store.publish(
+                &staging,
+                &generation.manifest().generation_id,
+                &sealed_identity,
+                &NeverCancelled,
+            ),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication must fail closed instead of accepting a permissive artifact namespace"
@@ -2816,7 +2881,12 @@ fn text_artifact_publish_rejects_a_symlink_artifacts_root() {
 
     assert!(
         matches!(
-            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            artifact_store.publish(
+                &staging,
+                &generation.manifest().generation_id,
+                &sealed_identity,
+                &NeverCancelled,
+            ),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication must not traverse a symlink artifact namespace"
@@ -9958,9 +10028,10 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert!(
-        !latest.query_owners_are_warm(),
-        "same-root refusal was lost and entered retained owner hydration"
+        latest.query_owners_are_warm(),
+        "same-root graph refusal must preserve retained text hydration"
     );
+    assert!(latest.production_query_owners().is_ok());
     assert!(latest.production_graph_serving().is_err());
     registry.shutdown().await;
 }
@@ -9979,17 +10050,28 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let sealed_worktree_id = {
+    let (scope, sealed_worktree_id, sealed_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), bytes);
         published(scheduler.reconcile_now().expect("seed generation"));
-        scheduler
+        let latest = scheduler
             .latest_complete()
-            .expect("seeded generation")
-            .generation
-            .snapshot()
+            .expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot
             .worktree
             .clone()
-            .expect("seeded worktree id")
+            .expect("seeded worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+            latest.generation.manifest().generation_id.clone(),
+        )
     };
     // Change the worktree so a reconcile pass would seal a brand-new
     // generation if the worker fell through after the activation failure.
@@ -10032,10 +10114,32 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         1,
         "a retryable activation failure must not seal a duplicate generation"
     );
+    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= text_deadline,
+            "graph retry backoff withheld the retained text generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        None,
-        "a generation that never activated must not serve"
+        Some(sealed_generation_id),
+        "exact and lexical serving remains authoritative during graph retry"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "retryable graph activation must not expose an unactivated graph owner"
     );
 
     // Clearing the injected failure lets the scheduled backoff retry activate
@@ -10044,7 +10148,7 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if registry
-            .latest_generation_id(fixture.path())
+            .latest_complete_serving_for_scope(&scope)
             .await
             .is_some()
         {

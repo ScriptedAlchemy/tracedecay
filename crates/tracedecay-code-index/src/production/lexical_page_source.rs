@@ -779,6 +779,13 @@ pub struct VerifiedSealedTextGenerationMetadataV1 {
 }
 
 impl VerifiedSealedTextGenerationMetadataV1 {
+    pub fn from_published_generation(generation: &CodeIndexPublishedGenerationV1) -> Self {
+        Self {
+            manifest: generation.manifest().clone(),
+            snapshot: generation.snapshot().clone(),
+        }
+    }
+
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
         &self.manifest
     }

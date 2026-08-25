@@ -31,8 +31,8 @@ use super::{
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
     CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
     CodeIndexWorktreeSchedulerV1, DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1,
-    LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
-    newly_eligible_percentile, now_micros,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, PendingHintsV1,
+    SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 #[cfg(test)]
 use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
@@ -46,7 +46,7 @@ mod runtime_generation_census_tests;
 mod scope_identity;
 
 use self::ignored_dependencies::exact_activated_serving_generation;
-pub(super) use scope_identity::latest_matches_scope_identity;
+pub(super) use scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
@@ -361,6 +361,7 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
     /// owns a long reconcile or text-artifact transaction.
     pub(super) build_progress: super::CodeIndexBuildProgressSlotV1,
@@ -476,6 +477,34 @@ fn dashboard_freshness_identity(
             Some(generation.manifest().generation_id.as_str().to_owned());
         identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
         identity.sealed_at_micros = Some(generation.manifest().seal.sealed_at.0);
+    }
+    identity
+}
+
+fn dashboard_text_freshness_identity(
+    latest: Option<&LatestCodeTextGenerationV1>,
+) -> crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+    let mut identity =
+        crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+    if let Some(latest) = latest {
+        let metadata = latest.metadata();
+        let snapshot = metadata.snapshot();
+        identity.repository_id = Some(snapshot.repository.as_str().to_owned());
+        identity.worktree_id = snapshot
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.as_str().to_owned());
+        identity.source_reference = snapshot
+            .reference
+            .as_ref()
+            .map(|reference| reference.as_str().to_owned());
+        identity.source_revision = snapshot
+            .source_revision
+            .as_ref()
+            .map(|revision| revision.as_str().to_owned());
+        identity.latest_generation_id = Some(metadata.manifest().generation_id.as_str().to_owned());
+        identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.sealed_at_micros = Some(metadata.manifest().seal.sealed_at.0);
     }
     identity
 }
@@ -1501,6 +1530,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *serving = None;
+                *worktree
+                    .text_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 worktree
                     .serving_generation_epoch
                     .fetch_add(1, Ordering::AcqRel);
@@ -1754,12 +1787,14 @@ impl CodeIndexSchedulerRegistryV1 {
     async fn seat_retained_serving_generation(
         scheduler: &Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
         serving_generation: &Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        text_generation: &Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
         serving_generation_epoch: &Arc<AtomicU64>,
         wake: &Arc<tokio::sync::Notify>,
-        retained: LatestCompleteCodeIndexV1,
+        mut retained: LatestCompleteCodeIndexV1,
     ) {
         let swap_scheduler = Arc::clone(scheduler);
         let swap_serving = Arc::clone(serving_generation);
+        let swap_text = Arc::clone(text_generation);
         let swap_serving_epoch = Arc::clone(serving_generation_epoch);
         let seated = tokio::task::spawn_blocking(move || {
             let scheduler = swap_scheduler
@@ -1769,6 +1804,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 .active_publication_matches(&retained)
                 .unwrap_or(false)
             {
+                let mut text = swap_text
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = text.as_ref()
+                    && existing.metadata().manifest().generation_id
+                        == retained.generation().manifest().generation_id
+                {
+                    retained.text = existing.clone();
+                } else {
+                    *text = Some(retained.text_generation_handle());
+                }
+                drop(text);
                 let mut serving = swap_serving
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2234,6 +2281,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // claims freshness; missing Git authority still leaves this empty.
         let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
             Arc::new(RwLock::new(None));
+        let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
+            Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
@@ -2250,6 +2299,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_text_generation = Arc::clone(&text_generation);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
         let worker_pending_wake = Arc::clone(&pending_wake);
@@ -2356,7 +2406,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
                     super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
-                let text_generation = serving_generation
+                let text_generation = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
@@ -2403,6 +2453,28 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("query.artifact.slice.yield_to_reconcile_total").inc(1_u64);
+                }
+                if worker_text_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none()
+                {
+                    let text_scheduler = Arc::clone(&scheduler);
+                    let retained_text = tokio::task::spawn_blocking(move || {
+                        text_scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .servable_retained_text_generation()
+                    })
+                    .await;
+                    if let Ok(Some(retained_text)) = retained_text {
+                        *worker_text_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(retained_text);
+                        worker_wake.notify_one();
+                        continue;
+                    }
                 }
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
@@ -2461,6 +2533,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Self::seat_retained_serving_generation(
                                         &scheduler,
                                         &serving_generation,
+                                        &worker_text_generation,
                                         &serving_generation_epoch,
                                         &worker_wake,
                                         retained,
@@ -2500,6 +2573,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Self::seat_retained_serving_generation(
                                         &scheduler,
                                         &serving_generation,
+                                        &worker_text_generation,
                                         &serving_generation_epoch,
                                         &worker_wake,
                                         retained,
@@ -2610,6 +2684,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
+                    let text_generation = Arc::clone(&worker_text_generation);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let serving_swap = tokio::task::spawn_blocking(move || {
@@ -2628,6 +2703,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             *serving = Some(latest.clone());
                             serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                            *text_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(latest.text_generation_handle());
                         }
                         // Semantic admission is independently retryable. A
                         // prior attempt may have lost bounded queue capacity,
@@ -2733,6 +2812,7 @@ impl CodeIndexSchedulerRegistryV1 {
             semantic_vector_graph_provider: None,
             scheduler,
             serving_generation,
+            text_generation,
             build_progress,
             serving_generation_epoch,
             serving_generation_installation,
@@ -3303,16 +3383,25 @@ impl CodeIndexSchedulerRegistryV1 {
         // so one warmup/dashboard call during a rebuild parked a runtime worker
         // for the reconcile's whole duration AND serialized every code-index
         // query behind it: a silent, daemon-wide code-index outage.
-        let serving = {
+        let (serving, text) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
-            Arc::clone(&worktree.serving_generation)
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.text_generation),
+            )
         };
         let latest = serving
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
-        Some(latest.generation.manifest().generation_id.clone())
+            .clone();
+        if let Some(latest) = latest {
+            return Some(latest.generation.manifest().generation_id.clone());
+        }
+        text.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| latest.metadata().manifest().generation_id.clone())
     }
 
     /// Exact bounded dashboard projection for one mounted worktree.
@@ -3327,13 +3416,14 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
-        let (scheduler, reconcile_in_progress, serving_generation, build_progress) = {
+        let (scheduler, reconcile_in_progress, serving_generation, text_generation, build_progress) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&canonical_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.build_progress),
             )
         };
@@ -3364,6 +3454,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
+                    let text = text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let identity = if latest.is_some() {
+                        dashboard_freshness_identity(latest.as_ref())
+                    } else {
+                        dashboard_text_freshness_identity(text.as_ref())
+                    };
                     return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros: None,
@@ -3378,13 +3477,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         hook_hint_count: None,
                         coverage: "partial_refresh_in_progress".to_owned(),
                         progress,
-                        ..dashboard_freshness_identity(latest.as_ref())
+                        ..identity
                     };
                 }
             };
             let verified = scheduler.verified_against_source();
             let stale = !verified || scheduler.freshness_window_elapsed();
             let latest = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let text = text_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
@@ -3406,6 +3509,11 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 "indexing"
             };
+            let identity = if latest.is_some() {
+                dashboard_freshness_identity(latest.as_ref())
+            } else {
+                dashboard_text_freshness_identity(text.as_ref())
+            };
             crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
@@ -3420,7 +3528,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 .to_owned(),
                 progress,
-                ..dashboard_freshness_identity(latest.as_ref())
+                ..identity
             }
         })
         .await
@@ -3760,6 +3868,27 @@ impl CodeIndexSchedulerRegistryV1 {
     /// never blocks on reconcile, gix status, or the scheduler mutex. A caller
     /// that takes this arm is serving an older complete generation and must
     /// mark its lanes stale; it must never present the result as current.
+    pub(in crate::daemon) async fn latest_text_serving_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let text_generation = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(
+                &unique_mounted_for_scope(&mounted, scope)
+                    .unique()?
+                    .1
+                    .text_generation,
+            )
+        };
+        let latest = text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        (text_matches_scope_identity(&latest, scope) && latest.text_serving_is_ready())
+            .then_some(latest)
+    }
+
     pub(in crate::daemon) async fn latest_complete_serving_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
