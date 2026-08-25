@@ -815,8 +815,7 @@ mod tests {
         let captured = scheduler
             .capture_exact_git_tree_snapshot(
                 &ExactGitTreeSourceV1 {
-                    reference: tracedecay_domain::RefId::new("refs/heads/main")
-                        .expect("reference"),
+                    reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
                     revision: tracedecay_domain::CommitId::new(revision).expect("revision"),
                     tree: tracedecay_domain::TreeId::new(tree).expect("tree"),
                 },

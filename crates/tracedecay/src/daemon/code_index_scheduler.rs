@@ -38,8 +38,8 @@ use tracedecay_private_fs::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    ResidentMemoryAdmissionFailureV1,
-    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryReservationV1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -4856,13 +4856,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        self.capture_admitted_candidate(
-            registry,
-            logical_path,
-            control,
-            None,
-            explicitly_admitted,
-        )
+        self.capture_admitted_candidate(registry, logical_path, control, None, explicitly_admitted)
     }
 
     fn ignored_admission_paths(&self) -> BTreeSet<&str> {

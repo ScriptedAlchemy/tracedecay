@@ -2440,8 +2440,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             if matches!(
                                 &error,
                                 tracedecay_query::retrieval::RetrievalPortError::Cancelled
-                            )
-                            {
+                            ) {
                                 let mut current = worker_text_generation
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
