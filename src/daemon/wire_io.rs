@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) async fn write_json_rpc_response(
     transport: &mut impl McpTransport,
-    response: &crate::mcp::JsonRpcResponse,
+    response: &tracedecay_jsonrpc::JsonRpcResponse,
 ) -> Result<()> {
     transport
         .write_line(&serde_json::to_string(response)?)

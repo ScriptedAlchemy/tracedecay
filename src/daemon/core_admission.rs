@@ -13,7 +13,7 @@ use super::{
     log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
     write_json_rpc_response,
 };
-use crate::mcp::ErrorCode;
+use tracedecay_jsonrpc::ErrorCode;
 use crate::support::weak_registry::WeakRegistry;
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
