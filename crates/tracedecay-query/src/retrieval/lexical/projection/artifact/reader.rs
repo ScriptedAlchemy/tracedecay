@@ -619,50 +619,90 @@ impl DocumentQueryV1 {
 /// the only storage used for the set-operation work table.
 const ARTIFACT_UNION_COMPOUND_ARMS_V1: usize = 64;
 
-fn union_document_queries(queries: impl IntoIterator<Item = DocumentQueryV1>) -> DocumentQueryV1 {
-    let mut level = queries
+fn union_document_queries(
+    queries: impl IntoIterator<Item = DocumentQueryV1>,
+) -> Result<DocumentQueryV1, RetrievalPortError> {
+    let queries = queries
         .into_iter()
         .filter(|query| query.sql.is_some())
         .collect::<Vec<_>>();
-    if level.is_empty() {
-        return DocumentQueryV1::empty();
+    if queries.is_empty() {
+        return Ok(DocumentQueryV1::empty());
     }
+
+    // Keep each compound arm below SQLite's expression limit, while sharing
+    // equal bind values across arms. A large fuzzy/phrase request commonly
+    // repeats its encoded field, so retaining one bind slot for every textual
+    // occurrence needlessly crosses the portable 999-variable ceiling even
+    // though the request's distinct values remain bounded. Named parameters
+    // also remain safe when this query is embedded in the frequency probe.
+    let mut parameters = Vec::new();
+    let mut level = queries
+        .into_iter()
+        .map(|query| {
+            let Some(sql) = query.sql else {
+                return Ok(String::new());
+            };
+            let sql = rewrite_union_query_parameters(&sql, &query.parameters, &mut parameters)?;
+            Ok(format!("SELECT document_id FROM ({sql})"))
+        })
+        .collect::<Result<Vec<_>, RetrievalPortError>>()?
+        .into_iter()
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
     while level.len() > 1 {
         level = level
             .chunks(ARTIFACT_UNION_COMPOUND_ARMS_V1)
-            .map(compound_union_document_queries)
+            .map(|queries| {
+                let sql = queries.join(" UNION ALL ");
+                format!("SELECT document_id FROM ({sql})")
+            })
             .collect();
     }
     let Some(root) = level.pop() else {
-        return DocumentQueryV1::empty();
+        return Ok(DocumentQueryV1::empty());
     };
-    DocumentQueryV1 {
-        sql: root
-            .sql
-            .map(|sql| format!("SELECT DISTINCT document_id FROM ({sql}) ORDER BY document_id")),
-        parameters: root.parameters,
-    }
+    Ok(DocumentQueryV1 {
+        sql: Some(format!(
+            "SELECT DISTINCT document_id FROM ({root}) ORDER BY document_id"
+        )),
+        parameters,
+    })
 }
 
-fn compound_union_document_queries(queries: &[DocumentQueryV1]) -> DocumentQueryV1 {
-    let mut sql = String::new();
-    let mut parameters = Vec::new();
-    for query in queries {
-        let Some(query_sql) = query.sql.as_deref() else {
+fn rewrite_union_query_parameters(
+    sql: &str,
+    query_parameters: &[Value],
+    parameters: &mut Vec<Value>,
+) -> Result<String, RetrievalPortError> {
+    let mut rewritten = String::with_capacity(sql.len());
+    let mut parameter_ordinal = 0usize;
+    for character in sql.chars() {
+        if character != '?' {
+            rewritten.push(character);
             continue;
-        };
-        if !sql.is_empty() {
-            sql.push_str(" UNION ALL ");
         }
-        sql.push_str("SELECT document_id FROM (");
-        sql.push_str(query_sql);
-        sql.push(')');
-        parameters.extend(query.parameters.iter().cloned());
+        let Some(value) = query_parameters.get(parameter_ordinal) else {
+            return Err(RetrievalPortError::Contract(
+                "document query SQL has more bind placeholders than values".to_owned(),
+            ));
+        };
+        let slot = if let Some(slot) = parameters.iter().position(|candidate| candidate == value) {
+            slot
+        } else {
+            parameters.push(value.clone());
+            parameters.len() - 1
+        };
+        rewritten.push_str(":d");
+        rewritten.push_str(&slot.to_string());
+        parameter_ordinal += 1;
     }
-    DocumentQueryV1 {
-        sql: Some(sql),
-        parameters,
+    if parameter_ordinal != query_parameters.len() {
+        return Err(RetrievalPortError::Contract(
+            "document query has values without bind placeholders".to_owned(),
+        ));
     }
+    Ok(rewritten)
 }
 
 fn visit_document_ids(
@@ -881,7 +921,7 @@ impl<'a> ArtifactQueryV1<'a> {
             .cloned()
             .map(|phrase| (phrase, 0usize))
             .collect::<BTreeMap<_, _>>();
-        let phrase_documents = union_document_queries(phrase_queries.values().cloned());
+        let phrase_documents = union_document_queries(phrase_queries.values().cloned())?;
         visit_lexical_rows(
             self.connection,
             &phrase_documents,
@@ -1114,7 +1154,7 @@ impl<'a> ArtifactQueryV1<'a> {
             ));
         }
         sources.extend(phrase_queries.values().cloned());
-        Ok(union_document_queries(sources))
+        union_document_queries(sources)
     }
 
     fn exact_documents(
@@ -1144,7 +1184,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 literal.canonical_bytes.clone(),
             ));
         }
-        Ok(union_document_queries(sources))
+        union_document_queries(sources)
     }
 
     fn visit_documents(
@@ -2325,7 +2365,8 @@ mod tests {
             DocumentQueryV1::term_except("render".to_owned(), "subtoken".to_owned()),
             DocumentQueryV1::term_except("renderer".to_owned(), "subtoken".to_owned()),
             DocumentQueryV1::term("subtoken".to_owned(), "render".to_owned()),
-        ]);
+        ])
+        .expect("small document union");
 
         assert_eq!(streamed_documents(&connection, &query), vec![1, 2, 3]);
         assert_eq!(
@@ -2334,7 +2375,8 @@ mod tests {
                 &union_document_queries([DocumentQueryV1::term(
                     "subtoken".to_owned(),
                     "render".to_owned(),
-                )]),
+                )])
+                .expect("single document union"),
             ),
             vec![3],
             "one source query must preserve bitmap-like candidate deduplication"
@@ -2367,7 +2409,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let query = union_document_queries(sources);
+        let query = union_document_queries(sources).expect("large document union");
+        assert_eq!(
+            query.parameters.len(),
+            source_count as usize + 1,
+            "repeated field binds share one bounded SQLite parameter slot"
+        );
 
         assert_eq!(
             streamed_documents(&connection, &query),
