@@ -27,7 +27,7 @@ use tracedecay_store::{
     SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1, StoreShardIdV1,
 };
 
-use crate::store::vector_generations::GraphVectorGenerationStoreV1;
+use tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_usecases::semantic_runtime::{
@@ -266,7 +266,7 @@ pub(crate) async fn retire_one_project_vector_generation(
 fn release_vector_reservation(
     store: &GraphVectorGenerationStoreV1,
     reservation: Option<tracedecay_graph_db::SemanticVectorRetirementReservation>,
-) -> Result<(), crate::store::vector_generations::VectorGenerationStoreErrorV1> {
+) -> Result<(), tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1> {
     if let Some(reservation) = reservation {
         store.release_reserved_generation(reservation)?;
     }
@@ -570,7 +570,9 @@ impl DaemonSemanticVectorGraphProviderV1 {
             worktree,
             source_generation,
             tracedecay_store::SemanticVectorCodeScopeHash::new(
-                crate::retention::code_index_generations::code_index_scope_hash(&self.project_root),
+                tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(
+                    &self.project_root,
+                ),
             )
             .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?,
             source_dependency,

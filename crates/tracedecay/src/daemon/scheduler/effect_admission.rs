@@ -715,8 +715,8 @@ pub(crate) fn scheduler_automation_request_id(
                 ),
             })
         }
-        None => crate::request_identity::mint_global_request_id(
-            crate::request_identity::GlobalRequestSurface::AutomationScheduler,
+        None => tracedecay_usecases::request_identity::mint_global_request_id(
+            tracedecay_usecases::request_identity::GlobalRequestSurface::AutomationScheduler,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation scheduler request identity is unavailable: {error}"),

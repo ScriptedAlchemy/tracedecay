@@ -602,12 +602,12 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
             reference: Some(feature_ref),
         },
     ];
-    let projection = crate::git_intelligence::NativeGitIntelligence::new(
+    let projection = tracedecay_usecases::git_intelligence::NativeGitIntelligence::new(
         roots[0].clone(),
         repository.clone(),
         main_worktree.clone(),
     )
-    .topology_projection(crate::git_intelligence::GIT_HISTORY_MAX_COUNT_LIMIT)
+    .topology_projection(tracedecay_usecases::git_intelligence::GIT_HISTORY_MAX_COUNT_LIMIT)
     .expect("native topology projection")
     .with_declared_topology(vec![branch_binding], occupancies)
     .expect("declared topology projection");

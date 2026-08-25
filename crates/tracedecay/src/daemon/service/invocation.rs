@@ -157,16 +157,16 @@ pub(crate) use crate::daemon_contract::{
 use crate::db::Database;
 use crate::errors::TraceDecayError;
 use crate::production_semantic_authorities;
-use crate::request_identity::{
-    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
-    mint_global_opaque_id,
-};
 #[cfg(test)]
 use tracedecay_application::{
     CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
     ProblemTerminality,
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
+use tracedecay_usecases::request_identity::{
+    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+    mint_global_opaque_id,
+};
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).

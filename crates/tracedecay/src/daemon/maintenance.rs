@@ -22,7 +22,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::branch_admin::StoreAdministration;
 use crate::db::DatabaseStorageTelemetryHandle;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) mod generation;
 

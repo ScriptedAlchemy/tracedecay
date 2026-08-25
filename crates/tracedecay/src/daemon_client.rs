@@ -24,10 +24,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use crate::request_identity::{
+use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
+use tracedecay_usecases::request_identity::{
     ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
 };
-use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 
 pub type ScopeSelector = InvocationTarget;
 

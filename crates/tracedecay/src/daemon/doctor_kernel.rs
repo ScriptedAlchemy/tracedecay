@@ -28,7 +28,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::PinnedRuntimeConfiguration;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
@@ -46,6 +45,7 @@ use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::maintenance::GuardedStoreTelemetryPort;
 
@@ -1002,14 +1002,14 @@ pub(super) async fn collect_code_generation_retention_findings(
     code_index_store_root: &Path,
     project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
-    use crate::retention::code_index_generations::{
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
-        plan_code_generation_retention_with_verification, plan_scope_root_retention,
-    };
     use tracedecay_application::storage::{
         CodeGenerationRetentionRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
         StoreKeyV1, code_generation_retention_finding, semantic_vector_retention_finding,
+    };
+    use tracedecay_usecases::retention::code_index_generations::{
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
+        plan_code_generation_retention_with_verification, plan_scope_root_retention,
     };
 
     if !code_index_store_root

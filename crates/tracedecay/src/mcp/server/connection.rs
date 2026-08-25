@@ -919,7 +919,7 @@ impl McpServer {
                     let delta = tokens_saved - last_flushed;
                     match self.canonical_upload_enabled().await {
                         Ok(upload_enabled) => {
-                            let mut config = crate::user_config::UserConfig::load();
+                            let mut config = tracedecay_usecases::user_config::UserConfig::load();
                             config.pending_upload += delta;
                             if upload_enabled
                                 && let Some(_total) =

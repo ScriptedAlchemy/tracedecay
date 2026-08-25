@@ -69,7 +69,6 @@ use crate::daemon_client::{
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_usecases::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
@@ -84,6 +83,7 @@ use tracedecay_usecases::primitives::{
     QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
     StorageStatusPrimitiveRequest,
 };
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
 mod handoff;

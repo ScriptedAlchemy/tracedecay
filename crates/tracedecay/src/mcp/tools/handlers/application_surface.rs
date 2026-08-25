@@ -17,8 +17,8 @@ use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {

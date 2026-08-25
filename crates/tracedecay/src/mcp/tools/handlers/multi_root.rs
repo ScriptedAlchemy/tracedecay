@@ -21,7 +21,7 @@ use crate::daemon_contract::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::tool_call_support::json_result;
 

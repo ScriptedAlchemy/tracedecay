@@ -19,9 +19,6 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
-use tracedecay::git_intelligence::{
-    GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
-};
 use tracedecay::git_query::{
     GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
 };
@@ -31,6 +28,9 @@ use tracedecay_domain::git::{
     HunkDirectionV1,
 };
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId};
+use tracedecay_usecases::git_intelligence::{
+    GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
+};
 
 /// An isolated repository fixture driven by the real `git` executable.
 struct Fixture {

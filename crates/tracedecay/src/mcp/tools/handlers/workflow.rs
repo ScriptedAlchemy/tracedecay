@@ -23,7 +23,6 @@ use url::Url;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, is_test_file};
 use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
 use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
@@ -32,6 +31,7 @@ use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
 use tracedecay_usecases::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::super::ToolResult;
 use super::super::render;

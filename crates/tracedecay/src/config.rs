@@ -36,7 +36,6 @@ use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
-pub mod scope_control;
 pub mod topology;
 pub(crate) mod work_executable_binding;
 
@@ -1110,15 +1109,16 @@ async fn open_runtime_configuration_from_store(
             ConfigurationRevisionId::new("configuration.initial.canonical.v1").map_err(
                 |error| config_error(format!("invalid initial configuration revision: {error}")),
             )?;
-        let daemon_binding = scope_control::daemon_owned_project_source_binding(
-            &target.project_id,
-            &target.project_root,
-        )
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding could not be derived: {error}"
-            ))
-        })?;
+        let daemon_binding =
+            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+                &target.project_id,
+                &target.project_root,
+            )
+            .map_err(|error| {
+                config_error(format!(
+                    "daemon project source binding could not be derived: {error}"
+                ))
+            })?;
         let source_bindings_key =
             SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).map_err(|error| {
                 config_error(format!("invalid source bindings setting key: {error}"))
@@ -1144,15 +1144,16 @@ async fn open_runtime_configuration_from_store(
             .await
             .map_err(map_configuration_error)?;
     }
-    let daemon_binding = scope_control::daemon_owned_project_source_binding(
-        &target.project_id,
-        &target.project_root,
-    )
-    .map_err(|error| {
-        config_error(format!(
-            "daemon project source binding could not be derived: {error}"
-        ))
-    })?;
+    let daemon_binding =
+        tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            &target.project_id,
+            &target.project_root,
+        )
+        .map_err(|error| {
+            config_error(format!(
+                "daemon project source binding could not be derived: {error}"
+            ))
+        })?;
     let current = store.current().await.map_err(map_configuration_error)?;
     let mut current = match store
         .converge_registered_additive_defaults(&current.revision_id, now_micros())

@@ -716,8 +716,8 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
         event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
-            let request_id = crate::request_identity::mint_global_request_id(
-                crate::request_identity::GlobalRequestSurface::FeedbackObservation,
+            let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
+                tracedecay_usecases::request_identity::GlobalRequestSurface::FeedbackObservation,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),

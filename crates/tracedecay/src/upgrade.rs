@@ -17,7 +17,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
-use crate::user_config::UserConfig;
+use tracedecay_usecases::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 

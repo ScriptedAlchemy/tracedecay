@@ -12,10 +12,10 @@ use tempfile::TempDir;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use crate::daemon::maintenance::{SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry};
-use crate::retention::code_index_generations::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_usecases::retention::code_index_generations::{
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
 };
-use crate::tracedecay::TraceDecay;
 
 use super::{
     VectorRetentionInventoryV1, apply_code_generation_retention, classify_vector_readable_sources,

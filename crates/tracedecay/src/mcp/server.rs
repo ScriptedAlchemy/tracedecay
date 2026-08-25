@@ -18,7 +18,6 @@ use crate::mcp::response_handles::{cleanup_expired_response_handles, response_ha
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
-use crate::request_identity::McpConnectionIdentityAuthority;
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
@@ -27,6 +26,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 use tracedecay_usecases::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
+use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
@@ -1354,7 +1354,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    crate::request_identity::mcp_connection_request_id(id, connection_scope)
+    tracedecay_usecases::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())
 }
 

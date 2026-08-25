@@ -11,7 +11,6 @@ pub mod global_db;
 pub use tracedecay_runtime_core::store::memory;
 pub mod session;
 mod session_ingest_authority;
-pub(crate) mod vector_generations;
 pub mod workflow;
 
 pub use git_correlation::GlobalDbGitCorrelationStore;
@@ -37,7 +36,7 @@ pub mod vector_generation_test_support {
         prepare_vector_generation_async, split_projection_request,
     };
 
-    pub use super::vector_generations::{
+    pub use tracedecay_usecases::store::vector_generations::{
         GraphVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
         VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationPublicationV1,
         VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,

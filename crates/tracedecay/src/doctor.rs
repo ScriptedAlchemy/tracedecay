@@ -18,8 +18,8 @@ use crate::application_surface::{
 };
 use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use crate::display::format_token_count;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other
 // targets only the module's tests reference it.
@@ -669,10 +669,10 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if let Some(config_path) = crate::user_config::config_path()
+    if let Some(config_path) = tracedecay_usecases::user_config::config_path()
         && config_path.exists()
     {
-        let config = crate::user_config::UserConfig::load();
+        let config = tracedecay_usecases::user_config::UserConfig::load();
         if config.pending_upload > 0 {
             dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
         }

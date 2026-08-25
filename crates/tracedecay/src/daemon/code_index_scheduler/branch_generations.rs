@@ -133,7 +133,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             return Err(reason);
         }
         let load =
-            |entry: &crate::retention::code_index_generations::DurableGenerationIndexEntryV1,
+            |entry: &tracedecay_usecases::retention::code_index_generations::DurableGenerationIndexEntryV1,
              revision: &GitOidV1,
              tree: &GitOidV1,
              reference: &RefId| {
@@ -934,7 +934,7 @@ mod tests {
     /// while keeping every entry, so the test isolates the flag itself from the
     /// question of which entries survived.
     fn latch_generation_index_truncation(scoped_store: &Path) {
-        use crate::retention::code_index_generations::{
+        use tracedecay_usecases::retention::code_index_generations::{
             DurablePublicationPointerV1, durable_generation_index_digest,
         };
 

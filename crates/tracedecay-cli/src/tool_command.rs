@@ -61,10 +61,10 @@ use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
     render_tool_cli_help, short_tool_name,
 };
-use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};

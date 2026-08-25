@@ -80,11 +80,13 @@ impl ProjectVectorRetentionFailure {
     }
 }
 
-impl From<crate::store::vector_generations::VectorGenerationStoreErrorV1>
+impl From<tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1>
     for ProjectVectorRetentionFailure
 {
-    fn from(error: crate::store::vector_generations::VectorGenerationStoreErrorV1) -> Self {
-        use crate::store::vector_generations::VectorGenerationStoreErrorV1;
+    fn from(
+        error: tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1,
+    ) -> Self {
+        use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
         match error {
             VectorGenerationStoreErrorV1::ResetRequired(message) => Self::ResetRequired(message),
             VectorGenerationStoreErrorV1::Corrupt(message) => Self::Corrupt(message),
@@ -215,7 +217,7 @@ mod tests {
         ProjectSemanticVectorCodeScopeLiveness, ProjectSemanticVectorSourceLiveness,
         ProjectVectorRetentionFailure,
     };
-    use crate::store::vector_generations::VectorGenerationStoreErrorV1;
+    use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
 
     #[test]
     fn vector_store_reset_and_corruption_remain_typed() {

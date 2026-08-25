@@ -29,7 +29,7 @@ use crate::git_index_transactions::{
     FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, NativeIndexLock,
     ValidatedIndexPatch,
 };
-use crate::git_intelligence::NativeGitIntelligence;
+use tracedecay_usecases::git_intelligence::NativeGitIntelligence;
 
 use super::service::NativeGitIndexApplyOutcomeV1;
 use super::{

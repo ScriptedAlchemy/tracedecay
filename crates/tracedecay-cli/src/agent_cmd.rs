@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
-use tracedecay::user_config::UserConfig;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_parent_directory};
+use tracedecay_usecases::user_config::UserConfig;
 
 mod automation;
 pub(crate) use automation::CodexAutomationInstall;
@@ -82,7 +82,7 @@ pub(crate) async fn handle_host_bundle_component_command(
         .map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!("could not resolve host lifecycle root: {error}"),
         })?;
-    let mut user_config = tracedecay::user_config::UserConfig::load();
+    let mut user_config = tracedecay_usecases::user_config::UserConfig::load();
     let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
         Some(agent) => vec![agent],
@@ -301,8 +301,8 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact backup/restore requires exactly one canonical component".to_string(),
         });
     };
-    let operation_id = tracedecay::request_identity::mint_global_operation_id(
-        tracedecay::request_identity::GlobalOperationIdentityKind::HostArtifact,
+    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
+        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostArtifact,
     )
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
         message: format!("could not generate host artifact operation id: {error}"),
@@ -399,8 +399,8 @@ fn component_set_request(
 ) -> tracedecay::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
 > {
-    let operation_id = tracedecay::request_identity::mint_global_operation_id(
-        tracedecay::request_identity::GlobalOperationIdentityKind::HostComponentSet,
+    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
+        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostComponentSet,
     )
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
         message: format!("could not generate host lifecycle operation id: {error}"),
@@ -1122,8 +1122,8 @@ fn feedback_request(
     operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     confirmed: bool,
 ) -> tracedecay::errors::Result<tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1> {
-    let operation_id = tracedecay::request_identity::mint_global_operation_id(
-        tracedecay::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
+    let operation_id = tracedecay_usecases::request_identity::mint_global_operation_id(
+        tracedecay_usecases::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
     )
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
         message: format!("could not generate feedback rollback operation id: {error}"),

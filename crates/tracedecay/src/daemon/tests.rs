@@ -542,8 +542,8 @@ async fn apply_project_automation_patch_via_surface(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = crate::request_identity::mint_global_request_id(
-        crate::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
+        tracedecay_usecases::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("surface request id");
     let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(

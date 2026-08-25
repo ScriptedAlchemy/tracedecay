@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tracedecay::upgrade::UpgradeOutcome;
-use tracedecay::user_config::UserConfig;
+use tracedecay_usecases::user_config::UserConfig;
 
 // Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
 // server-shutdown bounds with margin for service-manager/process-exit latency.
@@ -823,7 +823,7 @@ mod tests {
         drop(held);
     }
 
-    use tracedecay::user_config::UserConfig;
+    use tracedecay_usecases::user_config::UserConfig;
 
     fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
         tracedecay::errors::TraceDecayError::Config {

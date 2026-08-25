@@ -619,13 +619,13 @@ async fn run_startup_preamble(command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
     // Check first-run before any config save creates the file.
-    let is_first_run = tracedecay::user_config::UserConfig::is_fresh();
+    let is_first_run = tracedecay_usecases::user_config::UserConfig::is_fresh();
 
     let is_force_flush = matches!(
         command,
         Commands::Init { .. } | Commands::Sync { .. } | Commands::Status { .. }
     );
-    let mut user_config = tracedecay::user_config::UserConfig::load();
+    let mut user_config = tracedecay_usecases::user_config::UserConfig::load();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the

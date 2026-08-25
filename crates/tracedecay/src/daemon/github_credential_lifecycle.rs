@@ -404,7 +404,7 @@ fn load_configured_repositories(profile_root: &Path) -> ConfiguredGitHubReposito
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return ConfiguredGitHubRepositoriesV1::default();
     };
-    crate::user_config::parse_or_warn_default(&path, &contents)
+    tracedecay_usecases::user_config::parse_or_warn_default(&path, &contents)
 }
 
 fn valid_locator(value: &str) -> bool {

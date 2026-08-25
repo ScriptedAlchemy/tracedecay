@@ -30,7 +30,7 @@ use crate::daemon_contract::{
     WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let operation_id =

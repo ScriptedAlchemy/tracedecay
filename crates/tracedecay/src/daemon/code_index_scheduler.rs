@@ -89,14 +89,14 @@ use crate::{
         },
         ports::RetrievalPortError,
     },
-    retention::code_index_generations::{
-        DurableCodeTextArtifactDescriptorV1, DurableGenerationIndexEntryV1,
-        DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
-        MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-        acquire_code_generation_store_lock, attach_verified_text_artifact_under_lock,
-        code_text_artifact_path, code_text_artifacts_root, durable_generation_index_digest,
-        retain_bounded_generation_index, withdraw_verified_text_artifact_under_lock,
-    },
+};
+use tracedecay_usecases::retention::code_index_generations::{
+    DurableCodeTextArtifactDescriptorV1, DurableGenerationIndexEntryV1,
+    DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
+    MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
+    acquire_code_generation_store_lock, attach_verified_text_artifact_under_lock,
+    code_text_artifact_path, code_text_artifacts_root, durable_generation_index_digest,
+    retain_bounded_generation_index, withdraw_verified_text_artifact_under_lock,
 };
 
 const MAX_PENDING_HINTS: usize = 1_024;
@@ -130,7 +130,7 @@ pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
     canonical_project_root: &Path,
 ) -> PathBuf {
-    crate::retention::code_index_generations::scoped_code_index_store_root(
+    tracedecay_usecases::retention::code_index_generations::scoped_code_index_store_root(
         store_root,
         canonical_project_root,
     )

@@ -1619,12 +1619,12 @@ mod runtime_configuration_cutover {
             "returning to the primary must not repair linked-worktree churn"
         );
         assert_eq!(
-            crate::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
                 &project_id,
                 &primary,
             )
             .expect("primary binding"),
-            crate::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
                 &project_id,
                 &linked,
             )
@@ -1722,16 +1722,18 @@ mod runtime_configuration_cutover {
         // One binding belongs to a different registered project; the other
         // matches this project's authority but carries a foreign binding id
         // and a drifted locator digest.
-        let other_binding = crate::config::scope_control::daemon_owned_project_source_binding(
-            &other_project,
-            &checkout,
-        )
-        .expect("build other-project binding");
-        let drifted = crate::config::scope_control::daemon_owned_project_source_binding(
-            &project_id,
-            &elsewhere,
-        )
-        .expect("build drifted daemon binding");
+        let other_binding =
+            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+                &other_project,
+                &checkout,
+            )
+            .expect("build other-project binding");
+        let drifted =
+            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+                &project_id,
+                &elsewhere,
+            )
+            .expect("build drifted daemon binding");
         let foreign = ScopeSourceBinding::new(
             SourceBindingId::new("binding.operator.project-open".to_owned())
                 .expect("foreign binding id"),
