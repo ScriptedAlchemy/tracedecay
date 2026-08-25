@@ -2675,6 +2675,39 @@ impl CodeIndexSchedulerRegistryV1 {
                     (result, latest, replay_binding)
                 })
                 .await;
+                if !graph_activation_enabled
+                    && matches!(
+                        &result,
+                        Ok((Ok(CodeIndexReconcileOutcomeV1::Published(_)), None, None))
+                    )
+                {
+                    // Publication moved the durable pointer, so the prior text
+                    // owner is no longer authoritative even while the new
+                    // lightweight handle is opening. Withdraw it first: a
+                    // failed or delayed reopen must report warming, never keep
+                    // serving the superseded generation indefinitely.
+                    *worker_text_generation
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    let text_scheduler = Arc::clone(&worker_scheduler);
+                    let published_text = tokio::task::spawn_blocking(move || {
+                        text_scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .servable_retained_text_generation()
+                    })
+                    .await;
+                    if let Ok(Some(published_text)) = published_text {
+                        *worker_text_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(published_text);
+                    }
+                    // A successful open advances B's bounded projection; an
+                    // unavailable open retries the durable pointer without
+                    // resurrecting A.
+                    worker_wake.notify_one();
+                }
                 let replace_serving_generation = match &result {
                     Ok((Ok(CodeIndexReconcileOutcomeV1::Noop(_)), Some(latest), Some(_))) => {
                         let serving = worker_serving_generation

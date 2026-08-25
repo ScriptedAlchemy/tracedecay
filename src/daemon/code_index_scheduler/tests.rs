@@ -10158,6 +10158,244 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     registry.shutdown().await;
 }
 
+/// Publishing a changed graph-off generation must hand text authority from the
+/// ready prior generation to the new durable pointer. Otherwise the worker's
+/// graph-only `latest` slot stays empty, neither serving swap runs, and queries
+/// can serve the old generation forever even though the pointer names newer
+/// source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_off_changed_source_advances_text_authority_without_full_decode() {
+    let sources = (0..256)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, privacy_domain) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().privacy_domain.clone(),
+        )
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    registry
+        .mount_query_authority(fixture.path(), &scope, query_authority(privacy_domain))
+        .await
+        .expect("mount query authority");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let generation_a = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("alpha_0000"))
+            .await
+        {
+            Ok(executed) => break executed.generation,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= ready_deadline,
+                    "generation A never became text-queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    let owner_epoch_a = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(scheduler.sealed_decode_count(), 0);
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            progress
+                .snapshot()
+                .expect("generation A ready progress")
+                .generation_id,
+            generation_a.as_str()
+        );
+        progress.owner_epoch
+    };
+
+    fixture.edit(
+        "src/file_0000.rs",
+        "pub fn beta_0000() -> usize { 10_000 }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
+            .await,
+        "changed source wakes the mounted graph-off owner"
+    );
+
+    let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let generation_b = loop {
+        let durable = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("read durable active pointer")
+                .map(|pointer| pointer.generation_id)
+        };
+        if let Some(durable) = durable
+            && durable != generation_a.as_str()
+        {
+            break CodeGenerationId::new(durable).expect("generation B id");
+        }
+        assert!(
+            std::time::Instant::now() <= publication_deadline,
+            "changed graph-off source never published durable generation B"
+        );
+        tokio::task::yield_now().await;
+    };
+
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let progress_b = loop {
+        let progress = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (owner_epoch, Some(progress)) = progress
+            && progress.generation_id == generation_b.as_str()
+            && progress.committed_pages > 0
+        {
+            assert!(owner_epoch > owner_epoch_a);
+            break progress;
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "durable generation B never acquired advancing text authority"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert!(progress_b.progress_epoch > 0);
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_b.clone()),
+        "generation A stops owning the graph-off query route"
+    );
+    if let Ok(executed) = registry
+        .execute_query_search(&scope, core_search_request("alpha_0000"))
+        .await
+    {
+        assert_ne!(
+            executed.generation, generation_a,
+            "generation A must not serve after B owns text progress"
+        );
+    }
+
+    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let executed_b = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("beta_0000"))
+            .await
+        {
+            Ok(executed) if executed.generation == generation_b => break executed,
+            Ok(executed) => panic!(
+                "stale generation {} served after durable B",
+                executed.generation
+            ),
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= query_deadline,
+                    "generation B never became text-queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::ExactLiteral),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Lexical),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Graph),
+        Some(&PublicRetrieverStatus::Unavailable)
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "graph-off A-to-B publication must not decode a sealed generation"
+    );
+    registry.shutdown().await;
+}
+
 /// The canonical project setting must reach the scheduler's production policy
 /// boundary. A configured refusal still verifies and seats the sealed text
 /// generation, while the graph authority is never activated.
