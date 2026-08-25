@@ -275,7 +275,7 @@ fn mcp_tool_call(
         .wait_with_output(SERVE_TIMEOUT)
         .expect("the MCP stdio host exits after stdin closes");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let response = stdout
+    stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|message| message.get("id") == Some(&json!(2)))
@@ -284,8 +284,7 @@ fn mcp_tool_call(
                 "the MCP host returned no response for '{tool}'\nstdout:\n{stdout}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             )
-        });
-    response
+        })
 }
 
 /// The typed application payload an MCP tool result carries.
@@ -629,8 +628,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         serde_json::from_value(storage_status_body.clone()).expect("canonical storage status");
     let sdk_error = client
         .execute::<ApplicationStorageStatus>(&request)
-        .err()
-        .expect("a refused store must not read as a healthy status");
+        .expect_err("a refused store must not read as a healthy status");
     let (sdk_kind, sdk_envelope) = sdk_problem(sdk_error, "Rust SDK reset required");
     assert_eq!(
         sdk_kind, "reset_required",
@@ -683,8 +681,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
     let client = sdk_client(&mount, &identity);
     let sdk_error_after = client
         .execute::<ApplicationStorageStatus>(&request)
-        .err()
-        .expect("a refused store must not read as a healthy status after a restart");
+        .expect_err("a refused store must not read as a healthy status after a restart");
     let (sdk_kind_after, sdk_envelope_after) =
         sdk_problem(sdk_error_after, "Rust SDK reset required after restart");
     assert_eq!(

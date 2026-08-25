@@ -203,7 +203,7 @@ fn exact_identity(project: &Path, project_id: String) -> ExactIndexIdentity {
 }
 
 fn tool_payload(result: Value, operation: &str) -> Value {
-    let text = result["content"]
+    result["content"]
         .as_array()
         .and_then(|content| {
             content.iter().find_map(|item| {
@@ -212,8 +212,7 @@ fn tool_payload(result: Value, operation: &str) -> Value {
                     .and_then(|text| serde_json::from_str(text).ok())
             })
         })
-        .unwrap_or_else(|| panic!("{operation} did not return JSON content: {result}"));
-    text
+        .unwrap_or_else(|| panic!("{operation} did not return JSON content: {result}"))
 }
 
 async fn tool(socket: &Path, handshake: &DaemonHandshake, name: &str, arguments: Value) -> Value {

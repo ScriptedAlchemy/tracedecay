@@ -173,7 +173,7 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let res1 =
         handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"port": 0})).await;
     let text1 = extract_text(&res1);
-    let url1 = extract_url(&text1);
+    let url1 = extract_url(text1);
 
     // second start returns same (already)
     let res2 =
@@ -184,7 +184,7 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
         "second should be already: {}",
         text2
     );
-    let url2 = extract_url(&text2);
+    let url2 = extract_url(text2);
     assert_eq!(url1, url2, "idempotent url");
 
     // stop

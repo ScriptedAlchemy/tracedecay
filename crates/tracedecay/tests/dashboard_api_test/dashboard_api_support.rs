@@ -77,7 +77,6 @@ pub(crate) struct DashboardFixture {
     pub(crate) _data_dir_guard: EnvVarGuard,
     pub(crate) _home_guard: EnvVarGuard,
     pub(crate) _userprofile_guard: EnvVarGuard,
-    pub(crate) home: std::path::PathBuf,
     pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
@@ -900,7 +899,6 @@ async fn start_dashboard_fixture_with_options(
         _data_dir_guard: data_dir_guard,
         _home_guard: home_guard,
         _userprofile_guard: userprofile_guard,
-        home,
         global_db_path,
         base_url,
         project_root,
@@ -958,22 +956,4 @@ pub(crate) fn commit_all(project: &Path, message: &str) {
             message,
         ],
     );
-}
-
-/// Opens the resolved registered project session authority.
-pub(crate) async fn open_project_session_store(project_root: &Path) -> Arc<DashboardTestRuntimeV1> {
-    let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
-        .unwrap_or_else(|error| panic!("read dashboard project identity: {error}"))
-        .and_then(|marker| ProjectId::new(marker.project_id).ok())
-        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project identity"));
-    Arc::new(
-        DashboardTestRuntimeV1::project(
-            tracedecay::storage::default_profile_root()
-                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
-            project_root,
-            project_id,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard project session authority: {error}")),
-    )
 }

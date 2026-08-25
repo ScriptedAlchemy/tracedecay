@@ -45,7 +45,7 @@ mod common;
 #[path = "typed_terminal_restart_acceptance/transport_boundaries.rs"]
 mod transport_boundaries;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -290,8 +290,8 @@ fn assert_reset_required(payload: &Value, context: &str) {
     );
 }
 
-fn spawn_daemon_with_commit_barrier(home: &Path, barrier_dir: &PathBuf) -> common::DaemonProcess {
-    let barrier_dir = barrier_dir.clone();
+fn spawn_daemon_with_commit_barrier(home: &Path, barrier_dir: &Path) -> common::DaemonProcess {
+    let barrier_dir = barrier_dir.to_path_buf();
     spawn_tracedecay_daemon_with(home, move |command| {
         command.env(FACT_COMMIT_BARRIER_DIR_ENV, &barrier_dir);
     })

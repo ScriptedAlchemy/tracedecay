@@ -150,17 +150,17 @@ async fn wait_for_current_generation(
                 && worktree["staleness_state"] == "fresh"
                 && worktree["source_reference"] == "refs/heads/main"
                 && worktree["source_revision"] == expected_revision
-                && generation.is_some()
+                && let Some(current_generation) = generation
             {
                 last_search = search(harness, project, query).await;
-                if last_search["code_generation"].as_str() == generation.as_deref()
+                if last_search["code_generation"].as_str() == Some(current_generation.as_str())
                     && !result_paths(&last_search).is_empty()
                 {
                     assert!(
                         last_status.get("code_index_freshness_warning").is_none(),
                         "a current generation must not carry a warming warning: {last_status}"
                     );
-                    return generation.expect("current generation");
+                    return current_generation;
                 }
             }
             tokio::task::yield_now().await;

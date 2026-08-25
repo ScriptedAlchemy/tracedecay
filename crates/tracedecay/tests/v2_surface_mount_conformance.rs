@@ -451,7 +451,7 @@ fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let listing = stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|message| message["id"] == Value::from(2))
+        .find(|message| message["id"] == 2)
         .unwrap_or_else(|| {
             panic!("the MCP server never answered tools/list\nstdout:\n{stdout}\nstderr:\n{stderr}")
         });

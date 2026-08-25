@@ -40,7 +40,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
                     tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
                     "request.dashboard.fact-store-curate-single-launcher",
                 )
-                .send_json(&serde_json::json!({
+                .send_json(serde_json::json!({
                     "fact_review_limit": 24,
                     "min_confidence_millionths": 720_000
                 }))
@@ -72,7 +72,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
                         tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
                         "request.dashboard.fact-store-curate-reject-operations",
                     )
-                    .send_json(&serde_json::json!({
+                    .send_json(serde_json::json!({
                         "fact_review_limit": 24,
                         "operations": []
                     }))
@@ -87,7 +87,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
             crate::common::http_call_with_retry(&format!("POST {retired_curator_url}"), || {
                 agent
                     .post(&retired_curator_url)
-                    .send_json(&serde_json::json!({}))
+                    .send_json(serde_json::json!({}))
             });
         let status = response.status().as_u16();
         assert_eq!(
@@ -101,7 +101,7 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
                 format!("{base_url}/api/projects/{project_id}/automation/run/{route}"),
             ] {
                 let response = crate::common::http_call_with_retry(&format!("POST {url}"), || {
-                    agent.post(&url).send_json(&serde_json::json!({}))
+                    agent.post(&url).send_json(serde_json::json!({}))
                 });
                 assert_eq!(response.status().as_u16(), 404, "retired launcher: {url}");
             }
