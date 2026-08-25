@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod fixture;
+pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -30,6 +31,14 @@ use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
+
+pub fn repository_root() -> &'static Path {
+    repository_layout::repository_root()
+}
+
+pub fn repository_path(relative: impl AsRef<Path>) -> PathBuf {
+    repository_layout::repository_path(relative)
+}
 
 /// Host-installer source and template assets that live in
 /// `crates/tracedecay-agent-hosts`. Tests assert over the *source* of the

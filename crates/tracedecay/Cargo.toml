@@ -264,44 +264,50 @@ name = "tracedecay"
 # Plan 36 portability: symlink-alias snapshot capture (test-transport only).
 [[test]]
 name = "git_index_snapshot_root_canonicalization"
-path = "../../tests/git_index_snapshot_root_canonicalization.rs"
+path = "tests/git_index_snapshot_root_canonicalization.rs"
 required-features = ["test-transport"]
 
 # Integration harnesses that intentionally exercise in-process daemon/test
 # transport seams stay out of the default production feature graph.
 [[test]]
 name = "dashboard_api_test"
-path = "../../tests/dashboard_api_test/main.rs"
+path = "tests/dashboard_api_test/main.rs"
 required-features = ["test-transport"]
 
 [[test]]
 name = "daemon_fault_harness_test"
-path = "../../tests/daemon_fault_harness_test.rs"
+path = "tests/daemon_fault_harness_test.rs"
 required-features = ["test-transport"]
 
 # The PartialEffect leg parks a real fact commit at the daemon's durable commit
 # boundary, which is the `test-transport` fact-commit barrier.
 [[test]]
 name = "typed_terminal_restart_acceptance"
-path = "../../tests/typed_terminal_restart_acceptance.rs"
+path = "tests/typed_terminal_restart_acceptance.rs"
 required-features = ["test-transport"]
 
 [[test]]
 name = "graph_rebuild_status_test"
-path = "../../tests/graph_rebuild_status_test.rs"
+path = "tests/graph_rebuild_status_test.rs"
 required-features = ["test-transport"]
 
 [[test]]
 name = "serve_proxy_lifecycle_test"
-path = "../../tests/serve_proxy_lifecycle_test.rs"
+path = "tests/serve_proxy_lifecycle_test.rs"
 required-features = ["test-transport"]
 
 # Drives a live daemon, the real stdio MCP server, and the real CLI listing to
 # grade every declared surface for a mount in both directions.
 [[test]]
 name = "v2_surface_mount_conformance"
-path = "../../tests/v2_surface_mount_conformance.rs"
+path = "tests/v2_surface_mount_conformance.rs"
 required-features = ["test-transport"]
+
+# Shared with the extracted rusqlite-runtime package's restart/parity tests;
+# keep one repository-level source while preserving this package target.
+[[test]]
+name = "storage_runtime_rusqlite_suite"
+path = "../../tests/storage_runtime_rusqlite_suite/main.rs"
 
 [dependencies]
 axum = "0.8"
@@ -446,18 +452,18 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fau
 
 [[bench]]
 name = "large_repos"
-path = "../../benches/large_repos.rs"
+path = "benches/large_repos.rs"
 harness = false
 required-features = ["test-transport"]
 
 [[bench]]
 name = "queries"
-path = "../../benches/queries.rs"
+path = "benches/queries.rs"
 required-features = ["test-transport"]
 
 [[bench]]
 name = "session_temporal"
-path = "../../benches/session_temporal.rs"
+path = "benches/session_temporal.rs"
 harness = false
 # The custom benchmark CLI is not a libtest harness and cannot answer the
 # `--list --format terse` probe used by `cargo test` and nextest.

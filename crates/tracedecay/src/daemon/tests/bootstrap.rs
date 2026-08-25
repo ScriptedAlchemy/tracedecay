@@ -3,8 +3,8 @@ use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
-use tracedecay_jsonrpc::JsonRpcResponse;
 use std::process::Command;
+use tracedecay_jsonrpc::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_usecases::context::CancellationToken;
 
