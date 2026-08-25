@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use crate::mcp::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
-use crate::mcp::{JsonRpcResponse, McpTransport};
+use tracedecay_jsonrpc::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
 use super::transport::{BrokerReadHalf, BrokerWriteHalf};
@@ -286,7 +286,7 @@ impl BrokerStreamTransport {
     }
 }
 
-impl crate::mcp::McpTransport for BrokerStreamTransport {
+impl tracedecay_jsonrpc::McpTransport for BrokerStreamTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
@@ -473,12 +473,12 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
 #[cfg(all(test, unix))]
 mod peer_close_tests {
     use super::*;
-    use crate::mcp::McpTransport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tracedecay_application::{
         ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
+    use tracedecay_jsonrpc::McpTransport;
     use tracedecay_usecases::observability::{
         BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
         DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1,
