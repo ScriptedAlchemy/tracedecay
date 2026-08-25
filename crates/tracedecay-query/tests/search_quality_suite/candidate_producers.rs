@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -502,6 +503,13 @@ fn page_batch_identities(pages: &[VerifiedSealedLexicalPageV1]) -> Vec<(u64, Str
         .collect()
 }
 
+/// The batch callback reports how many staged pages the caller durably
+/// accepted. These fixtures accept every page they are handed, and the source
+/// never stages an empty batch, so the whole length is the accepted prefix.
+fn accepted_prefix(pages: &[VerifiedSealedLexicalPageV1]) -> NonZeroUsize {
+    NonZeroUsize::new(pages.len()).expect("the source never stages an empty page batch")
+}
+
 #[test]
 fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
     let fixture = real_lexical_source_fixture();
@@ -525,7 +533,9 @@ fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
     );
 
     let retried = source
-        .next_page_batch_if(&control, bounds, |_| Ok::<(), &'static str>(()))
+        .next_page_batch_if(&control, bounds, |pages| {
+            Ok::<_, &'static str>(accepted_prefix(pages))
+        })
         .expect("retry staged batch")
         .expect("accept retried batch");
     let VerifiedSealedLexicalPageBatchReadV1::Pages(retried_pages) = retried else {
@@ -565,9 +575,9 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
     let callbacks = AtomicUsize::new(0);
     assert!(
         source
-            .next_page_batch_if(&control, too_small, |_| {
+            .next_page_batch_if(&control, too_small, |pages| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), ()>(())
+                Ok::<_, ()>(accepted_prefix(pages))
             })
             .is_err(),
         "a first page above the retained-byte bound is a typed source error"
@@ -583,9 +593,9 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
     loop {
         let before = callbacks.load(Ordering::SeqCst);
         let read = source
-            .next_page_batch_if(&control, bounds, |_| {
+            .next_page_batch_if(&control, bounds, |pages| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), ()>(())
+                Ok::<_, ()>(accepted_prefix(pages))
             })
             .expect("drain source")
             .expect("accept source batch");
@@ -648,9 +658,10 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
                         .last()
                         .is_some_and(|page| page.page_ordinal() < staged_pages)
                     {
-                        Ok(())
+                        Ok(accepted_prefix(pages))
                     } else {
-                        self.append_pages(pages, control).map(|_| ())
+                        self.append_pages(pages, control)
+                            .map(|_| accepted_prefix(pages))
                     }
                 })
                 .map_err(|error| match error {

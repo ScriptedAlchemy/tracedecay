@@ -48,8 +48,9 @@ pub mod host_sources {
     pub const HERMES_PLUGIN_INIT_PY: &str = include_str!(
         "../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
     );
-    pub const HERMES_SKILL_MD: &str =
-        include_str!("../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md");
+    pub const HERMES_SKILL_MD: &str = include_str!(
+        "../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md"
+    );
 }
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();

@@ -3,6 +3,7 @@
 //! Hook events are bounded wake-up hints only. Every run reconstructs its
 //! source snapshot from gix's HEAD-tree/index/worktree status before content
 //! digests decide whether publication is necessary.
+use std::num::NonZeroUsize;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
@@ -2900,7 +2901,13 @@ impl LatestCompleteCodeIndexV1 {
                         Ok::<_, CodeLexicalArtifactErrorV1>(progress)
                     })?;
                     durable_progress = Some(progress);
-                    Ok(())
+                    // This callback commits every staged page before returning,
+                    // so the durably accepted prefix is the whole batch.
+                    NonZeroUsize::new(pages.len()).ok_or_else(|| {
+                        CodeLexicalArtifactErrorV1::Contract(
+                            "sealed lexical page source staged an empty batch".to_owned(),
+                        )
+                    })
                 })
             };
             let admitted = match admitted {
