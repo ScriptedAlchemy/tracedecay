@@ -1640,7 +1640,8 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(_)
+        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
             RetrievalPortError::AuthorityUnavailable(detail)
         }

@@ -1,9 +1,9 @@
-//! Root build script: embeds the dashboard dist and bakes the build's commit
+//! Composition-library build script: embeds the dashboard dist and bakes the build's commit
 //! identity. The plugin-bundle manifest moved to
 //! `crates/tracedecay-agent-hosts/build.rs` with the `agents`/`automation`
 //! subsystems.
 //!
-//! Rerun-edge contract. Cargo recompiles the whole root crate whenever this
+//! Rerun-edge contract. Cargo recompiles the composition crate whenever this
 //! script reruns, regardless of whether the generated output changed, so every
 //! `rerun-if-changed` path below costs a full root rebuild when it moves and
 //! must be load-bearing. Two rules follow:
@@ -11,7 +11,7 @@
 //! - This script must never watch `dashboard/app-dist`, which Rsbuild cleans
 //!   and rewrites. Only frontend source and configuration inputs are watched.
 //! - Moving this dashboard generator into a dependency would not shield the
-//!   root from churn: a dependency's build-script rerun recompiles its
+//!   composition crate from churn: a dependency's build-script rerun recompiles its
 //!   dependents unconditionally.
 
 use std::{
@@ -21,7 +21,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -43,15 +43,51 @@ const DASHBOARD_BUILD_INPUTS: &[&str] = &[
     "dashboard/tsconfig.json",
 ];
 
+const REPOSITORY_ROOT_FROM_CRATE: &str = "../..";
+
+fn repository_root(manifest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let checked_out_root = manifest_dir.join(REPOSITORY_ROOT_FROM_CRATE);
+    let repository_root =
+        if manifest_dir.join("dashboard").is_dir() && manifest_dir.join("plugin").is_dir() {
+            manifest_dir.to_path_buf()
+        } else {
+            checked_out_root
+        };
+    for sentinel in ["Cargo.toml", "dashboard", "plugin"] {
+        if !repository_root.join(sentinel).exists() {
+            return Err(format!(
+                "TraceDecay repository root {} is missing required sentinel {sentinel}",
+                repository_root.display()
+            )
+            .into());
+        }
+    }
+    Ok(repository_root)
+}
+
 /// Builds the dashboard with Rsbuild when frontend sources are present, then
 /// embeds exactly the files listed in Rsbuild's asset manifest. Packaged crates
 /// omit the frontend sources and consume their prebuilt app-dist as-is.
-fn build_and_embed_dashboard_app() -> Result<(), Box<dyn Error>> {
-    let dashboard = Path::new("dashboard");
+fn build_and_embed_dashboard_app(
+    manifest_dir: &Path,
+    repository_root: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let package_local_dashboard = manifest_dir.join("dashboard");
+    let (dashboard, include_root) = if package_local_dashboard.is_dir() {
+        (package_local_dashboard, "/dashboard/app-dist")
+    } else {
+        (
+            repository_root.join("dashboard"),
+            "/../../dashboard/app-dist",
+        )
+    };
     let app_dist = dashboard.join("app-dist");
 
     for input in DASHBOARD_BUILD_INPUTS {
-        println!("cargo::rerun-if-changed={input}");
+        println!(
+            "cargo::rerun-if-changed={}",
+            repository_root.join(input).display()
+        );
     }
     println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_SKIP_DASHBOARD_BUILD");
@@ -70,9 +106,9 @@ fn build_and_embed_dashboard_app() -> Result<(), Box<dyn Error>> {
             );
         } else if sources_present {
             if !dashboard.join("node_modules").is_dir() {
-                run_npm(dashboard, &["ci"])?;
+                run_npm(&dashboard, &["ci"])?;
             }
-            run_npm(dashboard, &["run", "build"])?;
+            run_npm(&dashboard, &["run", "build"])?;
         }
         dashboard_manifest::dashboard_asset_paths(&app_dist)?
     };
@@ -100,7 +136,7 @@ fn build_and_embed_dashboard_app() -> Result<(), Box<dyn Error>> {
             "txt" => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         };
-        let include_path = format!("/dashboard/app-dist/{relative}");
+        let include_path = format!("{include_root}/{relative}");
         let _ = writeln!(
             code,
             "    AppAsset {{ path: {relative:?}, contents: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {include_path:?})), content_type: {content_type:?} }},"
@@ -138,7 +174,10 @@ fn run_npm(dir: &Path, args: &[&str]) -> io::Result<()> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    build_and_embed_dashboard_app()?;
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let manifest_dir = Path::new(&manifest_dir);
+    let repository_root = repository_root(manifest_dir)?;
+    build_and_embed_dashboard_app(manifest_dir, &repository_root)?;
     // The plugin-bundle manifest (`$OUT_DIR/plugin_bundle_generated.rs`) moved
     // to `crates/tracedecay-agent-hosts/build.rs` along with its only consumer,
     // `agents::plugin_bundle`. Its `plugin/`-relative paths are rebased there.
@@ -147,9 +186,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // (so a stale installed plugin is distinguishable from the binary that
     // should have generated it) and the SemVer build metadata the binary
     // reports as its own version. Git metadata tracks commits and staging.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let identity = resolve(Path::new(&manifest_dir));
-    for path in watch_paths(Path::new(&manifest_dir)) {
+    let identity = resolve(&repository_root);
+    for path in watch_paths(&repository_root) {
         println!("cargo::rerun-if-changed={}", path.display());
     }
     println!("cargo::rerun-if-changed=src/version/build_identity.rs");

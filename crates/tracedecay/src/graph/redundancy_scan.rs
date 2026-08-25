@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn active_generation_classifies_semantic_only_pair_as_analogue() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/redundancy_eval_labeled.json"
+            "../../../../tests/fixtures/redundancy_eval_labeled.json"
         ))
         .unwrap();
         let labelled = fixture["cases"]

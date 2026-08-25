@@ -24,7 +24,7 @@ const REPO_ROOT_FROM_CRATE: &str = "../..";
 // pointed at the repository root, not this crate's directory: a crate
 // subdirectory is never its own git worktree top level, so `resolve` would
 // otherwise report an empty identity by design.
-#[path = "../../src/version/build_identity.rs"]
+#[path = "../tracedecay/src/version/build_identity.rs"]
 mod build_identity;
 
 // The product version this crate stamps into host-visible artifacts comes from
@@ -302,7 +302,7 @@ fn bake_build_identity() {
     for path in build_identity::watch_paths(&repo_root) {
         println!("cargo::rerun-if-changed={}", path.display());
     }
-    println!("cargo::rerun-if-changed={REPO_ROOT_FROM_CRATE}/src/version/build_identity.rs");
+    println!("cargo::rerun-if-changed=../tracedecay/src/version/build_identity.rs");
     println!(
         "cargo::rustc-env=TRACEDECAY_GIT_SHA={}",
         identity.sha.as_deref().unwrap_or("unknown")

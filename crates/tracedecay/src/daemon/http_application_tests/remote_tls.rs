@@ -26,19 +26,19 @@ use crate::daemon::http_application::{
 };
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.crt.pem");
 const REMOTE_TLS_LEAF_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost-leaf.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/localhost-leaf.crt.pem");
 const REMOTE_TLS_PRIVATE_KEY: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/localhost.key.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.key.pem");
 const REMOTE_TLS_CA_TRUE_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/ca-true.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/ca-true.crt.pem");
 const REMOTE_TLS_CLIENT_AUTH_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/client-auth-only.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/client-auth-only.crt.pem");
 const REMOTE_TLS_WRONG_IP_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/wrong-ip.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/wrong-ip.crt.pem");
 const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
+    include_bytes!("../../../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
 
 fn remote_tls_fixture(
     temporary: &tempfile::TempDir,

@@ -59,7 +59,7 @@ impl Default for BenchOptions {
 
 /// The embedded default query set. Compiled into the binary so `tracedecay bench`
 /// works without any external file dependency.
-pub const DEFAULT_QUERIES_TOML: &str = include_str!("../benchmark_data/queries/default.toml");
+pub const DEFAULT_QUERIES_TOML: &str = include_str!("../../../benchmark_data/queries/default.toml");
 
 /// Run the bench from a TOML query file on disk.
 pub async fn run_bench(

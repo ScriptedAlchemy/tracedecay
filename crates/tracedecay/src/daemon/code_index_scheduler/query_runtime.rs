@@ -37,7 +37,7 @@ use tracedecay_query::retrieval::{
 
 const QUERY_FALLBACK_PROFILE_ID: &str = "query-fallback";
 const QUERY_FALLBACK_WORKLOAD_JSON: &str = include_str!(
-    "../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+    "../../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
 );
 
 /// Immutable evidence that a configured authority accepted one exact query

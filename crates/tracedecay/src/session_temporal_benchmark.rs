@@ -82,11 +82,15 @@ const DIGEST: [u8; 32] = [0x8b; 32];
 const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-        include_str!("../tests/fixtures/provider_normalization/codex/session_meta.input.json"),
+        include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+        ),
     ),
     (
         "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-        include_str!("../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
+        include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+        ),
     ),
 ];
 
