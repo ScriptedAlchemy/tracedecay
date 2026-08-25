@@ -43,7 +43,10 @@ import tomllib
 
 with open(sys.argv[1], "rb") as handle:
     manifest = tomllib.load(handle)
-print(manifest["package"]["version"])
+# The repository root is a virtual workspace manifest with no `[package]`.
+# Every member inherits `version.workspace = true`, so the released version is
+# the workspace one.
+print(manifest["workspace"]["package"]["version"])
 PY
 )"
 

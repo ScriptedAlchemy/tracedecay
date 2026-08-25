@@ -19,6 +19,8 @@ import json
 import tomllib
 from pathlib import Path
 
+PRODUCT_PACKAGE = "tracedecay"
+
 with Path("Cargo.toml").open("rb") as handle:
     root = tomllib.load(handle)
 
@@ -32,10 +34,14 @@ release_manifest = json.loads(
     release_manifest_path.read_text(encoding="utf-8")
 )
 server_manifest = json.loads(Path("server.json").read_text(encoding="utf-8"))
-if root["package"].get("publish") is not False:
-    raise SystemExit("root Cargo package must remain private")
+# The repository root is a virtual workspace manifest with no package of its
+# own. The released version is the workspace one every member inherits, and the
+# privacy invariant is carried by the per-member loop below, which now includes
+# the product package.
+if "package" in root:
+    raise SystemExit("repository root must remain a virtual workspace manifest")
 if (
-    root["package"]["version"] != version
+    root["workspace"]["package"]["version"] != version
     or release_manifest.get(".") != version
     or server_manifest.get("version") != version
 ):
@@ -44,13 +50,13 @@ if (
     )
 with Path("Cargo.lock").open("rb") as handle:
     lockfile = tomllib.load(handle)
-root_locks = [
+product_locks = [
     package
     for package in lockfile["package"]
-    if package.get("name") == root["package"]["name"]
+    if package.get("name") == PRODUCT_PACKAGE
 ]
-if len(root_locks) != 1 or root_locks[0].get("version") != version:
-    raise SystemExit("Cargo.lock root version is not aligned")
+if len(product_locks) != 1 or product_locks[0].get("version") != version:
+    raise SystemExit("Cargo.lock product version is not aligned")
 
 for member in root["workspace"]["members"]:
     manifest_path = Path(member, "Cargo.toml")
@@ -58,6 +64,8 @@ for member in root["workspace"]["members"]:
         manifest = tomllib.load(handle)
     if manifest["package"].get("publish") is not False:
         raise SystemExit(f"workspace package is publishable: {manifest_path}")
+if PRODUCT_PACKAGE not in {Path(member).name for member in root["workspace"]["members"]}:
+    raise SystemExit(f"workspace does not contain the product package {PRODUCT_PACKAGE}")
 PY
 
 python3 - <<'PY'
