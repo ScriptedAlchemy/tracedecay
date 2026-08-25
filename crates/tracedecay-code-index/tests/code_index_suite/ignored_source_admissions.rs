@@ -50,7 +50,7 @@ fn add_present_typescript_file(
     });
     request.captured_files.push(CodeIndexCapturedFileV1 {
         file_occurrence_id,
-        sanitized_bytes: bytes,
+        sanitized_bytes: Arc::from(bytes),
         sensitivity_level: SensitivityLevelV1::Public,
     });
     request.changed_files.insert(logical_path.to_owned());

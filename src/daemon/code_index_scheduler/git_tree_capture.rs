@@ -199,7 +199,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             },
             captured: CodeIndexCapturedFileV1 {
                 file_occurrence_id: occurrence,
-                sanitized_bytes: shared.to_vec(),
+                sanitized_bytes: Arc::clone(&shared),
                 sensitivity_level,
             },
             receipt_id,
@@ -671,6 +671,37 @@ mod tests {
         assert!(
             !bytes.contains("current_tip_value"),
             "the capture must never fall back to the reference's current tip"
+        );
+    }
+
+    #[test]
+    fn exact_git_capture_reuses_one_byte_owner_for_snapshot_and_production() {
+        let (project, _store, scheduler) = generated_source_fixture();
+        let revision = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(
+                &ExactGitTreeSourceV1 {
+                    reference: tracedecay_domain::RefId::new("refs/heads/main")
+                        .expect("reference"),
+                    revision: tracedecay_domain::CommitId::new(revision).expect("revision"),
+                    tree: tracedecay_domain::TreeId::new(tree).expect("tree"),
+                },
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None,
+                },
+            )
+            .expect("capture exact Git tree");
+
+        assert_eq!(captured.captured_files.len(), captured.retained_bytes.len());
+        assert!(
+            captured.captured_files.iter().all(|captured_file| captured
+                .retained_bytes
+                .iter()
+                .any(|retained| Arc::ptr_eq(&captured_file.sanitized_bytes, retained))),
+            "production input must retain the snapshot's canonical byte allocation"
         );
     }
 

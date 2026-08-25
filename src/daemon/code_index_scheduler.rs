@@ -1480,9 +1480,9 @@ struct CapturedCandidateV1 {
     captured: CodeIndexCapturedFileV1,
     receipt_id: SanitizationReceiptId,
     retained: Arc<[u8]>,
-    /// Charges both live source representations (interned `Arc` and production
-    /// input `Vec`) before the candidate can join a snapshot. The build copy's
-    /// half is released after production completes.
+    /// Charges the canonical source allocation before the candidate can join a
+    /// snapshot. Production borrows this allocation until its bounded intake
+    /// materialization, rather than retaining a second snapshot-wide copy.
     retained_reservation: Option<ResidentMemoryReservationV1>,
 }
 
@@ -1496,8 +1496,8 @@ struct CapturedSnapshotV1 {
     /// snapshot's bytes so identical content in sibling worktrees can reuse
     /// them (physical sharing without identity aliasing).
     retained_bytes: Vec<Arc<[u8]>>,
-    /// Pointer-paired resident charges for `retained_bytes` plus their live
-    /// production-input copies. Empty sources need no nonzero reservation.
+    /// Resident charges for `retained_bytes`. Empty sources need no nonzero
+    /// reservation.
     retained_reservations: Vec<ResidentMemoryReservationV1>,
 }
 
@@ -3618,10 +3618,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         content_digest: &ContentDigest,
         retained_bytes: usize,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexSchedulerErrorV1> {
-        let Some(requested_bytes) = u64::try_from(retained_bytes)
-            .ok()
-            .and_then(|bytes| bytes.checked_mul(2))
-            .and_then(NonZeroU64::new)
+        let Some(requested_bytes) = u64::try_from(retained_bytes).ok().and_then(NonZeroU64::new)
         else {
             if retained_bytes == 0 {
                 return Ok(None);
@@ -3652,13 +3649,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     fn finish_snapshot_build_memory(
-        reservations: &mut [ResidentMemoryReservationV1],
+        _reservations: &mut [ResidentMemoryReservationV1],
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        for reservation in reservations {
-            reservation
-                .shrink_to(reservation.reserved_bytes() / 2)
-                .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment)?;
-        }
         Ok(())
     }
 

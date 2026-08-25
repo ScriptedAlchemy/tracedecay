@@ -83,13 +83,13 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
         .map(|bytes| bytes.len() as u64)
         .sum::<u64>();
     assert!(retained_bytes > 0);
-    assert_eq!(authority.snapshot().used_bytes, retained_bytes * 2);
+    assert_eq!(authority.snapshot().used_bytes, retained_bytes);
     drop(captured);
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
-fn completed_reconcile_releases_the_captured_file_copy_charge() {
+fn completed_reconcile_retains_the_canonical_snapshot_charge() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -122,7 +122,7 @@ fn completed_reconcile_releases_the_captured_file_copy_charge() {
     assert_eq!(
         authority.snapshot().used_bytes,
         retained_bytes,
-        "the no-build path must drop captured Vec copies before retaining only the Arc charge"
+        "the no-build path retains only the canonical Arc source charge"
     );
 }
 

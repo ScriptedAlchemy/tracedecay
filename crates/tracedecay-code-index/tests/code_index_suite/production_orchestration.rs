@@ -346,7 +346,7 @@ fn request_at_path(
         snapshot,
         captured_files: vec![CodeIndexCapturedFileV1 {
             file_occurrence_id: file.file_occurrence_id,
-            sanitized_bytes: source.to_vec(),
+            sanitized_bytes: Arc::from(source),
             sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
         }],
         changed_files: BTreeSet::new(),
@@ -378,7 +378,7 @@ pub(super) fn request_with_source(
     let bytes = source.as_bytes().to_vec();
     request.snapshot.files[0].content_digest = content_digest(&bytes);
     request.snapshot.content_identity = content_digest(&bytes);
-    request.captured_files[0].sanitized_bytes = bytes;
+    request.captured_files[0].sanitized_bytes = bytes.into();
     request.repository_parse_identity.tree = Some(id::<TreeId>(tree));
     request.changed_files.insert("src/lib.rs".to_owned());
     request
@@ -544,12 +544,12 @@ fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
         captured_files: vec![
             CodeIndexCapturedFileV1 {
                 file_occurrence_id: fast.file_occurrence_id.clone(),
-                sanitized_bytes: fast_source.as_bytes().to_vec(),
+                sanitized_bytes: Arc::from(fast_source.as_bytes()),
                 sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
             },
             CodeIndexCapturedFileV1 {
                 file_occurrence_id: slow.file_occurrence_id.clone(),
-                sanitized_bytes: slow_source.into_bytes(),
+                sanitized_bytes: Arc::from(slow_source.into_bytes()),
                 sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
             },
         ],
@@ -1140,7 +1140,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         content_digest(format!("{first_source}{second_source}").as_bytes());
     request.captured_files.push(CodeIndexCapturedFileV1 {
         file_occurrence_id: second_file.file_occurrence_id.clone(),
-        sanitized_bytes: second_source.as_bytes().to_vec(),
+        sanitized_bytes: Arc::from(second_source.as_bytes()),
         sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
     });
     request.changed_files.clear();
@@ -1523,7 +1523,7 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
         content_digest(format!("{first_source}{second_source}").as_bytes());
     request.captured_files.push(CodeIndexCapturedFileV1 {
         file_occurrence_id: second_file.file_occurrence_id.clone(),
-        sanitized_bytes: second_source.as_bytes().to_vec(),
+        sanitized_bytes: Arc::from(second_source.as_bytes()),
         sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
     });
     request.changed_files.clear();

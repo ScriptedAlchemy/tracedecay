@@ -267,7 +267,7 @@ fn build_fixture() -> Fixture {
             .iter()
             .map(|(file, source)| CodeIndexCapturedFileV1 {
                 file_occurrence_id: file.file_occurrence_id.clone(),
-                sanitized_bytes: source.clone(),
+                sanitized_bytes: Arc::from(source.clone()),
                 sensitivity_level: SensitivityLevelV1::Public,
             })
             .collect(),
