@@ -29,7 +29,7 @@ static WORKERS_POOL_COORDINATION: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static HOT_LOOP_SAMPLE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(any(feature = "hotpath", test))]
+#[cfg(feature = "hotpath")]
 #[must_use]
 #[inline(always)]
 fn is_hot_loop_sample(sequence: u64) -> bool {
@@ -375,13 +375,20 @@ pub(crate) fn record_rebuild_state(state: &'static str) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "hotpath")]
     #[test]
-    fn hot_loop_sampling_uses_one_fixed_slot_per_period() {
+    fn hotpath_file_probe_cadence_uses_one_fixed_slot_per_period() {
         let sampled = (0..(HOT_LOOP_SAMPLE_PERIOD * 2))
             .filter(|sequence| is_hot_loop_sample(*sequence))
             .collect::<Vec<_>>();
 
         assert_eq!(sampled, vec![0, HOT_LOOP_SAMPLE_PERIOD]);
+    }
+
+    #[cfg(not(feature = "hotpath"))]
+    #[test]
+    fn hotpath_file_probe_sampler_is_dormant_without_the_feature() {
+        assert!((0..(HOT_LOOP_SAMPLE_PERIOD * 2)).all(|_| !sample_hot_loop()));
     }
 
     #[test]
