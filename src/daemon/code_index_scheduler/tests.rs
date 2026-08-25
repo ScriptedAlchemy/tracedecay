@@ -10197,6 +10197,33 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         !current.served_stale,
         "a reconciled graph-off text owner must report current exact and lexical coverage"
     );
+    let text = registry
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .expect("ready graph-off text owner");
+    let candidate = current
+        .authorized
+        .fallback
+        .ordered_candidates
+        .first()
+        .expect("artifact-backed ranked candidate");
+    let (display, _) = crate::daemon::code_index_executor::code_index_text_search_display_binding(
+        &text,
+        current.sanitized.request(),
+        candidate,
+    )
+    .expect("artifact-backed result display");
+    assert_eq!(display.name, "alpha_0000");
+    assert_eq!(display.kind, "function");
+    assert_eq!(display.path, "src/file_0000.rs");
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "artifact-backed display hydration must not decode the sealed generation"
+    );
 
     let query_scope = CodeQueryScope::new(executed.generation.clone(), None).expect("query scope");
     let exact_operation =

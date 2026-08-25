@@ -84,8 +84,9 @@ use crate::{
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
-            CodeLexicalArtifactReaderV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-            LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
+            CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+            CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
+            LexicalLaneRetriever,
         },
         ports::RetrievalPortError,
     },
@@ -2039,6 +2040,20 @@ impl ProductionCodeIndexQueryOwnersV1 {
             .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
     }
 
+    fn artifact_occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<CodeLexicalArtifactOccurrenceV1, RetrievalPortError> {
+        self.hydration
+            .occurrence_by_chunk(chunk)
+            .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "lexical artifact row is unavailable".to_owned(),
+                )
+            })
+    }
+
     pub fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -2581,6 +2596,14 @@ impl LatestCompleteCodeIndexV1 {
 impl LatestCodeTextGenerationV1 {
     pub(in crate::daemon) fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
+    }
+
+    pub(in crate::daemon) fn artifact_occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<CodeLexicalArtifactOccurrenceV1, RetrievalPortError> {
+        self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())?
+            .artifact_occurrence_by_chunk(chunk)
     }
 
     #[cfg(test)]
