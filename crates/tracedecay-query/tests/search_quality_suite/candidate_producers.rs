@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -525,7 +526,9 @@ fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
     );
 
     let retried = source
-        .next_page_batch_if(&control, bounds, |_| Ok::<(), &'static str>(()))
+        .next_page_batch_if(&control, bounds, |pages| {
+            Ok::<_, &'static str>(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
+        })
         .expect("retry staged batch")
         .expect("accept retried batch");
     let VerifiedSealedLexicalPageBatchReadV1::Pages(retried_pages) = retried else {
@@ -567,7 +570,7 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
         source
             .next_page_batch_if(&control, too_small, |_| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::MIN)
             })
             .is_err(),
         "a first page above the retained-byte bound is a typed source error"
@@ -583,9 +586,9 @@ fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
     loop {
         let before = callbacks.load(Ordering::SeqCst);
         let read = source
-            .next_page_batch_if(&control, bounds, |_| {
+            .next_page_batch_if(&control, bounds, |pages| {
                 callbacks.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
             })
             .expect("drain source")
             .expect("accept source batch");
@@ -648,9 +651,18 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
                         .last()
                         .is_some_and(|page| page.page_ordinal() < staged_pages)
                     {
-                        Ok(())
+                        Ok(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
                     } else {
-                        self.append_pages(pages, control).map(|_| ())
+                        let accepted = self.largest_admissible_page_prefix(pages)?;
+                        let Some(accepted) = NonZeroUsize::new(accepted) else {
+                            self.append_pages(&pages[..1], control)?;
+                            return Err(CodeLexicalArtifactErrorV1::Contract(
+                                "lexical artifact admitted no pages without returning its typed bound"
+                                    .to_owned(),
+                            ));
+                        };
+                        self.append_pages(&pages[..accepted.get()], control)?;
+                        Ok(accepted)
                     }
                 })
                 .map_err(|error| match error {
@@ -1224,6 +1236,153 @@ fn reader_rejects_current_artifact_missing_required_term_statistics_index() {
 }
 
 #[test]
+fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("deferred-serving-state.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect staging artifact");
+    let staging_indexes: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name",
+        )
+        .expect("prepare index inventory")
+        .query_map([], |row| row.get(0))
+        .expect("query index inventory")
+        .collect::<Result<_, _>>()
+        .expect("read index inventory");
+    assert_eq!(staging_indexes, Vec::<String>::new());
+    for table in ["field_stats", "term_stats", "vocabulary"] {
+        let rows: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count deferred statistic rows");
+        assert_eq!(rows, 0, "{table} must be derived after the base freeze");
+    }
+    let authority_rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM source_pages) + \
+                    (SELECT COUNT(*) FROM document_integrity) + \
+                    (SELECT COUNT(*) FROM import_integrity) + \
+                    (SELECT COUNT(*) FROM import_evidence)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count authenticated authority rows");
+    let epoch: i64 = connection
+        .query_row(
+            "SELECT epoch FROM content_epoch WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read authenticated authority epoch");
+    assert_eq!(epoch, authority_rows);
+    drop(connection);
+
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("persist base freeze"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect frozen artifact");
+    assert!(
+        connection
+            .execute(
+                "UPDATE rows SET row = row WHERE document_id = (SELECT MIN(document_id) FROM rows)",
+                [],
+            )
+            .is_err(),
+        "the persisted freeze must deny base-row mutation"
+    );
+    drop(connection);
+
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect sealed artifact");
+    let serving_indexes: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name",
+        )
+        .expect("prepare final index inventory")
+        .query_map([], |row| row.get(0))
+        .expect("query final index inventory")
+        .collect::<Result<_, _>>()
+        .expect("read final index inventory");
+    assert_eq!(
+        serving_indexes,
+        [
+            "exact_postings_by_document",
+            "ngram_postings_by_document",
+            "rows_by_chunk",
+            "term_postings_by_document",
+            "term_postings_by_document_term",
+            "term_postings_by_term",
+            "term_stats_by_term",
+        ]
+    );
+    let incorrect_field_stats: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM field_stats AS actual LEFT JOIN (SELECT field, SUM(frequency) AS total_length FROM term_postings GROUP BY field) AS expected USING(field) WHERE actual.total_length != expected.total_length",
+            [],
+            |row| row.get(0),
+        )
+        .expect("compare field statistics");
+    let incorrect_term_stats: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM term_stats AS actual LEFT JOIN (SELECT field, term, COUNT(*) AS document_frequency FROM term_postings GROUP BY field, term) AS expected USING(field, term) WHERE actual.document_frequency != expected.document_frequency",
+            [],
+            |row| row.get(0),
+        )
+        .expect("compare term statistics");
+    assert_eq!(incorrect_field_stats, 0);
+    assert_eq!(incorrect_term_stats, 0);
+}
+
+#[test]
+fn disk_artifact_admission_selects_the_exact_largest_contiguous_prefix() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(
+        pages.len() >= 2,
+        "fixture must expose a real prefix boundary"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let probe_path = directory.path().join("prefix-probe.sqlite");
+    let probe = CodeLexicalArtifactBuilderV1::create(&probe_path, fixture.metadata.clone())
+        .expect("create admission probe");
+    let first_page_charge = probe
+        .page_batch_ledger_charge_bytes(&pages[..1])
+        .expect("measure first page charge");
+    let exact_budget = probe
+        .fixed_ledger_charge_bytes()
+        .checked_add(first_page_charge)
+        .expect("exact first-page budget");
+    drop(probe);
+
+    let artifact_path = directory.path().join("prefix-bound.sqlite");
+    let builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &artifact_path,
+        fixture.metadata,
+        exact_budget,
+    )
+    .expect("create exactly bounded builder");
+    assert_eq!(
+        builder
+            .largest_admissible_page_prefix(&pages)
+            .expect("select admissible prefix"),
+        1,
+        "the selector must accept the equality boundary and stop before the first over-budget page"
+    );
+}
+
+#[test]
 fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
     let (mut fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
     let metadata = fixture.metadata.clone();
@@ -1382,9 +1541,6 @@ fn disk_artifact_revision_four_is_incompatible_before_new_index_queries() {
             [],
         )
         .expect("write revision-four artifact state");
-    connection
-        .execute_batch("DROP INDEX term_stats_by_term;")
-        .expect("remove revision-five index");
     drop(connection);
 
     assert!(matches!(
@@ -1400,16 +1556,30 @@ fn disk_artifact_revision_four_is_incompatible_before_new_index_queries() {
 
 #[test]
 fn disk_artifact_resume_rejects_current_revision_with_wrong_term_index_shape() {
-    let (fixture, pages, _) = real_verified_pages();
+    let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("wrong-term-index-shape.sqlite");
     let control = ArtifactControl { cancelled: false };
     let mut builder =
         CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
-    builder
-        .append_page(&pages[0], &control)
-        .expect("stage current-format source page");
+    for page in &pages {
+        builder
+            .append_page(page, &control)
+            .expect("stage current-format source page");
+    }
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("freeze current artifact"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 10, &control)
+            .expect("build serving indexes"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
     drop(builder);
 
     let connection = rusqlite::Connection::open(&artifact_path).expect("open index mutation");
@@ -1455,18 +1625,18 @@ fn disk_artifact_finalization_refuses_inter_wake_mutation() {
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
-    connection
-        .execute(
-            "UPDATE rows SET row = row WHERE document_id = (SELECT MIN(document_id) FROM rows)",
-            [],
-        )
-        .expect("perform a structurally valid inter-wake mutation");
+    assert!(
+        connection
+            .execute(
+                "UPDATE rows SET row = row WHERE document_id = (SELECT MIN(document_id) FROM rows)",
+                [],
+            )
+            .is_err(),
+        "the persisted freeze must reject inter-wake mutation"
+    );
     drop(connection);
 
-    assert!(matches!(
-        builder.advance_finalization(&source_receipt, 1, &control),
-        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
-    ));
+    finish_staged_artifact(&mut builder, &source_receipt, &control);
     assert_eq!(
         builder.progress().expect("source progress after refusal"),
         staged,
@@ -1543,21 +1713,23 @@ fn disk_artifact_mandatory_verifier_rejects_tampered_real_source_chain() {
         .append_page(&pages[0], &control)
         .expect("append canonical first page");
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
-    connection
-        .execute(
-            "UPDATE source_pages SET page_digest = ?1, cumulative_digest = ?2, import_dictionary_digest = ?3 WHERE page_ordinal = 0",
-            [
-                digest_id::<ManifestDigest>('1').as_str(),
-                digest_id::<ManifestDigest>('2').as_str(),
-                digest_id::<ManifestDigest>('3').as_str(),
-            ],
-        )
-        .expect("tamper persisted page chain");
+    assert!(
+        connection
+            .execute(
+                "UPDATE source_pages SET page_digest = ?1, cumulative_digest = ?2, import_dictionary_digest = ?3 WHERE page_ordinal = 0",
+                [
+                    digest_id::<ManifestDigest>('1').as_str(),
+                    digest_id::<ManifestDigest>('2').as_str(),
+                    digest_id::<ManifestDigest>('3').as_str(),
+                ],
+            )
+            .is_err(),
+        "source-page authority is immutable from admission"
+    );
     drop(connection);
-    assert!(matches!(
-        builder.append_page(&pages[1], &control),
-        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
-    ));
+    builder
+        .append_page(&pages[1], &control)
+        .expect("append canonical successor after denied tamper");
 }
 
 #[test]
@@ -1639,9 +1811,16 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
     drop(connection);
 
     assert!(matches!(
-        builder.advance_finalization(&source_receipt, 128, &control),
-        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("persist freeze before authenticated scan"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
+    let corrupted = builder.advance_finalization(&source_receipt, 4_096, &control);
+    assert!(
+        matches!(corrupted, Err(CodeLexicalArtifactErrorV1::Corrupt(_))),
+        "mutated derived content must fail authenticated finalization: {corrupted:?}"
+    );
 
     // A corrupted staging file must fail closed. Recovery explicitly restages
     // trusted pages into a fresh artifact; bounded finalization never replays
@@ -1748,33 +1927,34 @@ fn disk_artifact_corruption_is_sticky_across_finalize_and_reopen_retries() {
         )
         .expect("artifact row");
     row.push(b' ');
-    connection
-        .execute(
-            "UPDATE rows SET row = ?1 WHERE document_id = (SELECT MIN(document_id) FROM rows)",
-            [row],
-        )
-        .expect("mutate artifact row without damaging SQLite structure");
+    assert!(
+        connection
+            .execute(
+                "UPDATE rows SET row = ?1 WHERE document_id = (SELECT MIN(document_id) FROM rows)",
+                [row],
+            )
+            .is_err(),
+        "sealed artifacts deny base-row mutation"
+    );
     let integrity: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .expect("SQLite integrity check");
     assert_eq!(integrity, "ok");
     drop(connection);
 
-    for _ in 0..2 {
-        assert!(matches!(
-            builder.finalize(&source_receipt, &control),
-            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
-        ));
-        assert!(matches!(
-            CodeLexicalArtifactReaderV1::open_with_control(
-                &artifact_path,
-                &verified,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                &control,
-            ),
-            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
-        ));
-    }
+    assert_eq!(
+        builder
+            .finalize(&source_receipt, &control)
+            .expect("denied mutation preserves sealed receipt"),
+        verified
+    );
+    CodeLexicalArtifactReaderV1::open_with_control(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("denied mutation preserves readable artifact");
 }
 
 #[test]
@@ -2395,10 +2575,15 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // source or duplicating rows. Their SQLite cursor is deliberately
     // durable, so retries are not required to preserve the staging file's
     // byte size.
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("persist immutable finalization freeze"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
     for round in 0..4 {
-        // The fifth checkpoint is the first one after the finalization marker
-        // is durable. Earlier refusal is intentionally mutation-free and does
-        // not freeze append admission.
+        // Every retry starts from the already durable freeze and may yield
+        // without replaying source or weakening immutable base authority.
         let exhausted = BudgetExhaustedAtObservation::new(5);
         let outcome = builder.advance_finalization(&source_receipt, usize::MAX, &exhausted);
         assert!(

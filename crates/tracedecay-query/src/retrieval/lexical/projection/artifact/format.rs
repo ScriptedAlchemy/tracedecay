@@ -18,13 +18,19 @@ use super::CodeLexicalArtifactErrorV1;
 /// are branch-only staging files and must fail as incompatible rather than be
 /// partially interpreted against this schema.
 // Revision 3 replaces the branch-local computed finalization cursor with
-// native table keys. Revision 4 adds document-leading indexes so verifying
-// one document's receipt never scans an unrelated generation. Revision 5
-// adds the term-leading statistics index and term-selective document index
-// required by batched lexical reads.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 5;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v5\0";
-const REQUIRED_ARTIFACT_INDEXES_V5: [(&str, &str, &[&str]); 3] = [
+// native table keys. Revision 4 adds document-leading indexes. Revision 5
+// adds term-selective read indexes. Revision 6 makes the append authority
+// immutable before one authenticated digest pass and defers every serving
+// index until resumable finalization.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 6;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v6\0";
+const REQUIRED_ARTIFACT_INDEXES_V6: [(&str, &str, &[&str]); 7] = [
+    ("rows", "rows_by_chunk", &["chunk_id"]),
+    (
+        "term_postings",
+        "term_postings_by_term",
+        &["term", "field", "document_id"],
+    ),
     (
         "term_postings",
         "term_postings_by_document",
@@ -36,6 +42,16 @@ const REQUIRED_ARTIFACT_INDEXES_V5: [(&str, &str, &[&str]); 3] = [
         &["document_id", "term", "field", "frequency"],
     ),
     ("term_stats", "term_stats_by_term", &["term", "field"]),
+    (
+        "exact_postings",
+        "exact_postings_by_document",
+        &["document_id", "field", "term"],
+    ),
+    (
+        "ngram_postings",
+        "ngram_postings_by_document",
+        &["document_id", "kind", "ngram"],
+    ),
 ];
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 11] = [
@@ -62,7 +78,7 @@ pub(super) fn verify_required_artifact_indexes(
                 "artifact index schema is unreadable: {error}"
             ))
         })?;
-    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V5 {
+    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V6 {
         let partial: Option<i64> = connection
             .query_row(
                 "SELECT partial FROM pragma_index_list(?1) WHERE name = ?2",
