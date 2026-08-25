@@ -1560,10 +1560,25 @@ fn saved_edit_incremental_publish() {
         !latest.graph_edges().is_empty() || !latest.graph_abstentions().is_empty(),
         "graph lane must remain explicitly queryable"
     );
+    let mut text_passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("advance bounded production text serving")
+    {
+        text_passes += 1;
+        assert!(
+            text_passes < 10_000,
+            "incremental generation text serving never became ready"
+        );
+    }
     let owners = latest
         .production_query_owners()
         .expect("production exact/lexical/graph owners connect");
-    let _ = owners.is_artifact_backed();
+    assert!(
+        owners.is_artifact_backed(),
+        "incremental publish must serve real durable exact/lexical owners"
+    );
+    latest.warm_serving_caches();
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
