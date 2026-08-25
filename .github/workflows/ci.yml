@@ -257,9 +257,13 @@ jobs:
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: windows-latest
     # Full-workspace `nextest archive` on hosted windows-latest has been
-    # dying at exactly 30m with no failed step. 45 leaves headroom for a
-    # cold cache without hiding a hung linker.
-    timeout-minutes: 45
+    # dying at the job timeout with no failed step: first at 30m, then at 45m
+    # (run 32789438873 burned 44m08s in `Build nextest archive` on a cold
+    # Swatinem cache -- the restore step took 12s, i.e. a miss -- and was
+    # killed mid-compile). Earlier runs only "finished" faster because a
+    # resolution error aborted the `tracedecay` lib-test unit early. 75m fits
+    # a genuinely cold cache while still failing loudly on a hung linker.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
 
