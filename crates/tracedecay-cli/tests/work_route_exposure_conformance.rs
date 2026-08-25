@@ -37,6 +37,8 @@ mod common;
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
+// Pins a `#!/bin/sh` provider executable; the whole journey is Unix-only.
+#[cfg(unix)]
 #[path = "work_route_exposure_conformance/work_task_session.rs"]
 mod work_task_session;
 
