@@ -2426,6 +2426,21 @@ impl CodeIndexSchedulerRegistryV1 {
                             text_slice_incomplete = true;
                         }
                         Ok(Err(error)) => {
+                            if matches!(
+                                &error,
+                                tracedecay_query::retrieval::RetrievalPortError::Cancelled
+                            )
+                            {
+                                let mut current = worker_text_generation
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if current
+                                    .as_ref()
+                                    .is_some_and(|current| current.same_text_owner(&failed_latest))
+                                {
+                                    *current = None;
+                                }
+                            }
                             tracing::warn!(
                                 event = "code_index_text_projection_failed",
                                 error = %error,

@@ -1788,7 +1788,24 @@ pub(in crate::daemon) struct LatestCodeTextGenerationV1 {
     /// that same reader to the artifact build. The full generation is never
     /// decoded merely to discover text metadata or source layout.
     preopened_source: Arc<Mutex<Option<VerifiedSealedLexicalPageSourceV1<File>>>>,
-    publication_binding: Option<Arc<DurablePublicationPointerV1>>,
+    publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DurableActiveSealedGenerationBindingV1 {
+    generation_id: CodeGenerationId,
+    generation_file: String,
+    state_digest: ManifestDigest,
+}
+
+impl DurableActiveSealedGenerationBindingV1 {
+    fn matches(&self, pointer: Option<&DurablePublicationPointerV1>) -> bool {
+        pointer.is_some_and(|pointer| {
+            pointer.generation_id == self.generation_id.as_str()
+                && pointer.generation_file == self.generation_file
+                && pointer.state_digest == self.state_digest.as_str()
+        })
+    }
 }
 
 impl std::ops::Deref for LatestCompleteCodeIndexV1 {
@@ -2411,6 +2428,10 @@ impl LatestCodeTextGenerationV1 {
         !self.text_serving_is_ready() && !self.text_projection_failed.load(Ordering::Acquire)
     }
 
+    fn same_text_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.text_projection_build, &other.text_projection_build)
+    }
+
     fn mark_text_serving_failed(&self) {
         self.text_projection_failed.store(true, Ordering::Release);
     }
@@ -2848,7 +2869,7 @@ impl LatestCodeTextGenerationV1 {
                 .publication
                 .read_publication_pointer()
                 .map_err(text_artifact_unavailable)?;
-            if current.as_ref() != Some(binding.as_ref()) {
+            if !binding.matches(current.as_ref()) {
                 self.text_control.retire();
                 return Err(RetrievalPortError::Cancelled);
             }
@@ -4091,7 +4112,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_progress_producer_incarnation: self.progress_producer_incarnation,
             text_artifact_store,
             preopened_source: Arc::new(Mutex::new(Some(source))),
-            publication_binding: Some(Arc::new(pointer)),
+            publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
+                generation_id,
+                generation_file: pointer.generation_file,
+                state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
+            })),
         })
     }
 

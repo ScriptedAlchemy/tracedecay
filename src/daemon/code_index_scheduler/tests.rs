@@ -2565,8 +2565,27 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     let text = reopened
         .servable_retained_text_generation()
         .expect("active durable text generation");
+    let binding = text
+        .publication_binding
+        .clone()
+        .expect("retained generation binding");
+    let mut retained_history_update = reopened
+        .publication
+        .read_publication_pointer()
+        .expect("read active pointer")
+        .expect("active pointer");
+    retained_history_update.generation_index.clear();
+    retained_history_update.generation_index_truncated = true;
+    retained_history_update.generation_index_digest = None;
+    assert!(
+        binding.matches(Some(&retained_history_update)),
+        "retention-history changes must not supersede the same active seal"
+    );
     let scan = build_progress_snapshot(&reopened);
-    assert_eq!(scan.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert_eq!(
+        scan.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
+    );
     assert!(scan.total_lexical_bytes > 0);
     assert_eq!(scan.completed_lexical_bytes, scan.total_lexical_bytes);
     assert_eq!(
@@ -2583,6 +2602,11 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         reopened.sealed_decode_count(),
         0,
         "exact and lexical owners must not require the full generation"
+    );
+    assert!(
+        text.advance_text_serving(1)
+            .expect("attached text descriptor preserves the active seal"),
+        "a text-head pointer update must not retire its own ready owner"
     );
 
     fixture.edit(
@@ -9375,11 +9399,11 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
-/// A retained generation is not serving until its persistent graph replay
-/// activates. A typed replay failure leaves the slot empty while the ordinary
-/// refresh remains pending.
+/// A retained text generation remains serving when persistent graph replay
+/// fails. The full graph owner stays absent while ordinary refresh remains
+/// pending, so exact/lexical availability never implies graph availability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
+async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
@@ -9387,18 +9411,21 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let scope = {
+    let (scope, seeded_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store, bytes);
         published(scheduler.reconcile_now().expect("seed generation"));
         let latest = scheduler.latest_complete().expect("seeded generation");
         let snapshot = latest.generation.snapshot();
-        ResolvedScope::new(
-            test_project_id(),
-            snapshot.repository.clone(),
-            snapshot.worktree.clone().expect("worktree id"),
-            snapshot.reference.clone(),
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().generation_id.clone(),
         )
-        .expect("resolved scope")
     };
 
     let profile = TempDir::new().expect("profile root");
@@ -9463,31 +9490,22 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
                 .scheduler,
         )
     };
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler held");
-        let _ = release_rx.recv();
-    });
-    held_rx.recv().expect("scheduler lock acquired");
     drop(admission);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+        if scheduler
+            .try_lock()
+            .is_ok_and(|scheduler| scheduler.sealed_decode_count() > 0)
+        {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "worker did not dequeue the retained graph replay"
+            "worker did not decode the retained generation for graph replay"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    release_tx.send(()).expect("release scheduler");
-    lock_thread.join().expect("join scheduler holder");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -9507,8 +9525,15 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
 
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        None,
-        "a retained generation cannot serve after persistent graph replay fails"
+        Some(seeded_generation_id),
+        "persistent graph replay failure must not withhold retained text serving"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "persistent graph replay failure must not expose a full graph owner"
     );
     registry.shutdown().await;
     graph_runtime
@@ -10053,14 +10078,9 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
     let (scope, sealed_worktree_id, sealed_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), bytes);
         published(scheduler.reconcile_now().expect("seed generation"));
-        let latest = scheduler
-            .latest_complete()
-            .expect("seeded generation");
+        let latest = scheduler.latest_complete().expect("seeded generation");
         let snapshot = latest.generation.snapshot();
-        let worktree_id = snapshot
-            .worktree
-            .clone()
-            .expect("seeded worktree id");
+        let worktree_id = snapshot.worktree.clone().expect("seeded worktree id");
         (
             ResolvedScope::new(
                 test_project_id(),
