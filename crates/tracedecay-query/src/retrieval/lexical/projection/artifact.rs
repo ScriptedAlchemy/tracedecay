@@ -41,7 +41,7 @@ pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 /// is a target the engine may transiently exceed, per-statement and
 /// allocator metadata overhead are unaccounted, and `temp_store = FILE`
 /// keeps temporary b-trees on disk rather than bounding them in memory.
-pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
+pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 768 * 1024 * 1024;
 /// Maximum reader cache budget: the stored metadata copy plus the SQLite
 /// page-cache grant, which stays inside the kernel SQLite window ([2, 64]
 /// MiB page cache, mmap disabled). The reader's retained claim is the
@@ -189,9 +189,36 @@ fn open_builder_connection(
     Ok(connection)
 }
 
+fn with_builder_sorter_cpu_admission<T>(
+    connection: &rusqlite::Connection,
+    operation: impl FnOnce() -> T,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    let effective_sorter_workers: i64 = connection
+        .pragma_query_value(None, "threads", |row| row.get(0))
+        .map_err(sqlite_error)?;
+    let admitted_units = usize::try_from(effective_sorter_workers)
+        .map_err(|_| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "SQLite returned a negative lexical sorter worker limit".to_owned(),
+            )
+        })?
+        .checked_add(1)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical sorter CPU admission width overflowed".to_owned(),
+            )
+        })?;
+    hotpath::gauge!("query.artifact.sqlite_sorter.admitted_cpu_units").set(admitted_units);
+    Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ARTIFACT_SQLITE_CACHE_BYTES, open_builder_connection};
+    use std::num::NonZeroUsize;
+
+    use super::{
+        ARTIFACT_SQLITE_CACHE_BYTES, open_builder_connection, with_builder_sorter_cpu_admission,
+    };
 
     /// Artifact connections stay inside the kernel SQLite window: no mmap
     /// grant, page cache at most 64 MiB, and `synchronous = NORMAL` — never
@@ -261,6 +288,39 @@ mod tests {
             usize::try_from(configured_threads).expect("nonnegative artifact worker limit"),
             admitted_auxiliary_threads,
             "SQLite must receive the maximum auxiliary width available below the canonical worker bound and its own compile-time ceiling"
+        );
+    }
+
+    #[test]
+    fn builder_sorter_statements_hold_their_weighted_cpu_width() {
+        let worker_width = tracedecay_code_index::parallelism::indexing_workers();
+        let authority = tracedecay_runtime_core::background_cpu::install_process_background_cpu(
+            NonZeroUsize::new(worker_width).expect("nonzero code-index worker width"),
+        )
+        .expect("install matching process background CPU authority");
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let connection = open_builder_connection(&directory.path().join("weighted.sqlite"))
+            .expect("builder connection");
+        let configured_threads: i64 = connection
+            .pragma_query_value(None, "threads", |row| row.get(0))
+            .expect("read configured SQLite helper width");
+        let expected_units = usize::try_from(configured_threads)
+            .expect("nonnegative SQLite helper width")
+            .saturating_add(1)
+            .min(worker_width);
+
+        let observed_units =
+            with_builder_sorter_cpu_admission(&connection, || authority.active_units())
+                .expect("run weighted SQLite statement");
+
+        assert_eq!(
+            observed_units, expected_units,
+            "one builder plus every configured SQLite helper must share the process CPU authority"
+        );
+        assert_eq!(
+            authority.active_units(),
+            0,
+            "weighted admission must release every unit after the statement"
         );
     }
 }

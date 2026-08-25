@@ -76,6 +76,7 @@ tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", features = ["lite"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [[bench]]
 name = "code_lexical_catchup"

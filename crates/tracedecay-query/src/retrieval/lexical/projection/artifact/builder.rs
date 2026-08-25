@@ -1126,7 +1126,9 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         if state.phase != PersistedFinalizationPhaseV1::Digest {
-            advance_pre_digest_work(&transaction, &mut state, control)?;
+            super::with_builder_sorter_cpu_admission(&transaction, || {
+                advance_pre_digest_work(&transaction, &mut state, control)
+            })??;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             commit_finalization_transaction(transaction, &mut transaction_metrics)?;

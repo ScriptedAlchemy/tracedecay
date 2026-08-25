@@ -1641,6 +1641,37 @@ fn disk_artifact_admission_keeps_real_pages_wide_until_the_actual_limit() {
 }
 
 #[test]
+fn disk_artifact_large_build_authority_commits_thirty_two_real_pages() {
+    let fixture = real_lexical_source_fixture_with_files(32);
+    let (pages, _) = drain_verified_pages(&fixture, 1);
+    assert!(
+        pages.len() >= 32,
+        "the parser-backed corpus must expose a full 32-page source window"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("thirty-two-page-batch.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &artifact_path,
+        fixture.metadata,
+        768 * 1024 * 1024,
+    )
+    .expect("create builder with the production large-batch authority");
+    let control = ArtifactControl { cancelled: false };
+    let prepared = builder
+        .prepare_admissible_page_prefix(&pages[..32], &control)
+        .expect("prepare one full production source window");
+    assert_eq!(
+        prepared.accepted_prefix().get(),
+        32,
+        "the tracked memory, row, and write authorities must admit the complete real prefix"
+    );
+    let progress = builder
+        .append_prepared_pages(prepared.prepared_pages(), &control)
+        .expect("commit the complete real prefix atomically");
+    assert_eq!(progress.next_page_ordinal, 32);
+}
+
+#[test]
 fn disk_artifact_repetitive_multi_chunk_page_makes_exact_prefix_progress() {
     let mut source = String::with_capacity(700_000);
     source.push_str("// ");

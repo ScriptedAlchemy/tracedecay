@@ -115,8 +115,8 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 16;
-const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 32 * 1024 * 1024;
+const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 32;
+const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
@@ -3110,6 +3110,12 @@ impl LatestCodeTextGenerationV1 {
     ) -> Result<bool, RetrievalPortError> {
         let store = &self.text_artifact_store;
         if build.is_none() {
+            hotpath::gauge!("query.artifact.build_memory_budget_bytes")
+                .set(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1);
+            hotpath::gauge!("query.artifact.source_batch_pages_max")
+                .set(TEXT_ARTIFACT_BATCH_PAGES_V1);
+            hotpath::gauge!("query.artifact.source_batch_bytes_max")
+                .set(TEXT_ARTIFACT_BATCH_BYTES_V1);
             let generation_id = self.metadata.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
                 // Durable-head reopen: a restart serves the published
