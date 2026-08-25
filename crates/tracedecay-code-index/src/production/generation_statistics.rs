@@ -24,6 +24,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// including parsed, error, and unsupported spans. Keeping the checked
     /// accumulation here makes a census faithful to the sealed generation and
     /// prevents downstream runtime telemetry from reading removed SQL tables.
+    #[hotpath::measure(label = "code_index.build.statistics")]
     pub fn generation_statistics(
         &self,
     ) -> Result<CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1> {

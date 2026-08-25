@@ -253,18 +253,24 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<ValidatedCodeSnapshotV1, IntakeRejectionV1> {
-        self.validate_snapshot(snapshot)
+        hotpath::measure_block!(
+            "code_index.intake.validation",
+            self.validate_snapshot(snapshot)
+        )
     }
 
     fn admit(
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<SanitizedSnapshotCapabilityV1, IntakeRejectionV1> {
-        self.validate_snapshot(snapshot)
-            .map(SanitizedSnapshotCapabilityV1::new)
+        hotpath::measure_block!(
+            "code_index.intake.admission",
+            self.validate_snapshot(snapshot)
+                .map(SanitizedSnapshotCapabilityV1::new)
+        )
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.intake.bind_file")]
     fn bind_file(
         &self,
         capability: &SanitizedSnapshotCapabilityV1,

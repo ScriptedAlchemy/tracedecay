@@ -171,7 +171,7 @@ impl SharedRetainedParsePool {
             .map(|(report, _)| report)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.collect.retained")]
     pub fn parse_and_extract(
         &self,
         identity: ParseDocumentIdentity,
@@ -195,7 +195,7 @@ impl SharedRetainedParsePool {
     /// The retained artifact, including import bindings, is the previous-state
     /// authority for incremental merging; this path never acquires a second
     /// parser.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.collect.retained_artifact")]
     pub fn parse_and_extract_artifact(
         &self,
         identity: ParseDocumentIdentity,
@@ -219,7 +219,7 @@ impl SharedRetainedParsePool {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.collect.parse")]
     fn parse_internal(
         &self,
         identity: ParseDocumentIdentity,
@@ -562,12 +562,18 @@ fn record_success(
         match extraction.disposition {
             ParsedExtractionDisposition::FullDocument => {
                 stats.full_extractions = stats.full_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.full_extraction_total").inc(1_u64);
             }
             ParsedExtractionDisposition::ChangedRegions => {
                 stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.incremental_extraction_total").inc(1_u64);
             }
             ParsedExtractionDisposition::Reset { .. } => {
                 stats.reset_extractions = stats.reset_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.reset_extraction_total").inc(1_u64);
             }
         }
         stats.visited_top_level_nodes = stats
@@ -577,6 +583,7 @@ fn record_success(
             .extracted_bytes
             .saturating_add(extraction.metrics.visited_bytes as u64);
     }
+    crate::hotpath_observe::record_candidate_bytes(report.metrics.source_bytes as u64);
     crate::hotpath_observe::add_parse_bytes(report.metrics.source_bytes as u64);
     if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
         crate::hotpath_observe::add_reused_parses(1);

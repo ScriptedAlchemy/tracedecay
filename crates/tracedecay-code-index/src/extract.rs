@@ -199,7 +199,7 @@ impl TreeSitterExtractor {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.extract.incremental")]
     pub(crate) fn extract_preparsed(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -213,6 +213,7 @@ impl TreeSitterExtractor {
         }
         let authority = file.authority().clone();
         let file = file.validated_file();
+        crate::hotpath_observe::record_captured_bytes(file.sanitized_bytes.len() as u64);
         validate_descriptor(file, descriptor)?;
         let admitted_prefix = file
             .sanitized_bytes
@@ -497,7 +498,7 @@ pub(crate) fn parser_import_rows_digest(
 }
 
 impl LanguageExtractor for TreeSitterExtractor {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.extract.full")]
     fn extract(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -509,6 +510,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         }
         let authority = file.authority().clone();
         let file = file.validated_file();
+        crate::hotpath_observe::record_captured_bytes(file.sanitized_bytes.len() as u64);
         validate_descriptor(file, descriptor)?;
 
         let parser = self.resolve_parser(file, descriptor).ok_or({
