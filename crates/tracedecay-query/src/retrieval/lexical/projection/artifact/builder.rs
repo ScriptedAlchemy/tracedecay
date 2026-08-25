@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -515,6 +516,24 @@ pub struct CodeLexicalArtifactBuilderV1 {
     fixed_ledger_charge_bytes: usize,
 }
 
+/// One source-prefix decision whose fresh relational values were prepared
+/// exactly once. Replayed pages contribute to `accepted_prefix` but do not
+/// appear in `prepared_pages` because they require no SQLite mutation.
+pub struct PreparedCodeLexicalArtifactBatchV1 {
+    accepted_prefix: NonZeroUsize,
+    prepared_pages: Vec<PreparedCodeLexicalArtifactPageV1>,
+}
+
+impl PreparedCodeLexicalArtifactBatchV1 {
+    pub fn accepted_prefix(&self) -> NonZeroUsize {
+        self.accepted_prefix
+    }
+
+    pub fn prepared_pages(&self) -> &[PreparedCodeLexicalArtifactPageV1] {
+        &self.prepared_pages
+    }
+}
+
 impl CodeLexicalArtifactBuilderV1 {
     pub fn create(
         path: impl AsRef<Path>,
@@ -661,10 +680,10 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 
     /// Return the largest contiguous input prefix whose complete retained,
-    /// prepared-output, active-worker scratch, prepared-row, and estimated
-    /// SQLite-write claims fit every canonical batch limit. Zero is truthful
-    /// when even the first page cannot be admitted; callers retain the source
-    /// cursor and can surface the existing typed bound.
+    /// prepared-output, and active-worker scratch claims fit the memory
+    /// authority. Exact prepared-row and SQLite-write prefix selection occurs
+    /// after this bound in [`Self::prepare_admissible_page_prefix`]. Zero is
+    /// truthful when even the first page cannot be prepared within memory.
     pub fn largest_admissible_page_prefix(
         &self,
         pages: &[VerifiedSealedLexicalPageV1],
@@ -675,7 +694,6 @@ impl CodeLexicalArtifactBuilderV1 {
         let mut prepared = 0usize;
         let mut active_scratch = 0usize;
         let mut largest_scratch = BinaryHeap::<Reverse<usize>>::new();
-        let mut canonical_limits = CanonicalBatchLimitLedgerV1::default();
         for (index, page) in pages.iter().enumerate() {
             if page.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1 {
                 return Err(CodeLexicalArtifactErrorV1::Contract(format!(
@@ -715,11 +733,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 .and_then(|bytes| bytes.checked_add(active_scratch))
                 .ok_or_else(batch_ledger_overflow)?;
             if required > self.memory_budget_bytes {
-                return Ok(index);
-            }
-            let (estimated_rows, estimated_write_bytes) =
-                page_prepared_write_upper_bounds(&self.metadata, page)?;
-            if !canonical_limits.try_admit(estimated_rows, estimated_write_bytes)? {
                 return Ok(index);
             }
         }
@@ -762,6 +775,87 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[VerifiedSealedLexicalPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Vec<PreparedCodeLexicalArtifactPageV1>, CodeLexicalArtifactErrorV1> {
+        let (_, prepared) = self.prepare_pages_inner(pages, control)?;
+        admit_prepared_page_batch(
+            self.fixed_ledger_charge_bytes,
+            self.memory_budget_bytes,
+            &prepared,
+        )?;
+        record_prepared_batch_metrics(&prepared);
+        Ok(prepared)
+    }
+
+    /// Memory-bound an offered source batch, prepare that prefix once, then
+    /// select the largest exact prepared prefix admitted by the row and
+    /// estimated-write authorities. This avoids conservative pre-dedup row
+    /// estimates while preserving every exact post-preparation cap.
+    pub fn prepare_admissible_page_prefix(
+        &self,
+        pages: &[VerifiedSealedLexicalPageV1],
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<PreparedCodeLexicalArtifactBatchV1, CodeLexicalArtifactErrorV1> {
+        if pages.is_empty() {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact page batches must be non-empty".to_owned(),
+            ));
+        }
+        let memory_prefix = self.largest_admissible_page_prefix(pages)?;
+        if memory_prefix == 0 {
+            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
+            admit_page_batch_within_memory_budget(
+                &self.metadata,
+                self.fixed_ledger_charge_bytes,
+                self.memory_budget_bytes,
+                &pages[..1],
+            )?;
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact memory prefix rejected a separately admissible first page"
+                    .to_owned(),
+            ));
+        }
+        let (replayed_prefix, mut prepared) =
+            self.prepare_pages_inner(&pages[..memory_prefix], control)?;
+        let (fresh_prefix, exact_limit) = largest_exact_prepared_prefix(&prepared)?;
+        if fresh_prefix == 0 && !prepared.is_empty() {
+            let exceeded = exact_limit.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact exact prefix rejected a page without a limiting authority"
+                        .to_owned(),
+                )
+            })?;
+            record_batch_prefix_limit(exceeded.limit);
+            return Err(batch_limit(
+                exceeded.limit,
+                exceeded.required,
+                exceeded.maximum,
+            ));
+        }
+        prepared.truncate(fresh_prefix);
+        let accepted = replayed_prefix
+            .checked_add(fresh_prefix)
+            .ok_or_else(batch_ledger_overflow)?;
+        let accepted_prefix = NonZeroUsize::new(accepted).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact admissible source prefix was empty".to_owned(),
+            )
+        })?;
+        if let Some(exceeded) = exact_limit {
+            record_batch_prefix_limit(exceeded.limit);
+        } else if memory_prefix < pages.len() {
+            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
+        }
+        record_prepared_batch_metrics(&prepared);
+        Ok(PreparedCodeLexicalArtifactBatchV1 {
+            accepted_prefix,
+            prepared_pages: prepared,
+        })
+    }
+
+    fn prepare_pages_inner(
+        &self,
+        pages: &[VerifiedSealedLexicalPageV1],
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(usize, Vec<PreparedCodeLexicalArtifactPageV1>), CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
         if pages.is_empty() {
@@ -792,7 +886,7 @@ impl CodeLexicalArtifactBuilderV1 {
         })?;
         let fresh_pages = &pages[fresh_start..];
         if fresh_pages.is_empty() {
-            return Ok(Vec::new());
+            return Ok((fresh_start, Vec::new()));
         }
         let previous_cursors = fresh_pages
             .iter()
@@ -845,13 +939,7 @@ impl CodeLexicalArtifactBuilderV1 {
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-        admit_prepared_page_batch(
-            self.fixed_ledger_charge_bytes,
-            self.memory_budget_bytes,
-            &prepared,
-        )?;
-        record_prepared_batch_metrics(&prepared);
-        Ok(prepared)
+        Ok((fresh_start, prepared))
     }
 
     /// Atomically admit an ordered prepared batch. The values carry no
@@ -1420,12 +1508,19 @@ struct CanonicalBatchLimitLedgerV1 {
     estimated_write_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct BatchLimitExceededV1 {
+    limit: CodeLexicalArtifactBatchLimitV1,
+    required: usize,
+    maximum: usize,
+}
+
 impl CanonicalBatchLimitLedgerV1 {
     fn try_admit(
         &mut self,
         page_rows: usize,
         page_write_bytes: usize,
-    ) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    ) -> Result<Option<BatchLimitExceededV1>, CodeLexicalArtifactErrorV1> {
         let estimated_rows = self.estimated_rows.checked_add(page_rows).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact batch row preflight overflowed".to_owned(),
@@ -1439,69 +1534,38 @@ impl CanonicalBatchLimitLedgerV1 {
                     "lexical artifact batch write preflight overflowed".to_owned(),
                 )
             })?;
-        if estimated_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1
-            || estimated_write_bytes > CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1
-        {
-            return Ok(false);
+        if estimated_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1 {
+            return Ok(Some(BatchLimitExceededV1 {
+                limit: CodeLexicalArtifactBatchLimitV1::PreparedRows,
+                required: estimated_rows,
+                maximum: CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1,
+            }));
+        }
+        if estimated_write_bytes > CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1 {
+            return Ok(Some(BatchLimitExceededV1 {
+                limit: CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes,
+                required: estimated_write_bytes,
+                maximum: CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
+            }));
         }
         self.estimated_rows = estimated_rows;
         self.estimated_write_bytes = estimated_write_bytes;
-        Ok(true)
+        Ok(None)
     }
 }
 
-/// Allocation-free upper bounds for the two canonical post-preparation
-/// admission metrics. The retained-output authority already covers every
-/// serialized row, posting key, and n-gram tuple; import evidence needs one
-/// additional canonical copy because SQLite writes it to two authority
-/// tables.
-fn page_prepared_write_upper_bounds(
-    metadata: &CodeLexicalProjectionMetadataV1,
-    page: &VerifiedSealedLexicalPageV1,
-) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
-    let mut rows = 1usize;
-    let mut write_bytes = page_prepared_retained_upper_bound_bytes(metadata, page)?;
-    for evidence in page.imports() {
-        rows = rows.checked_add(2).ok_or_else(batch_ledger_overflow)?;
-        write_bytes = write_bytes
-            .checked_add(import_transient_bytes(evidence)?)
-            .and_then(|bytes| bytes.checked_add(page.page_digest().as_str().len()))
-            .ok_or_else(batch_ledger_overflow)?;
-    }
-    for admitted in page.chunks() {
-        let chunk = admitted.chunk();
-        let text_bytes = chunk.sanitized_text.as_str().len();
-        let (normalized_ngrams, _) = document_ngram_scratch(text_bytes)?;
-        let raw_ngrams = if chunk
-            .sanitized_text
-            .as_str()
-            .as_bytes()
-            .iter()
-            .any(u8::is_ascii_uppercase)
+fn largest_exact_prepared_prefix(
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<(usize, Option<BatchLimitExceededV1>), CodeLexicalArtifactErrorV1> {
+    let mut ledger = CanonicalBatchLimitLedgerV1::default();
+    for (index, page) in pages.iter().enumerate() {
+        if let Some(exceeded) =
+            ledger.try_admit(page.estimated_write_rows(), page.estimated_write_bytes())?
         {
-            document_ngram_scratch(text_bytes)?.0
-        } else {
-            0
-        };
-        let term_postings = text_bytes
-            .checked_add(1)
-            .and_then(|count| count.checked_add(chunk.subtokens.len()))
-            .and_then(|count| count.checked_add(chunk.exact_terms.len().checked_mul(2)?))
-            .ok_or_else(batch_ledger_overflow)?;
-        let exact_postings = chunk
-            .exact_terms
-            .len()
-            .checked_add(1)
-            .ok_or_else(batch_ledger_overflow)?;
-        rows = rows
-            .checked_add(2)
-            .and_then(|count| count.checked_add(term_postings))
-            .and_then(|count| count.checked_add(exact_postings))
-            .and_then(|count| count.checked_add(normalized_ngrams))
-            .and_then(|count| count.checked_add(raw_ngrams))
-            .ok_or_else(batch_ledger_overflow)?;
+            return Ok((index, Some(exceeded)));
+        }
     }
-    Ok((rows, write_bytes))
+    Ok((pages.len(), None))
 }
 
 /// Refuse a batch unless its retained source pages, all prepared outputs, and
@@ -1805,7 +1869,7 @@ fn projected_chunk_prepared_retained_upper_bound_bytes(
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let transient = projected_chunk_transient_bytes(metadata, admitted)?;
     let text_bytes = admitted.chunk().sanitized_text.as_str().len();
-    let normalized_text_bytes = text_bytes.saturating_mul(3);
+    let normalized_text_bytes = text_bytes;
     let (_, normalized_scratch) = document_ngram_scratch(normalized_text_bytes)?;
     let (_, raw_scratch) = document_ngram_scratch(text_bytes)?;
     // Preparation retains `(kind, ngram)` tuples, not the `u32` scratch
@@ -1903,9 +1967,10 @@ fn projected_chunk_transient_bytes(
                 chunk.anchor.file_occurrence_id
             ))
         })?;
-    // Normalization can expand one Unicode scalar to at most three scalars;
-    // JSON can then escape each byte. This bound intentionally charges both
-    // cloned and moved ownership before append allocates either representation.
+    // Canonical lexical normalization is ASCII lowercasing, so it preserves
+    // the exact UTF-8 byte length. JSON escaping is charged separately below.
+    // The bound intentionally charges both cloned and moved ownership before
+    // append allocates either representation.
     let text_bytes = chunk.sanitized_text.as_str().len();
     let subtoken_bytes = chunk
         .subtokens
@@ -1914,12 +1979,12 @@ fn projected_chunk_transient_bytes(
     let exact_bytes = chunk.exact_terms.iter().fold(0usize, |total, term| {
         total.saturating_add(term.canonical_bytes().len())
     });
-    let normalized_text_bytes = text_bytes.saturating_mul(3);
+    let normalized_text_bytes = text_bytes;
     let field_text_bytes = normalized_text_bytes
-        .saturating_add(logical_path.len().saturating_mul(3))
-        .saturating_add(subtoken_bytes.saturating_mul(3))
-        .saturating_add(exact_bytes.saturating_mul(6));
-    let field_entries = text_bytes
+        .saturating_add(logical_path.len())
+        .saturating_add(subtoken_bytes)
+        .saturating_add(exact_bytes.saturating_mul(2));
+    let field_entries = lexical_token_count(chunk.sanitized_text.as_str())
         .saturating_add(1)
         .saturating_add(chunk.subtokens.len())
         .saturating_add(chunk.exact_terms.len().saturating_mul(2));
@@ -1947,6 +2012,20 @@ fn projected_chunk_transient_bytes(
         .saturating_add(raw_scratch)
         .saturating_add(row_bytes)
         .saturating_add(serialized_bytes))
+}
+
+fn lexical_token_count(value: &str) -> usize {
+    let mut count = 0usize;
+    let mut inside_token = false;
+    for character in value.chars() {
+        let accepted =
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.' | '/');
+        if accepted && !inside_token {
+            count = count.saturating_add(1);
+        }
+        inside_token = accepted;
+    }
+    count
 }
 
 fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
@@ -3875,6 +3954,27 @@ fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 }
 
 #[cfg(feature = "hotpath")]
+fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
+    match limit {
+        CodeLexicalArtifactBatchLimitV1::Memory => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.memory_total").inc(1u64);
+        }
+        CodeLexicalArtifactBatchLimitV1::PreparedRows => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total").inc(1u64);
+        }
+        CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
+                .inc(1u64);
+        }
+    }
+}
+
+#[cfg(not(feature = "hotpath"))]
+fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
+    let _ = limit;
+}
+
+#[cfg(feature = "hotpath")]
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
     hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
     hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
@@ -4034,6 +4134,7 @@ mod tests {
                 ledger
                     .try_admit(*rows, *bytes)
                     .expect("extend canonical limit ledger")
+                    .is_none()
             })
             .count();
         assert_eq!(

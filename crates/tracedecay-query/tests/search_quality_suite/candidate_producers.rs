@@ -344,12 +344,10 @@ fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
 /// scores tie across files without content-identical chunks.
 fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourceFixture {
     assert!(file_count >= 1, "fixture needs at least one file");
-    let repository = id::<RepositoryId>("repository.artifact");
-    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
     let identity_source = b"import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n";
-    let sources: Vec<(SanitizedCodeFileV1, Vec<u8>)> = (0..file_count)
+    let sources = (0..file_count)
         .map(|ordinal| {
-            let (file_id, logical_path, source) = if ordinal == 0 {
+            if ordinal == 0 {
                 (
                     "file.artifact".to_owned(),
                     "src/artifact.ts".to_owned(),
@@ -366,7 +364,21 @@ fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourc
                     )
                     .into_bytes(),
                 )
-            };
+            }
+        })
+        .collect();
+    real_lexical_source_fixture_from_sources(sources)
+}
+
+fn real_lexical_source_fixture_from_sources(
+    source_inputs: Vec<(String, String, Vec<u8>)>,
+) -> RealLexicalSourceFixture {
+    assert!(!source_inputs.is_empty(), "fixture needs at least one file");
+    let repository = id::<RepositoryId>("repository.artifact");
+    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
+    let sources = source_inputs
+        .into_iter()
+        .map(|(file_id, logical_path, source)| {
             let file = SanitizedCodeFileV1 {
                 file_occurrence_id: id::<FileOccurrenceId>(&file_id),
                 logical_path,
@@ -376,7 +388,11 @@ fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourc
             };
             (file, source)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let identity_source = sources
+        .first()
+        .map(|(_, source)| source.as_slice())
+        .expect("non-empty fixture sources");
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
         worktree: None,
@@ -666,26 +682,12 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
         let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(16, 32 * 1024 * 1024)
             .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
         let receipt = loop {
-            let staged_pages = self.progress()?.next_page_ordinal;
             let admitted = source
                 .next_page_batch_if(control, bounds, |pages| {
-                    if pages
-                        .last()
-                        .is_some_and(|page| page.page_ordinal() < staged_pages)
-                    {
-                        Ok(NonZeroUsize::new(pages.len()).expect("non-empty source batch"))
-                    } else {
-                        let accepted = self.largest_admissible_page_prefix(pages)?;
-                        let Some(accepted) = NonZeroUsize::new(accepted) else {
-                            self.append_pages(&pages[..1], control)?;
-                            return Err(CodeLexicalArtifactErrorV1::Contract(
-                                "lexical artifact admitted no pages without returning its typed bound"
-                                    .to_owned(),
-                            ));
-                        };
-                        self.append_pages(&pages[..accepted.get()], control)?;
-                        Ok(accepted)
-                    }
+                    let prepared = self.prepare_admissible_page_prefix(pages, control)?;
+                    let accepted = prepared.accepted_prefix();
+                    self.append_prepared_pages(prepared.prepared_pages(), control)?;
+                    Ok(accepted)
                 })
                 .map_err(|error| match error {
                     CodeIndexProductionErrorV1::Interrupted(interruption) => {
@@ -1636,6 +1638,49 @@ fn disk_artifact_admission_keeps_real_pages_wide_until_the_actual_limit() {
         .append_pages(&pages[..selected], &ArtifactControl { cancelled: false })
         .expect("the selected multi-page prefix must pass exact post-preparation admission");
     assert_eq!(progress.next_page_ordinal, 2);
+}
+
+#[test]
+fn disk_artifact_repetitive_multi_chunk_page_makes_exact_prefix_progress() {
+    let mut source = String::with_capacity(700_000);
+    source.push_str("// ");
+    source.push_str(&"a".repeat(650_000));
+    source.push_str(
+        "\nexport function first() { return 1; }\nexport function second() { return 2; }\n",
+    );
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.artifact.repetitive".to_owned(),
+        "src/repetitive.ts".to_owned(),
+        source.into_bytes(),
+    )]);
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    let page = pages.first().expect("repetitive source page");
+    assert!(
+        page.chunks().len() > 1,
+        "the real parser-backed page must cover multiple chunks"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("repetitive-prefix.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    let prepared = builder
+        .prepare_admissible_page_prefix(
+            std::slice::from_ref(page),
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("select repetitive page prefix");
+    assert_eq!(
+        prepared.accepted_prefix().get(),
+        1,
+        "a conservative pre-dedup estimate must not turn one valid page into a permanent zero prefix"
+    );
+    let progress = builder
+        .append_prepared_pages(
+            prepared.prepared_pages(),
+            &ArtifactControl { cancelled: false },
+        )
+        .expect("exactly prepared repetitive page must commit inside every canonical limit");
+    assert_eq!(progress.next_page_ordinal, 1);
 }
 
 #[test]

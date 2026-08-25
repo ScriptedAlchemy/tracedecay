@@ -36,8 +36,8 @@ pub use self::projection::{
     CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
     CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
-    lexical_projection_build_deadline_micros,
+    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
+    VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared

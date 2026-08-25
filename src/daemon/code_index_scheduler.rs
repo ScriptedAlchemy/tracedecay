@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{Read, Write},
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
@@ -2948,24 +2948,12 @@ impl LatestCompleteCodeIndexV1 {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("query.artifact.batch.offered_pages_total")
                         .inc(u64::try_from(pages.len()).unwrap_or(u64::MAX));
-                    let accepted =
-                        NonZeroUsize::new(builder.largest_admissible_page_prefix(pages)?)
-                            .ok_or_else(|| {
-                                CodeLexicalArtifactErrorV1::Unreserved(
-                            "one sealed lexical page exceeds the artifact build memory budget"
-                                .to_owned(),
-                        )
-                            })?;
-                    let pages = &pages[..accepted.get()];
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("query.artifact.batch.accepted_pages_total")
-                        .inc(u64::try_from(pages.len()).unwrap_or(u64::MAX));
-                    let batch_pages = u64::try_from(pages.len()).map_err(|_| {
+                    let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
                         CodeLexicalArtifactErrorV1::Contract(
                             "text-artifact batch page count exceeds u64".to_owned(),
                         )
                     })?;
-                    let batch_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
+                    let offered_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
                         total.checked_add(page.payload_bytes()).ok_or_else(|| {
                             CodeLexicalArtifactErrorV1::Contract(
                                 "text-artifact batch payload bytes overflowed".to_owned(),
@@ -2974,23 +2962,47 @@ impl LatestCompleteCodeIndexV1 {
                     })?;
                     self.publish_text_progress_phase(
                         CodeIndexBuildPhaseV1::RelationalPreparation,
-                        batch_pages,
-                        batch_payload_bytes,
+                        offered_batch_pages,
+                        offered_payload_bytes,
                     );
-                    let progress = hotpath::measure_block!("query.artifact.batch.builder", {
-                        let prepared = builder.prepare_pages(pages, control)?;
-                        self.publish_text_progress_phase(
-                            CodeIndexBuildPhaseV1::BulkCommit,
-                            batch_pages,
-                            batch_payload_bytes,
-                        );
-                        let commit_started = Instant::now();
-                        let progress = builder.append_prepared_pages(&prepared, control)?;
-                        commit_latency_micros = Some(
-                            u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                        );
-                        Ok::<_, CodeLexicalArtifactErrorV1>(progress)
-                    })?;
+                    let (progress, accepted) =
+                        hotpath::measure_block!("query.artifact.batch.builder", {
+                            let prepared =
+                                builder.prepare_admissible_page_prefix(pages, control)?;
+                            let accepted = prepared.accepted_prefix();
+                            let accepted_pages = &pages[..accepted.get()];
+                            #[cfg(feature = "hotpath")]
+                            hotpath::gauge!("query.artifact.batch.accepted_pages_total")
+                                .inc(u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX));
+                            let batch_pages =
+                                u64::try_from(accepted_pages.len()).map_err(|_| {
+                                    CodeLexicalArtifactErrorV1::Contract(
+                                        "text-artifact accepted page count exceeds u64".to_owned(),
+                                    )
+                                })?;
+                            let batch_payload_bytes =
+                                accepted_pages.iter().try_fold(0_u64, |total, page| {
+                                    total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                                        CodeLexicalArtifactErrorV1::Contract(
+                                            "text-artifact accepted payload bytes overflowed"
+                                                .to_owned(),
+                                        )
+                                    })
+                                })?;
+                            self.publish_text_progress_phase(
+                                CodeIndexBuildPhaseV1::BulkCommit,
+                                batch_pages,
+                                batch_payload_bytes,
+                            );
+                            let commit_started = Instant::now();
+                            let progress = builder
+                                .append_prepared_pages(prepared.prepared_pages(), control)?;
+                            commit_latency_micros = Some(
+                                u64::try_from(commit_started.elapsed().as_micros())
+                                    .unwrap_or(u64::MAX),
+                            );
+                            Ok::<_, CodeLexicalArtifactErrorV1>((progress, accepted))
+                        })?;
                     durable_progress = Some(progress);
                     Ok(accepted)
                 })
