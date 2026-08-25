@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::Result;
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
 

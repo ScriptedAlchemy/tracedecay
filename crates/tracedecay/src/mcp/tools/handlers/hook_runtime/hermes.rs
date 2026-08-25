@@ -278,7 +278,8 @@ pub(super) async fn hermes_receipt(
         .get("event")
         .cloned()
         .ok_or_else(|| config_error("missing required parameter `event`"))?;
-    let event: crate::daemon::DaemonHookEvent = serde_json::from_value(event_value.clone())?;
+    let event: tracedecay_hooks::core_events::DaemonHookEvent =
+        serde_json::from_value(event_value.clone())?;
     if event.receipt.is_none() {
         return Err(config_error("Hermes event omitted receipt"));
     }

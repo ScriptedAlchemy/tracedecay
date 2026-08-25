@@ -3544,6 +3544,8 @@ function codeIndexBuildProgressFixture(
 ): Record<string, unknown> {
   return {
     generation_id: 'generation.catchup.01',
+    daemon_incarnation: 1,
+    producer_incarnation: 1,
     progress_epoch: 1,
     sealed_source_digest: 'sha256:sealed-source-catchup',
     phase: 'bulk_commit',

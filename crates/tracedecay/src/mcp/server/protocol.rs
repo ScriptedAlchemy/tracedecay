@@ -20,7 +20,7 @@ pub(crate) enum McpMethod {
 }
 
 pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
-    if method == crate::daemon::HOOK_EVENT_METHOD {
+    if method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
         return McpMethod::HookEvent;
     }
     match method {

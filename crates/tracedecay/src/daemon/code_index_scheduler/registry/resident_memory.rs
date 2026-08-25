@@ -32,16 +32,20 @@ impl CodeIndexSchedulerRegistryV1 {
         )
     }
 
+    /// Build a registry under one durable daemon epoch. The constructor name
+    /// is retained for its invocation-state caller; individual producer
+    /// incarnations are minted below this daemon authority for each scheduler.
     pub fn with_resident_memory_and_progress_producer_incarnation(
         max_worktrees: usize,
         resident_memory: Arc<ProcessResidentMemoryV1>,
-        progress_producer_incarnation: u64,
+        progress_daemon_incarnation: u64,
     ) -> Self {
         let (generation_publications, _) =
             tokio::sync::broadcast::channel(super::GENERATION_PUBLICATION_CHANNEL_CAPACITY);
         Self {
             max_worktrees,
-            progress_producer_incarnation: progress_producer_incarnation.max(1),
+            progress_daemon_incarnation: progress_daemon_incarnation.max(1),
+            next_progress_producer_incarnation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             resident_memory,
             byte_pool: Arc::new(super::SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),

@@ -19,6 +19,7 @@ const SOURCE_CHAIN_RECORD_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source-cha
 const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
     b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
+const LAYOUT_PROGRESS_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
 
 type PersistedSealedLexicalCursorFields = (
     String,
@@ -1561,8 +1562,13 @@ struct SealedLexicalLayoutV1 {
     first_file_offset: u64,
     files_end_offset: u64,
     maximum_file_bytes: u64,
+    #[cfg(test)]
+    structural_byte_visits: u64,
+    #[cfg(test)]
+    temporary_string_allocations: u64,
 }
 
+#[hotpath::measure]
 fn scan_layout<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
@@ -1577,6 +1583,9 @@ fn scan_layout<R: Read + Seek>(
     reader.seek(SeekFrom::Start(0)).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!("sealed lexical source seek failed: {error}"))
     })?;
+    hotpath::gauge!("code_index_lexical_layout_scan_attempts").inc(1);
+    hotpath::gauge!("code_index_lexical_layout_bytes_total").set(admitted_len);
+    hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(0);
     let mut scanner = LayoutScanner::default();
     let mut file_hasher = expected_file_digest.map(|_| Sha256::new());
     let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
@@ -1584,6 +1593,7 @@ fn scan_layout<R: Read + Seek>(
     })?;
     let mut remaining = read_limit;
     let mut observed = 0u64;
+    let mut next_progress = LAYOUT_PROGRESS_INTERVAL_BYTES;
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
         checkpoint(control)?;
@@ -1624,6 +1634,11 @@ fn scan_layout<R: Read + Seek>(
                 "sealed lexical source length overflowed".to_owned(),
             )
         })?;
+        let admitted_observed = observed.min(admitted_len);
+        if admitted_observed >= next_progress || admitted_observed == admitted_len {
+            hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(admitted_observed);
+            next_progress = admitted_observed.saturating_add(LAYOUT_PROGRESS_INTERVAL_BYTES);
+        }
         remaining -= read_bytes;
     }
     if observed != admitted_len {
@@ -1641,16 +1656,36 @@ fn scan_layout<R: Read + Seek>(
     scanner.finish()
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutKey {
+    StateDigest,
+    Generation,
+    Files,
+    FormatRevision,
+}
+
+impl LayoutKey {
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            b"state_digest" => Some(Self::StateDigest),
+            b"generation" => Some(Self::Generation),
+            b"files" => Some(Self::Files),
+            b"format_revision" => Some(Self::FormatRevision),
+            _ => None,
+        }
+    }
+}
+
 struct LayoutScanner {
     brace_depth: usize,
     bracket_depth: usize,
     in_string: bool,
     escaped: bool,
-    string: Vec<u8>,
+    string: [u8; 128],
+    string_len: usize,
     string_overflowed: bool,
-    completed_string: Option<String>,
-    pending_key: Option<String>,
+    completed_key: Option<LayoutKey>,
+    pending_key: Option<LayoutKey>,
     capture_state_digest: bool,
     state_digest: Option<ManifestDigest>,
     format_revision: Option<u32>,
@@ -1663,6 +1698,42 @@ struct LayoutScanner {
     files_end_offset: Option<u64>,
     file_count: u64,
     maximum_file_bytes: u64,
+    #[cfg(test)]
+    structural_byte_visits: u64,
+    #[cfg(test)]
+    temporary_string_allocations: u64,
+}
+
+impl Default for LayoutScanner {
+    fn default() -> Self {
+        Self {
+            brace_depth: 0,
+            bracket_depth: 0,
+            in_string: false,
+            escaped: false,
+            string: [0; 128],
+            string_len: 0,
+            string_overflowed: false,
+            completed_key: None,
+            pending_key: None,
+            capture_state_digest: false,
+            state_digest: None,
+            format_revision: None,
+            generation_depth: None,
+            generation_hasher: None,
+            generation_digest: None,
+            files_depth: None,
+            current_file_start: None,
+            first_file_offset: None,
+            files_end_offset: None,
+            file_count: 0,
+            maximum_file_bytes: 0,
+            #[cfg(test)]
+            structural_byte_visits: 0,
+            #[cfg(test)]
+            temporary_string_allocations: 0,
+        }
+    }
 }
 
 /// Transition of the generation-payload hash span produced by one observed
@@ -1685,7 +1756,19 @@ impl LayoutScanner {
         base_offset: u64,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let mut active_from = self.generation_hasher.is_some().then_some(0usize);
-        for (index, &byte) in bytes.iter().enumerate() {
+        let mut index = 0usize;
+        while index < bytes.len() {
+            if self.in_string && !self.escaped {
+                let relative_end = first_json_string_control(&bytes[index..]);
+                let end = relative_end.map_or(bytes.len(), |relative| index + relative);
+                if end > index {
+                    self.observe_string_run(&bytes[index..end]);
+                    index = end;
+                    if index == bytes.len() {
+                        break;
+                    }
+                }
+            }
             let offset = u64::try_from(index)
                 .ok()
                 .and_then(|index| base_offset.checked_add(index))
@@ -1694,7 +1777,7 @@ impl LayoutScanner {
                         "sealed lexical source length overflowed".to_owned(),
                     )
                 })?;
-            match self.observe(byte, offset)? {
+            match self.observe(bytes[index], offset)? {
                 GenerationSpanEvent::None => {}
                 GenerationSpanEvent::Opened => active_from = Some(index),
                 GenerationSpanEvent::Closed => {
@@ -1712,6 +1795,7 @@ impl LayoutScanner {
                     self.generation_digest = Some(digest_hasher(hasher)?);
                 }
             }
+            index += 1;
         }
         if let Some(hasher) = self.generation_hasher.as_mut() {
             let start = active_from.ok_or_else(|| {
@@ -1724,19 +1808,46 @@ impl LayoutScanner {
         Ok(())
     }
 
+    /// Consume bytes that cannot alter JSON string state in one bounded step.
+    /// Only a key or the envelope state digest is retained, and both are
+    /// capped at the scanner's existing 128-byte contract.
+    fn observe_string_run(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        {
+            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
+        }
+        let remaining = self.string.len().saturating_sub(self.string_len);
+        let retained = remaining.min(bytes.len());
+        let retained_end = self.string_len + retained;
+        self.string[self.string_len..retained_end].copy_from_slice(&bytes[..retained]);
+        self.string_len = retained_end;
+        if retained < bytes.len() {
+            self.string_overflowed = true;
+        }
+    }
+
+    fn observe_string_byte(&mut self, byte: u8) {
+        if self.string_len < self.string.len() {
+            self.string[self.string_len] = byte;
+            self.string_len += 1;
+        } else {
+            self.string_overflowed = true;
+        }
+    }
+
     fn observe(
         &mut self,
         byte: u8,
         offset: u64,
     ) -> Result<GenerationSpanEvent, CodeIndexProductionErrorV1> {
+        #[cfg(test)]
+        {
+            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
+        }
         if self.in_string {
             if self.escaped {
                 self.escaped = false;
-                if self.string.len() < 128 {
-                    self.string.push(byte);
-                } else {
-                    self.string_overflowed = true;
-                }
+                self.observe_string_byte(byte);
                 return Ok(GenerationSpanEvent::None);
             }
             match byte {
@@ -1744,8 +1855,13 @@ impl LayoutScanner {
                 b'"' => {
                     self.in_string = false;
                     if self.capture_state_digest {
-                        let value =
-                            String::from_utf8(std::mem::take(&mut self.string)).map_err(|_| {
+                        #[cfg(test)]
+                        {
+                            self.temporary_string_allocations =
+                                self.temporary_string_allocations.saturating_add(1);
+                        }
+                        let value = String::from_utf8(self.string[..self.string_len].to_vec())
+                            .map_err(|_| {
                                 CodeIndexProductionErrorV1::Contract(
                                     "sealed generation state digest is not UTF-8".to_owned(),
                                 )
@@ -1756,26 +1872,19 @@ impl LayoutScanner {
                         self.capture_state_digest = false;
                         self.pending_key = None;
                     } else if !self.string_overflowed {
-                        self.completed_string = Some(
-                            String::from_utf8(std::mem::take(&mut self.string)).map_err(|_| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed generation key is not UTF-8".to_owned(),
-                                )
-                            })?,
-                        );
+                        std::str::from_utf8(&self.string[..self.string_len]).map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed generation key is not UTF-8".to_owned(),
+                            )
+                        })?;
+                        self.completed_key = LayoutKey::from_bytes(&self.string[..self.string_len]);
                     } else {
-                        self.string.clear();
-                        self.completed_string = None;
+                        self.completed_key = None;
                     }
+                    self.string_len = 0;
                     self.string_overflowed = false;
                 }
-                _ => {
-                    if self.string.len() < 128 {
-                        self.string.push(byte);
-                    } else {
-                        self.string_overflowed = true;
-                    }
-                }
+                _ => self.observe_string_byte(byte),
             }
             return Ok(GenerationSpanEvent::None);
         }
@@ -1784,14 +1893,14 @@ impl LayoutScanner {
         match byte {
             b'"' => {
                 self.in_string = true;
-                self.string.clear();
+                self.string_len = 0;
                 self.string_overflowed = false;
                 self.capture_state_digest =
-                    self.pending_key.as_deref() == Some("state_digest") && self.brace_depth == 1;
+                    self.pending_key == Some(LayoutKey::StateDigest) && self.brace_depth == 1;
             }
-            b':' => self.pending_key = self.completed_string.take(),
+            b':' => self.pending_key = self.completed_key.take(),
             b'{' => {
-                if self.pending_key.as_deref() == Some("generation") && self.brace_depth == 1 {
+                if self.pending_key == Some(LayoutKey::Generation) && self.brace_depth == 1 {
                     self.generation_depth = Some(self.brace_depth + 1);
                     self.generation_hasher = Some(Sha256::new());
                     event = GenerationSpanEvent::Opened;
@@ -1841,7 +1950,7 @@ impl LayoutScanner {
                 self.pending_key = None;
             }
             b'[' => {
-                if self.pending_key.as_deref() == Some("files")
+                if self.pending_key == Some(LayoutKey::Files)
                     && self.generation_depth == Some(self.brace_depth)
                 {
                     self.files_depth = Some(self.bracket_depth + 1);
@@ -1862,18 +1971,18 @@ impl LayoutScanner {
                 self.pending_key = None;
             }
             b'0'..=b'9'
-                if self.pending_key.as_deref() == Some("format_revision")
+                if self.pending_key == Some(LayoutKey::FormatRevision)
                     && self.generation_depth == Some(self.brace_depth) =>
             {
                 self.format_revision = Some(u32::from(byte - b'0'));
                 self.pending_key = None;
             }
             b',' => {
-                self.completed_string = None;
+                self.completed_key = None;
                 self.pending_key = None;
             }
             byte if byte.is_ascii_whitespace() => {}
-            _ => self.completed_string = None,
+            _ => self.completed_key = None,
         }
         Ok(event)
     }
@@ -1928,8 +2037,46 @@ impl LayoutScanner {
             first_file_offset,
             files_end_offset,
             maximum_file_bytes: self.maximum_file_bytes,
+            #[cfg(test)]
+            structural_byte_visits: self.structural_byte_visits,
+            #[cfg(test)]
+            temporary_string_allocations: self.temporary_string_allocations,
         })
     }
+}
+
+/// Locate the next quote or escape marker with eight-byte candidate probes.
+/// Every input byte is still authenticated by the outer SHA-256 stream; this
+/// helper only avoids interpreting ordinary string payload bytes one by one.
+fn first_json_string_control(bytes: &[u8]) -> Option<usize> {
+    const LOW_BITS: u64 = 0x0101_0101_0101_0101;
+    const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
+    const QUOTES: u64 = u64::from_ne_bytes([b'"'; 8]);
+    const ESCAPES: u64 = u64::from_ne_bytes([b'\\'; 8]);
+
+    fn contains_zero_byte(value: u64) -> bool {
+        value.wrapping_sub(LOW_BITS) & !value & HIGH_BITS != 0
+    }
+
+    let mut chunks = bytes.chunks_exact(8);
+    for (chunk_index, chunk) in chunks.by_ref().enumerate() {
+        let word = u64::from_ne_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        if contains_zero_byte(word ^ QUOTES) || contains_zero_byte(word ^ ESCAPES) {
+            let base = chunk_index * 8;
+            return chunk
+                .iter()
+                .position(|byte| matches!(*byte, b'"' | b'\\'))
+                .map(|relative| base + relative);
+        }
+    }
+    let tail_base = bytes.len() - chunks.remainder().len();
+    chunks
+        .remainder()
+        .iter()
+        .position(|byte| matches!(*byte, b'"' | b'\\'))
+        .map(|relative| tail_base + relative)
 }
 
 fn read_next_file_bytes<R: Read + Seek>(
@@ -2776,6 +2923,198 @@ mod lexical_page_source_tests {
                 .persisted_bytes()
                 .expect("cancelled cursor persists"),
             cursor_before,
+        );
+    }
+
+    #[test]
+    fn large_string_layout_scan_skips_non_structural_bytes() {
+        const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+        let file = format!(r#"{{"payload":"{}"}}"#, "x".repeat(PAYLOAD_BYTES));
+        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
+                .expect("synthetic generation digest is canonical");
+        let sealed = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            state_digest.as_str()
+        )
+        .into_bytes();
+        let first_file_offset = sealed
+            .windows(b"{\"payload\"".len())
+            .position(|window| window == b"{\"payload\"")
+            .expect("synthetic file object is present");
+        let files_end_offset = first_file_offset
+            .checked_add(file.len())
+            .expect("synthetic files end fits usize");
+
+        let layout = scan_layout(
+            &mut Cursor::new(&sealed),
+            u64::try_from(sealed.len()).expect("synthetic seal length fits u64"),
+            None,
+            &ActiveControl,
+        )
+        .expect("synthetic seal has a valid lexical layout");
+
+        assert_eq!(layout.state_digest, state_digest);
+        assert_eq!(layout.format_revision, 6);
+        assert_eq!(layout.file_count, 1);
+        assert_eq!(
+            layout.first_file_offset,
+            u64::try_from(first_file_offset).expect("synthetic file offset fits u64")
+        );
+        assert_eq!(
+            layout.files_end_offset,
+            u64::try_from(files_end_offset).expect("synthetic files end fits u64")
+        );
+        assert_eq!(
+            layout.maximum_file_bytes,
+            u64::try_from(file.len()).expect("synthetic file length fits u64")
+        );
+        assert!(
+            layout.structural_byte_visits < 1024,
+            "an 8 MiB JSON string should require bounded structural visits, observed {}",
+            layout.structural_byte_visits
+        );
+    }
+
+    #[test]
+    fn layout_scan_preserves_digest_and_file_boundaries_across_escaped_syntax() {
+        let first_file = r#"{"payload":"escaped \\\" quote and { [ ] } syntax"}"#;
+        let second_file = format!(r#"{{"payload":"{}"}}"#, "y".repeat(96 * 1024));
+        let generation = format!(
+            r#"{{"format_revision":6,"files":[{first_file},{second_file}],"tail":"done"}}"#
+        );
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
+                .expect("synthetic generation digest is canonical");
+        let sealed = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            state_digest.as_str()
+        )
+        .into_bytes();
+        let file_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&sealed))
+            .expect("synthetic file digest is canonical");
+        let first_file_offset = sealed
+            .windows(first_file.len())
+            .position(|window| window == first_file.as_bytes())
+            .expect("first synthetic file is present");
+        let files_end_offset = first_file_offset + first_file.len() + 1 + second_file.len();
+
+        let layout = scan_layout(
+            &mut Cursor::new(&sealed),
+            u64::try_from(sealed.len()).expect("synthetic seal length fits u64"),
+            Some(&file_digest),
+            &ActiveControl,
+        )
+        .expect("escaped syntax does not alter the authenticated layout");
+
+        assert_eq!(layout.state_digest, state_digest);
+        assert_eq!(layout.file_count, 2);
+        assert_eq!(layout.first_file_offset, first_file_offset as u64);
+        assert_eq!(layout.files_end_offset, files_end_offset as u64);
+        assert_eq!(layout.maximum_file_bytes, second_file.len() as u64);
+    }
+
+    #[test]
+    fn layout_scan_rejects_cancelled_and_corrupted_sources() {
+        let file = format!(r#"{{"payload":"{}"}}"#, "z".repeat(512 * 1024));
+        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
+                .expect("synthetic generation digest is canonical");
+        let sealed = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            state_digest.as_str()
+        )
+        .into_bytes();
+
+        let cancellation = CancelDuringStaging::new();
+        let cancelled = match scan_layout(
+            &mut Cursor::new(&sealed),
+            sealed.len() as u64,
+            None,
+            &cancellation,
+        ) {
+            Ok(_) => panic!("layout opening must honor bounded read checkpoints"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            cancelled,
+            CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+        ));
+
+        let mut corrupted = sealed;
+        let payload = corrupted
+            .windows(b"zzzz".len())
+            .position(|window| window == b"zzzz")
+            .expect("synthetic payload is present");
+        corrupted[payload] = b'x';
+        let error = match scan_layout(
+            &mut Cursor::new(&corrupted),
+            corrupted.len() as u64,
+            None,
+            &ActiveControl,
+        ) {
+            Ok(_) => panic!("payload corruption must fail the exact generation digest"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
+    }
+
+    #[test]
+    fn layout_scanner_retains_a_constant_string_window() {
+        let file = format!(r#"{{"payload":"{}"}}"#, "w".repeat(8 * 1024 * 1024));
+        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
+                .expect("synthetic generation digest is canonical");
+        let sealed = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            state_digest.as_str()
+        )
+        .into_bytes();
+        let mut scanner = LayoutScanner::default();
+        for (chunk_ordinal, chunk) in sealed.chunks(64 * 1024).enumerate() {
+            scanner
+                .observe_slice(chunk, (chunk_ordinal * 64 * 1024) as u64)
+                .expect("bounded chunk scan succeeds");
+            assert!(scanner.string_len <= scanner.string.len());
+            assert!(std::mem::size_of::<LayoutScanner>() < 1024);
+        }
+        let layout = scanner.finish().expect("bounded scanner layout verifies");
+        assert_eq!(layout.file_count, 1);
+        assert_eq!(layout.state_digest, state_digest);
+    }
+
+    #[test]
+    fn layout_scan_does_not_allocate_for_unrelated_short_strings() {
+        let values = (0..50_000)
+            .map(|index| format!(r#""term-{index}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let file = format!(r#"{{"payload":[{values}]}}"#);
+        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
+                .expect("synthetic generation digest is canonical");
+        let sealed = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            state_digest.as_str()
+        )
+        .into_bytes();
+
+        let layout = scan_layout(
+            &mut Cursor::new(&sealed),
+            sealed.len() as u64,
+            None,
+            &ActiveControl,
+        )
+        .expect("short-string-heavy layout verifies");
+
+        assert!(
+            layout.temporary_string_allocations <= 1,
+            "only the authenticated state digest may require a temporary string, observed {} allocations",
+            layout.temporary_string_allocations
         );
     }
 }

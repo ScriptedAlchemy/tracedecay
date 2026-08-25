@@ -543,7 +543,10 @@ impl CodeIndexPublishedGenerationV1 {
                         ))
                     })
                 )?;
-                let expected_digest = json_generation_digest(raw.generation.get().as_bytes())?;
+                let expected_digest = hotpath::measure_block!(
+                    "code_index.sealed_decode.v6_payload_digest",
+                    json_generation_digest(raw.generation.get().as_bytes())
+                )?;
                 if expected_digest != raw.state_digest {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "sealed generation state digest does not match its payload".to_owned(),
@@ -685,7 +688,10 @@ impl CodeIndexPublishedGenerationV1 {
             chunk_policy: OnceLock::new(),
             graph_manifest: OnceLock::new(),
         };
-        generation.validate_fresh()?;
+        hotpath::measure_block!(
+            "code_index.sealed_decode.corpus_validation",
+            generation.validate_fresh()
+        )?;
         Ok(generation)
     }
 

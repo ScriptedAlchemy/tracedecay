@@ -661,6 +661,7 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   completed_lexical_bytes: z.number().int().safe().min(0),
   current_batch_pages: z.number().int().safe().min(0),
   current_batch_payload_bytes: z.number().int().safe().min(0),
+  daemon_incarnation: z.number().int().safe().min(0),
   elapsed_micros: z.number().int().safe().min(0),
   estimated_remaining_seconds: z.number().int().safe().min(0).nullable(),
   files_per_second: z.number().nullable(),

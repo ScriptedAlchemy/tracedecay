@@ -61,8 +61,12 @@ pub struct CodeIndexBuildProgressV1 {
     /// Durable daemon-authority epoch that produced this snapshot.
     ///
     /// This orders snapshots across daemon restarts without relying on wall
-    /// clock time. `progress_epoch` is comparable only within one producer
-    /// incarnation.
+    /// clock time.
+    pub daemon_incarnation: u64,
+    /// Registry-minted scheduler incarnation within one daemon.
+    ///
+    /// A worktree retirement/remount creates a new value. `progress_epoch` is
+    /// comparable only when both incarnation fields match.
     pub producer_incarnation: u64,
     /// Monotonic publication epoch for replacing delayed progress reads.
     pub progress_epoch: u64,
@@ -354,6 +358,7 @@ mod tests {
                     coverage: "complete".to_owned(),
                     progress: Some(CodeIndexBuildProgressV1 {
                         generation_id: "generation.catchup.01".to_owned(),
+                        daemon_incarnation: 3,
                         producer_incarnation: 11,
                         progress_epoch: 7,
                         sealed_source_digest: "sha256:sealed-source-catchup".to_owned(),

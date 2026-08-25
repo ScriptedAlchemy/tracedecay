@@ -2251,6 +2251,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "daemon_incarnation": {
+          "description": "Durable daemon-authority epoch that produced this snapshot.\n\nThis orders snapshots across daemon restarts without relying on wall\nclock time.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "elapsed_micros": {
           "description": "Monotonic elapsed time for this process's active generation build.",
           "format": "uint64",
@@ -2305,7 +2311,7 @@
           "description": "Durable pipeline phase that published this snapshot."
         },
         "producer_incarnation": {
-          "description": "Durable daemon-authority epoch that produced this snapshot.\n\nThis orders snapshots across daemon restarts without relying on wall\nclock time. `progress_epoch` is comparable only within one producer\nincarnation.",
+          "description": "Registry-minted scheduler incarnation within one daemon.\n\nA worktree retirement/remount creates a new value. `progress_epoch` is\ncomparable only when both incarnation fields match.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2335,6 +2341,7 @@
       },
       "required": [
         "generation_id",
+        "daemon_incarnation",
         "producer_incarnation",
         "progress_epoch",
         "sealed_source_digest",

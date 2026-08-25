@@ -18,6 +18,7 @@ mod reader;
 pub use builder::{
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
+    PreparedCodeLexicalArtifactBatchV1,
 };
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,

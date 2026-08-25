@@ -1,5 +1,12 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fs::File;
+use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use rayon::prelude::*;
 use rusqlite::types::ValueRef;
@@ -22,7 +29,7 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use super::format::{
     CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, metadata_digest,
+    decode_padded_receipt, decode_padded_receipt_with_control, encode_field, metadata_digest,
     new_verified_receipt, padded_receipt, verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
@@ -45,6 +52,18 @@ const DOCUMENT_NGRAM_POSTINGS_QUERY: &str =
     "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram";
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor \
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
+const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
+const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_FINALIZATION_MONITOR_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_finalization_monitor_spawn() {
+    FAIL_NEXT_FINALIZATION_MONITOR_SPAWN.with(|failure| failure.set(true));
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalizationSectionV1 {
@@ -106,7 +125,7 @@ impl FinalizationSectionV1 {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
             Self::DocumentIntegrity => {
-                "SELECT document_id, digest FROM document_integrity ORDER BY document_id"
+                "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
             }
             Self::ImportIntegrity => {
                 "SELECT canonical, digest FROM import_integrity ORDER BY canonical"
@@ -142,10 +161,10 @@ impl FinalizationSectionV1 {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
             }
             (Self::DocumentIntegrity, false) => {
-                "SELECT document_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
+                "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
             }
             (Self::DocumentIntegrity, true) => {
-                "SELECT document_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
+                "SELECT document_id, chunk_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
             }
             (Self::ImportIntegrity, false) => {
                 "SELECT canonical, digest FROM import_integrity ORDER BY canonical LIMIT ?1"
@@ -309,15 +328,16 @@ struct PersistedFinalizationStateV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum PersistedFinalizationPhaseV1 {
-    Build,
-    Verify,
+    Statistics,
+    Indexes,
+    Digest,
 }
 
 impl PersistedFinalizationPhaseV1 {
     const fn public(self) -> CodeLexicalArtifactFinalizationPhaseV1 {
         match self {
-            Self::Build => CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
-            Self::Verify => CodeLexicalArtifactFinalizationPhaseV1::Verification,
+            Self::Statistics | Self::Indexes => CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
+            Self::Digest => CodeLexicalArtifactFinalizationPhaseV1::Verification,
         }
     }
 }
@@ -373,11 +393,15 @@ impl FinalizationWakeMetricsV1 {
     fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
         #[cfg(feature = "hotpath")]
         match pass {
-            PersistedFinalizationPhaseV1::Build => {
-                hotpath::gauge!("query.artifact.finalization.digest_pass.build_total").inc(1u64);
+            PersistedFinalizationPhaseV1::Statistics => {
+                hotpath::gauge!("query.artifact.finalization.statistics_wakes_total").inc(1u64);
             }
-            PersistedFinalizationPhaseV1::Verify => {
-                hotpath::gauge!("query.artifact.finalization.digest_pass.verify_total").inc(1u64);
+            PersistedFinalizationPhaseV1::Indexes => {
+                hotpath::gauge!("query.artifact.finalization.index_wakes_total").inc(1u64);
+            }
+            PersistedFinalizationPhaseV1::Digest => {
+                hotpath::gauge!("query.artifact.finalization.digest_pass.authenticated_total")
+                    .inc(1u64);
             }
         };
         #[cfg(not(feature = "hotpath"))]
@@ -492,6 +516,24 @@ pub struct CodeLexicalArtifactBuilderV1 {
     fixed_ledger_charge_bytes: usize,
 }
 
+/// One source-prefix decision whose fresh relational values were prepared
+/// exactly once. Replayed pages contribute to `accepted_prefix` but do not
+/// appear in `prepared_pages` because they require no SQLite mutation.
+pub struct PreparedCodeLexicalArtifactBatchV1 {
+    accepted_prefix: NonZeroUsize,
+    prepared_pages: Vec<PreparedCodeLexicalArtifactPageV1>,
+}
+
+impl PreparedCodeLexicalArtifactBatchV1 {
+    pub fn accepted_prefix(&self) -> NonZeroUsize {
+        self.accepted_prefix
+    }
+
+    pub fn prepared_pages(&self) -> &[PreparedCodeLexicalArtifactPageV1] {
+        &self.prepared_pages
+    }
+}
+
 impl CodeLexicalArtifactBuilderV1 {
     pub fn create(
         path: impl AsRef<Path>,
@@ -571,8 +613,15 @@ impl CodeLexicalArtifactBuilderV1 {
         require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
         verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
-        verify_required_artifact_indexes(&connection)?;
-        read_receipt_with_control(&connection, control)?;
+        let receipt = read_receipt_with_control(&connection, control)?;
+        let finalization = load_finalization_state(&connection)?;
+        if receipt.is_some()
+            || finalization
+                .as_ref()
+                .is_some_and(|state| state.phase == PersistedFinalizationPhaseV1::Digest)
+        {
+            verify_required_artifact_indexes(&connection)?;
+        }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
         crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
@@ -630,6 +679,66 @@ impl CodeLexicalArtifactBuilderV1 {
         page_batch_ledger_charge_bytes(&self.metadata, pages)
     }
 
+    /// Return the largest contiguous input prefix whose complete retained,
+    /// prepared-output, and active-worker scratch claims fit the memory
+    /// authority. Exact prepared-row and SQLite-write prefix selection occurs
+    /// after this bound in [`Self::prepare_admissible_page_prefix`]. Zero is
+    /// truthful when even the first page cannot be prepared within memory.
+    pub fn largest_admissible_page_prefix(
+        &self,
+        pages: &[VerifiedSealedLexicalPageV1],
+    ) -> Result<usize, CodeLexicalArtifactErrorV1> {
+        self.verify_path_binding()?;
+        let worker_limit = tracedecay_code_index::parallelism::indexing_workers();
+        let mut retained = 0usize;
+        let mut prepared = 0usize;
+        let mut active_scratch = 0usize;
+        let mut largest_scratch = BinaryHeap::<Reverse<usize>>::new();
+        for (index, page) in pages.iter().enumerate() {
+            if page.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1 {
+                return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+                    "sealed lexical page retained bytes exceed the {}-byte artifact input bound",
+                    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1
+                )));
+            }
+            retained = retained
+                .checked_add(page.retained_owned_bytes())
+                .ok_or_else(batch_ledger_overflow)?;
+            prepared = prepared
+                .checked_add(page_prepared_retained_upper_bound_bytes(
+                    &self.metadata,
+                    page,
+                )?)
+                .ok_or_else(batch_ledger_overflow)?;
+            let scratch = page_transient_peak_bytes(&self.metadata, page, usize::MAX)?;
+            if largest_scratch.len() < worker_limit {
+                largest_scratch.push(Reverse(scratch));
+                active_scratch = active_scratch
+                    .checked_add(scratch)
+                    .ok_or_else(batch_ledger_overflow)?;
+            } else if let Some(Reverse(smallest)) = largest_scratch.peek().copied()
+                && scratch > smallest
+            {
+                largest_scratch.pop();
+                largest_scratch.push(Reverse(scratch));
+                active_scratch = active_scratch
+                    .checked_sub(smallest)
+                    .and_then(|bytes| bytes.checked_add(scratch))
+                    .ok_or_else(batch_ledger_overflow)?;
+            }
+            let required = self
+                .fixed_ledger_charge_bytes
+                .checked_add(retained)
+                .and_then(|bytes| bytes.checked_add(prepared))
+                .and_then(|bytes| bytes.checked_add(active_scratch))
+                .ok_or_else(batch_ledger_overflow)?;
+            if required > self.memory_budget_bytes {
+                return Ok(index);
+            }
+        }
+        Ok(pages.len())
+    }
+
     /// Append one page through the canonical atomic batch path.
     pub fn append_page(
         &mut self,
@@ -666,6 +775,87 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[VerifiedSealedLexicalPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Vec<PreparedCodeLexicalArtifactPageV1>, CodeLexicalArtifactErrorV1> {
+        let (_, prepared) = self.prepare_pages_inner(pages, control)?;
+        admit_prepared_page_batch(
+            self.fixed_ledger_charge_bytes,
+            self.memory_budget_bytes,
+            &prepared,
+        )?;
+        record_prepared_batch_metrics(&prepared);
+        Ok(prepared)
+    }
+
+    /// Memory-bound an offered source batch, prepare that prefix once, then
+    /// select the largest exact prepared prefix admitted by the row and
+    /// estimated-write authorities. This avoids conservative pre-dedup row
+    /// estimates while preserving every exact post-preparation cap.
+    pub fn prepare_admissible_page_prefix(
+        &self,
+        pages: &[VerifiedSealedLexicalPageV1],
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<PreparedCodeLexicalArtifactBatchV1, CodeLexicalArtifactErrorV1> {
+        if pages.is_empty() {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact page batches must be non-empty".to_owned(),
+            ));
+        }
+        let memory_prefix = self.largest_admissible_page_prefix(pages)?;
+        if memory_prefix == 0 {
+            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
+            admit_page_batch_within_memory_budget(
+                &self.metadata,
+                self.fixed_ledger_charge_bytes,
+                self.memory_budget_bytes,
+                &pages[..1],
+            )?;
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact memory prefix rejected a separately admissible first page"
+                    .to_owned(),
+            ));
+        }
+        let (replayed_prefix, mut prepared) =
+            self.prepare_pages_inner(&pages[..memory_prefix], control)?;
+        let (fresh_prefix, exact_limit) = largest_exact_prepared_prefix(&prepared)?;
+        if fresh_prefix == 0 && !prepared.is_empty() {
+            let exceeded = exact_limit.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact exact prefix rejected a page without a limiting authority"
+                        .to_owned(),
+                )
+            })?;
+            record_batch_prefix_limit(exceeded.limit);
+            return Err(batch_limit(
+                exceeded.limit,
+                exceeded.required,
+                exceeded.maximum,
+            ));
+        }
+        prepared.truncate(fresh_prefix);
+        let accepted = replayed_prefix
+            .checked_add(fresh_prefix)
+            .ok_or_else(batch_ledger_overflow)?;
+        let accepted_prefix = NonZeroUsize::new(accepted).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact admissible source prefix was empty".to_owned(),
+            )
+        })?;
+        if let Some(exceeded) = exact_limit {
+            record_batch_prefix_limit(exceeded.limit);
+        } else if memory_prefix < pages.len() {
+            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
+        }
+        record_prepared_batch_metrics(&prepared);
+        Ok(PreparedCodeLexicalArtifactBatchV1 {
+            accepted_prefix,
+            prepared_pages: prepared,
+        })
+    }
+
+    fn prepare_pages_inner(
+        &self,
+        pages: &[VerifiedSealedLexicalPageV1],
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(usize, Vec<PreparedCodeLexicalArtifactPageV1>), CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
         if pages.is_empty() {
@@ -696,7 +886,7 @@ impl CodeLexicalArtifactBuilderV1 {
         })?;
         let fresh_pages = &pages[fresh_start..];
         if fresh_pages.is_empty() {
-            return Ok(Vec::new());
+            return Ok((fresh_start, Vec::new()));
         }
         let previous_cursors = fresh_pages
             .iter()
@@ -749,13 +939,7 @@ impl CodeLexicalArtifactBuilderV1 {
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-        admit_prepared_page_batch(
-            self.fixed_ledger_charge_bytes,
-            self.memory_budget_bytes,
-            &prepared,
-        )?;
-        record_prepared_batch_metrics(&prepared);
-        Ok(prepared)
+        Ok((fresh_start, prepared))
     }
 
     /// Atomically admit an ordered prepared batch. The values carry no
@@ -809,15 +993,15 @@ impl CodeLexicalArtifactBuilderV1 {
                 })?;
                 record_batch_import_metrics(pages);
                 hotpath::measure_block!(
-                    "query.artifact.batch.postings",
-                    append_prepared_postings(&transaction, pages, control)
-                )?;
-                record_batch_posting_metrics(pages);
-                hotpath::measure_block!(
                     "query.artifact.batch.rows",
                     append_prepared_rows(&transaction, pages, control)
                 )?;
                 record_batch_row_metrics(pages);
+                hotpath::measure_block!(
+                    "query.artifact.batch.postings",
+                    append_prepared_postings(&transaction, pages, control)
+                )?;
+                record_batch_posting_metrics(pages);
                 hotpath::measure_block!("query.artifact.batch.receipts", {
                     for page in pages {
                         insert_prepared_source_page(&transaction, page)?;
@@ -869,9 +1053,12 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 
     /// Advance durable receipt construction without rereading the sealed
-    /// generation. `maximum_work` bounds the number of staged rows (or empty
+    /// generation. Before digest verification, one wake commits exactly one
+    /// set-wise statistics or serving-index statement and SQLite VM progress
+    /// observes cancellation during that statement. During digest
+    /// verification, `maximum_work` bounds the number of staged rows (or empty
     /// section completions) this call may consume.
-    #[hotpath::measure(label = "query.artifact.finalization.digest_verify_wake")]
+    #[hotpath::measure(label = "query.artifact.finalization.advance_wake")]
     pub fn advance_finalization(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -900,15 +1087,24 @@ impl CodeLexicalArtifactBuilderV1 {
         }
 
         if load_finalization_state(&self.connection)?.is_none() {
-            verify_staged_source_tail(&self.connection, source)?;
-            let content_epoch = content_epoch(&self.connection)?;
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
+            verify_staged_source_chain(&transaction, source, control)?;
+            let content_epoch = authenticated_authority_epoch(&transaction, source)?;
+            install_base_freeze(&transaction)?;
             store_finalization_state(
                 &transaction,
                 &PersistedFinalizationStateV1::new(content_epoch, source)?,
             )?;
+            checkpoint(control)?;
             commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            let step = CodeLexicalArtifactFinalizationStepV1::Pending {
+                phase: CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
+                completed_sections: 0,
+                completed_rows: 0,
+            };
+            record_finalization_step(&step);
+            return Ok(step);
         }
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
@@ -926,6 +1122,19 @@ impl CodeLexicalArtifactBuilderV1 {
                 "bounded lexical artifact finalization received a different source receipt"
                     .to_owned(),
             ));
+        }
+        if state.phase != PersistedFinalizationPhaseV1::Digest {
+            advance_pre_digest_work(&transaction, &mut state, control)?;
+            store_finalization_state(&transaction, &state)?;
+            checkpoint(control)?;
+            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            let step = CodeLexicalArtifactFinalizationStepV1::Pending {
+                phase: state.phase.public(),
+                completed_sections: 0,
+                completed_rows: state.completed_rows,
+            };
+            record_finalization_step(&step);
+            return Ok(step);
         }
         let mut remaining_work = maximum_work;
         let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
@@ -950,29 +1159,7 @@ impl CodeLexicalArtifactBuilderV1 {
             }
 
             let section_digest = finish_persisted_section(section_name, &state)?;
-            match state.phase {
-                PersistedFinalizationPhaseV1::Build => {
-                    state.completed_sections.push(section_digest)
-                }
-                PersistedFinalizationPhaseV1::Verify => {
-                    let expected =
-                        state
-                            .completed_sections
-                            .get(section_ordinal)
-                            .ok_or_else(|| {
-                                CodeLexicalArtifactErrorV1::Corrupt(
-                                    "lexical artifact verification has no matching build section"
-                                        .to_owned(),
-                                )
-                            })?;
-                    if &section_digest != expected {
-                        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                            "lexical artifact changed between bounded finalization wakes"
-                                .to_owned(),
-                        ));
-                    }
-                }
-            }
+            state.completed_sections.push(section_digest);
             state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact finalization section ordinal overflowed".to_owned(),
@@ -989,25 +1176,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
 
         if state.section_ordinal < section_count {
-            store_finalization_state(&transaction, &state)?;
-            checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
-            let step = CodeLexicalArtifactFinalizationStepV1::Pending {
-                phase: state.phase.public(),
-                completed_sections: u64::try_from(state.completed_sections.len())
-                    .map_err(contract_number)?,
-                completed_rows: state.completed_rows,
-            };
-            record_finalization_step(&step);
-            return Ok(step);
-        }
-
-        if state.phase == PersistedFinalizationPhaseV1::Build {
-            state.phase = PersistedFinalizationPhaseV1::Verify;
-            state.section_ordinal = 0;
-            state.section_row_count = 0;
-            state.section_last_key = None;
-            state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             commit_finalization_transaction(transaction, &mut transaction_metrics)?;
@@ -1334,6 +1502,72 @@ fn page_batch_ledger_charge_bytes(
         })
 }
 
+#[derive(Default)]
+struct CanonicalBatchLimitLedgerV1 {
+    estimated_rows: usize,
+    estimated_write_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BatchLimitExceededV1 {
+    limit: CodeLexicalArtifactBatchLimitV1,
+    required: usize,
+    maximum: usize,
+}
+
+impl CanonicalBatchLimitLedgerV1 {
+    fn try_admit(
+        &mut self,
+        page_rows: usize,
+        page_write_bytes: usize,
+    ) -> Result<Option<BatchLimitExceededV1>, CodeLexicalArtifactErrorV1> {
+        let estimated_rows = self.estimated_rows.checked_add(page_rows).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact batch row preflight overflowed".to_owned(),
+            )
+        })?;
+        let estimated_write_bytes = self
+            .estimated_write_bytes
+            .checked_add(page_write_bytes)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact batch write preflight overflowed".to_owned(),
+                )
+            })?;
+        if estimated_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1 {
+            return Ok(Some(BatchLimitExceededV1 {
+                limit: CodeLexicalArtifactBatchLimitV1::PreparedRows,
+                required: estimated_rows,
+                maximum: CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1,
+            }));
+        }
+        if estimated_write_bytes > CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1 {
+            return Ok(Some(BatchLimitExceededV1 {
+                limit: CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes,
+                required: estimated_write_bytes,
+                maximum: CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
+            }));
+        }
+        self.estimated_rows = estimated_rows;
+        self.estimated_write_bytes = estimated_write_bytes;
+        Ok(None)
+    }
+}
+
+fn largest_exact_prepared_prefix(
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<(usize, Option<BatchLimitExceededV1>), CodeLexicalArtifactErrorV1> {
+    let mut ledger = CanonicalBatchLimitLedgerV1::default();
+    for (index, page) in pages.iter().enumerate() {
+        if let Some(exceeded) =
+            ledger.try_admit(page.estimated_write_rows(), page.estimated_write_bytes())?
+        {
+            return Ok((index, Some(exceeded)));
+        }
+    }
+    Ok((pages.len(), None))
+}
+
 /// Refuse a batch unless its retained source pages, all prepared outputs, and
 /// one scratch peak per active worker fit together. Admission runs before the
 /// staging transaction, so refusal leaves builder and source progress intact.
@@ -1472,6 +1706,12 @@ fn batch_limit(
         required,
         maximum,
     }
+}
+
+fn batch_ledger_overflow() -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Contract(
+        "lexical artifact batch ledger charge overflowed".to_owned(),
+    )
 }
 
 fn prepare_page_batch_admission(
@@ -1629,7 +1869,7 @@ fn projected_chunk_prepared_retained_upper_bound_bytes(
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let transient = projected_chunk_transient_bytes(metadata, admitted)?;
     let text_bytes = admitted.chunk().sanitized_text.as_str().len();
-    let normalized_text_bytes = text_bytes.saturating_mul(3);
+    let normalized_text_bytes = text_bytes;
     let (_, normalized_scratch) = document_ngram_scratch(normalized_text_bytes)?;
     let (_, raw_scratch) = document_ngram_scratch(text_bytes)?;
     // Preparation retains `(kind, ngram)` tuples, not the `u32` scratch
@@ -1727,9 +1967,10 @@ fn projected_chunk_transient_bytes(
                 chunk.anchor.file_occurrence_id
             ))
         })?;
-    // Normalization can expand one Unicode scalar to at most three scalars;
-    // JSON can then escape each byte. This bound intentionally charges both
-    // cloned and moved ownership before append allocates either representation.
+    // Canonical lexical normalization is ASCII lowercasing, so it preserves
+    // the exact UTF-8 byte length. JSON escaping is charged separately below.
+    // The bound intentionally charges both cloned and moved ownership before
+    // append allocates either representation.
     let text_bytes = chunk.sanitized_text.as_str().len();
     let subtoken_bytes = chunk
         .subtokens
@@ -1738,12 +1979,12 @@ fn projected_chunk_transient_bytes(
     let exact_bytes = chunk.exact_terms.iter().fold(0usize, |total, term| {
         total.saturating_add(term.canonical_bytes().len())
     });
-    let normalized_text_bytes = text_bytes.saturating_mul(3);
+    let normalized_text_bytes = text_bytes;
     let field_text_bytes = normalized_text_bytes
-        .saturating_add(logical_path.len().saturating_mul(3))
-        .saturating_add(subtoken_bytes.saturating_mul(3))
-        .saturating_add(exact_bytes.saturating_mul(6));
-    let field_entries = text_bytes
+        .saturating_add(logical_path.len())
+        .saturating_add(subtoken_bytes)
+        .saturating_add(exact_bytes.saturating_mul(2));
+    let field_entries = lexical_token_count(chunk.sanitized_text.as_str())
         .saturating_add(1)
         .saturating_add(chunk.subtokens.len())
         .saturating_add(chunk.exact_terms.len().saturating_mul(2));
@@ -1771,6 +2012,20 @@ fn projected_chunk_transient_bytes(
         .saturating_add(raw_scratch)
         .saturating_add(row_bytes)
         .saturating_add(serialized_bytes))
+}
+
+fn lexical_token_count(value: &str) -> usize {
+    let mut count = 0usize;
+    let mut inside_token = false;
+    for character in value.chars() {
+        let accepted =
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.' | '/');
+        if accepted && !inside_token {
+            count = count.saturating_add(1);
+        }
+        inside_token = accepted;
+    }
+    count
 }
 
 fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
@@ -1936,24 +2191,24 @@ fn append_prepared_postings(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut term_statement = transaction
+        .prepare_cached(
+            "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(sqlite_error)?;
+    let mut exact_statement = transaction
+        .prepare_cached(
+            "INSERT OR IGNORE INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(sqlite_error)?;
+    let mut ngram_statement = transaction
+        .prepare_cached("INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, ?3)")
+        .map_err(sqlite_error)?;
     for page in pages {
         for document in &page.documents {
             checkpoint(control)?;
-            for (field, total_length) in &document.field_stats {
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO field_stats(field, total_length) VALUES (?1, ?2) ON CONFLICT(field) DO UPDATE SET total_length = total_length + excluded.total_length",
-                    )
-                    .map_err(sqlite_error)?
-                    .execute(params![field.as_str(), total_length])
-                    .map_err(sqlite_error)?;
-            }
             for posting in &document.term_postings {
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
-                    )
-                    .map_err(sqlite_error)?
+                term_statement
                     .execute(params![
                         posting.field.as_str(),
                         posting.term.as_str(),
@@ -1961,36 +2216,18 @@ fn append_prepared_postings(
                         posting.frequency
                     ])
                     .map_err(sqlite_error)?;
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO term_stats(field, term, document_frequency) VALUES (?1, ?2, 1) ON CONFLICT(field, term) DO UPDATE SET document_frequency = document_frequency + 1",
-                    )
-                    .map_err(sqlite_error)?
-                    .execute(params![posting.field.as_str(), posting.term.as_str()])
-                    .map_err(sqlite_error)?;
-                if posting.vocabulary {
-                    transaction
-                        .prepare_cached("INSERT OR IGNORE INTO vocabulary(term) VALUES (?1)")
-                        .map_err(sqlite_error)?
-                        .execute([&posting.term])
-                        .map_err(sqlite_error)?;
-                }
             }
             for (field, term) in &document.exact_postings {
-                transaction
-                    .prepare_cached(
-                        "INSERT OR IGNORE INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
-                    )
-                    .map_err(sqlite_error)?
-                    .execute(params![field.as_str(), term.as_slice(), document.document_id])
+                exact_statement
+                    .execute(params![
+                        field.as_str(),
+                        term.as_slice(),
+                        document.document_id
+                    ])
                     .map_err(sqlite_error)?;
             }
             for (kind, ngram) in &document.ngram_postings {
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, ?3)",
-                    )
-                    .map_err(sqlite_error)?
+                ngram_statement
                     .execute(params![kind, ngram, document.document_id])
                     .map_err(sqlite_error)?;
             }
@@ -2004,24 +2241,30 @@ fn append_prepared_rows(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut row_statement = transaction
+        .prepare_cached("INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, ?2, ?3)")
+        .map_err(sqlite_error)?;
+    let mut integrity_statement = transaction
+        .prepare_cached(
+            "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(sqlite_error)?;
     for page in pages {
         for document in &page.documents {
             checkpoint(control)?;
-            transaction
-                .execute(
-                    "INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, ?2, ?3)",
-                    params![
-                        document.document_id,
-                        document.chunk_id.as_str(),
-                        document.row.as_slice()
-                    ],
-                )
+            row_statement
+                .execute(params![
+                    document.document_id,
+                    document.chunk_id.as_str(),
+                    document.row.as_slice()
+                ])
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-            transaction
-                .execute(
-                    "INSERT INTO document_integrity(document_id, digest) VALUES (?1, ?2)",
-                    params![document.document_id, document.integrity_digest.as_str()],
-                )
+            integrity_statement
+                .execute(params![
+                    document.document_id,
+                    document.chunk_id.as_str(),
+                    document.integrity_digest.as_str()
+                ])
                 .map_err(sqlite_error)?;
         }
     }
@@ -2110,6 +2353,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             -- pre-seal mutation cannot attest itself without rereading source.
             CREATE TABLE document_integrity (
                 document_id INTEGER PRIMARY KEY,
+                chunk_id TEXT NOT NULL,
                 digest TEXT NOT NULL
             );
             CREATE TABLE import_integrity (
@@ -2122,7 +2366,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TABLE rows (
                 document_id INTEGER PRIMARY KEY,
-                chunk_id TEXT NOT NULL UNIQUE,
+                chunk_id TEXT NOT NULL,
                 row BLOB NOT NULL
             );
             CREATE TABLE term_postings (
@@ -2155,48 +2399,368 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 PRIMARY KEY(kind, ngram, document_id)
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
-            CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id);
-            CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency);
-            CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency);
-            CREATE INDEX term_stats_by_term ON term_stats(term, field);
-            CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term);
-            CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram);
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_source_pages_update AFTER UPDATE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_source_pages_delete AFTER DELETE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_document_integrity_insert AFTER INSERT ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_document_integrity_update AFTER UPDATE ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_document_integrity_delete AFTER DELETE ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_import_integrity_insert AFTER INSERT ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_import_integrity_update AFTER UPDATE ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_import_integrity_delete AFTER DELETE ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_import_evidence_insert AFTER INSERT ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_import_evidence_update AFTER UPDATE ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_import_evidence_delete AFTER DELETE ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_rows_insert AFTER INSERT ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_rows_update AFTER UPDATE ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_rows_delete AFTER DELETE ON rows BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_postings_insert AFTER INSERT ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_postings_update AFTER UPDATE ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_postings_delete AFTER DELETE ON term_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_stats_insert AFTER INSERT ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_stats_update AFTER UPDATE ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_term_stats_delete AFTER DELETE ON term_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_field_stats_insert AFTER INSERT ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_field_stats_update AFTER UPDATE ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_field_stats_delete AFTER DELETE ON field_stats BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_exact_postings_insert AFTER INSERT ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_exact_postings_update AFTER UPDATE ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_exact_postings_delete AFTER DELETE ON exact_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_ngram_postings_insert AFTER INSERT ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_ngram_postings_update AFTER UPDATE ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_ngram_postings_delete AFTER DELETE ON ngram_postings BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_vocabulary_insert AFTER INSERT ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_vocabulary_update AFTER UPDATE ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_vocabulary_delete AFTER DELETE ON vocabulary BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
+            CREATE TRIGGER immutable_source_pages_update BEFORE UPDATE ON source_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END;
+            CREATE TRIGGER immutable_source_pages_delete BEFORE DELETE ON source_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END;
+            CREATE TRIGGER immutable_document_integrity_update BEFORE UPDATE ON document_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical document integrity'); END;
+            CREATE TRIGGER immutable_document_integrity_delete BEFORE DELETE ON document_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical document integrity'); END;
+            CREATE TRIGGER immutable_import_integrity_update BEFORE UPDATE ON import_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical import integrity'); END;
+            CREATE TRIGGER immutable_import_integrity_delete BEFORE DELETE ON import_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical import integrity'); END;
+            CREATE TRIGGER immutable_import_evidence_update BEFORE UPDATE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
+            CREATE TRIGGER immutable_import_evidence_delete BEFORE DELETE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
             ",
         )
         .map_err(sqlite_error)
+}
+
+fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
+    transaction
+        .execute_batch(
+            "
+            CREATE TRIGGER frozen_source_pages_insert BEFORE INSERT ON source_pages BEGIN SELECT RAISE(ABORT, 'frozen lexical source pages'); END;
+            CREATE TRIGGER frozen_document_integrity_insert BEFORE INSERT ON document_integrity BEGIN SELECT RAISE(ABORT, 'frozen lexical document integrity'); END;
+            CREATE TRIGGER frozen_import_integrity_insert BEFORE INSERT ON import_integrity BEGIN SELECT RAISE(ABORT, 'frozen lexical import integrity'); END;
+            CREATE TRIGGER frozen_import_evidence_insert BEFORE INSERT ON import_evidence BEGIN SELECT RAISE(ABORT, 'frozen lexical import evidence'); END;
+            CREATE TRIGGER frozen_rows_insert BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
+            CREATE TRIGGER frozen_rows_update BEFORE UPDATE ON rows BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
+            CREATE TRIGGER frozen_rows_delete BEFORE DELETE ON rows BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
+            CREATE TRIGGER frozen_term_postings_insert BEFORE INSERT ON term_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical term postings'); END;
+            CREATE TRIGGER frozen_term_postings_update BEFORE UPDATE ON term_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical term postings'); END;
+            CREATE TRIGGER frozen_term_postings_delete BEFORE DELETE ON term_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical term postings'); END;
+            CREATE TRIGGER frozen_exact_postings_insert BEFORE INSERT ON exact_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical exact postings'); END;
+            CREATE TRIGGER frozen_exact_postings_update BEFORE UPDATE ON exact_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical exact postings'); END;
+            CREATE TRIGGER frozen_exact_postings_delete BEFORE DELETE ON exact_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical exact postings'); END;
+            CREATE TRIGGER frozen_ngram_postings_insert BEFORE INSERT ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
+            CREATE TRIGGER frozen_ngram_postings_update BEFORE UPDATE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
+            CREATE TRIGGER frozen_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
+            ",
+        )
+        .map_err(sqlite_error)
+}
+
+fn authenticated_authority_epoch(
+    transaction: &Transaction<'_>,
+    source: &VerifiedSealedLexicalSourceReceiptV1,
+) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    let (pages, documents, import_integrity, import_evidence): (i64, i64, i64, i64) = transaction
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM source_pages), (SELECT COUNT(*) FROM document_integrity), (SELECT COUNT(*) FROM import_integrity), (SELECT COUNT(*) FROM import_evidence)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(sqlite_error)?;
+    let expected_epoch = pages
+        .checked_add(documents)
+        .and_then(|count| count.checked_add(import_integrity))
+        .and_then(|count| count.checked_add(import_evidence))
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact authority row count overflowed".to_owned(),
+            )
+        })?;
+    let actual_epoch = content_epoch(transaction)?;
+    if actual_epoch != expected_epoch
+        || u64::try_from(pages).ok() != Some(source.page_count())
+        || u64::try_from(documents).ok() != Some(source.total_chunks())
+        || u64::try_from(import_integrity).ok() != Some(source.total_imports())
+        || import_integrity != import_evidence
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact authenticated authority disagrees with its source receipt".to_owned(),
+        ));
+    }
+    let orphaned: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM rows AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
+                UNION ALL SELECT 1 FROM term_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
+                UNION ALL SELECT 1 FROM exact_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
+                UNION ALL SELECT 1 FROM ngram_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    let mismatched_rows: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM document_integrity AS authority LEFT JOIN rows AS content USING(document_id) WHERE content.document_id IS NULL OR content.chunk_id != authority.chunk_id)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if orphaned != 0 || mismatched_rows != 0 {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact base rows are not covered by authenticated document authority"
+                .to_owned(),
+        ));
+    }
+    Ok(actual_epoch)
+}
+
+fn advance_pre_digest_work(
+    transaction: &Transaction<'_>,
+    state: &mut PersistedFinalizationStateV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    match state.phase {
+        PersistedFinalizationPhaseV1::Statistics => {
+            with_cancellable_sqlite_statement(transaction, control, || {
+                derive_statistics_step(transaction, state.section_ordinal)?;
+                Ok(())
+            })?;
+            state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact statistics step overflowed".to_owned(),
+                )
+            })?;
+            if state.section_ordinal == 3 {
+                state.phase = PersistedFinalizationPhaseV1::Indexes;
+                state.section_ordinal = 0;
+            }
+        }
+        PersistedFinalizationPhaseV1::Indexes => {
+            with_cancellable_sqlite_statement(transaction, control, || {
+                build_serving_index_step(transaction, state.section_ordinal)?;
+                Ok(())
+            })?;
+            state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact serving-index step overflowed".to_owned(),
+                )
+            })?;
+            if state.section_ordinal == 7 {
+                verify_required_artifact_indexes(transaction)?;
+                state.phase = PersistedFinalizationPhaseV1::Digest;
+                state.section_ordinal = 0;
+                state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
+            }
+        }
+        PersistedFinalizationPhaseV1::Digest => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact selected pre-digest work after entering digest verification"
+                    .to_owned(),
+            ));
+        }
+    }
+    checkpoint(control)?;
+    Ok(())
+}
+
+fn with_cancellable_sqlite_statement<T>(
+    transaction: &Transaction<'_>,
+    control: &dyn CodeIndexExecutionControlV1,
+    operation: impl FnOnce() -> Result<T, CodeLexicalArtifactErrorV1>,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let interruption = Arc::new(AtomicU8::new(0));
+    let finished = Arc::new(AtomicBool::new(false));
+    let progress_interruption = Arc::clone(&interruption);
+    transaction
+        .progress_handler(
+            FINALIZATION_PROGRESS_INTERVAL_OPS,
+            Some(move || progress_interruption.load(Ordering::Acquire) != 0),
+        )
+        .map_err(sqlite_error)?;
+
+    let monitored = std::thread::scope(|scope| {
+        let monitor_interruption = Arc::clone(&interruption);
+        let monitor_finished = Arc::clone(&finished);
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(0);
+        let monitor = spawn_finalization_control_monitor(scope, move || {
+            let mut ready = false;
+            loop {
+                let reason = if control.is_cancelled() {
+                    1
+                } else if control.is_deadline_exceeded() {
+                    2
+                } else {
+                    0
+                };
+                if reason != 0 {
+                    monitor_interruption.store(reason, Ordering::Release);
+                }
+                if !ready {
+                    let _ = ready_sender.send(());
+                    ready = true;
+                }
+                if reason != 0 || monitor_finished.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(FINALIZATION_CONTROL_POLL_INTERVAL);
+            }
+        })?;
+        let readiness = ready_receiver.recv();
+        let outcome = readiness
+            .as_ref()
+            .ok()
+            .map(|_| catch_unwind(AssertUnwindSafe(operation)));
+        finished.store(true, Ordering::Release);
+        Ok::<_, std::io::Error>((readiness, outcome, monitor.join()))
+    });
+    let clear = transaction
+        .progress_handler(FINALIZATION_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>)
+        .map_err(sqlite_error);
+    clear?;
+
+    let (readiness, outcome, monitor) = monitored.map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact finalization cancellation monitor could not start: {error}"
+        ))
+    })?;
+    if let Err(payload) = monitor {
+        return Err(CodeLexicalArtifactErrorV1::Io(
+            tracedecay_code_index::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                0, &*payload,
+            )
+            .to_string(),
+        ));
+    }
+    readiness.map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact finalization cancellation monitor stopped before readiness: {error}"
+        ))
+    })?;
+
+    let outcome = match outcome.ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Io(
+            "lexical artifact finalization cancellation monitor produced no operation outcome"
+                .to_owned(),
+        )
+    })? {
+        Ok(outcome) => outcome,
+        Err(payload) => resume_unwind(payload),
+    };
+    match interruption.load(Ordering::Acquire) {
+        1 => Err(CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+        )),
+        2 => Err(CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        )),
+        _ => outcome,
+    }
+}
+
+fn spawn_finalization_control_monitor<'scope, 'environment>(
+    scope: &'scope std::thread::Scope<'scope, 'environment>,
+    monitor: impl FnOnce() + Send + 'scope,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, ()>>
+where
+    'environment: 'scope,
+{
+    #[cfg(test)]
+    if FAIL_NEXT_FINALIZATION_MONITOR_SPAWN.with(std::cell::Cell::take) {
+        return Err(std::io::Error::other(
+            "injected finalization monitor spawn failure",
+        ));
+    }
+    std::thread::Builder::new()
+        .name("tracedecay-lexical-finalization-control".to_owned())
+        .spawn_scoped(scope, monitor)
+}
+
+fn derive_statistics_step(
+    transaction: &Transaction<'_>,
+    ordinal: u64,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    match ordinal {
+        0 => hotpath::measure_block!("query.artifact.finalization.derive_field_stats", {
+            transaction.execute_batch(
+                "INSERT INTO field_stats(field, total_length) SELECT field, SUM(frequency) FROM term_postings GROUP BY field;
+                 CREATE TRIGGER frozen_field_stats_insert BEFORE INSERT ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
+                 CREATE TRIGGER frozen_field_stats_update BEFORE UPDATE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
+                 CREATE TRIGGER frozen_field_stats_delete BEFORE DELETE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;",
+            )
+        }),
+        1 => hotpath::measure_block!("query.artifact.finalization.derive_term_stats", {
+            transaction.execute_batch(
+                "INSERT INTO term_stats(field, term, document_frequency) SELECT field, term, COUNT(*) FROM term_postings GROUP BY field, term;
+                 CREATE TRIGGER frozen_term_stats_insert BEFORE INSERT ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;
+                 CREATE TRIGGER frozen_term_stats_update BEFORE UPDATE ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;
+                 CREATE TRIGGER frozen_term_stats_delete BEFORE DELETE ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;",
+            )
+        }),
+        2 => hotpath::measure_block!("query.artifact.finalization.derive_vocabulary", {
+            let subtoken = encode_field(LexicalFieldV1::Subtoken)?;
+            transaction
+                .execute(
+                    "INSERT INTO vocabulary(term) SELECT DISTINCT term FROM term_postings WHERE field != ?1",
+                    [subtoken],
+                )
+                .and_then(|_| {
+                    transaction.execute_batch(
+                        "CREATE TRIGGER frozen_vocabulary_insert BEFORE INSERT ON vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical vocabulary'); END;
+                         CREATE TRIGGER frozen_vocabulary_update BEFORE UPDATE ON vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical vocabulary'); END;
+                         CREATE TRIGGER frozen_vocabulary_delete BEFORE DELETE ON vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical vocabulary'); END;",
+                    )
+                })
+        }),
+        _ => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact selected an unknown statistics step".to_owned(),
+            ));
+        }
+    }
+    .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn build_serving_index_step(
+    transaction: &Transaction<'_>,
+    ordinal: u64,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    match ordinal {
+        0 => hotpath::measure_block!(
+            "query.artifact.finalization.index.rows_by_chunk",
+            transaction.execute_batch("CREATE UNIQUE INDEX rows_by_chunk ON rows(chunk_id)")
+        ),
+        1 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id)",
+            )
+        ),
+        2 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency)",
+            )
+        ),
+        3 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_postings_by_document_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency)",
+            )
+        ),
+        4 => hotpath::measure_block!(
+            "query.artifact.finalization.index.term_stats_by_term",
+            transaction.execute_batch(
+                "CREATE INDEX term_stats_by_term ON term_stats(term, field)",
+            )
+        ),
+        5 => hotpath::measure_block!(
+            "query.artifact.finalization.index.exact_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
+            )
+        ),
+        6 => hotpath::measure_block!(
+            "query.artifact.finalization.index.ngram_postings_by_document",
+            transaction.execute_batch(
+                "CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram)",
+            )
+        ),
+        _ => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact selected an unknown serving-index step".to_owned(),
+            ));
+        }
+    }
+    .map_err(sqlite_error)
 }
 
 impl PersistedFinalizationStateV1 {
@@ -2210,7 +2774,7 @@ impl PersistedFinalizationStateV1 {
             ));
         }
         Ok(Self {
-            phase: PersistedFinalizationPhaseV1::Build,
+            phase: PersistedFinalizationPhaseV1::Statistics,
             section_ordinal: 0,
             section_row_count: 0,
             section_last_key: None,
@@ -2333,13 +2897,17 @@ fn validate_finalization_state(
     state: &PersistedFinalizationStateV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
-    let completed_section_count = match state.phase {
-        PersistedFinalizationPhaseV1::Build => {
-            usize::try_from(state.section_ordinal).map_err(contract_number)?
-        }
-        PersistedFinalizationPhaseV1::Verify => SECTION_NAMES.len(),
+    let completed_section_count = if state.phase == PersistedFinalizationPhaseV1::Digest {
+        usize::try_from(state.section_ordinal).map_err(contract_number)?
+    } else {
+        0
     };
-    if state.section_ordinal > section_count
+    let maximum_ordinal = match state.phase {
+        PersistedFinalizationPhaseV1::Statistics => 3,
+        PersistedFinalizationPhaseV1::Indexes => 7,
+        PersistedFinalizationPhaseV1::Digest => section_count,
+    };
+    if state.section_ordinal > maximum_ordinal
         || state.completed_sections.len() != completed_section_count
         || state.completed_sections.len() > SECTION_NAMES.len()
         || state.section_accumulator.len() != 32
@@ -2360,6 +2928,11 @@ fn validate_finalization_state(
         ));
     }
     if let Some(key) = &state.section_last_key {
+        if state.phase != PersistedFinalizationPhaseV1::Digest {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "persisted lexical artifact pre-digest state has a row key".to_owned(),
+            ));
+        }
         let section_ordinal = usize::try_from(state.section_ordinal).map_err(contract_number)?;
         let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
         if !key.matches_section(section) {
@@ -2614,7 +3187,13 @@ fn verify_integrity_row(
     row: &rusqlite::Row<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let expected: String = row.get(1).map_err(sqlite_error)?;
+    let expected: String = row
+        .get(if section == FinalizationSectionV1::DocumentIntegrity {
+            2
+        } else {
+            1
+        })
+        .map_err(sqlite_error)?;
     let actual = match section {
         FinalizationSectionV1::DocumentIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
             ValueRef::Integer(document) if document >= 0 => {
@@ -2744,28 +3323,79 @@ fn finish_section(
 /// counting/replaying every staged page on each bounded finalization wake.
 /// The final section receipts validate the full source-page cardinality before
 /// a sealed artifact is published.
-fn verify_staged_source_tail(
+fn verify_staged_source_chain(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let cursor = match source.page_count().checked_sub(1) {
-        Some(page_ordinal) => connection
-            .query_row(
-                "SELECT next_cursor FROM source_pages WHERE page_ordinal = ?1",
-                [i64::try_from(page_ordinal).map_err(contract_number)?],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(sqlite_error)?
-            .as_deref()
-            .map(decode_cursor)
-            .transpose()?,
-        None => None,
-    };
+    let mut statement = connection
+        .prepare(
+            "SELECT page_ordinal, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal",
+        )
+        .map_err(sqlite_error)?;
+    let mut rows = statement.query([]).map_err(sqlite_error)?;
+    let mut expected_ordinal = 0u64;
+    let mut chunks = 0u64;
+    let mut payload_bytes = 0u64;
+    let mut imports = 0u64;
+    let mut import_payload_bytes = 0u64;
+    let mut terminal = None;
+    while let Some(row) = rows.next().map_err(sqlite_error)? {
+        checkpoint(control)?;
+        let ordinal =
+            u64::try_from(row.get::<_, i64>(0).map_err(sqlite_error)?).map_err(contract_number)?;
+        let cumulative_digest: String = row.get(1).map_err(sqlite_error)?;
+        let page_chunks =
+            u64::try_from(row.get::<_, i64>(2).map_err(sqlite_error)?).map_err(contract_number)?;
+        let page_payload =
+            u64::try_from(row.get::<_, i64>(3).map_err(sqlite_error)?).map_err(contract_number)?;
+        let page_imports =
+            u64::try_from(row.get::<_, i64>(4).map_err(sqlite_error)?).map_err(contract_number)?;
+        let page_import_payload =
+            u64::try_from(row.get::<_, i64>(5).map_err(sqlite_error)?).map_err(contract_number)?;
+        let import_digest: String = row.get(6).map_err(sqlite_error)?;
+        let cursor_bytes: Vec<u8> = row.get(7).map_err(sqlite_error)?;
+        let cursor = decode_cursor(&cursor_bytes)?;
+        chunks = chunks
+            .checked_add(page_chunks)
+            .ok_or_else(source_chain_overflow)?;
+        payload_bytes = payload_bytes
+            .checked_add(page_payload)
+            .ok_or_else(source_chain_overflow)?;
+        imports = imports
+            .checked_add(page_imports)
+            .ok_or_else(source_chain_overflow)?;
+        import_payload_bytes = import_payload_bytes
+            .checked_add(page_import_payload)
+            .ok_or_else(source_chain_overflow)?;
+        if ordinal != expected_ordinal
+            || cursor.next_page_ordinal() != expected_ordinal + 1
+            || cursor.emitted_chunks() != chunks
+            || cursor.emitted_payload_bytes() != payload_bytes
+            || cursor.emitted_imports() != imports
+            || cursor.emitted_import_payload_bytes() != import_payload_bytes
+            || cursor.cumulative_digest().as_str() != cumulative_digest
+            || cursor.import_dictionary_digest().as_str() != import_digest
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact source-page cursor chain is inconsistent".to_owned(),
+            ));
+        }
+        expected_ordinal = expected_ordinal
+            .checked_add(1)
+            .ok_or_else(source_chain_overflow)?;
+        terminal = Some(cursor);
+    }
     source
-        .verify_completion(cursor.as_ref())
+        .verify_completion(terminal.as_ref())
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
     Ok(())
+}
+
+fn source_chain_overflow() -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Corrupt(
+        "lexical artifact source-page chain counter overflowed".to_owned(),
+    )
 }
 
 fn verify_sealed_receipt_header(
@@ -2818,13 +3448,13 @@ fn document_integrity_digest(
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v1\0");
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v2\0");
     hasher.update(document.to_le_bytes());
     let row_count = hash_document_table(
         transaction,
         &mut hasher,
         "row",
-        "SELECT row FROM rows WHERE document_id = ?1",
+        "SELECT chunk_id, row FROM rows WHERE document_id = ?1",
         document,
         control,
     )?;
@@ -3324,6 +3954,27 @@ fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 }
 
 #[cfg(feature = "hotpath")]
+fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
+    match limit {
+        CodeLexicalArtifactBatchLimitV1::Memory => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.memory_total").inc(1u64);
+        }
+        CodeLexicalArtifactBatchLimitV1::PreparedRows => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total").inc(1u64);
+        }
+        CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
+            hotpath::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
+                .inc(1u64);
+        }
+    }
+}
+
+#[cfg(not(feature = "hotpath"))]
+fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
+    let _ = limit;
+}
+
+#[cfg(feature = "hotpath")]
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
     hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
     hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
@@ -3470,6 +4121,54 @@ mod tests {
     }
 
     #[test]
+    fn canonical_batch_limits_select_a_multi_page_prefix_without_stalling() {
+        let page_bounds = [
+            (700_000usize, 80 * 1024 * 1024usize),
+            (700_000, 80 * 1024 * 1024),
+            (700_000, 80 * 1024 * 1024),
+        ];
+        let mut ledger = CanonicalBatchLimitLedgerV1::default();
+        let selected = page_bounds
+            .into_iter()
+            .take_while(|(rows, bytes)| {
+                ledger
+                    .try_admit(*rows, *bytes)
+                    .expect("extend canonical limit ledger")
+                    .is_none()
+            })
+            .count();
+        assert_eq!(
+            selected, 2,
+            "two pages fit both canonical caps and the third must remain for the next wake"
+        );
+    }
+
+    #[test]
+    fn finalization_monitor_spawn_failure_is_typed_and_leaves_sqlite_reusable() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        let transaction = connection.transaction().expect("start transaction");
+        fail_next_finalization_monitor_spawn();
+        let operation_ran = AtomicBool::new(false);
+        let error = with_cancellable_sqlite_statement(&transaction, &ActiveControl, || {
+            operation_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("injected monitor spawn failure must be typed");
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Io(_)));
+        assert!(
+            !operation_ran.load(Ordering::SeqCst),
+            "SQLite work must not start without its cancellation monitor"
+        );
+        with_cancellable_sqlite_statement(&transaction, &ActiveControl, || {
+            transaction
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .map_err(sqlite_error)
+        })
+        .expect("progress handler is cleared after spawn failure");
+    }
+
+    #[test]
     fn persisted_progress_tail_seeks_latest_maintained_cursor_without_full_scan() {
         let connection = Connection::open_in_memory().expect("open progress database");
         connection
@@ -3537,6 +4236,14 @@ mod tests {
                 .expect("seed ngram posting");
         }
         transaction.commit().expect("commit seed transaction");
+        let transaction = connection
+            .transaction()
+            .expect("start index-build transaction");
+        for ordinal in [2, 5, 6] {
+            build_serving_index_step(&transaction, ordinal)
+                .expect("build document integrity index");
+        }
+        transaction.commit().expect("commit integrity index");
 
         for query in [
             DOCUMENT_TERM_POSTINGS_QUERY,
@@ -3583,17 +4290,18 @@ mod tests {
                 )
                 .expect("seed term posting");
         }
+        build_serving_index_step(&transaction, 2).expect("build document integrity index");
         let digest = document_integrity_digest(&transaction, 0, &ActiveControl)
             .expect("derive append receipt");
         transaction
             .execute(
-                "INSERT INTO document_integrity(document_id, digest) VALUES (0, ?1)",
+                "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (0, 'chunk', ?1)",
                 [digest.as_str()],
             )
             .expect("seed document receipt");
 
         let mut state = PersistedFinalizationStateV1 {
-            phase: PersistedFinalizationPhaseV1::Build,
+            phase: PersistedFinalizationPhaseV1::Digest,
             section_ordinal: 1,
             section_row_count: 0,
             section_last_key: None,
@@ -3643,7 +4351,7 @@ mod tests {
             .expect("seed source page");
         connection
             .execute(
-                "INSERT INTO document_integrity(document_id, digest) VALUES (0, 'document')",
+                "INSERT INTO document_integrity(document_id, chunk_id, digest) VALUES (0, 'chunk', 'document')",
                 [],
             )
             .expect("seed document integrity");

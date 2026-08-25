@@ -4,15 +4,13 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
 use tracedecay_domain::{ExactFieldV1, ManifestDigest};
 
-use super::format::{ArtifactRowV1, encode_exact_field, encode_field};
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::{CodeLexicalArtifactErrorV1, checkpoint};
-use crate::retrieval::lexical::LexicalFieldV1;
-
 use super::super::{
     CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
     exact_field_for_kind,
 };
+use super::format::{ArtifactRowV1, encode_exact_field, encode_field};
+use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
+use super::{CodeLexicalArtifactErrorV1, checkpoint};
 
 #[derive(Debug)]
 pub struct PreparedCodeLexicalArtifactPageV1 {
@@ -91,7 +89,6 @@ pub(super) struct PreparedDocumentV1 {
     pub(super) document_id: i64,
     pub(super) chunk_id: String,
     pub(super) row: Vec<u8>,
-    pub(super) field_stats: Vec<(String, i64)>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
     pub(super) ngram_postings: Vec<(i64, i64)>,
@@ -103,7 +100,6 @@ pub(super) struct PreparedTermPostingV1 {
     pub(super) field: String,
     pub(super) term: String,
     pub(super) frequency: i64,
-    pub(super) vocabulary: bool,
 }
 
 pub(super) fn prepare_page(
@@ -209,15 +205,10 @@ fn prepare_document(
             ))
         })?;
     let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path);
-    let mut field_stats = Vec::with_capacity(fields.len());
     let mut term_postings = Vec::new();
     for (field, terms) in &fields {
         checkpoint(control)?;
         let encoded_field = encode_field(*field)?;
-        field_stats.push((
-            encoded_field.clone(),
-            i64::try_from(terms.len()).map_err(contract_number)?,
-        ));
         let mut frequencies = BTreeMap::<&str, u32>::new();
         for term in terms {
             frequencies
@@ -230,11 +221,9 @@ fn prepare_document(
                 field: encoded_field.clone(),
                 term: term.to_owned(),
                 frequency: i64::from(frequency),
-                vocabulary: *field != LexicalFieldV1::Subtoken,
             });
         }
     }
-    field_stats.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     term_postings.sort_unstable_by(|left, right| {
         (&left.field, &left.term).cmp(&(&right.field, &right.term))
     });
@@ -277,6 +266,7 @@ fn prepare_document(
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let integrity_digest = document_integrity_digest(
         document_id,
+        chunk_id.as_bytes(),
         &row,
         &term_postings,
         &exact_postings,
@@ -286,7 +276,6 @@ fn prepare_document(
         document_id,
         chunk_id,
         row,
-        field_stats,
         term_postings,
         exact_postings,
         ngram_postings,
@@ -296,15 +285,19 @@ fn prepare_document(
 
 fn document_integrity_digest(
     document: i64,
+    chunk_id: &[u8],
     row: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
     ngram_postings: &[(i64, i64)],
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v1\0");
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v2\0");
     hasher.update(document.to_le_bytes());
-    hash_table(&mut hasher, "row", 1, |hasher, _| hash_blob(hasher, row))?;
+    hash_table(&mut hasher, "row", 1, |hasher, _| {
+        hash_text(hasher, chunk_id)?;
+        hash_blob(hasher, row)
+    })?;
     hash_table(
         &mut hasher,
         "term_posting",
@@ -447,14 +440,6 @@ fn prepared_retained_bytes(
             .and_then(|bytes| {
                 bytes.checked_add(
                     document
-                        .field_stats
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<(String, i64)>()),
-                )
-            })
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    document
                         .term_postings
                         .capacity()
                         .saturating_mul(std::mem::size_of::<PreparedTermPostingV1>()),
@@ -477,11 +462,6 @@ fn prepared_retained_bytes(
                 )
             })
             .ok_or_else(prepared_charge_overflow)?;
-        for (field, _) in &document.field_stats {
-            bytes = bytes
-                .checked_add(field.capacity())
-                .ok_or_else(prepared_charge_overflow)?;
-        }
         for posting in &document.term_postings {
             bytes = bytes
                 .checked_add(posting.field.capacity())
@@ -524,33 +504,10 @@ fn estimated_sqlite_writes(
             .and_then(|bytes| bytes.checked_add(document.row.len()))
             .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
             .ok_or_else(prepared_write_overflow)?;
-        for (field, _) in &document.field_stats {
+        for posting in &document.term_postings {
             rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
             bytes = bytes
-                .checked_add(field.len())
-                .and_then(|bytes| bytes.checked_add(16))
-                .ok_or_else(prepared_write_overflow)?;
-        }
-        for posting in &document.term_postings {
-            // Posting, term statistic, and optional vocabulary mutation.
-            rows = rows
-                .checked_add(2 + usize::from(posting.vocabulary))
-                .ok_or_else(prepared_write_overflow)?;
-            bytes = bytes
-                .checked_add(
-                    posting
-                        .field
-                        .len()
-                        .saturating_add(posting.term.len())
-                        .saturating_mul(2),
-                )
-                .and_then(|bytes| {
-                    bytes.checked_add(if posting.vocabulary {
-                        posting.term.len()
-                    } else {
-                        0
-                    })
-                })
+                .checked_add(posting.field.len().saturating_add(posting.term.len()))
                 .and_then(|bytes| bytes.checked_add(32))
                 .ok_or_else(prepared_write_overflow)?;
         }
