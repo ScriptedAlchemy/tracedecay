@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useScope } from '../../data/scope/store.ts';
 import { ObservatoryPage } from './ObservatoryPage.tsx';
 
 /**
@@ -28,6 +29,7 @@ describe('ObservatoryPage store telemetry', () => {
   });
 
   afterEach(() => {
+    useScope.getState().selectAllProjects();
     vi.useRealTimers();
   });
 
@@ -118,6 +120,115 @@ describe('ObservatoryPage store telemetry', () => {
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(screen.queryByText('generation.catchup.01')).toBeNull();
+  });
+
+  it('accepts a same-generation publication after restart and rejects a delayed pre-restart epoch', async () => {
+    vi.useFakeTimers();
+    const beforeRestart = codeIndexFreshnessEnvelope();
+    const beforeRestartWorktree = beforeRestart.payload.worktrees[0]!;
+    const beforeRestartProgress = beforeRestartWorktree.progress;
+    const afterRestart = {
+      ...beforeRestart,
+      payload: {
+        ...beforeRestart.payload,
+        worktrees: [
+          {
+            ...beforeRestartWorktree,
+            progress: {
+              ...beforeRestartProgress,
+              progress_epoch: 0,
+              last_progress_micros: SAMPLE_CURRENT_MICROS + 1,
+              completed_files: 1,
+            },
+          },
+        ],
+      },
+    };
+    const beforeRestartWithEpoch = {
+      ...beforeRestart,
+      payload: {
+        ...beforeRestart.payload,
+        worktrees: [
+          {
+            ...beforeRestartWorktree,
+            progress: { ...beforeRestartProgress, progress_epoch: 8 },
+          },
+        ],
+      },
+    };
+    const progressResponses = [beforeRestartWithEpoch, afterRestart, beforeRestartWithEpoch];
+    let progressResponse = 0;
+    stubTelemetry(
+      telemetryPayload(),
+      emptyStorageFindingsPayload(),
+      () => progressResponses[Math.min(progressResponse++, progressResponses.length - 1)]!,
+    );
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+  });
+
+  it('removes an unmounted worktree before switching to the next scope pipeline', async () => {
+    vi.useFakeTimers();
+    const first = codeIndexFreshnessEnvelope();
+    const firstWorktree = first.payload.worktrees[0]!;
+    const firstProgress = firstWorktree.progress;
+    const aggregate = {
+      ...first,
+      payload: {
+        ...first.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/aggregate-alpha',
+            progress: { ...firstProgress, generation_id: 'generation.scope.alpha' },
+          },
+        ],
+      },
+    };
+    const unmounted = {
+      ...aggregate,
+      payload: { ...aggregate.payload, worktrees: [] },
+    };
+    const projectBeta = {
+      ...aggregate,
+      scope: { project_id: 'project.beta', storage_mode: 'project', store_root: '/stores/beta' },
+      payload: {
+        ...aggregate.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-beta',
+            progress: { ...firstProgress, generation_id: 'generation.scope.beta' },
+          },
+        ],
+      },
+    };
+    let aggregateResponse = 0;
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), (url: string) => {
+      if (url.startsWith('/api/projects/project.beta/')) return projectBeta;
+      return [aggregate, unmounted][Math.min(aggregateResponse++, 1)]!;
+    });
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+
+    act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'selected'));
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+    expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
   });
 
   it('distinguishes an unset budget from an undetermined one in the rendered state', async () => {
@@ -342,24 +453,25 @@ async function advanceTimers(milliseconds: number): Promise<void> {
 function stubTelemetry(
   payload: unknown,
   findingsPayload: unknown = emptyStorageFindingsPayload(),
-  codeIndexFreshnessPayload: unknown | (() => unknown) = readyCodeIndexFreshnessEnvelope(),
+  codeIndexFreshnessPayload: unknown | ((url: string) => unknown) = readyCodeIndexFreshnessEnvelope(),
 ) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === '/api/storage/telemetry') return jsonResponse(envelope(payload));
-      if (url === '/api/storage/findings') {
+      const route = url.replace(/^\/api\/projects\/[^/]+/, '/api');
+      if (route === '/api/storage/telemetry') return jsonResponse(envelope(payload));
+      if (route === '/api/storage/findings') {
         return jsonResponse(envelope(findingsPayload));
       }
-      if (url === '/api/code-index/freshness') {
+      if (route === '/api/code-index/freshness') {
         return jsonResponse(
           typeof codeIndexFreshnessPayload === 'function'
-            ? codeIndexFreshnessPayload()
+            ? codeIndexFreshnessPayload(url)
             : codeIndexFreshnessPayload,
         );
       }
-      if (url === '/api/doctor/findings') {
+      if (route === '/api/doctor/findings') {
         return jsonResponse(
           envelope({
             family_filter: null,

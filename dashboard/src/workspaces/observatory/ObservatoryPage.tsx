@@ -60,14 +60,15 @@ import type { ObservatoryAccountingReads } from './accountingReads.ts';
  * read models. A failed source never hides the other source or becomes empty. */
 export function ObservatoryPage() {
   const scope = useScope((s) => s.scope);
+  const codeIndexScopeKey = scopeKey(scope);
   const telemetry = useQuery({
-    queryKey: ['storage', 'telemetry', scopeKey(scope)],
+    queryKey: ['storage', 'telemetry', codeIndexScopeKey],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/storage/telemetry'), StorageTelemetryPayloadV1Schema),
     refetchInterval: 30_000,
   });
   const codeIndexFreshness = useQuery({
-    queryKey: ['code-index', 'freshness', scopeKey(scope)],
+    queryKey: ['code-index', 'freshness', codeIndexScopeKey],
     queryFn: () =>
       fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
     refetchInterval: (query) => (hasActiveCodeIndexBuild(query.state.data) ? 1_000 : 30_000),
@@ -145,6 +146,7 @@ export function ObservatoryPage() {
       <CodeIndexPipeline
         result={codeIndexFreshness.data}
         pending={codeIndexFreshness.isPending}
+        scopeKey={codeIndexScopeKey}
       />
 
       <EnvelopeSection
@@ -183,11 +185,13 @@ export function ObservatoryPage() {
 function CodeIndexPipeline({
   result,
   pending,
+  scopeKey,
 }: {
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined;
   pending: boolean;
+  scopeKey: string;
 }) {
-  const progress = useLatestCodeIndexProgress(result);
+  const progress = useLatestCodeIndexProgress(result, scopeKey);
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -296,44 +300,88 @@ function hasActiveCodeIndexBuild(
 
 function useLatestCodeIndexProgress(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
+  currentScopeKey: string,
 ): readonly CodeIndexBuildProgressV1[] {
-  const [latestProgress, setLatestProgress] = useState<ReadonlyMap<string, CodeIndexBuildProgressV1>>(
-    () => new Map(),
-  );
+  const [latestProgress, setLatestProgress] = useState<ScopedCodeIndexProgress>(() => ({
+    scopeKey: currentScopeKey,
+    byWorktree: new Map(),
+  }));
   useEffect(() => {
-    if (result?.outcome !== 'envelope') return;
+    if (result?.outcome !== 'envelope') {
+      setLatestProgress((rendered) =>
+        rendered.scopeKey === currentScopeKey
+          ? rendered
+          : { scopeKey: currentScopeKey, byWorktree: new Map() },
+      );
+      return;
+    }
     setLatestProgress((rendered) => {
-      const next = new Map(rendered);
-      let changed = false;
+      const current =
+        rendered.scopeKey === currentScopeKey
+          ? rendered.byWorktree
+          : new Map<string, CodeIndexBuildProgressV1>();
+      const next = new Map<string, CodeIndexBuildProgressV1>();
       for (const worktree of result.envelope.payload.worktrees) {
         const incoming = worktree.progress;
-        const current = next.get(worktree.worktree_root);
+        const renderedProgress = current.get(worktree.worktree_root);
         if (!incoming) {
           if (
-            current &&
+            renderedProgress &&
             result.envelope.domain_state === 'ready' &&
-            worktree.latest_generation_id === current.generation_id
+            worktree.latest_generation_id === renderedProgress.generation_id
           ) {
-            next.delete(worktree.worktree_root);
-            changed = true;
+            continue;
           }
-        } else if (!current || isCurrentOrNewerCodeIndexProgress(incoming, current)) {
+          if (renderedProgress) next.set(worktree.worktree_root, renderedProgress);
+        } else if (
+          !renderedProgress ||
+          isCurrentOrNewerCodeIndexProgress(incoming, renderedProgress)
+        ) {
           next.set(worktree.worktree_root, incoming);
-          changed = true;
+        } else {
+          next.set(worktree.worktree_root, renderedProgress);
         }
       }
-      return changed ? next : rendered;
+      return rendered.scopeKey === currentScopeKey &&
+        sameCodeIndexProgressMap(next, rendered.byWorktree)
+        ? rendered
+        : { scopeKey: currentScopeKey, byWorktree: next };
     });
-  }, [result]);
-  return [...latestProgress.values()];
+  }, [currentScopeKey, result]);
+  return latestProgress.scopeKey === currentScopeKey ? [...latestProgress.byWorktree.values()] : [];
+}
+
+interface ScopedCodeIndexProgress {
+  scopeKey: string;
+  byWorktree: ReadonlyMap<string, CodeIndexBuildProgressV1>;
+}
+
+function sameCodeIndexProgressMap(
+  left: ReadonlyMap<string, CodeIndexBuildProgressV1>,
+  right: ReadonlyMap<string, CodeIndexBuildProgressV1>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [worktreeRoot, progress] of left) {
+    if (right.get(worktreeRoot) !== progress) return false;
+  }
+  return true;
 }
 
 function isCurrentOrNewerCodeIndexProgress(
   incoming: CodeIndexBuildProgressV1,
   rendered: CodeIndexBuildProgressV1,
 ): boolean {
+  if (incoming.last_progress_micros < rendered.last_progress_micros) {
+    return false;
+  }
   if (incoming.generation_id === rendered.generation_id) {
-    return incoming.progress_epoch >= rendered.progress_epoch;
+    if (incoming.progress_epoch >= rendered.progress_epoch) {
+      return true;
+    }
+    // A lower epoch is only credible after a daemon restart. The durable
+    // last-progress timestamp establishes that new process boundary and keeps
+    // delayed publications from the preceding process out of this view.
+    return incoming.last_progress_micros > rendered.last_progress_micros;
   }
   // A daemon restart resets its in-memory epoch, so replacement generations
   // order by their immutable publication time. An older delayed response is

@@ -212,6 +212,57 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('accepts a same-generation publication after restart and rejects a delayed pre-restart epoch', async () => {
+    vi.useFakeTimers();
+    const beforeRestart = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: { ...progress(), progress_epoch: 8 },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const afterRestart = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            progress_epoch: 0,
+            last_progress_micros: NOW_MICROS + 1,
+            completed_files: 1,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(beforeRestart), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(afterRestart), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(beforeRestart), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+  });
+
   it('polls an active build each second and returns to the ready cadence', async () => {
     vi.useFakeTimers();
     const active = envelope('loading', {

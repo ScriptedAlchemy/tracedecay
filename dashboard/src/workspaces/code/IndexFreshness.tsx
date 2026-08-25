@@ -277,8 +277,17 @@ function isCurrentOrNewerProgress(
   incoming: CodeIndexBuildProgress,
   rendered: CodeIndexBuildProgress,
 ): boolean {
+  if (incoming.last_progress_micros < rendered.last_progress_micros) {
+    return false;
+  }
   if (incoming.generation_id === rendered.generation_id) {
-    return incoming.progress_epoch >= rendered.progress_epoch;
+    if (incoming.progress_epoch >= rendered.progress_epoch) {
+      return true;
+    }
+    // A lower epoch is only credible after a daemon restart. The durable
+    // last-progress timestamp establishes that new process boundary and keeps
+    // delayed publications from the preceding process out of this view.
+    return incoming.last_progress_micros > rendered.last_progress_micros;
   }
   // Epochs restart with the daemon. A different generation is only accepted
   // when its own immutable publication is later; an equal or older delayed
