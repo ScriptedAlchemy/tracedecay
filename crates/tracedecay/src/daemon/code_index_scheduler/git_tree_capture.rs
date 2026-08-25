@@ -3,6 +3,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "hotpath")]
+use std::sync::atomic::AtomicU64;
 
 use gix::bstr::ByteSlice;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -51,6 +53,116 @@ pub(super) fn classify_capture_failure(
 /// an unbounded per-file warning is what turned a handful of refusals into a
 /// log flood.
 const MAX_REPORTED_WITHHELD_SOURCES: usize = 16;
+
+/// Publish capture progress at a coarse cadence so a large tree does not
+/// turn one file into one profiler event. The final values are always flushed
+/// by `Drop`, including cancellation and other early-return paths.
+#[cfg(feature = "hotpath")]
+const CAPTURE_PROGRESS_UPDATE_PERIOD: u64 = 32;
+
+pub(super) struct CaptureProgressV1 {
+    #[cfg(feature = "hotpath")]
+    candidate_files: AtomicU64,
+    #[cfg(feature = "hotpath")]
+    candidate_bytes: AtomicU64,
+    #[cfg(feature = "hotpath")]
+    processed_files: AtomicU64,
+    #[cfg(feature = "hotpath")]
+    processed_bytes: AtomicU64,
+    #[cfg(feature = "hotpath")]
+    captured_files: AtomicU64,
+    #[cfg(feature = "hotpath")]
+    captured_bytes: AtomicU64,
+}
+
+impl CaptureProgressV1 {
+    pub(super) const fn new() -> Self {
+        Self {
+            #[cfg(feature = "hotpath")]
+            candidate_files: AtomicU64::new(0),
+            #[cfg(feature = "hotpath")]
+            candidate_bytes: AtomicU64::new(0),
+            #[cfg(feature = "hotpath")]
+            processed_files: AtomicU64::new(0),
+            #[cfg(feature = "hotpath")]
+            processed_bytes: AtomicU64::new(0),
+            #[cfg(feature = "hotpath")]
+            captured_files: AtomicU64::new(0),
+            #[cfg(feature = "hotpath")]
+            captured_bytes: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn observe_candidate(&self, bytes: usize) {
+        #[cfg(feature = "hotpath")]
+        {
+            self.candidate_files.fetch_add(1, Ordering::Relaxed);
+            self.candidate_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            self.publish_at_cadence(false);
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = bytes;
+    }
+
+    #[inline(always)]
+    pub(super) fn observe_processed(&self, bytes: usize) {
+        #[cfg(feature = "hotpath")]
+        {
+            self.processed_files.fetch_add(1, Ordering::Relaxed);
+            self.processed_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            self.publish_at_cadence(false);
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = bytes;
+    }
+
+    #[inline(always)]
+    pub(super) fn observe_captured(&self, bytes: usize) {
+        #[cfg(feature = "hotpath")]
+        {
+            self.captured_files.fetch_add(1, Ordering::Relaxed);
+            self.captured_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            self.publish_at_cadence(false);
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = bytes;
+    }
+
+    #[cfg(feature = "hotpath")]
+    #[inline(always)]
+    fn publish_at_cadence(&self, force: bool) {
+        let candidate_files = self.candidate_files.load(Ordering::Relaxed);
+        let processed_files = self.processed_files.load(Ordering::Relaxed);
+        let captured_files = self.captured_files.load(Ordering::Relaxed);
+        if !force
+            && !candidate_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
+            && !processed_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
+            && !captured_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
+        {
+            return;
+        }
+        hotpath::gauge!("code_index.capture.candidate_files").set(candidate_files);
+        hotpath::gauge!("code_index.capture.candidate_bytes")
+            .set(self.candidate_bytes.load(Ordering::Relaxed));
+        hotpath::gauge!("code_index.capture.processed_files").set(processed_files);
+        hotpath::gauge!("code_index.capture.processed_bytes")
+            .set(self.processed_bytes.load(Ordering::Relaxed));
+        hotpath::gauge!("code_index.capture.captured_files").set(captured_files);
+        hotpath::gauge!("code_index.capture.captured_bytes")
+            .set(self.captured_bytes.load(Ordering::Relaxed));
+    }
+}
+
+impl Drop for CaptureProgressV1 {
+    fn drop(&mut self) {
+        #[cfg(feature = "hotpath")]
+        self.publish_at_cadence(true);
+    }
+}
 
 pub(super) fn report_withheld_sources(withheld: &[WithheldSourceV1]) {
     if withheld.is_empty() {
@@ -160,54 +272,69 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
-    pub(super) fn capture_candidate_bytes(
+    pub(super) fn capture_candidate_bytes_with_progress(
         &self,
         registry: &StaticLanguageRegistry,
         logical_path: &str,
         raw_bytes: &[u8],
+        progress: Option<&CaptureProgressV1>,
     ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let Some(extension) = Path::new(logical_path)
-            .extension()
-            .and_then(|value| value.to_str())
-        else {
-            return Ok(None);
-        };
-        let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
-            return Ok(None);
-        };
-        let (sanitized_bytes, sensitivity_level, receipt_id) =
-            privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
-        let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
-        let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
-        let occurrence = file_occurrence_id(
-            &self.repository_id,
-            &self.worktree_id,
-            logical_path,
-            &digest,
-            &receipt_id,
-        )?;
-        Ok(Some(CapturedCandidateV1 {
-            file: SanitizedCodeFileV1 {
-                file_occurrence_id: occurrence.clone(),
-                logical_path: logical_path.to_owned(),
-                language: Some(descriptor.language.clone()),
-                content_digest: digest,
-                disposition: SnapshotFileDispositionV1::Present,
-            },
-            captured: CodeIndexCapturedFileV1 {
-                file_occurrence_id: occurrence,
-                sanitized_bytes: shared.to_vec(),
-                sensitivity_level,
-            },
-            receipt_id,
-            retained: shared,
-            retained_reservation,
-        }))
+        if let Some(progress) = progress {
+            progress.observe_candidate(raw_bytes.len());
+        }
+        let result: Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> = (|| {
+            let Some(extension) = Path::new(logical_path)
+                .extension()
+                .and_then(|value| value.to_str())
+            else {
+                return Ok(None);
+            };
+            let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase())
+            else {
+                return Ok(None);
+            };
+            let (sanitized_bytes, sensitivity_level, receipt_id) =
+                privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
+            let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
+            let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
+            let occurrence = file_occurrence_id(
+                &self.repository_id,
+                &self.worktree_id,
+                logical_path,
+                &digest,
+                &receipt_id,
+            )?;
+            Ok(Some(CapturedCandidateV1 {
+                file: SanitizedCodeFileV1 {
+                    file_occurrence_id: occurrence.clone(),
+                    logical_path: logical_path.to_owned(),
+                    language: Some(descriptor.language.clone()),
+                    content_digest: digest,
+                    disposition: SnapshotFileDispositionV1::Present,
+                },
+                captured: CodeIndexCapturedFileV1 {
+                    file_occurrence_id: occurrence,
+                    sanitized_bytes: Arc::clone(&shared),
+                    sensitivity_level,
+                },
+                receipt_id,
+                retained: shared,
+                retained_reservation,
+            }))
+        })();
+        if let Some(progress) = progress {
+            progress.observe_processed(raw_bytes.len());
+            if let Ok(Some(candidate)) = result.as_ref() {
+                progress.observe_captured(candidate.captured.sanitized_bytes.len());
+            }
+        }
+        result
     }
 
+    #[hotpath::measure(label = "code_index.capture.exact_git_tree")]
     pub(super) fn capture_exact_git_tree_snapshot(
         &self,
         source: &ExactGitTreeSourceV1,
@@ -254,6 +381,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
 
         let registry = StaticLanguageRegistry::new();
+        let progress = CaptureProgressV1::new();
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
@@ -273,8 +401,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             let blob = repository
                 .find_blob(entry.oid)
                 .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-            let candidate = match self.capture_candidate_bytes(&registry, &logical_path, &blob.data)
-            {
+            let candidate = match self.capture_candidate_bytes_with_progress(
+                &registry,
+                &logical_path,
+                &blob.data,
+                Some(&progress),
+            ) {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => continue,
                 Err(error) => {
@@ -671,6 +803,37 @@ mod tests {
         assert!(
             !bytes.contains("current_tip_value"),
             "the capture must never fall back to the reference's current tip"
+        );
+    }
+
+    #[test]
+    fn exact_git_capture_reuses_one_byte_owner_for_snapshot_and_production() {
+        let (project, _store, scheduler) = generated_source_fixture();
+        let revision = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(
+                &ExactGitTreeSourceV1 {
+                    reference: tracedecay_domain::RefId::new("refs/heads/main")
+                        .expect("reference"),
+                    revision: tracedecay_domain::CommitId::new(revision).expect("revision"),
+                    tree: tracedecay_domain::TreeId::new(tree).expect("tree"),
+                },
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None,
+                },
+            )
+            .expect("capture exact Git tree");
+
+        assert_eq!(captured.captured_files.len(), captured.retained_bytes.len());
+        assert!(
+            captured.captured_files.iter().all(|captured_file| captured
+                .retained_bytes
+                .iter()
+                .any(|retained| Arc::ptr_eq(&captured_file.sanitized_bytes, retained))),
+            "production input must retain the snapshot's canonical byte allocation"
         );
     }
 

@@ -2705,7 +2705,7 @@ fn publish_corpus_with_scale(
             if indexable {
                 captured.push(CodeIndexCapturedFileV1 {
                     file_occurrence_id,
-                    sanitized_bytes: bytes,
+                    sanitized_bytes: Arc::from(bytes),
                     sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
                 });
             }
@@ -2835,12 +2835,12 @@ fn publish_corpus_with_scale(
                 "incremental fixture corpus document is not eligible".to_owned(),
             )
         })?;
-    if changed.sanitized_bytes == after_bytes {
+    if changed.sanitized_bytes.as_ref() == after_bytes.as_slice() {
         return Err(CandidateOutputError::Contract(
             "incremental before/after fixture bytes are identical".to_owned(),
         ));
     }
-    changed.sanitized_bytes = after_bytes;
+    changed.sanitized_bytes = Arc::from(after_bytes);
     let changed_digest = content_digest(&changed.sanitized_bytes);
     let snapshot_file = incremental_snapshot
         .files

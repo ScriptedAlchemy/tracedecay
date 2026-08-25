@@ -171,7 +171,6 @@ impl SharedRetainedParsePool {
             .map(|(report, _)| report)
     }
 
-    #[hotpath::measure]
     pub fn parse_and_extract(
         &self,
         identity: ParseDocumentIdentity,
@@ -179,23 +178,24 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtraction), ParseError> {
-        let (report, extraction) =
-            self.parse_and_extract_artifact(identity, language_id, source, extractor)?;
-        Ok((
-            report,
-            ParsedExtraction {
-                result: extraction.artifact.result,
-                disposition: extraction.disposition,
-                metrics: extraction.metrics,
-            },
-        ))
+        crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained", {
+            let (report, extraction) =
+                self.parse_and_extract_artifact(identity, language_id, source, extractor)?;
+            Ok((
+                report,
+                ParsedExtraction {
+                    result: extraction.artifact.result,
+                    disposition: extraction.disposition,
+                    metrics: extraction.metrics,
+                },
+            ))
+        })
     }
 
     /// Parse and extract one full canonical artifact from the pool-owned tree.
     /// The retained artifact, including import bindings, is the previous-state
     /// authority for incremental merging; this path never acquires a second
     /// parser.
-    #[hotpath::measure]
     pub fn parse_and_extract_artifact(
         &self,
         identity: ParseDocumentIdentity,
@@ -203,23 +203,24 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
-        let grammar_key = extractor.retained_grammar_key(identity.logical_path());
-        let prepared_source = extractor.prepare_parse_source(source);
-        let (report, extraction) = self.parse_internal(
-            identity,
-            language_id,
-            source,
-            prepared_source.as_ref(),
-            Some(&grammar_key),
-            Some(extractor),
-        )?;
-        match extraction {
-            Some(extraction) => Ok((report, extraction)),
-            None => Err(ParseError::ParseFailed),
-        }
+        crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained_artifact", {
+            let grammar_key = extractor.retained_grammar_key(identity.logical_path());
+            let prepared_source = extractor.prepare_parse_source(source);
+            let (report, extraction) = self.parse_internal(
+                identity,
+                language_id,
+                source,
+                prepared_source.as_ref(),
+                Some(&grammar_key),
+                Some(extractor),
+            )?;
+            match extraction {
+                Some(extraction) => Ok((report, extraction)),
+                None => Err(ParseError::ParseFailed),
+            }
+        })
     }
 
-    #[hotpath::measure]
     fn parse_internal(
         &self,
         identity: ParseDocumentIdentity,
@@ -229,119 +230,122 @@ impl SharedRetainedParsePool {
         grammar_key: Option<&str>,
         extractor: Option<&dyn LanguageExtractor>,
     ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
-        if source.len() > self.limits.max_total_source_bytes {
-            self.record_failure();
-            return Err(ParseError::SourceTooLarge {
-                size: source.len(),
-                limit: self.limits.max_total_source_bytes,
-            });
-        }
-        let key = ParseDocumentKey::for_identity(&identity);
-        let (existing, admission_epoch) = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            touch(&mut state.lru, &key);
-            (state.documents.get(&key).cloned(), state.clear_epoch)
-        };
-
-        match existing {
-            Some(entry) => self.parse_existing(
-                key,
-                entry,
-                identity,
-                language_id,
-                source,
-                prepared_source,
-                grammar_key,
-                extractor,
-            ),
-            None => {
-                // Serialize first admission per document. Unrelated documents
-                // parse concurrently; a second lookup after acquiring this
-                // key's gate keeps one retained tree for duplicate callers.
-                let first_admission = self.first_admission(&key);
-                let _first_admission_guard = first_admission
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::hotpath_observe::measure_hot_loop!("code_index.collect.parse", {
+            if source.len() > self.limits.max_total_source_bytes {
+                self.record_failure();
+                return Err(ParseError::SourceTooLarge {
+                    size: source.len(),
+                    limit: self.limits.max_total_source_bytes,
+                });
+            }
+            let key = ParseDocumentKey::for_identity(&identity);
+            let (existing, admission_epoch) = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = state.documents.get(&key).cloned() {
-                    touch(&mut state.lru, &key);
-                    drop(state);
-                    return self.parse_existing(
-                        key,
-                        entry,
-                        identity,
-                        language_id,
-                        source,
-                        prepared_source,
-                        grammar_key,
-                        extractor,
-                    );
-                }
-                drop(state);
-                let opened = match grammar_key {
-                    Some(grammar_key) => RetainedParseDocument::open_prepared(
-                        identity,
-                        language_id,
-                        grammar_key,
-                        source,
-                        prepared_source,
-                        self.limits.document,
-                    ),
-                    None => RetainedParseDocument::open(
-                        identity,
-                        language_id,
-                        source,
-                        self.limits.document,
-                    ),
-                };
-                let (document, report) = match opened {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        self.record_failure_at(admission_epoch);
-                        return Err(error);
+                touch(&mut state.lru, &key);
+                (state.documents.get(&key).cloned(), state.clear_epoch)
+            };
+
+            match existing {
+                Some(entry) => self.parse_existing(
+                    key,
+                    entry,
+                    identity,
+                    language_id,
+                    source,
+                    prepared_source,
+                    grammar_key,
+                    extractor,
+                ),
+                None => {
+                    // Serialize first admission per document. Unrelated documents
+                    // parse concurrently; a second lookup after acquiring this
+                    // key's gate keeps one retained tree for duplicate callers.
+                    let first_admission = self.first_admission(&key);
+                    let _first_admission_guard = first_admission
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(entry) = state.documents.get(&key).cloned() {
+                        touch(&mut state.lru, &key);
+                        drop(state);
+                        return self.parse_existing(
+                            key,
+                            entry,
+                            identity,
+                            language_id,
+                            source,
+                            prepared_source,
+                            grammar_key,
+                            extractor,
+                        );
                     }
-                };
-                let extraction = match extractor {
-                    Some(extractor) => {
-                        match document.extract_canonical_artifact(extractor, &report, None) {
-                            Ok(extraction) => Some(extraction),
-                            Err(error) => {
-                                self.record_failure_at(admission_epoch);
-                                return Err(error);
+                    drop(state);
+                    let opened = match grammar_key {
+                        Some(grammar_key) => RetainedParseDocument::open_prepared(
+                            identity,
+                            language_id,
+                            grammar_key,
+                            source,
+                            prepared_source,
+                            self.limits.document,
+                        ),
+                        None => RetainedParseDocument::open(
+                            identity,
+                            language_id,
+                            source,
+                            self.limits.document,
+                        ),
+                    };
+                    let (document, report) = match opened {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            self.record_failure_at(admission_epoch);
+                            return Err(error);
+                        }
+                    };
+                    let extraction = match extractor {
+                        Some(extractor) => {
+                            match document.extract_canonical_artifact(extractor, &report, None) {
+                                Ok(extraction) => Some(extraction),
+                                Err(error) => {
+                                    self.record_failure_at(admission_epoch);
+                                    return Err(error);
+                                }
                             }
                         }
+                        None => None,
+                    };
+                    let retained_artifact =
+                        extraction.as_ref().map(|parsed| parsed.artifact.clone());
+                    let current_size = document.retained_source_bytes();
+                    let entry = Arc::new(Mutex::new(RetainedEntry {
+                        document,
+                        artifact: retained_artifact,
+                    }));
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state.clear_epoch != admission_epoch {
+                        return Ok((report, extraction));
                     }
-                    None => None,
-                };
-                let retained_artifact = extraction.as_ref().map(|parsed| parsed.artifact.clone());
-                let current_size = document.retained_source_bytes();
-                let entry = Arc::new(Mutex::new(RetainedEntry {
-                    document,
-                    artifact: retained_artifact,
-                }));
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if state.clear_epoch != admission_epoch {
-                    return Ok((report, extraction));
+                    state.documents.insert(key.clone(), Arc::clone(&entry));
+                    state.source_bytes.insert(key.clone(), current_size);
+                    touch(&mut state.lru, &key);
+                    evict_to_limits(&mut state, &key, self.limits);
+                    record_success(&mut state.stats, &report, extraction.as_ref());
+                    state.stats.retained_documents = state.documents.len();
+                    state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
+                    Ok((report, extraction))
                 }
-                state.documents.insert(key.clone(), Arc::clone(&entry));
-                state.source_bytes.insert(key.clone(), current_size);
-                touch(&mut state.lru, &key);
-                evict_to_limits(&mut state, &key, self.limits);
-                record_success(&mut state.stats, &report, extraction.as_ref());
-                state.stats.retained_documents = state.documents.len();
-                state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
-                Ok((report, extraction))
             }
-        }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -562,12 +566,18 @@ fn record_success(
         match extraction.disposition {
             ParsedExtractionDisposition::FullDocument => {
                 stats.full_extractions = stats.full_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.full_extraction_total").inc(1_u64);
             }
             ParsedExtractionDisposition::ChangedRegions => {
                 stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.incremental_extraction_total").inc(1_u64);
             }
             ParsedExtractionDisposition::Reset { .. } => {
                 stats.reset_extractions = stats.reset_extractions.saturating_add(1);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("code_index.collect.reset_extraction_total").inc(1_u64);
             }
         }
         stats.visited_top_level_nodes = stats

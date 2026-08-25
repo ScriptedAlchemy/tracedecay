@@ -2,10 +2,11 @@ use crate::chunks::CodeIndexImportEvidenceV1;
 
 use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
 
-pub(super) fn derive_import_evidence(
-    files: &[FileGenerationArtifactsV1],
-) -> Vec<CodeIndexImportEvidenceV1> {
-    derive_import_evidence_from(files.iter())
+pub(super) fn derive_import_evidence<T>(files: &[T]) -> Vec<CodeIndexImportEvidenceV1>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    derive_import_evidence_from(files.iter().map(AsRef::as_ref))
 }
 
 fn derive_import_evidence_from<'a>(

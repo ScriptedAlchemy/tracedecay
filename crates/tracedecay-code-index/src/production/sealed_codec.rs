@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;
@@ -202,7 +202,7 @@ fn admit_sealed_generation_bytes(
     Ok(bytes)
 }
 
-const SEALED_GENERATION_WRITE_CHUNK_BYTES_V1: usize = 64 * 1024;
+const SEALED_GENERATION_WRITE_CHUNK_BYTES_V1: usize = 1024 * 1024;
 
 struct BoundedChunkWriterV1<'a, W> {
     writer: &'a mut W,
@@ -296,9 +296,10 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
             "sealed generation writer position failed: {error}"
         ))
     })?;
+    let mut writer = BufWriter::with_capacity(maximum_write, writer);
     let (digest_start, digest_end, generation_hash, written) = {
         let mut bounded = BoundedChunkWriterV1 {
-            writer,
+            writer: &mut writer,
             written: 0,
             byte_limit,
             maximum_write,
@@ -366,6 +367,11 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
                 ))
             }
         })?;
+        bounded.flush().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation serialization flush failed: {error}"
+            ))
+        })?;
         (digest_start, digest_end, generation_hash, bounded.written)
     };
 
@@ -396,9 +402,14 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
                 "sealed generation digest seek failed: {error}"
             ))
         })?;
-    write_chunked(writer, &digest_bytes, maximum_write).map_err(|error| {
+    write_chunked(&mut writer, &digest_bytes, maximum_write).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation digest serialization failed: {error}"
+        ))
+    })?;
+    writer.flush().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation digest flush failed: {error}"
         ))
     })?;
     let envelope_end = envelope_start.checked_add(written).ok_or_else(|| {
@@ -413,6 +424,11 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
                 "sealed generation final seek failed: {error}"
             ))
         })?;
+    writer.flush().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation final flush failed: {error}"
+        ))
+    })?;
     Ok(written)
 }
 
@@ -628,12 +644,12 @@ impl CodeIndexPublishedGenerationV1 {
             for file in persisted_files {
                 let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
                     .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                files.push(FileGenerationArtifactsV1 {
+                files.push(Arc::new(FileGenerationArtifactsV1 {
                     authority: file.authority,
                     extraction: file.extraction,
                     artifacts: file.artifacts,
                     exact_authority,
-                });
+                }));
             }
             let chunks = GenerationChunkManifestV1::new(
                 manifest.generation_id.clone(),
@@ -755,6 +771,8 @@ mod tests {
     struct MaximumWriteSink {
         inner: std::io::Cursor<Vec<u8>>,
         maximum_write: usize,
+        write_calls: usize,
+        largest_write: usize,
     }
 
     impl Write for MaximumWriteSink {
@@ -762,6 +780,8 @@ mod tests {
             if bytes.len() > self.maximum_write {
                 return Err(std::io::Error::other("write exceeded the fixture bound"));
             }
+            self.write_calls += 1;
+            self.largest_write = self.largest_write.max(bytes.len());
             self.inner.write(bytes)
         }
 
@@ -791,6 +811,8 @@ mod tests {
         let mut assembled = MaximumWriteSink {
             inner: std::io::Cursor::new(Vec::new()),
             maximum_write: 7,
+            write_calls: 0,
+            largest_write: 0,
         };
         write_generation_envelope_with_limits(&generation, &mut assembled, u64::MAX, 7)
             .expect("direct sealed envelope encoding");
@@ -806,6 +828,31 @@ mod tests {
         .expect("serde envelope serialization");
 
         assert_eq!(assembled, prior);
+    }
+
+    #[test]
+    fn direct_envelope_encoding_coalesces_small_serialization_writes() {
+        const WRITE_BOUND: usize = 1024 * 1024;
+        let generation = serde_json::json!({
+            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "payload": vec![1_u8; WRITE_BOUND]
+        });
+        let mut assembled = MaximumWriteSink {
+            inner: std::io::Cursor::new(Vec::new()),
+            maximum_write: WRITE_BOUND,
+            write_calls: 0,
+            largest_write: 0,
+        };
+
+        write_generation_envelope_with_limits(&generation, &mut assembled, u64::MAX, WRITE_BOUND)
+            .expect("direct sealed envelope encoding");
+
+        assert!(
+            assembled.write_calls <= 8,
+            "a two-megabyte seal must use coalesced writes, observed {}",
+            assembled.write_calls
+        );
+        assert!(assembled.largest_write <= WRITE_BOUND);
     }
 
     #[test]
@@ -827,6 +874,8 @@ mod tests {
         let mut refused = MaximumWriteSink {
             inner: std::io::Cursor::new(Vec::new()),
             maximum_write: 7,
+            write_calls: 0,
+            largest_write: 0,
         };
 
         let error = write_generation_envelope_with_limits(&generation, &mut refused, byte_limit, 7)

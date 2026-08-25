@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::{collections::BTreeSet, sync::Arc};
 
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
@@ -46,7 +46,7 @@ pub(super) fn prove_cancellation(
     });
     captured.push(CodeIndexCapturedFileV1 {
         file_occurrence_id,
-        sanitized_bytes: bytes.clone(),
+        sanitized_bytes: Arc::from(bytes.clone()),
         sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
     });
     let snapshot = SanitizedCodeSnapshotV1 {

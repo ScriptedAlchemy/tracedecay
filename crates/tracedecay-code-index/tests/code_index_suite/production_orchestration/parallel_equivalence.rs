@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use tracedecay_code_index::{
     chunks::content_digest,
@@ -40,7 +40,7 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
         });
         captured.push(CodeIndexCapturedFileV1 {
             file_occurrence_id: occurrence,
-            sanitized_bytes: bytes,
+            sanitized_bytes: Arc::from(bytes),
             sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
         });
         receipts.push(id::<SanitizationReceiptId>(&format!(

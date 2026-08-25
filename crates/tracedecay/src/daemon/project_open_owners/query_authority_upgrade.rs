@@ -1,13 +1,14 @@
 //! Deferred query-authority mounts covering the cold-open generation gap.
 //!
 //! Both project-open query-authority mounts resolve the privacy domain from an
-//! already-complete current code generation, but a fresh project publishes its
+//! authenticated current text generation, but a fresh project publishes its
 //! first generation asynchronously after admission, so the open-time mount can
 //! lose that race. A physical restart restores a sealed generation as `Noop`
-//! and does not republish, so waiters must also poll the serving slot: a
-//! publication that will never repeat must not deny search for the rest of the
-//! daemon session. Retry the exact mount that failed when this project's
-//! generation becomes serving, mirroring the deferred feedback-cycle upgrade.
+//! and does not republish, so waiters must also poll the text-serving slot: a
+//! publication that will never repeat must not deny exact/lexical search while
+//! optional graph activation is still warming. Retry the exact mount that
+//! failed when this project's text generation becomes serving, mirroring the
+//! deferred feedback-cycle upgrade.
 
 use std::path::{Path, PathBuf};
 use tracedecay_application::ResolvedScope;
@@ -29,9 +30,9 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
     },
 }
 
-/// Waits for the first complete code-index generation of `project_root` and
-/// then retries the query-authority mount. Exits when the mount reaches any
-/// terminal outcome or the publication channel closes (daemon shutdown).
+/// Waits for the first authenticated text generation of `project_root` and then
+/// retries the query-authority mount. Exits when the mount reaches any terminal
+/// outcome or the publication channel closes (daemon shutdown).
 ///
 /// The open-time mount runs before code-index activation, so the first ready
 /// check usually misses. A later `Published` event wakes the waiter on a
@@ -53,7 +54,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
         loop {
             if invocation
                 .code_index_schedulers
-                .latest_complete_ready_for_scope(&scope)
+                .latest_text_serving_for_scope(&scope)
                 .await
                 .is_some()
                 && try_deferred_mount(&invocation, &project_root, &scope, &mount).await
