@@ -20,8 +20,8 @@ use super::CodeLexicalArtifactErrorV1;
 // Revision 3 replaces the branch-local computed finalization cursor with
 // native table keys. Revision 4 adds document-leading indexes. Revision 5
 // adds term-selective read indexes. Revision 6 makes the append authority
-// immutable before one authenticated digest pass and defers every serving
-// index until resumable finalization.
+// immutable before one authenticated digest pass, defers every serving index
+// until resumable finalization, and keeps ngram catch-up document-leading.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 6;
 const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v6\0";
 const REQUIRED_ARTIFACT_INDEXES_V6: [(&str, &str, &[&str]); 7] = [
@@ -49,8 +49,8 @@ const REQUIRED_ARTIFACT_INDEXES_V6: [(&str, &str, &[&str]); 7] = [
     ),
     (
         "ngram_postings",
-        "ngram_postings_by_document",
-        &["document_id", "kind", "ngram"],
+        "ngram_postings_by_ngram",
+        &["kind", "ngram", "document_id"],
     ),
 ];
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
@@ -71,6 +71,7 @@ pub(super) const SECTION_NAMES: [&str; 11] = [
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    verify_artifact_table_layout(connection)?;
     let mut statement = connection
         .prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?1) WHERE key = 1 ORDER BY seqno")
         .map_err(|error| {
@@ -122,6 +123,70 @@ pub(super) fn verify_required_artifact_indexes(
                 "artifact index {index} has columns {columns:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires {expected_columns:?}"
             )));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_artifact_table_layout(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let without_rowid: Option<i64> = connection
+        .query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'ngram_postings' AND type = 'table'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram table schema is unreadable: {error}"
+            ))
+        })?;
+    let mut statement = connection
+        .prepare(
+            "SELECT name, type, [notnull], pk FROM pragma_table_xinfo('ngram_postings') WHERE hidden = 0 ORDER BY cid",
+        )
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram columns are unreadable: {error}"
+            ))
+        })?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram columns are unreadable: {error}"
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact ngram columns are unreadable: {error}"
+            ))
+        })?;
+    let expected = [
+        ("kind", "INTEGER", 1, 2),
+        ("ngram", "INTEGER", 1, 3),
+        ("document_id", "INTEGER", 1, 1),
+    ];
+    if without_rowid != Some(1)
+        || !columns
+            .iter()
+            .map(|(name, column_type, not_null, primary_key)| {
+                (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+            })
+            .eq(expected)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact ngram table has columns {columns:?} and without-rowid state {without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires a document-leading primary key"
+        )));
     }
     Ok(())
 }

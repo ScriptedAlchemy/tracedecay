@@ -30,7 +30,8 @@ use super::format::{
     CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, decode_padded_receipt_with_control, encode_field, metadata_digest,
-    new_verified_receipt, padded_receipt, verify_required_artifact_indexes,
+    new_verified_receipt, padded_receipt, verify_artifact_table_layout,
+    verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{PreparedCodeLexicalArtifactPageV1, prepare_page as prepare_page_values};
@@ -613,6 +614,7 @@ impl CodeLexicalArtifactBuilderV1 {
         require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
         verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
+        verify_artifact_table_layout(&connection)?;
         let receipt = read_receipt_with_control(&connection, control)?;
         let finalization = load_finalization_state(&connection)?;
         if receipt.is_some()
@@ -2396,7 +2398,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 kind INTEGER NOT NULL,
                 ngram INTEGER NOT NULL,
                 document_id INTEGER NOT NULL,
-                PRIMARY KEY(kind, ngram, document_id)
+                PRIMARY KEY(document_id, kind, ngram)
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -2749,9 +2751,9 @@ fn build_serving_index_step(
             )
         ),
         6 => hotpath::measure_block!(
-            "query.artifact.finalization.index.ngram_postings_by_document",
+            "query.artifact.finalization.index.ngram_postings_by_ngram",
             transaction.execute_batch(
-                "CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram)",
+                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, document_id)",
             )
         ),
         _ => {
@@ -4092,6 +4094,10 @@ mod tests {
     use super::*;
     use rusqlite::StatementStatus;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracedecay_domain::{
+        CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ScoreDomainId,
+        SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
+    };
 
     struct ActiveControl;
 
@@ -4108,6 +4114,35 @@ mod tests {
     struct CancelAtCheckpoint {
         checkpoint: usize,
         observations: AtomicUsize,
+    }
+
+    fn test_metadata() -> CodeLexicalProjectionMetadataV1 {
+        CodeLexicalProjectionMetadataV1 {
+            generation: CodeGenerationId::new("generation.artifact-builder.v1")
+                .expect("generation"),
+            repository_id: None,
+            logical_paths: Default::default(),
+            freshness: SourceFreshness {
+                source_namespace: SourceNamespace::new("namespace.artifact-builder")
+                    .expect("namespace"),
+                source_instance: SourceInstanceKey::new("instance.artifact-builder")
+                    .expect("instance"),
+                source_watermark: None,
+                projection_watermark: None,
+                observed_at: UtcMicros(0),
+                source_generation: None,
+                generation_lag: None,
+                compatibility: FreshnessCompatibilityV1::Unknown,
+                policy_revision: ComponentRevision::new("policy.artifact-builder.v1")
+                    .expect("policy"),
+            },
+            exact_retriever_revision: ComponentRevision::new("retriever.exact.artifact.v1")
+                .expect("exact retriever"),
+            lexical_retriever_revision: ComponentRevision::new("retriever.lexical.artifact.v1")
+                .expect("lexical retriever"),
+            exact_score_domain: ScoreDomainId::new("score.exact.artifact.v1")
+                .expect("score domain"),
+        }
     }
 
     impl CodeIndexExecutionControlV1 for CancelAtCheckpoint {
@@ -4166,6 +4201,163 @@ mod tests {
                 .map_err(sqlite_error)
         })
         .expect("progress handler is cleared after spawn failure");
+    }
+
+    #[test]
+    fn ngram_staging_key_preserves_document_order_without_a_serving_index() {
+        let connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        for (document_id, ngram) in [(0i64, 90i64), (0, 100), (1, 10), (1, 20)] {
+            connection
+                .execute(
+                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
+                    params![ngram, document_id],
+                )
+                .expect("seed document-ordered ngram posting");
+        }
+
+        let serving_indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('ngram_postings') WHERE name = 'ngram_postings_by_ngram'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect staging indexes");
+        assert_eq!(
+            serving_indexes, 0,
+            "serving-key maintenance must remain absent during catch-up"
+        );
+
+        let mut statement = connection
+            .prepare(
+                "SELECT document_id, kind, ngram FROM ngram_postings ORDER BY document_id, kind, ngram",
+            )
+            .expect("prepare staging-order scan");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("scan staging order")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect staging order");
+        assert_eq!(rows, [(0, 1, 90), (0, 1, 100), (1, 1, 10), (1, 1, 20)]);
+        assert_eq!(
+            statement.get_status(StatementStatus::Sort),
+            0,
+            "document-order catch-up must be the maintained table order"
+        );
+    }
+
+    #[test]
+    fn deferred_ngram_serving_index_is_unique_and_query_selective() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        for (document_id, ngram) in [(1i64, 10i64), (1, 20), (2, 10)] {
+            connection
+                .execute(
+                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
+                    params![ngram, document_id],
+                )
+                .expect("seed ngram posting");
+        }
+
+        let transaction = connection
+            .transaction()
+            .expect("start serving-index transaction");
+        build_serving_index_step(&transaction, 6).expect("build ngram serving index");
+        transaction.commit().expect("commit ngram serving index");
+
+        let unique: i64 = connection
+            .query_row(
+                "SELECT [unique] FROM pragma_index_list('ngram_postings') WHERE name = 'ngram_postings_by_ngram'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect ngram serving index");
+        assert_eq!(
+            unique, 1,
+            "the serving index must preserve posting identity"
+        );
+        let columns = connection
+            .prepare(
+                "SELECT name FROM pragma_index_xinfo('ngram_postings_by_ngram') WHERE key = 1 ORDER BY seqno",
+            )
+            .expect("prepare serving-index columns")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query serving-index columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect serving-index columns");
+        assert_eq!(columns, ["kind", "ngram", "document_id"]);
+
+        let query = "SELECT document_id FROM ngram_postings \
+                     WHERE kind = ?1 AND ngram IN (?2, ?3) \
+                     GROUP BY document_id HAVING COUNT(DISTINCT ngram) = ?4 \
+                     ORDER BY document_id";
+        let plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .expect("prepare ngram serving plan")
+            .query_map(params![1i64, 10i64, 20i64, 2i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("query ngram serving plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect ngram serving plan");
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("USING COVERING INDEX ngram_postings_by_ngram")),
+            "phrase candidates must use the deferred serving index, got {plan:?}"
+        );
+        let documents = connection
+            .prepare(query)
+            .expect("prepare ngram serving query")
+            .query_map(params![1i64, 10i64, 20i64, 2i64], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("query ngram candidates")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect ngram candidates");
+        assert_eq!(documents, [1]);
+    }
+
+    #[test]
+    fn resume_refuses_the_superseded_ngram_staging_layout() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("superseded-ngram-layout.sqlite");
+        let metadata = test_metadata();
+        drop(
+            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+                .expect("create current staging artifact"),
+        );
+        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
+        connection
+            .execute_batch(
+                "ALTER TABLE ngram_postings RENAME TO current_ngram_postings;
+                 CREATE TABLE ngram_postings (
+                    kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    PRIMARY KEY(kind, ngram, document_id)
+                 ) WITHOUT ROWID;
+                 DROP TABLE current_ngram_postings;",
+            )
+            .expect("install superseded branch-local layout");
+        drop(connection);
+
+        let error =
+            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &path,
+                metadata,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &ActiveControl,
+            ) {
+                Ok(_) => panic!("resume must not mix superseded and current ngram layouts"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
     }
 
     #[test]
@@ -4406,6 +4598,12 @@ mod tests {
         connection
             .execute("INSERT INTO vocabulary(term) VALUES ('term')", [])
             .expect("seed vocabulary");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("start ngram serving-index transaction");
+        build_serving_index_step(&transaction, 6)
+            .expect("build ngram serving index before digest verification");
+        transaction.commit().expect("commit ngram serving index");
 
         for section in FinalizationSectionV1::ALL {
             let plan = explain_native_seek_plan(&connection, section)

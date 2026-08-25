@@ -1344,7 +1344,7 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
         serving_indexes,
         [
             "exact_postings_by_document",
-            "ngram_postings_by_document",
+            "ngram_postings_by_ngram",
             "rows_by_chunk",
             "term_postings_by_document",
             "term_postings_by_document_term",
