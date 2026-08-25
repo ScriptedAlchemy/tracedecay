@@ -95,8 +95,9 @@ describe('ObservatoryPage store telemetry', () => {
             progress: {
               ...firstProgress,
               generation_id: 'generation.catchup.02',
+              producer_incarnation: 2,
               progress_epoch: 0,
-              last_progress_micros: SAMPLE_CURRENT_MICROS + 1,
+              last_progress_micros: SAMPLE_CURRENT_MICROS - 1,
               completed_files: 1,
             },
           },
@@ -136,8 +137,9 @@ describe('ObservatoryPage store telemetry', () => {
             ...beforeRestartWorktree,
             progress: {
               ...beforeRestartProgress,
+              producer_incarnation: 2,
               progress_epoch: 0,
-              last_progress_micros: SAMPLE_CURRENT_MICROS + 1,
+              last_progress_micros: SAMPLE_CURRENT_MICROS - 1,
               completed_files: 1,
             },
           },
@@ -225,6 +227,54 @@ describe('ObservatoryPage store telemetry', () => {
     expect(screen.queryByText('generation.scope.alpha')).toBeNull();
 
     act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'selected'));
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.beta')).toBeTruthy();
+    expect(screen.queryByText('generation.scope.alpha')).toBeNull();
+    expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
+  });
+
+  it('clears an active scope pipeline before accepting a direct active scope replacement', async () => {
+    vi.useFakeTimers();
+    const first = codeIndexFreshnessEnvelope();
+    const firstWorktree = first.payload.worktrees[0]!;
+    const firstProgress = firstWorktree.progress;
+    const projectAlpha = {
+      ...first,
+      scope: { project_id: 'project.alpha', storage_mode: 'project', store_root: '/stores/alpha' },
+      payload: {
+        ...first.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-alpha',
+            progress: { ...firstProgress, generation_id: 'generation.scope.alpha' },
+          },
+        ],
+      },
+    };
+    const projectBeta = {
+      ...projectAlpha,
+      scope: { project_id: 'project.beta', storage_mode: 'project', store_root: '/stores/beta' },
+      payload: {
+        ...projectAlpha.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            worktree_root: '/worktrees/project-beta',
+            progress: { ...firstProgress, generation_id: 'generation.scope.beta' },
+          },
+        ],
+      },
+    };
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), (url: string) =>
+      url.startsWith('/api/projects/project.alpha/') ? projectAlpha : projectBeta,
+    );
+    act(() => useScope.getState().selectProject('project.alpha', 'Project Alpha', 'active'));
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('generation.scope.alpha')).toBeTruthy();
+    act(() => useScope.getState().selectProject('project.beta', 'Project Beta', 'active'));
     await advanceTimers(0);
     expect(screen.getByText('generation.scope.beta')).toBeTruthy();
     expect(screen.queryByText('generation.scope.alpha')).toBeNull();
@@ -513,6 +563,7 @@ function codeIndexFreshnessEnvelope() {
           staleness_state: 'indexing',
           progress: {
             generation_id: 'generation.catchup.01',
+            producer_incarnation: 1,
             progress_epoch: 1,
             sealed_source_digest: 'sha256:sealed-source-catchup',
             phase: 'bulk_commit',

@@ -185,8 +185,9 @@ describe('Code index freshness', () => {
             generation_id: 'generation.catchup.02',
             // The daemon restarted before this generation began, so its
             // in-memory progress epoch is lower than the rendered generation.
+            producer_incarnation: 2,
             progress_epoch: 0,
-            last_progress_micros: NOW_MICROS + 1,
+            last_progress_micros: NOW_MICROS - 1,
             completed_files: 1,
           },
         },
@@ -237,8 +238,9 @@ describe('Code index freshness', () => {
           staleness_state: 'indexing',
           progress: {
             ...progress(),
+            producer_incarnation: 2,
             progress_epoch: 0,
-            last_progress_micros: NOW_MICROS + 1,
+            last_progress_micros: NOW_MICROS - 1,
             completed_files: 1,
           },
         },
@@ -378,6 +380,7 @@ function worktree() {
 function progress() {
   return {
     generation_id: 'generation.catchup.01',
+    producer_incarnation: 1,
     progress_epoch: 1,
     sealed_source_digest: 'sha256:sealed-source-catchup',
     phase: 'bulk_commit',

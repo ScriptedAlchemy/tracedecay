@@ -371,22 +371,10 @@ function isCurrentOrNewerCodeIndexProgress(
   incoming: CodeIndexBuildProgressV1,
   rendered: CodeIndexBuildProgressV1,
 ): boolean {
-  if (incoming.last_progress_micros < rendered.last_progress_micros) {
-    return false;
+  if (incoming.producer_incarnation !== rendered.producer_incarnation) {
+    return incoming.producer_incarnation > rendered.producer_incarnation;
   }
-  if (incoming.generation_id === rendered.generation_id) {
-    if (incoming.progress_epoch >= rendered.progress_epoch) {
-      return true;
-    }
-    // A lower epoch is only credible after a daemon restart. The durable
-    // last-progress timestamp establishes that new process boundary and keeps
-    // delayed publications from the preceding process out of this view.
-    return incoming.last_progress_micros > rendered.last_progress_micros;
-  }
-  // A daemon restart resets its in-memory epoch, so replacement generations
-  // order by their immutable publication time. An older delayed response is
-  // not evidence of a later generation and stays rejected.
-  return incoming.last_progress_micros > rendered.last_progress_micros;
+  return incoming.progress_epoch >= rendered.progress_epoch;
 }
 
 function codeIndexProgressPercentage(progress: CodeIndexBuildProgressV1): number {
