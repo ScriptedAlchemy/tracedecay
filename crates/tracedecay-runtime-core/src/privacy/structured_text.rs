@@ -33,8 +33,9 @@ use super::detect::{
     SanitizationActionV1, SanitizationDetectorOriginV1, SanitizationFindingV1, credential_patterns,
     redact_text,
 };
-use super::detector_kernel::{CredentialPattern, NormalizedSensitiveKey, SensitiveKeyPolicy};
+use super::detector_kernel::{NormalizedSensitiveKey, SensitiveKeyPolicy};
 use super::length_prefixed_sha256_hex;
+use super::rules::CredentialPatternSet;
 use super::structured::{
     ParsedStructuredTextV1, StructuredSanitizationError, StructuredSanitizationLimits,
     StructuredTextFieldV1, StructuredTextFormatV1, StructuredTextParseFailureV1,
@@ -265,7 +266,7 @@ pub(crate) fn sanitize_structured_text(
     })
 }
 
-fn raw_only(raw: &str, patterns: &[CredentialPattern]) -> StructuredTextSanitizationV1 {
+fn raw_only(raw: &str, patterns: &CredentialPatternSet) -> StructuredTextSanitizationV1 {
     let mut sanitized_text = raw.to_owned();
     let mut findings = Vec::new();
     redact_text(
@@ -290,7 +291,7 @@ fn raw_only(raw: &str, patterns: &[CredentialPattern]) -> StructuredTextSanitiza
 /// then emit a typed quarantine finding so every durable caller rejects it.
 fn quarantined_structured_text(
     raw: &str,
-    patterns: &[CredentialPattern],
+    patterns: &CredentialPatternSet,
 ) -> StructuredTextSanitizationV1 {
     let mut sanitized = raw_only(raw, patterns);
     sanitized
@@ -329,7 +330,7 @@ fn line_candidates(
     raw: &str,
     fields: &[StructuredTextFieldV1],
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &[CredentialPattern],
+    patterns: &CredentialPatternSet,
 ) -> Vec<SensitiveCandidate> {
     let mut candidates = Vec::new();
     for field in fields {
@@ -366,7 +367,7 @@ fn line_candidates(
 /// Detects whether an already-decoded value carries a credential the encoded
 /// bytes hid. `Authorization=Bearer%20…` only looks like a bearer token once
 /// the percent escapes are resolved.
-fn trips_a_detector(decoded: &str, patterns: &[CredentialPattern]) -> bool {
+fn trips_a_detector(decoded: &str, patterns: &CredentialPatternSet) -> bool {
     let mut probe = decoded.to_owned();
     let mut ignored = Vec::new();
     redact_text(
@@ -382,7 +383,7 @@ fn tree_candidates(
     raw: &str,
     parsed: &ParsedStructuredTextV1,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &[CredentialPattern],
+    patterns: &CredentialPatternSet,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) -> Vec<SensitiveCandidate> {
     let mut sensitive = Vec::new();
@@ -422,7 +423,7 @@ fn tree_candidates(
 fn collect_tree_fields(
     value: &Value,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &[CredentialPattern],
+    patterns: &CredentialPatternSet,
     sensitive: &mut Vec<(String, String, SanitizationDetectorOriginV1)>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) {
