@@ -422,20 +422,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 self.latest_text_fresh_for_scope(request.scope())
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
+            } else if let Some(latest) = self
+                .latest_text_serving_for_scope(request.scope())
+                .await
+                .filter(|latest| latest.metadata().manifest().generation_id == *requested)
+            {
+                Ok(latest)
             } else {
-                if let Some(latest) = self
-                    .latest_text_serving_for_scope(request.scope())
+                self.generation_for(request.scope(), requested)
                     .await
-                    .filter(|latest| latest.metadata().manifest().generation_id == *requested)
-                {
-                    Ok(latest)
-                } else {
-                    self.generation_for(request.scope(), requested)
-                        .await
-                        .map_err(|_| CallableCodeCursorError::Unavailable)?
-                        .map(|latest| latest.text_generation_handle())
-                        .ok_or(CallableCodeCursorError::Unavailable)
-                }
+                    .map_err(|_| CallableCodeCursorError::Unavailable)?
+                    .map(|latest| latest.text_generation_handle())
+                    .ok_or(CallableCodeCursorError::Unavailable)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
