@@ -21,7 +21,7 @@ on:
       - "scripts/plan-release-recovery.py"
       - "scripts/test-plan-release-recovery.py"
       - "tests/release_safety_test.sh"
-      - "src/application_surface.rs"
+      - "crates/tracedecay/src/application_surface.rs"
   push:
     branches: [master]
 
