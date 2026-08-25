@@ -496,6 +496,14 @@ while IFS=$'\t' read -r name version; do
   [[ -f "$directory/Cargo.toml" ]] ||
     die "package archive did not contain $name-$version/Cargo.toml"
   package_dirs["$name"]=$directory
+  # Extracted archives are named `<name>-<version>`, but in the workspace every
+  # crate sits at `crates/<name>`. Build scripts that reach a sibling crate by
+  # relative path — `tracedecay-agent-hosts/build.rs` shares
+  # `tracedecay/src/version/build_identity.rs` through `#[path]` — resolve
+  # against that unversioned shape. `cargo package` cannot carry a file from
+  # outside the package, so give the battery the same sibling layout the
+  # workspace has rather than a copy that could drift from it.
+  ln -sfn -- "$name-$version" "$packages/$name"
 done <"$package_table"
 
 for required_package in \
