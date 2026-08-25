@@ -50,6 +50,9 @@ pub mod analytics_bridge;
 pub mod application_output;
 pub mod application_surface;
 pub(crate) mod hint_outcomes;
+// Fixture surface for integration tests, assembled by the composition root.
+// Gated so a default or `production` build carries none of it.
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod host_admission;
 pub use tracedecay_code_index::ast_grep_search;
 pub mod bench;

@@ -124,6 +124,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
 tower = "0.5"
+tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 ureq = { version = "3", features = ["json"] }

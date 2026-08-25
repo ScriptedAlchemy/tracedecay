@@ -232,7 +232,15 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
+# Integration fixture surface. `HostAdmissionTestRuntimeV1` and the registered
+# database scaffolding it owns are assembled by the composition root, so they
+# live in the product library rather than a test crate. This feature keeps them
+# out of a default or `production` build: they compile only under `cfg(test)`
+# or when a consumer asks for them explicitly.
+test-helpers = []
+
 test-transport = [
+    "test-helpers",
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
     "tracedecay-agent-hosts/test-transport",
@@ -468,3 +476,113 @@ harness = false
 # The custom benchmark CLI is not a libtest harness and cannot answer the
 # `--list --format terse` probe used by `cargo test` and nextest.
 test = false
+
+[[test]]
+name = "advisory_runtime_acceptance"
+path = "tests/advisory_runtime_acceptance.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "agent_suite"
+path = "tests/agent_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "application_production_reachability"
+path = "tests/application_production_reachability.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "automation_runner_test"
+path = "tests/automation_runner_test/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "cross_host_handoff_test"
+path = "tests/cross_host_handoff_test.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "daemon_runtime_acceptance"
+path = "tests/daemon_runtime_acceptance.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "daemon_suite"
+path = "tests/daemon_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "grafeo_restart_acceptance"
+path = "tests/grafeo_restart_acceptance.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "hermes_suite"
+path = "tests/hermes_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "hooks_lsp_suite"
+path = "tests/hooks_lsp_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "host_event_fixture_test"
+path = "tests/host_event_fixture_test.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "lifecycle_production_authority_test"
+path = "tests/lifecycle_production_authority_test.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "mcp_suite"
+path = "tests/mcp_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "memory_suite"
+path = "tests/memory_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "private_route_restart_acceptance"
+path = "tests/private_route_restart_acceptance.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "runtime_surface_acceptance"
+path = "tests/runtime_surface_acceptance.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "search_eval_cli_test"
+path = "tests/search_eval_cli_test.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "search_quality_suite"
+path = "tests/search_quality_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_suite"
+path = "tests/session_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "storage_suite"
+path = "tests/storage_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "tool_client_transport"
+path = "tests/tool_client_transport.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "windows_durable_behavior"
+path = "tests/windows_durable_behavior.rs"
+required-features = ["test-helpers"]

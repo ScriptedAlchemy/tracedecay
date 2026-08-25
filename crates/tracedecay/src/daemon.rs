@@ -194,7 +194,6 @@ pub(crate) use dashboard_configuration_test_runtime::{
     dashboard_configuration_authorities_for_test, register_dashboard_test_retained_runtime,
 };
 pub(crate) mod query_authority_provider;
-#[cfg(any(test, feature = "test-transport"))]
 #[cfg(test)]
 pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;

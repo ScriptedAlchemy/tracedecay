@@ -221,8 +221,17 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      # Every `crates/tracedecay` integration target declares
+      # `required-features = ["test-helpers"]`, because the fixture surface it
+      # gates is used by `tests/common/mod.rs`. Those targets are selected here
+      # today only as a side effect of dev-dependency feature unification
+      # (`tracedecay-cli` dev-depends on `tracedecay` with that feature), which
+      # is not a property this lane should depend on: it would evaporate the
+      # moment that dev-dependency changes, and nextest would then silently
+      # select zero of them and report green having run nothing. Asking for the
+      # feature explicitly makes the selection independent of that accident.
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked
+        run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
 
       # Compile-only gate for the features this lane does not enable. Both are
       # otherwise built for the first time at release (`--all-features`), so

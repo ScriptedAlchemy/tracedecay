@@ -20,7 +20,11 @@ impl CodeIndexSchedulerRegistryV1 {
         )
     }
 
-    #[cfg(test)]
+    // Reached from the `test-transport` dashboard and configuration fixture
+    // runtimes, which compile without `cfg(test)`. `test-transport` includes
+    // `test-helpers`, so this gate covers both without widening the production
+    // surface.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn with_resident_memory(
         max_worktrees: usize,
         resident_memory: Arc<ProcessResidentMemoryV1>,
