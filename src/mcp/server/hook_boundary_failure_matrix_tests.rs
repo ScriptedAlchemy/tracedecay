@@ -16,8 +16,8 @@ use super::writer_test_support::{
     WriterTestFixtureAuthority, init_indexed_repo, registered_context,
 };
 use super::{CodeIndexReconcileSink, McpServer};
-use crate::daemon::{DaemonHookEvent, HookAgent};
 use crate::mcp::project_route::HookProjectRouteCache;
+use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent};
 use tracedecay_usecases::host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
     SpoolBounds,

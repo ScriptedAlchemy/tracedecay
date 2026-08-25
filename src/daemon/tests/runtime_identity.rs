@@ -8,7 +8,7 @@ async fn notify_workspace_open(
     session_id: &str,
     workspace_root: &Path,
 ) {
-    let notification = crate::mcp::JsonRpcRequest {
+    let notification = tracedecay_jsonrpc::JsonRpcRequest {
         jsonrpc: "2.0".to_owned(),
         id: None,
         method: "tracedecay/hookEvent".to_owned(),
@@ -29,8 +29,8 @@ async fn notify_workspace_open(
 async fn files_for_session(
     server: &crate::mcp::McpServer,
     session_id: &str,
-) -> crate::mcp::JsonRpcResponse {
-    let request = crate::mcp::JsonRpcRequest {
+) -> tracedecay_jsonrpc::JsonRpcResponse {
+    let request = tracedecay_jsonrpc::JsonRpcRequest {
         jsonrpc: "2.0".to_owned(),
         id: Some(serde_json::json!(1)),
         method: "tools/call".to_owned(),

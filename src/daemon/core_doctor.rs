@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use crate::errors::Result;
-use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_jsonrpc::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::{
     SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
@@ -596,9 +596,10 @@ mod doctor_runtime_route_tests {
     };
     use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
+    use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
-    use crate::mcp::{McpServer, McpTransport};
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_jsonrpc::McpTransport;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 

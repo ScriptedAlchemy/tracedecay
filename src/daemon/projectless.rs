@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::Result;
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
 
@@ -80,10 +80,10 @@ pub(super) async fn serve_projectless_client(
 }
 
 async fn projectless_response(
-    request: &crate::mcp::JsonRpcRequest,
+    request: &tracedecay_jsonrpc::JsonRpcRequest,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
-) -> Option<crate::mcp::JsonRpcResponse> {
+) -> Option<tracedecay_jsonrpc::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
         "initialize" => Some(JsonRpcResponse::success(
@@ -125,7 +125,7 @@ pub(super) async fn projectless_tools_call_response(
     params: Option<&serde_json::Value>,
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
-) -> crate::mcp::JsonRpcResponse {
+) -> tracedecay_jsonrpc::JsonRpcResponse {
     let connection = match admit_projectless_connection(client_identity, store_administration) {
         Ok(connection) => connection,
         Err(error) => {
@@ -142,7 +142,7 @@ async fn projectless_tools_call_response_with_connection(
     params: Option<&serde_json::Value>,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
-) -> crate::mcp::JsonRpcResponse {
+) -> tracedecay_jsonrpc::JsonRpcResponse {
     let (tool_name, arguments) = match projectless_tool_call(params) {
         Ok(tool_call) => tool_call,
         Err(message) => {
@@ -352,7 +352,7 @@ async fn projectless_profile_retained_response(
     arguments: serde_json::Value,
     connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
-) -> crate::mcp::JsonRpcResponse {
+) -> tracedecay_jsonrpc::JsonRpcResponse {
     let is_lcm =
         tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search";
     let requested_scope = if is_lcm {

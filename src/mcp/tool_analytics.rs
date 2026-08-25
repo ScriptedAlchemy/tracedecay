@@ -266,8 +266,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::daemon::HookRouteMetadata;
     use crate::mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
+    use tracedecay_hooks::core_events::HookRouteMetadata;
 
     use super::{
         FAILURE_REASON_MAX_CHARS, McpToolAnalyticsEvent, bounded_failure_reason,

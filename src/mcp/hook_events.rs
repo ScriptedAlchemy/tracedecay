@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Shared with hook emitters so the receiver accepts the same agent keys.
-pub(crate) use crate::daemon::HookAgent;
+pub(crate) use tracedecay_hooks::core_events::HookAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookEventKind {
@@ -58,8 +58,8 @@ pub(crate) struct HookEvent {
     pub(crate) rel_paths: Vec<String>,
     pub(crate) had_command: bool,
     pub(crate) cwd: Option<PathBuf>,
-    pub(crate) route: Option<crate::daemon::HookRouteMetadata>,
-    pub(crate) receipt: Option<crate::daemon::HookTerminalReceipt>,
+    pub(crate) route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
+    pub(crate) receipt: Option<tracedecay_hooks::core_events::HookTerminalReceipt>,
 }
 
 impl HookEvent {
@@ -152,11 +152,11 @@ pub(crate) enum HookEventPlan {
     },
     DebouncedIncrementalSync(HookAgent),
     RecordTerminalReceipt {
-        route: Option<crate::daemon::HookRouteMetadata>,
-        receipt: crate::daemon::HookTerminalReceipt,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
+        receipt: tracedecay_hooks::core_events::HookTerminalReceipt,
     },
     MarkTurnIngested {
-        route: Option<crate::daemon::HookRouteMetadata>,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         transcript_watermark: String,
     },
     Noop,
@@ -184,11 +184,11 @@ enum DurableHookEventPlan {
         agent: String,
     },
     RecordTerminalReceipt {
-        route: Option<crate::daemon::HookRouteMetadata>,
-        receipt: crate::daemon::HookTerminalReceipt,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
+        receipt: tracedecay_hooks::core_events::HookTerminalReceipt,
     },
     MarkTurnIngested {
-        route: Option<crate::daemon::HookRouteMetadata>,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         transcript_watermark: String,
     },
     Noop,
@@ -260,7 +260,7 @@ fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<Str
 }
 
 fn protect_hook_route_structural_ids(
-    route: &mut crate::daemon::HookRouteMetadata,
+    route: &mut tracedecay_hooks::core_events::HookRouteMetadata,
 ) -> Result<(), ()> {
     route.session_id = protect_optional_hook_structural_id(route.session_id.as_deref())?;
     route.thread_id = protect_optional_hook_structural_id(route.thread_id.as_deref())?;
@@ -268,7 +268,7 @@ fn protect_hook_route_structural_ids(
 }
 
 fn protect_hook_receipt_structural_ids(
-    receipt: &mut crate::daemon::HookTerminalReceipt,
+    receipt: &mut tracedecay_hooks::core_events::HookTerminalReceipt,
 ) -> Result<(), ()> {
     receipt.tool_call_id = protect_optional_hook_structural_id(receipt.tool_call_id.as_deref())?;
     receipt.turn_id = protect_optional_hook_structural_id(receipt.turn_id.as_deref())?;
@@ -295,12 +295,12 @@ fn sanitize_durable_status(value: Option<&str>) -> Result<Option<String>, ()> {
 /// as transcript/LCM storage so receipt, analytics, span, and reopen joins
 /// preserve one identity.
 fn sanitize_durable_route(
-    route: Option<&crate::daemon::HookRouteMetadata>,
-) -> Result<Option<crate::daemon::HookRouteMetadata>, ()> {
+    route: Option<&tracedecay_hooks::core_events::HookRouteMetadata>,
+) -> Result<Option<tracedecay_hooks::core_events::HookRouteMetadata>, ()> {
     let Some(route) = route else {
         return Ok(None);
     };
-    let mut sanitized = crate::daemon::HookRouteMetadata {
+    let mut sanitized = tracedecay_hooks::core_events::HookRouteMetadata {
         session_id: durable_bound_optional_str(
             route.session_id.as_deref(),
             DURABLE_MAX_IDENTIFIER_BYTES,
@@ -318,9 +318,9 @@ fn sanitize_durable_route(
 }
 
 fn sanitize_durable_receipt(
-    receipt: &crate::daemon::HookTerminalReceipt,
-) -> Result<crate::daemon::HookTerminalReceipt, ()> {
-    let mut sanitized = crate::daemon::HookTerminalReceipt {
+    receipt: &tracedecay_hooks::core_events::HookTerminalReceipt,
+) -> Result<tracedecay_hooks::core_events::HookTerminalReceipt, ()> {
+    let mut sanitized = tracedecay_hooks::core_events::HookTerminalReceipt {
         tool_call_id: durable_bound_optional_str(
             receipt.tool_call_id.as_deref(),
             DURABLE_MAX_IDENTIFIER_BYTES,
@@ -493,7 +493,7 @@ pub(crate) fn decode_durable_hook_event_plan(
 }
 
 pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
-    let mut event = crate::daemon::DaemonHookEvent::deserialize(params?).ok()?;
+    let mut event = tracedecay_hooks::core_events::DaemonHookEvent::deserialize(params?).ok()?;
     if let Some(route) = &mut event.route {
         protect_hook_route_structural_ids(route).ok()?;
     }
@@ -990,8 +990,10 @@ mod tests {
     #[test]
     fn shell_emitters_do_not_put_command_text_on_the_wire() {
         for event in [
-            crate::daemon::DaemonHookEvent::cursor_after_shell_execution(PathBuf::from("/project")),
-            crate::daemon::DaemonHookEvent::post_tool_use_shell(
+            tracedecay_hooks::core_events::DaemonHookEvent::cursor_after_shell_execution(
+                PathBuf::from("/project"),
+            ),
+            tracedecay_hooks::core_events::DaemonHookEvent::post_tool_use_shell(
                 HookAgent::Codex,
                 PathBuf::from("/project"),
             ),
@@ -1241,10 +1243,12 @@ mod tests {
 
     #[test]
     fn plans_cursor_session_start_as_current_branch_sync() {
-        let params = serde_json::to_value(crate::daemon::DaemonHookEvent::session_start(
-            HookAgent::Cursor,
-            PathBuf::from("/tmp/project"),
-        ))
+        let params = serde_json::to_value(
+            tracedecay_hooks::core_events::DaemonHookEvent::session_start(
+                HookAgent::Cursor,
+                PathBuf::from("/tmp/project"),
+            ),
+        )
         .unwrap();
         let event = parse_or_panic(&params);
 
@@ -1277,14 +1281,14 @@ mod tests {
     #[test]
     fn durable_plan_round_trip_preserves_supported_variants() {
         let worktree_root = std::env::temp_dir().join("worktree");
-        let route = Some(crate::daemon::HookRouteMetadata {
+        let route = Some(tracedecay_hooks::core_events::HookRouteMetadata {
             session_id: Some("session-1".to_string()),
             thread_id: None,
             cwd: None,
             worktree: None,
             branch: None,
         });
-        let receipt = crate::daemon::HookTerminalReceipt {
+        let receipt = tracedecay_hooks::core_events::HookTerminalReceipt {
             tool_call_id: None,
             turn_id: None,
             status: Some("success".to_string()),
@@ -1371,14 +1375,14 @@ mod tests {
 
     #[test]
     fn durable_plan_strips_route_paths_and_rejects_unbounded_identifiers() {
-        let route = Some(crate::daemon::HookRouteMetadata {
+        let route = Some(tracedecay_hooks::core_events::HookRouteMetadata {
             session_id: Some("session-1".to_string()),
             thread_id: Some("thread-1".to_string()),
             cwd: Some(PathBuf::from("/tmp/secret-home")),
             worktree: Some(PathBuf::from("/tmp/secret-worktree")),
             branch: Some("main".to_string()),
         });
-        let receipt = crate::daemon::HookTerminalReceipt {
+        let receipt = tracedecay_hooks::core_events::HookTerminalReceipt {
             tool_call_id: Some("call-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             status: Some("success".to_string()),
@@ -1459,20 +1463,20 @@ mod tests {
         let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
-        let params = serde_json::to_value(crate::daemon::DaemonHookEvent {
+        let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {
             agent: HookAgent::Hermes.as_wire().to_string(),
             event: "terminalReceipt".to_string(),
             rel_paths: Vec::new(),
             command: None,
             cwd: Some(PathBuf::from("/tmp/project")),
-            route: Some(crate::daemon::HookRouteMetadata {
+            route: Some(tracedecay_hooks::core_events::HookRouteMetadata {
                 session_id: Some(raw.clone()),
                 thread_id: Some(raw.clone()),
                 cwd: Some(PathBuf::from("/tmp/project")),
                 worktree: None,
                 branch: Some("main".to_string()),
             }),
-            receipt: Some(crate::daemon::HookTerminalReceipt {
+            receipt: Some(tracedecay_hooks::core_events::HookTerminalReceipt {
                 tool_call_id: Some(raw.clone()),
                 turn_id: Some(raw.clone()),
                 status: Some("success".to_string()),
