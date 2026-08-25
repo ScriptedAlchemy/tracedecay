@@ -622,7 +622,7 @@ fn age_scope_for_reconciliation(scope: &Path) {
 async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey() {
     use super::semantic_activation_journey_test::{
         evaluate_native_profile, installed_selection_material, seed_distribution_fixture,
-        selection, semantic_candidate, set_semantic_profile, wait_for_semantic_generation,
+        selection, set_semantic_profile, wait_for_semantic_generation,
     };
 
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
@@ -689,18 +689,8 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         primary_vector.generation_id(),
         linked_vector.generation_id()
     );
-    let primary_profile = evaluate_native_profile(
-        &harness,
-        &primary,
-        semantic_candidate(&primary_code, &primary_vector),
-    )
-    .await;
-    let linked_profile = evaluate_native_profile(
-        &harness,
-        &linked,
-        semantic_candidate(&linked_code, &linked_vector),
-    )
-    .await;
+    let primary_profile = evaluate_native_profile(&harness, &primary).await;
+    let linked_profile = evaluate_native_profile(&harness, &linked).await;
     let primary_selection = selection(primary_profile, &artifact_digest, &artifact_path);
     let linked_selection = selection(linked_profile, &artifact_digest, &artifact_path);
     set_semantic_profile(

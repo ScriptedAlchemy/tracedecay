@@ -888,7 +888,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     SemanticEvaluateAndPublish {
-        candidate: Box<tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1482,7 +1482,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn semantic_evaluate_and_publish(
         request_id: impl Into<String>,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1493,7 +1493,7 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::SemanticEvaluateAndPublish {
-                candidate: Box::new(candidate),
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
@@ -2218,12 +2218,22 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish {
-                candidate,
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
+            } => {
+                if evaluated_profile_id.trim() != evaluated_profile_id
+                    || evaluated_profile_id.is_empty()
+                    || evaluated_profile_id.len() > MAX_OPAQUE_HANDLE_BYTES
+                    || observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
             }
-            | DaemonInvocationPayload::SemanticQualify {
+            DaemonInvocationPayload::SemanticQualify {
                 candidate,
                 observed_at,
                 deadline,
@@ -2536,6 +2546,27 @@ mod semantic_qualification_tests {
         assert_eq!(wire["operation"], "semantic_qualify");
         assert!(wire.get("report").is_none());
         assert!(wire.get("snapshot_digest").is_none());
+    }
+
+    #[test]
+    fn semantic_publication_wire_carries_only_the_daemon_owned_profile_selection() {
+        let request = DaemonInvocationRequest::semantic_evaluate_and_publish(
+            "request.semantic-evaluation.default-profile",
+            "hybrid-conservative".to_owned(),
+            UtcMicros(1_000),
+            Deadline::new(UtcMicros(2_000)).expect("deadline"),
+            CancellationContext::active("cancellation.semantic-evaluation.default-profile")
+                .expect("cancellation"),
+        );
+
+        assert_eq!(request.validate(), Ok(()));
+        let wire = serde_json::to_value(request).expect("semantic evaluation wire");
+        assert_eq!(wire["operation"], "semantic_evaluate_and_publish");
+        assert_eq!(wire["evaluated_profile_id"], "hybrid-conservative");
+        assert!(
+            wire.get("candidate").is_none(),
+            "caller-authored candidate material must not cross the publishing wire"
+        );
     }
 
     #[test]

@@ -592,10 +592,10 @@ impl DaemonInvocationClient {
 
     pub async fn evaluate_and_publish_semantic_profile(
         &self,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: &str,
     ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
         self.evaluate_and_publish_semantic_profile_until(
-            candidate,
+            evaluated_profile_id,
             SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
         )
         .await
@@ -603,7 +603,7 @@ impl DaemonInvocationClient {
 
     pub async fn evaluate_and_publish_semantic_profile_until(
         &self,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: &str,
         deadline_micros: i64,
     ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
         let request_id =
@@ -637,7 +637,7 @@ impl DaemonInvocationClient {
             .invoke(
                 crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                     request_id.as_str(),
-                    candidate,
+                    evaluated_profile_id.to_owned(),
                     observed_at,
                     deadline,
                     cancellation,

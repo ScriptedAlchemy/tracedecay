@@ -18,8 +18,7 @@ use serde_json::{Value, json};
 use super::journey_test_support::{git, tool_payload};
 use super::semantic_activation_journey_test::{
     assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
-    seed_distribution_fixture, selection, semantic_candidate, set_semantic_profile,
-    wait_for_semantic_generation,
+    seed_distribution_fixture, selection, set_semantic_profile, wait_for_semantic_generation,
 };
 use super::*;
 
@@ -426,8 +425,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
     );
 
     // ---- Phase 2: the real accepted-profile evaluation. -------------------
-    let accepted_profile =
-        evaluate_native_profile(&harness, &project, semantic_candidate(&code, &vector)).await;
+    let accepted_profile = evaluate_native_profile(&harness, &project).await;
     assert_eq!(
         non_semantic_answers(&harness, &project).await,
         answers_before,

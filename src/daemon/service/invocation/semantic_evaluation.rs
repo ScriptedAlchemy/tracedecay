@@ -1,10 +1,9 @@
 use super::*;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-#[derive(Clone, Copy)]
-enum SemanticExecutionIntentV1 {
-    Qualify,
-    EvaluateAndPublish,
+enum SemanticExecutionInputV1 {
+    Qualify(Box<tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1>),
+    EvaluateAndPublish(String),
 }
 
 enum SemanticExecutionOutcomeV1 {
@@ -106,12 +105,11 @@ impl DaemonInvocationService {
         self.execute_semantic_operation(
             project_root,
             request_id,
-            candidate,
             observed_at,
             deadline,
             cancellation,
             request_cancellation,
-            SemanticExecutionIntentV1::Qualify,
+            SemanticExecutionInputV1::Qualify(Box::new(candidate)),
         )
         .await
     }
@@ -120,7 +118,7 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
         request_id: String,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -129,12 +127,11 @@ impl DaemonInvocationService {
         self.execute_semantic_operation(
             project_root,
             request_id,
-            candidate,
             observed_at,
             deadline,
             cancellation,
             request_cancellation,
-            SemanticExecutionIntentV1::EvaluateAndPublish,
+            SemanticExecutionInputV1::EvaluateAndPublish(evaluated_profile_id),
         )
         .await
     }
@@ -144,12 +141,11 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
         request_id: String,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
         request_cancellation: CancellationToken,
-        intent: SemanticExecutionIntentV1,
+        input: SemanticExecutionInputV1,
     ) -> DaemonInvocationResponse {
         let control = SemanticInvocationControlV1::new(observed_at, deadline, cancellation);
         if let Some(problem) = semantic_execution_interruption(&control, &request_cancellation) {
@@ -171,9 +167,9 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        let operation = match intent {
-            SemanticExecutionIntentV1::Qualify => None,
-            SemanticExecutionIntentV1::EvaluateAndPublish => {
+        let operation = match &input {
+            SemanticExecutionInputV1::Qualify(_) => None,
+            SemanticExecutionInputV1::EvaluateAndPublish(_) => {
                 let operation = registered.semantic_operation.get().cloned();
                 if let Some(problem) =
                     semantic_execution_interruption(&control, &request_cancellation)
@@ -215,8 +211,10 @@ impl DaemonInvocationService {
         let scope = registered.scope.clone();
         let scheduler = self.code_index_schedulers.clone();
         let workers = Arc::clone(&registered.semantic_evaluation_workers);
-        let execution = match intent {
-            SemanticExecutionIntentV1::Qualify => {
+        let configuration = registered.runtime.client();
+        let execution = match input {
+            SemanticExecutionInputV1::Qualify(candidate) => {
+                let candidate = *candidate;
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         let authority =
@@ -268,7 +266,7 @@ impl DaemonInvocationService {
                     })
                     .await
             }
-            SemanticExecutionIntentV1::EvaluateAndPublish => {
+            SemanticExecutionInputV1::EvaluateAndPublish(evaluated_profile_id) => {
                 let Some(operation) = operation else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -277,16 +275,29 @@ impl DaemonInvocationService {
                 };
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
-                        let snapshot =
-                            crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                        async move {
+                            let configured = control
+                                .interruptible(configuration.current())
+                                .await?
+                                .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
+                            let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
+                                &canonical_root,
+                                &scope,
+                                &scheduler,
+                                &evaluated_profile_id,
+                                configured.config.semantic.resources,
+                                Arc::clone(&control),
+                            )
+                            .await?;
+                            let snapshot =
+                                crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
                                 canonical_root.clone(),
                                 scope,
                                 scheduler,
                                 candidate.clone(),
                                 control,
                             );
-                        let authority = crate::daemon::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
-                        async move {
+                            let authority = crate::daemon::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
                             operation
                                 .evaluate_and_publish_profile(&authority, &canonical_root, candidate)
                                 .await
@@ -438,8 +449,20 @@ fn semantic_evaluation_response(
             | SemanticActivationCoordinationErrorV1::RejectedDetail(_)),
         )) => application_problem(request_id, semantic_evaluation_rejection_problem(&error)),
         Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
-            SemanticActivationCoordinationErrorV1::Conflict
-            | SemanticActivationCoordinationErrorV1::Runtime(_)
+            SemanticActivationCoordinationErrorV1::Conflict,
+        )) => application_problem(
+            request_id,
+            ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic {
+                    code: "semantic_evaluation.conflict".to_owned(),
+                    message: "The semantic evaluation target changed before publication".to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![tracedecay_application::LegalAction::Refresh],
+            },
+        ),
+        Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+            SemanticActivationCoordinationErrorV1::Runtime(_)
             | SemanticActivationCoordinationErrorV1::Unavailable,
         )) => DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable),
     }
@@ -548,6 +571,39 @@ mod tests {
                 );
             }
             other => panic!("expected application problem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indexing_cannot_be_published_as_an_empty_semantic_candidate() {
+        let state = tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            completed_units: 7,
+            total_units: 11,
+        };
+
+        assert_eq!(
+            crate::daemon::semantic_evaluation::semantic_publication_generation(&state),
+            Err(SemanticActivationCoordinationErrorV1::Unavailable)
+        );
+    }
+
+    #[test]
+    fn stale_publication_conflict_remains_typed_across_the_daemon_boundary() {
+        let response = semantic_evaluation_response(
+            "req-semantic-conflict".to_owned(),
+            Err(
+                crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+                    SemanticActivationCoordinationErrorV1::Conflict,
+                ),
+            ),
+        );
+
+        match response.outcome {
+            DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
+                assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+            }
+            other => panic!("expected typed conflict, got {other:?}"),
         }
     }
 }
