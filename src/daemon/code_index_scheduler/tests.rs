@@ -11192,6 +11192,86 @@ async fn wait_for_event_to_ready(
     }
 }
 
+/// A successful reconcile is product state; optional lifecycle telemetry may
+/// not keep its in-progress guard or freshness response open while the
+/// observability store is busy.
+#[tokio::test]
+async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        fixture.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = Arc::new(
+        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+            database.clone(),
+            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                process_boot_id: "boot:code-index-readiness".to_owned(),
+                producer_revision: "code-index-readiness-test.v1".to_owned(),
+                configuration_revision: "code-index-readiness-config.v1".to_owned(),
+                policy_revision: "code-index-readiness-policy.v1".to_owned(),
+            },
+            8,
+        )
+        .expect("bounded producer"),
+    );
+    registry
+        .install_index_observability(
+            fixture.path(),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
+        )
+        .await
+        .expect("install observability lane");
+
+    let blocked_writer = database
+        .begin_write_transaction()
+        .await
+        .expect("hold observability writer");
+    let initial = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("dashboard freshness");
+        if freshness.staleness_state.as_deref() == Some("fresh") && freshness.coverage == "complete"
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "optional telemetry held successful reconcile readiness: {freshness:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    blocked_writer
+        .commit()
+        .await
+        .expect("release observability writer");
+    registry.shutdown().await;
+    producer.shutdown().await.expect("flush producer");
+}
+
 /// The installed observability lane must persist one canonical index
 /// lifecycle observation when a reconcile publishes a generation, and the
 /// retrieval-pipeline families when a query composition completes, all in the
@@ -11228,10 +11308,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     registry
         .install_index_observability(
             fixture.path(),
-            super::observability::CodeIndexObservabilityV1::new(
-                database.clone(),
-                Arc::clone(&producer),
-            ),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
         )
         .await
         .expect("install observability lane");
@@ -11249,6 +11326,22 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
             .await
     );
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= ready_deadline,
+            "published text generation did not become queryable"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // One real query composition through the mounted authority carries the
     // retrieval-pipeline families through the bounded producer.

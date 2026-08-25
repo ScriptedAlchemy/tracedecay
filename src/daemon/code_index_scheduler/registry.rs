@@ -2850,9 +2850,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                 tracedecay_domain::QueueDepthBucketV1::OneToEight
                             }
                         };
-                        observability
-                            .record_reconcile_outcome(outcome, service_micros, queue_depth_bucket)
-                            .await;
+                        observability.record_reconcile_outcome(
+                            outcome,
+                            service_micros,
+                            queue_depth_bucket,
+                        );
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
