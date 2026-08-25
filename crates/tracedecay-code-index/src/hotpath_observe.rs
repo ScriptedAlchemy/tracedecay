@@ -225,36 +225,6 @@ pub(crate) fn record_files(count: usize) {
     }
 }
 
-/// Record the bounded candidate byte total admitted to one parser or builder
-/// operation. The key is static and the value is a current total rather than
-/// a per-file series, so a large generation cannot create profiler entries.
-#[inline(always)]
-pub(crate) fn record_candidate_bytes(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_candidate_bytes").set(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = bytes;
-    }
-}
-
-/// Record the bounded sanitized bytes captured for the current source
-/// operation. This is deliberately a gauge: it reports the latest admitted
-/// boundary without accumulating one event per file.
-#[inline(always)]
-pub(crate) fn record_captured_bytes(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_captured_bytes").set(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = bytes;
-    }
-}
-
 /// Every call site computes its byte total inside a `hotpath`-gated block, so
 /// this carries the same gate instead of a body that can never run.
 #[cfg(feature = "hotpath")]
