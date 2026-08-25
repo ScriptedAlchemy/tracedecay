@@ -1542,6 +1542,61 @@ impl PendingHintsV1 {
     fn take(&mut self) -> Self {
         std::mem::take(self)
     }
+
+    fn restore(&mut self, pending: Self) {
+        if self.overflow {
+            return;
+        }
+        if pending.overflow {
+            self.overflow();
+            return;
+        }
+        for path in pending.paths {
+            self.path(path);
+            if self.overflow {
+                break;
+            }
+        }
+    }
+}
+
+/// A drained view of the canonical pending-hint authority. Until committed,
+/// every early return, typed failure, cancellation, or unwind merges the exact
+/// drained paths back with hints that arrived during the reconcile pass.
+struct DrainedPendingHintsV1 {
+    authority: Arc<Mutex<PendingHintsV1>>,
+    pending: Option<PendingHintsV1>,
+}
+
+impl DrainedPendingHintsV1 {
+    fn new(authority: Arc<Mutex<PendingHintsV1>>, pending: PendingHintsV1) -> Self {
+        Self {
+            authority,
+            pending: Some(pending),
+        }
+    }
+
+    fn overflow(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.overflow)
+    }
+
+    fn commit(mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for DrainedPendingHintsV1 {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore(pending);
+    }
 }
 
 /// One candidate path's capture result, produced independently per file so
@@ -4113,10 +4168,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             )));
         }
 
+        let _worker_memory = self.reserve_worker_memory()?;
         let capture_epoch = self.epoch.load(Ordering::Acquire);
         let mut captured =
             self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
-        let hints = {
+        let drained_hints = {
             let mut hints = self
                 .hints
                 .lock()
@@ -4124,7 +4180,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             if self.epoch.load(Ordering::Acquire) != capture_epoch {
                 return Ok(None);
             }
-            hints.take()
+            DrainedPendingHintsV1::new(Arc::clone(&self.hints), hints.take())
         };
         if captured.snapshot.reference != metadata.snapshot().reference
             || captured.snapshot.source_revision != metadata.snapshot().source_revision
@@ -4208,24 +4264,24 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation.edges(),
             ))
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            return Ok(Some(CodeIndexReconcileOutcomeV1::Published(
-                CodeIndexPublishEvidenceV1 {
-                    generation_id: generation.manifest().generation_id.clone(),
-                    repository_id: self.repository_id.clone(),
-                    snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                    _lane_digest: lane_digest,
-                    _file_occurrence_ids: generation
-                        .snapshot()
-                        .files
-                        .iter()
-                        .map(|file| file.file_occurrence_id.clone())
-                        .collect(),
-                    reextracted_files,
-                    changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-                    reused_chunks: changes.reused.len(),
-                    overflow_reconciled: hints.overflow,
-                },
-            )));
+            let outcome = CodeIndexReconcileOutcomeV1::Published(CodeIndexPublishEvidenceV1 {
+                generation_id: generation.manifest().generation_id.clone(),
+                repository_id: self.repository_id.clone(),
+                snapshot_content_identity: generation.snapshot().content_identity.clone(),
+                _lane_digest: lane_digest,
+                _file_occurrence_ids: generation
+                    .snapshot()
+                    .files
+                    .iter()
+                    .map(|file| file.file_occurrence_id.clone())
+                    .collect(),
+                reextracted_files,
+                changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
+                reused_chunks: changes.reused.len(),
+                overflow_reconciled: drained_hints.overflow(),
+            });
+            drained_hints.commit();
+            return Ok(Some(outcome));
         }
         drop(std::mem::take(&mut captured.captured_files));
         Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
@@ -4243,12 +4299,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_source_paths: witness.ignored_source_paths,
         }
         .persist(&self.store_root);
-        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
-            CodeIndexNoopEvidenceV1 {
-                snapshot_content_identity,
-                overflow_reconciled: hints.overflow,
-            },
-        )))
+        let outcome = CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+            snapshot_content_identity,
+            overflow_reconciled: drained_hints.overflow(),
+        });
+        drained_hints.commit();
+        Ok(Some(outcome))
     }
 
     /// Load a complete identity-valid generation for stale serving.

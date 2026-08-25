@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -10158,6 +10159,107 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     registry.shutdown().await;
 }
 
+/// A graph-off changed-source rebuild must use the same canonical worker-memory
+/// admission as the complete reconcile path. A denial occurs before capture,
+/// leaves the durable pointer and hint authority intact, and releases its RAII
+/// reservation so an adequately funded retry can publish without decoding A.
+#[test]
+fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn graph_off_memory_alpha() -> usize { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation A"));
+    let generation_a = scheduler
+        .publication
+        .read_publication_pointer()
+        .expect("read generation A pointer")
+        .expect("generation A pointer");
+    let metadata_a = scheduler
+        .servable_retained_text_generation()
+        .expect("verified generation A text handle")
+        .metadata()
+        .clone();
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn graph_off_memory_beta() -> usize { 2 }\n",
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qam", "publish memory generation B"],
+    );
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+
+    let tight_limit = NonZeroU64::new(1024 * 1024).expect("tight canonical limit");
+    assert!(
+        tracedecay_code_index::parallelism::worker_reservation_bytes(
+            tracedecay_code_index::parallelism::indexing_workers(),
+        ) > tight_limit.get(),
+        "the fixture limit must deny the installed worker plan"
+    );
+    let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
+    scheduler.bind_resident_memory(Arc::clone(&tight));
+    let denied = scheduler.reconcile_retained_text_generation(&metadata_a);
+    assert!(
+        matches!(
+            denied,
+            Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_))
+        ),
+        "graph-off capture must be refused by canonical worker admission: {denied:?}"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer after denial")
+            .expect("active pointer after denial"),
+        generation_a,
+        "denied capture must leave generation A durable"
+    );
+    assert_eq!(
+        tight.snapshot().used_bytes,
+        0,
+        "a denied worker reservation must not leak a charge"
+    );
+
+    let adequate = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&adequate));
+    let outcome = scheduler
+        .reconcile_retained_text_generation(&metadata_a)
+        .expect("adequately funded graph-off retry")
+        .expect("graph-off retry outcome");
+    let generation_b = published(outcome);
+    assert_ne!(
+        generation_b.generation_id.as_str(),
+        generation_a.generation_id
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read generation B pointer")
+            .expect("generation B pointer")
+            .generation_id,
+        generation_b.generation_id.as_str()
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+    assert!(
+        adequate.snapshot().charges.iter().all(|charge| {
+            charge.key.component.as_str() != super::CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1
+        }),
+        "the successful retry must release its worker reservation"
+    );
+}
+
 /// Publishing a changed graph-off generation must hand text authority from the
 /// ready prior generation to the new durable pointer. Otherwise the worker's
 /// graph-only `latest` slot stays empty, neither serving swap runs, and queries
@@ -10269,11 +10371,77 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         "pub fn beta_0000() -> usize { 10_000 }\n",
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    let durable_generations_root = {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let durable = scheduler.publication.generations_root.clone();
+        let blocker = store.path().join("publication-root-blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write publication blocker");
+        scheduler.publication.generations_root = blocker;
+        durable
+    };
+    let reconcile_in_progress = {
+        Arc::clone(
+            &scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reconcile_in_progress,
+        )
+    };
     assert!(
         registry
             .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
             .await,
         "changed source wakes the mounted graph-off owner"
+    );
+
+    let attempt_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() <= attempt_deadline,
+            "transient publication failure was never attempted"
+        );
+        tokio::task::yield_now().await;
+    }
+    let restore_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        assert!(
+            std::time::Instant::now() <= restore_deadline,
+            "transient publication failure did not terminate"
+        );
+        tokio::task::yield_now().await;
+    }
+    {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !scheduler
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .paths
+                .is_empty(),
+            "transient publication failure lost the drained source hint"
+        );
+        assert_eq!(
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("read pointer after transient failure")
+                .expect("generation A remains durable")
+                .generation_id,
+            generation_a.as_str()
+        );
+        assert_eq!(scheduler.sealed_decode_count(), 0);
+        scheduler.publication.generations_root = durable_generations_root;
+    }
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
+            .await,
+        "retry wake reaches the restored source hint"
     );
 
     let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
