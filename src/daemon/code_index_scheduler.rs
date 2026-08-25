@@ -2164,70 +2164,75 @@ impl DaemonCodeTextArtifactStoreV1 {
         sealed_identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        let artifacts_root = code_text_artifacts_root(&self.store_root);
-        ensure_private_text_artifacts_root(&artifacts_root)?;
-        // Publication and artifact retention share this canonical store lock.
-        // Hold it from the first staging observation until pointer attachment
-        // is durable so retention cannot unlink a newly visible artifact from
-        // a plan made before the descriptor was attached.
-        let lock = acquire_code_generation_store_lock(&self.store_root)
-            .map_err(text_artifact_unavailable)?;
-        let (artifact_hex, artifact_size_bytes) =
-            sha256_private_file_hex_and_size(staging_path, control)?;
-        let descriptor = DurableCodeTextArtifactDescriptorV1 {
-            generation_id: generation.manifest().generation_id.clone(),
-            artifact_file: format!("text-artifact-{artifact_hex}.bin"),
-            artifact_digest: ManifestDigest::from_sha256_bytes(
-                &hex::decode(&artifact_hex).map_err(text_artifact_unavailable)?,
-            )
-            .map_err(text_artifact_unavailable)?,
-            artifact_size_bytes,
-        };
-        let final_path = artifacts_root.join(&descriptor.artifact_file);
-        match final_path.symlink_metadata() {
-            Ok(_) => {
-                // A digest-derived name is not proof that an existing filesystem
-                // object contains the named bytes. Verify the stable destination
-                // before withdrawing staging evidence; a symlink, non-regular
-                // object, truncated file, or same-name collision fails closed.
-                let (existing_hex, existing_size_bytes) =
-                    sha256_private_file_hex_and_size(&final_path, control)?;
-                if existing_size_bytes != artifact_size_bytes {
-                    return Err(RetrievalPortError::Contract(
-                        "existing code text artifact does not match its content address".to_owned(),
-                    ));
-                }
-                if existing_hex != artifact_hex {
-                    return Err(RetrievalPortError::Contract(
-                        "existing code text artifact contains different bytes".to_owned(),
-                    ));
-                }
-                std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
-            }
-            Err(error) => return Err(text_artifact_unavailable(error)),
-        }
-        DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
-            .map_err(text_artifact_unavailable)?;
-        let pointer = self
-            .publication
-            .read_publication_pointer()
-            .map_err(text_artifact_unavailable)?
-            .ok_or_else(|| {
-                RetrievalPortError::AuthorityUnavailable(
-                    "no durable publication pointer exists for text-artifact attachment".to_owned(),
+        hotpath::measure_block!("query.artifact.store.publish", {
+            let artifacts_root = code_text_artifacts_root(&self.store_root);
+            ensure_private_text_artifacts_root(&artifacts_root)?;
+            // Publication and artifact retention share this canonical store lock.
+            // Hold it from the first staging observation until pointer attachment
+            // is durable so retention cannot unlink a newly visible artifact from
+            // a plan made before the descriptor was attached.
+            let lock = acquire_code_generation_store_lock(&self.store_root)
+                .map_err(text_artifact_unavailable)?;
+            let (artifact_hex, artifact_size_bytes) =
+                sha256_private_file_hex_and_size(staging_path, control)?;
+            let descriptor = DurableCodeTextArtifactDescriptorV1 {
+                generation_id: generation.manifest().generation_id.clone(),
+                artifact_file: format!("text-artifact-{artifact_hex}.bin"),
+                artifact_digest: ManifestDigest::from_sha256_bytes(
+                    &hex::decode(&artifact_hex).map_err(text_artifact_unavailable)?,
                 )
-            })?;
-        attach_verified_text_artifact_under_lock(
-            &lock,
-            &pointer,
-            sealed_identity,
-            descriptor.clone(),
-        )
-        .map_err(text_artifact_unavailable)?;
-        Ok(descriptor)
+                .map_err(text_artifact_unavailable)?,
+                artifact_size_bytes,
+            };
+            let final_path = artifacts_root.join(&descriptor.artifact_file);
+            match final_path.symlink_metadata() {
+                Ok(_) => {
+                    // A digest-derived name is not proof that an existing filesystem
+                    // object contains the named bytes. Verify the stable destination
+                    // before withdrawing staging evidence; a symlink, non-regular
+                    // object, truncated file, or same-name collision fails closed.
+                    let (existing_hex, existing_size_bytes) =
+                        sha256_private_file_hex_and_size(&final_path, control)?;
+                    if existing_size_bytes != artifact_size_bytes {
+                        return Err(RetrievalPortError::Contract(
+                            "existing code text artifact does not match its content address"
+                                .to_owned(),
+                        ));
+                    }
+                    if existing_hex != artifact_hex {
+                        return Err(RetrievalPortError::Contract(
+                            "existing code text artifact contains different bytes".to_owned(),
+                        ));
+                    }
+                    std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(staging_path, &final_path)
+                        .map_err(text_artifact_unavailable)?;
+                }
+                Err(error) => return Err(text_artifact_unavailable(error)),
+            }
+            DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+                .map_err(text_artifact_unavailable)?;
+            let pointer = self
+                .publication
+                .read_publication_pointer()
+                .map_err(text_artifact_unavailable)?
+                .ok_or_else(|| {
+                    RetrievalPortError::AuthorityUnavailable(
+                        "no durable publication pointer exists for text-artifact attachment"
+                            .to_owned(),
+                    )
+                })?;
+            attach_verified_text_artifact_under_lock(
+                &lock,
+                &pointer,
+                sealed_identity,
+                descriptor.clone(),
+            )
+            .map_err(text_artifact_unavailable)?;
+            Ok(descriptor)
+        })
     }
 }
 
