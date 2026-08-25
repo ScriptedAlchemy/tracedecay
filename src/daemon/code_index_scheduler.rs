@@ -1167,6 +1167,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .map(|generation| generation.as_ref().clone()))
     }
 
+    #[hotpath::measure(label = "code_index.generation.publish")]
     fn publish_atomically(
         &mut self,
         _scope: &CodeIndexGenerationScopeV1,
@@ -1223,13 +1224,21 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
-        let generation_size = Self::write_sealed_durable(&temporary.path, &generation)?;
+        let generation_size = hotpath::measure_block!(
+            "code_index.generation.publish.seal_fsync",
+            Self::write_sealed_durable(&temporary.path, &generation)
+        )?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
             return Err(Self::unavailable(
                 "sealed code generation exceeds the durable history byte bound",
             ));
         }
-        let state_digest = Self::state_digest_file(&temporary.path)?;
+        let state_digest = hotpath::measure_block!(
+            "code_index.generation.publish.state_digest",
+            Self::state_digest_file(&temporary.path)
+        )?;
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("code_index.generation.publish.digest_bytes").set(generation_size);
         let generation_file = format!(
             "generation-{}.json",
             state_digest
@@ -1239,7 +1248,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let generation_path = self.generations_root.join(&generation_file);
         match generation_path.symlink_metadata() {
             Ok(_) => {
-                if !Self::files_equal(&generation_path, &temporary.path)? {
+                let equal = hotpath::measure_block!(
+                    "code_index.generation.publish.dedupe_compare",
+                    Self::files_equal(&generation_path, &temporary.path)
+                )?;
+                if !equal {
                     return Err(Self::unavailable(
                         "immutable code-generation path contains different bytes",
                     ));
@@ -1346,14 +1359,17 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         if temporary.exists() {
             std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
         }
-        Self::write_durable(&temporary, &bytes)?;
-        std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
-        Self::sync_directory(
-            self.active_path
-                .parent()
-                .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
-        )?;
-        self.remember_publication_pointer(&pointer, &bytes);
+        hotpath::measure_block!("code_index.generation.publish.pointer_commit", {
+            Self::write_durable(&temporary, &bytes)?;
+            std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
+            Self::sync_directory(
+                self.active_path
+                    .parent()
+                    .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
+            )?;
+            self.remember_publication_pointer(&pointer, &bytes);
+            Ok::<(), CodeIndexPublicationStoreErrorV1>(())
+        })?;
         let mut state = self.cache.lock_state()?;
         if state
             .active
