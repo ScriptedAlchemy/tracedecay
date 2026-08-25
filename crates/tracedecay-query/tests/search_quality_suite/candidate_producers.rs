@@ -1783,13 +1783,17 @@ fn disk_artifact_widened_reservation_commits_high_ngram_window_atomically() {
                 .expect("measure high-ngram window"),
         )
         .expect("high-ngram window ledger charge");
+    let staging_window_bytes = fixture.open_source(128).staging_window_bytes();
+    let production_builder_budget = WIDENED_BUILD_BUDGET_BYTES
+        .checked_sub(staging_window_bytes)
+        .expect("production builder budget after source reservation");
     assert!(
         batch_charge > PRIOR_BUILD_BUDGET_BYTES,
         "the production-shaped window must reproduce the measured 768 MiB memory limit: {batch_charge}"
     );
     assert!(
-        batch_charge <= WIDENED_BUILD_BUDGET_BYTES,
-        "the same bounded window must fit the widened reservation: {batch_charge}"
+        batch_charge <= production_builder_budget,
+        "the same bounded window must fit after the production source reservation: batch={batch_charge}, staging={staging_window_bytes}, builder={production_builder_budget}"
     );
     assert!(
         prior
@@ -1820,8 +1824,12 @@ fn disk_artifact_widened_reservation_commits_high_ngram_window_atomically() {
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, WIDENED_BUILD_BUDGET_BYTES,
         "the canonical reservation must cover the measured production window"
     );
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
-        .expect("create builder with the canonical widened reservation");
+    let mut builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &artifact_path,
+        fixture.metadata,
+        production_builder_budget,
+    )
+    .expect("create builder after the production source reservation");
     assert_eq!(
         builder
             .largest_admissible_page_prefix(pages)
