@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) struct StagedGenerationV1 {
-    pub(crate) files: Vec<FileGenerationArtifactsV1>,
+    pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
     pub(crate) chunks: GenerationChunkManifestV1,
     pub(crate) symbols: GenerationSymbolIndexV1,
     pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
@@ -9,7 +9,7 @@ pub(crate) struct StagedGenerationV1 {
 
 pub(crate) fn staged_generation(
     generation_id: CodeGenerationId,
-    mut files: Vec<FileGenerationArtifactsV1>,
+    mut files: Vec<Arc<FileGenerationArtifactsV1>>,
     lineage: Vec<SymbolLineageCandidateV1>,
 ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
     files.sort_by(|left, right| {
@@ -19,20 +19,26 @@ pub(crate) fn staged_generation(
             .file_occurrence_id
             .cmp(&right.artifacts.chunks.document.file_occurrence_id)
     });
-    let chunks = GenerationChunkManifestV1::new(
-        generation_id.clone(),
-        files
-            .iter()
-            .map(|file| file.artifacts.chunks.clone())
-            .collect(),
+    let chunks = hotpath::measure_block!(
+        "code_index.generation.aggregate_chunks",
+        GenerationChunkManifestV1::new(
+            generation_id.clone(),
+            files
+                .iter()
+                .map(|file| file.artifacts.chunks.clone())
+                .collect(),
+        )
     )
     .map_err(CodeIndexProductionErrorV1::Increment)?;
-    let symbols = GenerationSymbolIndexV1::new(
-        generation_id,
-        files
-            .iter()
-            .flat_map(|file| file.artifacts.symbols.clone())
-            .collect(),
+    let symbols = hotpath::measure_block!(
+        "code_index.generation.aggregate_symbols",
+        GenerationSymbolIndexV1::new(
+            generation_id,
+            files
+                .iter()
+                .flat_map(|file| file.artifacts.symbols.clone())
+                .collect(),
+        )
     )
     .map_err(CodeIndexProductionErrorV1::Lineage)?;
     Ok(StagedGenerationV1 {
@@ -114,7 +120,7 @@ pub(crate) fn captured_files(
 
 pub(crate) fn coverage_summary(
     snapshot: &SanitizedCodeSnapshotV1,
-    files: &[FileGenerationArtifactsV1],
+    files: &[Arc<FileGenerationArtifactsV1>],
 ) -> CoverageSummaryV1 {
     let mut coverage = CoverageSummaryV1::default();
     for file in &snapshot.files {
@@ -196,17 +202,20 @@ pub(crate) fn edge_order(
         ))
 }
 
-pub(crate) fn collect_edge_evidence(
-    files: &[FileGenerationArtifactsV1],
-) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>) {
+pub(crate) fn collect_edge_evidence<T>(
+    files: &[T],
+) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
     let mut edges = files
         .iter()
-        .flat_map(|file| file.artifacts.edges.clone())
+        .flat_map(|file| file.as_ref().artifacts.edges.clone())
         .collect::<Vec<_>>();
     edges.sort_by(edge_order);
     let mut abstentions = files
         .iter()
-        .flat_map(|file| file.artifacts.edge_abstentions.clone())
+        .flat_map(|file| file.as_ref().artifacts.edge_abstentions.clone())
         .collect::<Vec<_>>();
     abstentions.sort();
     (edges, abstentions)

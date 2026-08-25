@@ -644,12 +644,12 @@ impl CodeIndexPublishedGenerationV1 {
             for file in persisted_files {
                 let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
                     .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                files.push(FileGenerationArtifactsV1 {
+                files.push(Arc::new(FileGenerationArtifactsV1 {
                     authority: file.authority,
                     extraction: file.extraction,
                     artifacts: file.artifacts,
                     exact_authority,
-                });
+                }));
             }
             let chunks = GenerationChunkManifestV1::new(
                 manifest.generation_id.clone(),

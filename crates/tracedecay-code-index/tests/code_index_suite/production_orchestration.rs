@@ -21,8 +21,9 @@ use tracedecay_code_index::{
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-        VerifiedSealedLexicalPageV1, sealed_generation_payload_digest,
+        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+        sealed_generation_payload_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -486,6 +487,115 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_restored.initial_parses, 0);
     assert_eq!(after_restored.incremental_parses, 0);
     assert_eq!(after_restored.noop_parses, 0);
+}
+
+/// The physical reuse pool is an index over immutable generation-owned
+/// artifacts, not a second owner of every parsed and chunked payload. Keeping
+/// the registry-scoped pool alive after its publication owner shuts down must
+/// therefore release the complete file corpus with the generation.
+#[test]
+fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
+    let pool = SharedPhysicalCodeArtifactPoolV1::default();
+    {
+        let store = SharedPublicationStore::default();
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+            .expect("production owner")
+            .with_physical_artifact_pool(pool.clone());
+        let generation = owner
+            .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
+            .expect("generation publishes");
+
+        assert_eq!(pool.stats().resident, 1);
+        drop(generation);
+    }
+
+    assert_eq!(
+        pool.stats().resident,
+        0,
+        "the reuse index must not pin a second copy of a dropped generation"
+    );
+}
+
+#[test]
+fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
+    let pool = SharedPhysicalCodeArtifactPoolV1::default();
+    let mut source_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("source owner")
+    .with_physical_artifact_pool(pool.clone());
+    let source = source_owner
+        .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
+        .expect("source generation publishes");
+
+    let mut reused_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("reuse owner")
+    .with_physical_artifact_pool(pool.clone());
+    let reused = reused_owner
+        .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
+        .expect("physically reused generation publishes");
+
+    let mut cold_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("cold owner");
+    let cold = cold_owner
+        .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
+        .expect("cold comparison generation publishes");
+
+    let mut foreign_owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("foreign occurrence owner")
+    .with_physical_artifact_pool(pool.clone());
+    foreign_owner
+        .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
+        .expect("foreign occurrence generation publishes without unsafe reuse");
+
+    assert_eq!(
+        pool.stats().reused,
+        1,
+        "only the byte-exact file occurrence may reuse physical artifacts"
+    );
+    assert_eq!(reused.manifest(), cold.manifest(), "manifest mismatch");
+    assert_eq!(reused.snapshot(), cold.snapshot(), "snapshot mismatch");
+    assert_eq!(reused.chunks(), cold.chunks(), "chunk mismatch");
+    assert_eq!(reused.symbols(), cold.symbols(), "symbol mismatch");
+    assert_eq!(reused.lineage(), cold.lineage(), "lineage mismatch");
+    assert_eq!(reused.imports(), cold.imports(), "import mismatch");
+    assert_eq!(reused.edges(), cold.edges(), "edge mismatch");
+    assert_eq!(
+        reused.edge_abstentions(),
+        cold.edge_abstentions(),
+        "edge abstention mismatch"
+    );
+    assert_eq!(reused.coverage(), cold.coverage(), "coverage mismatch");
+    assert_eq!(
+        reused.capability(),
+        cold.capability(),
+        "capability mismatch"
+    );
+    assert_eq!(
+        reused.projection(),
+        cold.projection(),
+        "projection mismatch"
+    );
+    assert_eq!(
+        reused.encode_sealed().expect("reused generation seals"),
+        cold.encode_sealed().expect("cold generation seals"),
+        "sharing the physical allocation must preserve every durable byte and digest"
+    );
+    drop(source);
 }
 
 /// One file exceeding the bounded per-file parse budget must never fail the
