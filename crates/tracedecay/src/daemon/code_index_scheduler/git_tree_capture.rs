@@ -142,6 +142,9 @@ impl CaptureProgressV1 {
     }
 
     #[cfg(feature = "hotpath")]
+    // Cadence arithmetic on the capture hot loop; the profiling build must not
+    // pay a call for it.
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     fn publish_at_cadence(&self, observation_count: u64, force: bool) {
         if !force && !Self::cadence_is_due(observation_count) {
@@ -162,6 +165,9 @@ impl CaptureProgressV1 {
     }
 
     #[cfg(feature = "hotpath")]
+    // Cadence arithmetic on the capture hot loop; the profiling build must not
+    // pay a call for it.
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     fn cadence_is_due(observation_count: u64) -> bool {
         observation_count != 0 && observation_count.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)

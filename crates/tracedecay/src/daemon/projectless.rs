@@ -155,8 +155,7 @@ async fn projectless_tools_call_response_with_connection(
             tool_name,
             "tracedecay_admin_project" | "tracedecay_hook_runtime" | "tracedecay_admin_cli"
         )
-            || tracedecay_application::RetainedSurfaceOperation::from_tool_name(&tool_name)
-                .is_some()
+            || tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
         {
             tool_name
         } else {

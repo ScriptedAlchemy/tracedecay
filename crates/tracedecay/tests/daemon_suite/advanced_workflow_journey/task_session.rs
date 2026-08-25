@@ -500,61 +500,65 @@ fn set_semantic_runtime_configuration(
         .unwrap_or_else(|error| panic!("{operation}: {error}"));
 }
 
-/// Waits for the daemon to re-establish the evaluated semantic profile after a
-/// physical restart.
-///
-/// Activation is durable, so a restart must return the runtime to `Current`
-/// under the *same* evaluated profile rather than silently falling back to the
-/// built-in default. Both halves are asserted: the runtime state proves the
-/// activated generation is live again, and the configuration read back through
-/// the daemon proves the evaluated selection itself survived the restart.
+/// Proves the evaluated profile is both selected through the public configuration
+/// authority and ready through the mounted runtime authority before TaskSession
+/// selection. TaskSession anchors deliberately retain only TaskSession provenance.
 pub(super) fn wait_for_evaluated_semantic_profile_current(
     home: &Path,
     project: &Path,
     client: &Client,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        let status = semantic_runtime_status(home, project);
-        if matches!(
-            status.as_ref().map(|status| &status.state),
-            Some(SemanticRuntimeStateV1::Current { .. })
-        ) {
-            break;
-        }
-        assert_semantic_lifecycle_not_failed(home, status.as_ref());
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for the evaluated semantic profile to read current \
-             after physical restart: {status:?}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    let resolved = client
+    let configured = client
         .execute::<ApplicationConfigurationGet>(
             &tracedecay_application::configuration::ConfigurationGetRequestV1 {
                 key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
                     .expect("semantic runtime setting key"),
             },
         )
-        .expect("semantic runtime configuration after restart")
+        .expect("read activated semantic runtime configuration through typed SDK")
         .result;
-    let ConfigurationValueV1::Text(encoded) = &resolved.effective_value else {
+    let ConfigurationValueV1::Text(value) = &configured.effective_value else {
         panic!(
-            "the semantic runtime setting must resolve to text, got {:?}",
-            resolved.effective_value
-        )
+            "activated semantic runtime must retain its typed configuration text: {configured:?}"
+        );
     };
-    let configuration: SemanticConfig =
-        serde_json::from_str(encoded).expect("semantic runtime configuration JSON");
-    let active = configuration
+    let semantic_config: SemanticConfig = serde_json::from_str(value)
+        .unwrap_or_else(|error| panic!("decode activated semantic runtime configuration: {error}"));
+    let active_profile = semantic_config
         .active_profile
-        .expect("the evaluated profile selection must survive a physical restart");
+        .as_ref()
+        .expect("evaluated semantic profile must remain active through the typed SDK");
     assert_eq!(
-        active.profile_id, EVALUATED_PROFILE_ID,
-        "a restart must restore the evaluated profile, not fall back to a default selection"
+        active_profile.profile_id, EVALUATED_PROFILE_ID,
+        "the evaluated semantic profile selected through the typed SDK must remain active"
     );
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let status = semantic_runtime_status(home, project)
+            .unwrap_or_else(|| panic!("runtime returned an invalid semantic status"));
+        if let SemanticRuntimeStateV1::Current { receipt } = &status.state {
+            let runtime_configuration = status
+                .configuration
+                .as_ref()
+                .expect("ready semantic runtime must report its activation configuration");
+            assert_eq!(
+                runtime_configuration.effective_behavior_digest,
+                configured.effective_behavior_digest,
+                "the runtime readiness receipt must authorize the exact evaluated configuration selected through the SDK"
+            );
+            assert_eq!(
+                receipt.configuration, *runtime_configuration,
+                "the ready semantic receipt must retain the runtime's exact activation configuration"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for activated semantic runtime: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn wait_for_semantic_generation(

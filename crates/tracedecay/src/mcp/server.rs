@@ -608,6 +608,7 @@ impl McpServer {
     /// before it ever reaches the spool, which is a fixture gap rather than
     /// the daemon's behaviour.
     #[cfg(any(test, feature = "test-transport"))]
+    #[allow(clippy::expect_used)]
     #[doc(hidden)]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,

@@ -4,11 +4,6 @@ pub mod formatter;
 /// Re-ranking of search candidates using structural signals.
 pub mod ranking;
 
-/// Cross-session cache backing `tracedecay_read`.
-
-/// Mode dispatchers (`full`, `lines`, `map`, `signatures`) for `tracedecay_read`.
-
-/// Shared source-read path, rendering, context, and cache authority.
 pub(crate) use formatter::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
     CONTEXT_INDEX_COVERAGE_HINT_HEADING, CONTEXT_MEMORY_FEEDBACK_HINT,

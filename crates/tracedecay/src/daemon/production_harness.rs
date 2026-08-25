@@ -40,6 +40,9 @@ struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
     _project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    // Read by the `cfg(test)` capacity journey; under `test-transport` alone the
+    // harness still must own the registry for its lifetime, so it reads as dead.
+    #[cfg_attr(not(test), allow(dead_code))]
     http_application_registry: http_application::DaemonHttpApplicationRegistry,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
     _database_scope: crate::db::DaemonDatabaseScope,

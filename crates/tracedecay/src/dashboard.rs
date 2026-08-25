@@ -31,30 +31,6 @@ pub fn spa_router() -> axum::Router {
     assets::spa_router()
 }
 
-#[cfg(test)]
-mod spa_router_tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn unknown_api_paths_never_receive_the_single_page_app() {
-        let response = super::spa_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/not-a-real-route")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("SPA router response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-}
-
 /// Installs the canonical root-owned registered schema port before dashboard
 /// integration fixtures open any database authority.
 #[cfg(feature = "test-transport")]
@@ -400,4 +376,28 @@ pub async fn record_project_span_for_test(
             operation: "record dashboard test git span".to_owned(),
             message: error.to_string(),
         })
+}
+
+#[cfg(test)]
+mod spa_router_tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn unknown_api_paths_never_receive_the_single_page_app() {
+        let response = super::spa_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/not-a-real-route")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("SPA router response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
