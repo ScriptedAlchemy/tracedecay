@@ -27,8 +27,10 @@ use super::CodeLexicalArtifactErrorV1;
 // source-page Roaring bitmap shards. Revision 8 adds source-page receipts for
 // every append-only base section so sealing and reopening need not rescan the
 // relational base after the private builder connection has admitted it.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 8;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v8\0";
+// Revision 9 persists parser-attested symbol display identity with each row so
+// graph-independent result hydration never needs the full sealed generation.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 9;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v9\0";
 const REQUIRED_ARTIFACT_INDEXES_V8: [(&str, &str, &[&str]); 7] = [
     ("rows", "rows_by_chunk", &["chunk_id"]),
     (
@@ -764,6 +766,9 @@ pub struct CodeLexicalArtifactOccurrenceV1 {
     pub source_span: SourceSpan,
     pub logical_path: String,
     pub sanitized_text: BoundedSanitizedText,
+    pub simple_name: Option<String>,
+    pub qualified_name: Option<String>,
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -782,6 +787,9 @@ pub(super) struct ArtifactRowV1 {
     pub exact_terms: Vec<ExactTechnicalTermV1>,
     pub sanitized_text: BoundedSanitizedText,
     pub logical_path: String,
+    pub symbol_simple_name: Option<String>,
+    pub symbol_qualified_name: Option<String>,
+    pub symbol_kind: Option<String>,
     pub field_lengths: BTreeMap<LexicalFieldV1, usize>,
     pub normalized_text: String,
 }
@@ -795,6 +803,9 @@ impl From<ProjectedChunkV1> for ArtifactRowV1 {
             exact_terms: row.exact_terms,
             sanitized_text: row.sanitized_text,
             logical_path: row.logical_path,
+            symbol_simple_name: row.symbol_simple_name,
+            symbol_qualified_name: row.symbol_qualified_name,
+            symbol_kind: row.symbol_kind,
             field_lengths: row.field_lengths,
             normalized_text: row.normalized_text,
         }

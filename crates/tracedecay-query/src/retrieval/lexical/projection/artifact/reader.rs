@@ -2292,6 +2292,9 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
         source_span: row.anchor.source_span,
         logical_path: row.logical_path,
         sanitized_text: row.sanitized_text,
+        simple_name: row.symbol_simple_name,
+        qualified_name: row.symbol_qualified_name,
+        kind: row.symbol_kind,
     }
 }
 

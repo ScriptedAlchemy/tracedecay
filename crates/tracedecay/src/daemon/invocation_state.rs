@@ -469,16 +469,16 @@ impl DaemonInvocationState {
         // observability lane uninstalled and nothing records.
         match self
             .service
-            .observability_producer_with_database(Some(&canonical_project_root))
+            .observability_producer(Some(&canonical_project_root))
             .await
         {
-            Some((session_db, producer)) => {
+            Some(producer) => {
                 if let Err(error) = self
                     .code_index_schedulers
                     .install_index_observability(
                         &canonical_project_root,
                         code_index_scheduler::observability::CodeIndexObservabilityV1::new(
-                            session_db, producer,
+                            producer,
                         ),
                     )
                     .await

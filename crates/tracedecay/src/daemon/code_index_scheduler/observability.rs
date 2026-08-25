@@ -11,49 +11,50 @@ use tracedecay_domain::{
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::observation::observe_composition;
 use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, emit_retrieval_pipeline, record_index,
+    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, emit_index,
+    emit_retrieval_pipeline,
 };
 
 use super::CodeIndexReconcileOutcomeV1;
 
 /// Project-bound observation authority installed once per mounted worktree
 /// (`CodeIndexSchedulerRegistryV1::install_index_observability`). The session
-/// database carries index lifecycle receipts directly; the bounded producer
-/// carries the retrieval-pipeline families off the query hot path.
+/// bounded producer carries lifecycle and retrieval-pipeline observations off
+/// the scheduler and query hot paths.
 #[derive(Clone)]
 pub(in crate::daemon) struct CodeIndexObservabilityV1 {
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     producer: Arc<BoundedObservabilityProducerV1>,
 }
 
 impl CodeIndexObservabilityV1 {
-    pub(in crate::daemon) fn new(
-        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
-        producer: Arc<BoundedObservabilityProducerV1>,
-    ) -> Self {
-        Self {
-            session_db,
-            producer,
-        }
+    pub(in crate::daemon) fn new(producer: Arc<BoundedObservabilityProducerV1>) -> Self {
+        Self { producer }
     }
 
     /// Records one terminal reconcile pass as a canonical index lifecycle
     /// observation beside the worker's in-memory cadence receipt.
-    pub(in crate::daemon) async fn record_reconcile_outcome(
+    pub(in crate::daemon) fn record_reconcile_outcome(
         &self,
         outcome: &CodeIndexReconcileOutcomeV1,
         service_micros: u64,
         queue_depth_bucket: QueueDepthBucketV1,
     ) {
         let observation = reconcile_index_observation(outcome, service_micros, queue_depth_bucket);
-        if let Err(error) = record_index(self.session_db.as_ref(), observation).await {
-            tracing::debug!(
+        match emit_index(self.producer.as_ref(), observation) {
+            Ok(ObservabilityEmissionOutcomeV1::Enqueued) => {}
+            Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => tracing::debug!(
+                event = "code_index_observability",
+                family = "index",
+                outcome = "dropped_at_capacity",
+                "code-index lifecycle observation was refused by the bounded producer"
+            ),
+            Err(error) => tracing::debug!(
                 event = "code_index_observability",
                 family = "index",
                 outcome = "unavailable",
-                error = ?error,
-                "code-index lifecycle observation could not be recorded"
-            );
+                error,
+                "code-index lifecycle observation could not be enqueued"
+            ),
         }
     }
 

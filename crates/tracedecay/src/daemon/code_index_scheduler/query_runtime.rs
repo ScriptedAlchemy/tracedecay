@@ -408,14 +408,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 None => (serving, true),
             },
             None => {
-                if let Some(text) = self.latest_text_serving_for_scope(scope).await {
+                if let Some((text, current)) =
+                    self.latest_text_serving_freshness_for_scope(scope).await
+                {
                     return execute_query_search_on_text(
                         self,
                         scope,
                         input,
                         text,
                         None,
-                        true,
+                        !current,
                         graph_control,
                     )
                     .await;

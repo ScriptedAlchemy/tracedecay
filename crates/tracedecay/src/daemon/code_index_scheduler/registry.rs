@@ -2850,9 +2850,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                 tracedecay_domain::QueueDepthBucketV1::OneToEight
                             }
                         };
-                        observability
-                            .record_reconcile_outcome(outcome, service_micros, queue_depth_bucket)
-                            .await;
+                        observability.record_reconcile_outcome(
+                            outcome,
+                            service_micros,
+                            queue_depth_bucket,
+                        );
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
@@ -4031,7 +4033,19 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCodeTextGenerationV1> {
-        let (root, scheduler, text_generation, wake, pending_wake) = {
+        self.latest_text_serving_freshness_for_scope(scope)
+            .await
+            .map(|(latest, _)| latest)
+    }
+
+    /// Resolve the graph-independent text owner together with the freshness
+    /// decision made by the same scheduler observation. A ready text artifact
+    /// is not inherently stale merely because native graph activation is off.
+    pub(in crate::daemon) async fn latest_text_serving_freshness_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<(LatestCodeTextGenerationV1, bool)> {
+        let (root, scheduler, text_generation, wake, pending_wake, reconcile_in_progress) = {
             let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
@@ -4040,6 +4054,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
             )
         };
         let scope = scope.clone();
@@ -4054,6 +4069,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 .filter(|latest| {
                     latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
                 })?;
+            if pending_wake.has_pending_arrival()
+                || reconcile_in_progress.load(Ordering::Acquire) != 0
+            {
+                // The existing worker owns the freshness remedy. Re-requesting
+                // here would enqueue a redundant pass behind it.
+                return Some((latest, false));
+            }
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -4063,17 +4085,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
-                    return Some(latest);
+                    return Some((latest, false));
                 }
             };
-            if scheduler.request_fresh_for_query_background() {
+            let current = !scheduler.request_fresh_for_query_background();
+            if !current {
                 Self::note_wake(
                     &pending_wake,
                     &wake,
                     CodeIndexCadenceTriggerV1::QueryAdmission,
                 );
             }
-            Some(latest)
+            Some((latest, current))
         })
         .await
         .ok()

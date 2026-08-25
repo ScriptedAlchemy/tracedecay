@@ -299,6 +299,140 @@ pub(super) fn code_index_search_display_binding(
     Ok((display, provenance))
 }
 
+pub(super) fn code_index_text_search_display_binding(
+    latest: &code_index_scheduler::LatestCodeTextGenerationV1,
+    request: &tracedecay_domain::RetrievalRequest,
+    candidate: &tracedecay_domain::RankedCandidate,
+) -> std::result::Result<
+    (
+        code_search::CodeIndexSearchDisplayV1,
+        tracedecay_domain::OccurrenceProvenance,
+    ),
+    tracedecay_query::retrieval::hydrate::HydrationUnavailableV1,
+> {
+    use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
+
+    let metadata = latest.metadata();
+    let manifest = metadata.manifest();
+    let snapshot = metadata.snapshot();
+    if request.scope.privacy_domain != manifest.privacy_domain
+        || request.scope.root.repository != snapshot.repository
+        || request.scope.root.worktree != snapshot.worktree
+        || request.scope.root.reference != snapshot.reference
+        || request.snapshot.freshness_digest.as_str() != manifest.snapshot_digest.as_str()
+        || request.snapshot.captured_at != manifest.seal.sealed_at
+    {
+        return Err(HydrationUnavailableV1::Stale);
+    }
+
+    let source_prefix = format!("code-chunk:{}:", manifest.generation_id.as_str());
+    let (provenance, chunk_id) = candidate
+        .candidate
+        .occurrences
+        .iter()
+        .find_map(|provenance| {
+            let chunk_id = provenance
+                .source_occurrence_id
+                .as_str()
+                .strip_prefix(&source_prefix)?;
+            (provenance.repository_id.as_ref() == Some(&request.scope.root.repository)
+                && provenance.source_namespace == provenance.freshness.source_namespace
+                && provenance.freshness.compatibility
+                    == tracedecay_domain::FreshnessCompatibilityV1::Current
+                && provenance.source_namespace.as_str() == "ns.code.daemon")
+                .then_some((provenance.clone(), chunk_id))
+        })
+        .ok_or(HydrationUnavailableV1::Invalid)?;
+    let chunk_id = tracedecay_domain::CodeSearchChunkId::new(chunk_id.to_owned())
+        .map_err(|_| HydrationUnavailableV1::Invalid)?;
+    let occurrence = latest
+        .artifact_occurrence_by_chunk(&chunk_id)
+        .map_err(|_| HydrationUnavailableV1::AuthorityUnavailable)?;
+    if occurrence.generation != manifest.generation_id
+        || !snapshot.files.iter().any(|file| {
+            file.file_occurrence_id == occurrence.file
+                && file.logical_path == occurrence.logical_path
+                && file.disposition == tracedecay_domain::SnapshotFileDispositionV1::Present
+        })
+    {
+        return Err(HydrationUnavailableV1::Stale);
+    }
+
+    let anchor = candidate.candidate.anchor_id.as_str();
+    if let Some(symbol) = anchor.strip_prefix("code-symbol:") {
+        if occurrence.symbol.as_ref().map(|value| value.as_str()) != Some(symbol) {
+            return Err(HydrationUnavailableV1::Invalid);
+        }
+    } else if anchor.strip_prefix("code-chunk:") != Some(chunk_id.as_str()) {
+        return Err(HydrationUnavailableV1::Invalid);
+    }
+
+    let display = match occurrence.symbol {
+        Some(_) => code_search::CodeIndexSearchDisplayV1 {
+            name: occurrence
+                .simple_name
+                .ok_or(HydrationUnavailableV1::Invalid)?,
+            qualified_name: occurrence
+                .qualified_name
+                .ok_or(HydrationUnavailableV1::Invalid)?,
+            kind: occurrence.kind.ok_or(HydrationUnavailableV1::Invalid)?,
+            path: occurrence.logical_path,
+        },
+        None => {
+            if occurrence.simple_name.is_some()
+                || occurrence.qualified_name.is_some()
+                || occurrence.kind.is_some()
+            {
+                return Err(HydrationUnavailableV1::Invalid);
+            }
+            let name = occurrence
+                .logical_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(occurrence.logical_path.as_str())
+                .to_owned();
+            code_search::CodeIndexSearchDisplayV1 {
+                name,
+                qualified_name: occurrence.logical_path.clone(),
+                kind: "file".to_owned(),
+                path: occurrence.logical_path,
+            }
+        }
+    };
+    Ok((display, provenance))
+}
+
+enum CodeIndexSearchDisplaySourceV1 {
+    Text(code_index_scheduler::LatestCodeTextGenerationV1),
+    Complete {
+        latest: code_index_scheduler::LatestCompleteCodeIndexV1,
+        paths: CodeIndexDisplayPathIndexV1,
+    },
+}
+
+impl CodeIndexSearchDisplaySourceV1 {
+    fn binding(
+        &self,
+        request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+    ) -> std::result::Result<
+        (
+            code_search::CodeIndexSearchDisplayV1,
+            tracedecay_domain::OccurrenceProvenance,
+        ),
+        tracedecay_query::retrieval::hydrate::HydrationUnavailableV1,
+    > {
+        match self {
+            Self::Text(latest) => {
+                code_index_text_search_display_binding(latest, request, candidate)
+            }
+            Self::Complete { latest, paths } => {
+                code_index_search_display_binding(latest.generation(), paths, request, candidate)
+            }
+        }
+    }
+}
+
 fn code_index_symbol_display(
     symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
     display_paths: &CodeIndexDisplayPathIndexV1,
@@ -791,21 +925,28 @@ pub(super) fn code_index_search_executor(
                     None,
                 ),
             };
-            let latest = match generation_for_hydration(
-                &schedulers,
-                &terminal_scope,
-                &executed.query.generation,
-                control.deadline.clone(),
-                control.cancellation.clone(),
-            )
-            .await
-            {
-                Ok(latest) => latest,
-                Err(outcome) => return outcome,
-            };
-            let display_paths =
-                match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
-                    Ok(display_paths) => display_paths,
+            let display_source = if let Some(text) = schedulers
+                .latest_text_serving_for_scope(&terminal_scope)
+                .await
+                .filter(|text| {
+                    text.metadata().manifest().generation_id == executed.query.generation
+                }) {
+                CodeIndexSearchDisplaySourceV1::Text(text)
+            } else {
+                let latest = match generation_for_hydration(
+                    &schedulers,
+                    &terminal_scope,
+                    &executed.query.generation,
+                    control.deadline.clone(),
+                    control.cancellation.clone(),
+                )
+                .await
+                {
+                    Ok(latest) => latest,
+                    Err(outcome) => return outcome,
+                };
+                let paths = match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
+                    Ok(paths) => paths,
                     Err(_) => {
                         return code_index_search_unavailable_for_generation(
                             Some(executed.query.generation.as_str().to_owned()),
@@ -814,6 +955,8 @@ pub(super) fn code_index_search_executor(
                         );
                     }
                 };
+                CodeIndexSearchDisplaySourceV1::Complete { latest, paths }
+            };
             let mut hydration_request = executed.query.sanitized.request().clone();
             let hydration_budget = code_index_search_hydration_budget(
                 accepted_semantic_budget,
@@ -896,12 +1039,7 @@ pub(super) fn code_index_search_executor(
                  _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
                     use tracedecay_query::retrieval::hydrate::HydrationPreflightOutcomeV1;
 
-                    match code_index_search_display_binding(
-                        latest.generation(),
-                        &display_paths,
-                        request,
-                        candidate,
-                    )
+                    match display_source.binding(request, candidate)
                     .and_then(|(display, _)| code_index_search_display_bytes(&display))
                     {
                         Ok(estimated_bytes) => {
@@ -916,12 +1054,7 @@ pub(super) fn code_index_search_executor(
                  _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
                     use tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1;
 
-                    let (display, provenance) = match code_index_search_display_binding(
-                        latest.generation(),
-                        &display_paths,
-                        request,
-                        candidate,
-                    ) {
+                    let (display, provenance) = match display_source.binding(request, candidate) {
                         Ok(binding) => binding,
                         Err(reason) => return HydrationReadOutcomeV1::Unavailable(reason),
                     };

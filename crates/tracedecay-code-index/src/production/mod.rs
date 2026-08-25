@@ -79,7 +79,8 @@ pub use lexical_page_source::{
     VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    VerifiedSealedTextGenerationMetadataV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{

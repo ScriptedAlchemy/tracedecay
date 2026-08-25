@@ -36,6 +36,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::event_lane::record_observability;
 
+use super::{BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1};
+
 const SCHEMA_REVISION: u32 = 1;
 const CONFIGURATION_REVISION: &str = "registered-project-session.v1";
 
@@ -615,6 +617,20 @@ pub async fn record_index(
     let envelope =
         index_envelope(&project_id, now_micros().0, observation).map_err(contract_error)?;
     record_observability(db, envelope).await
+}
+
+/// Offers one code-index generation lifecycle observation to the mounted
+/// bounded producer without waiting for project-store persistence.
+pub fn emit_index(
+    producer: &BoundedObservabilityProducerV1,
+    observation: IndexObservedV1,
+) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
+    let envelope = index_envelope(
+        &producer.identity().authorized_scope_ref,
+        now_micros().0,
+        observation,
+    )?;
+    producer.try_emit(envelope)
 }
 
 #[cfg(test)]

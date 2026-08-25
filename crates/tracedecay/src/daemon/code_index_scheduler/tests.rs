@@ -70,6 +70,9 @@ use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
 };
+use tracedecay_query::retrieval::semantic::{
+    SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
+};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
 };
@@ -1055,6 +1058,18 @@ impl RerankExecutionControlV1 for ReadyRerankControlV1 {
 
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct ReadySemanticControlV1;
+
+impl SemanticExecutionControl for ReadySemanticControlV1 {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
     }
 }
 
@@ -10063,6 +10078,10 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             }
         }
     };
+    assert!(
+        executed.served_stale,
+        "an explicit overflow keeps the currently served text generation stale until reconcile settles"
+    );
     let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let overflow_settled = {
@@ -10186,6 +10205,85 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .expect("ready progress stays observable")
             .phase,
         crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    let current = registry
+        .execute_query_search(&scope, core_search_request("alpha_0000"))
+        .await
+        .expect("settled graph-off text query");
+    assert!(
+        !current.served_stale,
+        "a reconciled graph-off text owner must report current exact and lexical coverage"
+    );
+    let semantic = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::FallbackAllowed,
+        )
+        .await
+        .expect("graph-off fallback semantic query");
+    assert_eq!(semantic.query.generation, current.generation);
+    assert!(matches!(
+        semantic.semantic,
+        super::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            ..
+        }
+    ));
+    let strict = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::StrictSemantic,
+        )
+        .await;
+    assert!(matches!(
+        strict,
+        Err(
+            super::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            }
+        ) if generation == current.generation
+    ));
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "semantic fallback without an activated profile must not decode the sealed generation"
+    );
+    let text = registry
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .expect("ready graph-off text owner");
+    let candidate = current
+        .authorized
+        .fallback
+        .ordered_candidates
+        .first()
+        .expect("artifact-backed ranked candidate");
+    let (display, _) = crate::daemon::code_index_executor::code_index_text_search_display_binding(
+        &text,
+        current.sanitized.request(),
+        candidate,
+    )
+    .expect("artifact-backed result display");
+    assert_eq!(display.name, "alpha_0000");
+    assert_eq!(display.kind, "function");
+    assert_eq!(display.path, "src/file_0000.rs");
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "artifact-backed display hydration must not decode the sealed generation"
     );
 
     let query_scope = CodeQueryScope::new(executed.generation.clone(), None).expect("query scope");
@@ -11096,6 +11194,86 @@ async fn wait_for_event_to_ready(
     }
 }
 
+/// A successful reconcile is product state; optional lifecycle telemetry may
+/// not keep its in-progress guard or freshness response open while the
+/// observability store is busy.
+#[tokio::test]
+async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        fixture.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = Arc::new(
+        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+            database.clone(),
+            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                process_boot_id: "boot:code-index-readiness".to_owned(),
+                producer_revision: "code-index-readiness-test.v1".to_owned(),
+                configuration_revision: "code-index-readiness-config.v1".to_owned(),
+                policy_revision: "code-index-readiness-policy.v1".to_owned(),
+            },
+            8,
+        )
+        .expect("bounded producer"),
+    );
+    registry
+        .install_index_observability(
+            fixture.path(),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
+        )
+        .await
+        .expect("install observability lane");
+
+    let blocked_writer = database
+        .begin_write_transaction()
+        .await
+        .expect("hold observability writer");
+    let initial = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("dashboard freshness");
+        if freshness.staleness_state.as_deref() == Some("fresh") && freshness.coverage == "complete"
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "optional telemetry held successful reconcile readiness: {freshness:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    blocked_writer
+        .commit()
+        .await
+        .expect("release observability writer");
+    registry.shutdown().await;
+    producer.shutdown().await.expect("flush producer");
+}
+
 /// The installed observability lane must persist one canonical index
 /// lifecycle observation when a reconcile publishes a generation, and the
 /// retrieval-pipeline families when a query composition completes, all in the
@@ -11132,10 +11310,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     registry
         .install_index_observability(
             fixture.path(),
-            super::observability::CodeIndexObservabilityV1::new(
-                database.clone(),
-                Arc::clone(&producer),
-            ),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
         )
         .await
         .expect("install observability lane");
@@ -11153,6 +11328,22 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
             .await
     );
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= ready_deadline,
+            "published text generation did not become queryable"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // One real query composition through the mounted authority carries the
     // retrieval-pipeline families through the bounded producer.

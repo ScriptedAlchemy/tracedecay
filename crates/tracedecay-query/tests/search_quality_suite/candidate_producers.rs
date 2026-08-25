@@ -22,7 +22,7 @@ use tracedecay_code_index::production::{
     CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -1173,6 +1173,20 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .expect("artifact row lookup")
         .expect("artifact occurrence");
     assert_eq!(occurrence.logical_path, "src/artifact.ts");
+    let symbol_chunk = chunks
+        .iter()
+        .find(|chunk| chunk.chunk().anchor.symbol_occurrence_id.is_some())
+        .expect("parser-backed symbol chunk");
+    let symbol_occurrence = reader
+        .occurrence_by_chunk(&symbol_chunk.chunk().id)
+        .expect("artifact symbol row lookup")
+        .expect("artifact symbol occurrence");
+    assert_eq!(symbol_occurrence.simple_name.as_deref(), Some("render"));
+    assert_eq!(
+        symbol_occurrence.qualified_name.as_deref(),
+        Some("src/artifact.ts::render")
+    );
+    assert_eq!(symbol_occurrence.kind.as_deref(), Some("function"));
     let import_witness = reader
         .import_membership(&import_evidence)
         .expect("import membership")
@@ -3846,9 +3860,21 @@ fn sealed_page_retained_bytes_include_digest_identities() {
                     + evidence.local_name.as_ref().map_or(0, String::capacity)
             },
         );
+        let symbol_display_bytes = page.symbol_displays().iter().fold(
+            page.symbol_display_capacity()
+                .saturating_mul(std::mem::size_of::<
+                    Option<VerifiedSealedLexicalSymbolDisplayV1>,
+                >()),
+            |bytes, display| {
+                bytes.saturating_add(display.as_ref().map_or(
+                    0,
+                    VerifiedSealedLexicalSymbolDisplayV1::retained_owned_bytes,
+                ))
+            },
+        );
         assert_eq!(
             page.retained_owned_bytes(),
-            payload_bytes + 8 * sha256_digest_len,
+            payload_bytes + symbol_display_bytes + 8 * sha256_digest_len,
             "page {} retained bytes must include its eight digest identity strings",
             page.page_ordinal()
         );

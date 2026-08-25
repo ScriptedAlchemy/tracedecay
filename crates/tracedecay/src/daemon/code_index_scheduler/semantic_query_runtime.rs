@@ -358,6 +358,19 @@ impl CodeIndexSchedulerRegistryV1 {
         let query = self
             .execute_controlled_query(scope, input, control.clone())
             .await?;
+        if self
+            .semantic_query_authority_for_scope(scope)
+            .await
+            .is_none()
+        {
+            let semantic = semantic_abstention(
+                mode,
+                SemanticAbstentionV1::CalibrationUnavailable,
+                Arc::clone(&query.authorized.fallback),
+            )
+            .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
+            return Ok(ExecutedQuerySemanticSearchV1 { query, semantic });
+        }
         let latest = match self.generation_for(scope, &query.generation).await {
             Ok(Some(latest)) => latest,
             Ok(None) => {
