@@ -69,6 +69,12 @@ const ARTIFACT_SQLITE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// The kernel SQLite window's page-cache floor.
 const ARTIFACT_SQLITE_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024;
 const ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+/// Conservative live charge while one page's n-grams move from the ordered
+/// key map and Roaring containers into canonical encoded shards. One logical
+/// membership pays for a worst-case distinct B-tree entry/container plus the
+/// sparse document value; the separately retained shard bytes cover encoded
+/// output that overlaps the shrinking map.
+const NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1: usize = 160;
 
 #[derive(Debug, Error)]
 pub enum CodeLexicalArtifactErrorV1 {

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use roaring::RoaringBitmap;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
 use tracedecay_domain::{ExactFieldV1, ManifestDigest};
@@ -8,9 +9,13 @@ use super::super::{
     CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
     exact_field_for_kind,
 };
-use super::format::{ArtifactRowV1, encode_exact_field, encode_field};
+use super::format::{
+    ArtifactRowV1, encode_exact_field, encode_field, encode_ngram_bitmap, ngram_page_digest,
+};
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::{CodeLexicalArtifactErrorV1, checkpoint};
+use super::{
+    CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
+};
 
 #[derive(Debug)]
 pub struct PreparedCodeLexicalArtifactPageV1 {
@@ -26,6 +31,8 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) next_cursor: Vec<u8>,
     pub(super) imports: Vec<PreparedImportV1>,
     pub(super) documents: Vec<PreparedDocumentV1>,
+    pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
+    pub(super) ngram_digest: ManifestDigest,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
     preparation_scratch_bytes: usize,
@@ -91,8 +98,15 @@ pub(super) struct PreparedDocumentV1 {
     pub(super) row: Vec<u8>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
-    pub(super) ngram_postings: Vec<(i64, i64)>,
     pub(super) integrity_digest: ManifestDigest,
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedNgramShardV1 {
+    pub(super) kind: i64,
+    pub(super) ngram: i64,
+    pub(super) documents: Vec<u8>,
+    pub(super) cardinality: u64,
 }
 
 #[derive(Debug)]
@@ -120,6 +134,8 @@ pub(super) fn prepare_page(
             )
         })?;
     let mut documents = Vec::with_capacity(page.chunks().len());
+    let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
+    let mut logical_ngram_postings = 0usize;
     for (offset, admitted) in page.chunks().iter().enumerate() {
         checkpoint(control)?;
         let document = first_document
@@ -129,12 +145,27 @@ pub(super) fn prepare_page(
                     "lexical artifact prepared document id overflowed".to_owned(),
                 )
             })?;
-        documents.push(prepare_document(
+        let (prepared, ngrams) = prepare_document(
             metadata,
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
             control,
-        )?);
+        )?;
+        let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
+        logical_ngram_postings = logical_ngram_postings
+            .checked_add(ngrams.len())
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact ngram aggregation count overflowed".to_owned(),
+                )
+            })?;
+        for (kind, ngram) in ngrams {
+            ngram_documents
+                .entry((kind, ngram))
+                .or_default()
+                .insert(document);
+        }
+        documents.push(prepared);
     }
     let mut imports = Vec::with_capacity(page.imports().len());
     for evidence in page.imports() {
@@ -151,6 +182,42 @@ pub(super) fn prepare_page(
         .next_cursor()
         .persisted_bytes()
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    let mut ngram_shards = Vec::with_capacity(ngram_documents.len());
+    for ((kind, ngram), documents) in ngram_documents {
+        checkpoint(control)?;
+        let encoded = encode_ngram_bitmap(&documents)?;
+        ngram_shards.push(PreparedNgramShardV1 {
+            kind,
+            ngram,
+            documents: encoded,
+            cardinality: documents.len(),
+        });
+    }
+    let ngram_digest = ngram_page_digest(
+        page.page_ordinal(),
+        ngram_shards.iter().map(|shard| {
+            (
+                shard.kind,
+                shard.ngram,
+                shard.documents.as_slice(),
+                shard.cardinality,
+            )
+        }),
+    )?;
+    let aggregation_scratch_bytes = logical_ngram_postings
+        .checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact ngram aggregation charge overflowed".to_owned(),
+            )
+        })?;
+    let preparation_scratch_bytes = preparation_scratch_bytes
+        .checked_add(aggregation_scratch_bytes)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact page preparation scratch charge overflowed".to_owned(),
+            )
+        })?;
     let mut prepared = PreparedCodeLexicalArtifactPageV1 {
         page_ordinal: page.page_ordinal(),
         page_digest: page.page_digest().clone(),
@@ -164,6 +231,8 @@ pub(super) fn prepare_page(
         next_cursor,
         imports,
         documents,
+        ngram_shards,
+        ngram_digest,
         source_retained_bytes: page.retained_owned_bytes(),
         prepared_retained_bytes: 0,
         preparation_scratch_bytes,
@@ -183,7 +252,7 @@ fn prepare_document(
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<PreparedDocumentV1, CodeLexicalArtifactErrorV1> {
+) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
         CodeLexicalArtifactErrorV1::Contract(
             "lexical artifact exceeds the posting document-id range".to_owned(),
@@ -270,17 +339,18 @@ fn prepare_document(
         &row,
         &term_postings,
         &exact_postings,
-        &ngram_postings,
     )?;
-    Ok(PreparedDocumentV1 {
-        document_id,
-        chunk_id,
-        row,
-        term_postings,
-        exact_postings,
+    Ok((
+        PreparedDocumentV1 {
+            document_id,
+            chunk_id,
+            row,
+            term_postings,
+            exact_postings,
+            integrity_digest,
+        },
         ngram_postings,
-        integrity_digest,
-    })
+    ))
 }
 
 fn document_integrity_digest(
@@ -289,10 +359,9 @@ fn document_integrity_digest(
     row: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
-    ngram_postings: &[(i64, i64)],
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v2\0");
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
     hasher.update(document.to_le_bytes());
     hash_table(&mut hasher, "row", 1, |hasher, _| {
         hash_text(hasher, chunk_id)?;
@@ -318,17 +387,6 @@ fn document_integrity_digest(
             let (field, term) = &exact_postings[ordinal];
             hash_text(hasher, field.as_bytes())?;
             hash_blob(hasher, term)
-        },
-    )?;
-    hash_table(
-        &mut hasher,
-        "ngram_posting",
-        ngram_postings.len(),
-        |hasher, ordinal| {
-            let (kind, ngram) = ngram_postings[ordinal];
-            hash_integer(hasher, kind);
-            hash_integer(hasher, ngram);
-            Ok(())
         },
     )?;
     integrity_digest(hasher)
@@ -425,6 +483,14 @@ fn prepared_retained_bytes(
                     .saturating_mul(std::mem::size_of::<PreparedDocumentV1>()),
             )
         })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                page.ngram_shards
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<PreparedNgramShardV1>()),
+            )
+        })
+        .and_then(|bytes| bytes.checked_add(page.ngram_digest.as_str().len()))
         .ok_or_else(prepared_charge_overflow)?;
     for import in &page.imports {
         bytes = bytes
@@ -453,14 +519,6 @@ fn prepared_retained_bytes(
                         .saturating_mul(std::mem::size_of::<(String, Vec<u8>)>()),
                 )
             })
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    document
-                        .ngram_postings
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<(i64, i64)>()),
-                )
-            })
             .ok_or_else(prepared_charge_overflow)?;
         for posting in &document.term_postings {
             bytes = bytes
@@ -475,6 +533,11 @@ fn prepared_retained_bytes(
                 .ok_or_else(prepared_charge_overflow)?;
         }
     }
+    for shard in &page.ngram_shards {
+        bytes = bytes
+            .checked_add(shard.documents.capacity())
+            .ok_or_else(prepared_charge_overflow)?;
+    }
     Ok(bytes)
 }
 
@@ -482,14 +545,13 @@ fn estimated_sqlite_writes(
     page: &PreparedCodeLexicalArtifactPageV1,
 ) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
     let mut rows = 1usize;
-    let mut bytes = page
-        .page_digest
-        .as_str()
-        .len()
-        .checked_add(page.cumulative_digest.as_str().len())
-        .and_then(|bytes| bytes.checked_add(page.import_dictionary_digest.as_str().len()))
-        .and_then(|bytes| bytes.checked_add(page.next_cursor.len()))
-        .ok_or_else(prepared_write_overflow)?;
+    let mut bytes = estimated_source_page_receipt_write_bytes(
+        page.page_digest.as_str(),
+        page.cumulative_digest.as_str(),
+        page.import_dictionary_digest.as_str(),
+        page.ngram_digest.as_str(),
+        &page.next_cursor,
+    )?;
     for import in &page.imports {
         rows = rows.checked_add(2).ok_or_else(prepared_write_overflow)?;
         bytes = bytes
@@ -519,14 +581,33 @@ fn estimated_sqlite_writes(
                 .and_then(|bytes| bytes.checked_add(8))
                 .ok_or_else(prepared_write_overflow)?;
         }
-        rows = rows
-            .checked_add(document.ngram_postings.len())
-            .ok_or_else(prepared_write_overflow)?;
+    }
+    rows = rows
+        .checked_add(page.ngram_shards.len())
+        .ok_or_else(prepared_write_overflow)?;
+    for shard in &page.ngram_shards {
         bytes = bytes
-            .checked_add(document.ngram_postings.len().saturating_mul(24))
+            .checked_add(shard.documents.len())
+            .and_then(|bytes| bytes.checked_add(32))
             .ok_or_else(prepared_write_overflow)?;
     }
     Ok((rows, bytes))
+}
+
+fn estimated_source_page_receipt_write_bytes(
+    page_digest: &str,
+    cumulative_digest: &str,
+    import_dictionary_digest: &str,
+    ngram_digest: &str,
+    next_cursor: &[u8],
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    page_digest
+        .len()
+        .checked_add(cumulative_digest.len())
+        .and_then(|bytes| bytes.checked_add(import_dictionary_digest.len()))
+        .and_then(|bytes| bytes.checked_add(ngram_digest.len()))
+        .and_then(|bytes| bytes.checked_add(next_cursor.len()))
+        .ok_or_else(prepared_write_overflow)
 }
 
 fn prepared_write_overflow() -> CodeLexicalArtifactErrorV1 {
@@ -543,4 +624,22 @@ fn prepared_charge_overflow() -> CodeLexicalArtifactErrorV1 {
 
 fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimated_source_page_receipt_write_bytes;
+
+    #[test]
+    fn source_page_write_charge_includes_the_ngram_receipt_exactly() {
+        let without_ngram =
+            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "", b"cursor")
+                .expect("receipt charge without ngram digest");
+        let with_ngram =
+            estimated_source_page_receipt_write_bytes("p", "cc", "iii", "nnnnn", b"cursor")
+                .expect("receipt charge with ngram digest");
+
+        assert_eq!(without_ngram, 1 + 2 + 3 + 6);
+        assert_eq!(with_ngram, without_ngram + 5);
+    }
 }

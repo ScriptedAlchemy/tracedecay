@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use roaring::RoaringBitmap;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,9 +23,11 @@ use super::CodeLexicalArtifactErrorV1;
 // adds term-selective read indexes. Revision 6 makes the append authority
 // immutable before one authenticated digest pass, defers every serving index
 // until resumable finalization, and keeps ngram catch-up document-leading.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 6;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v6\0";
-const REQUIRED_ARTIFACT_INDEXES_V6: [(&str, &str, &[&str]); 7] = [
+// Revision 7 replaces one row per document n-gram with deterministic
+// source-page Roaring bitmap shards.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 7;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v7\0";
+const REQUIRED_ARTIFACT_INDEXES_V7: [(&str, &str, &[&str]); 7] = [
     ("rows", "rows_by_chunk", &["chunk_id"]),
     (
         "term_postings",
@@ -50,7 +53,7 @@ const REQUIRED_ARTIFACT_INDEXES_V6: [(&str, &str, &[&str]); 7] = [
     (
         "ngram_postings",
         "ngram_postings_by_ngram",
-        &["kind", "ngram", "document_id"],
+        &["kind", "ngram", "page_ordinal"],
     ),
 ];
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
@@ -79,7 +82,7 @@ pub(super) fn verify_required_artifact_indexes(
                 "artifact index schema is unreadable: {error}"
             ))
         })?;
-    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V6 {
+    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V7 {
         let partial: Option<i64> = connection
             .query_row(
                 "SELECT partial FROM pragma_index_list(?1) WHERE name = ?2",
@@ -172,9 +175,11 @@ pub(super) fn verify_artifact_table_layout(
             ))
         })?;
     let expected = [
+        ("page_ordinal", "INTEGER", 1, 1),
         ("kind", "INTEGER", 1, 2),
         ("ngram", "INTEGER", 1, 3),
-        ("document_id", "INTEGER", 1, 1),
+        ("documents", "BLOB", 1, 0),
+        ("cardinality", "INTEGER", 1, 0),
     ];
     if without_rowid != Some(1)
         || !columns
@@ -185,10 +190,179 @@ pub(super) fn verify_artifact_table_layout(
             .eq(expected)
     {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-            "artifact ngram table has columns {columns:?} and without-rowid state {without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires a document-leading primary key"
+            "artifact ngram table has columns {columns:?} and without-rowid state {without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires source-page bitmap shards"
         )));
     }
     Ok(())
+}
+
+pub(super) fn ngram_page_digest<'a>(
+    page_ordinal: u64,
+    rows: impl IntoIterator<Item = (i64, i64, &'a [u8], u64)>,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.code-lexical-artifact-ngram-page.v1\0");
+    hasher.update(page_ordinal.to_le_bytes());
+    let mut row_count = 0u64;
+    for (kind, ngram, documents, cardinality) in rows {
+        hasher.update(b"row\0");
+        hasher.update(kind.to_le_bytes());
+        hasher.update(ngram.to_le_bytes());
+        hasher.update(
+            u64::try_from(documents.len())
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+                .to_le_bytes(),
+        );
+        hasher.update(documents);
+        hasher.update(cardinality.to_le_bytes());
+        row_count = row_count.checked_add(1).ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact ngram shard count overflowed".to_owned(),
+            )
+        })?;
+    }
+    hasher.update(b"end\0");
+    hasher.update(row_count.to_le_bytes());
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+pub(super) fn encode_ngram_bitmap(
+    bitmap: &RoaringBitmap,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    let cardinality = bitmap.len();
+    let mut range_count = 0u64;
+    let mut previous: Option<u32> = None;
+    for document in bitmap.iter() {
+        if previous.is_none_or(|previous| document != previous.saturating_add(1)) {
+            range_count = range_count.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact ngram range count overflowed".to_owned(),
+                )
+            })?;
+        }
+        previous = Some(document);
+    }
+    let list_bytes = cardinality.checked_mul(4).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact ngram document-list size overflowed".to_owned(),
+        )
+    })?;
+    let range_bytes = range_count.checked_mul(8).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact ngram range size overflowed".to_owned(),
+        )
+    })?;
+    let ranges = range_bytes < list_bytes;
+    let payload_bytes = if ranges { range_bytes } else { list_bytes };
+    let capacity = usize::try_from(payload_bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+        .checked_add(16)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact ngram bitmap size overflowed".to_owned(),
+            )
+        })?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(b"TDN1");
+    encoded.push(u8::from(ranges));
+    encoded.extend_from_slice(&[0u8; 3]);
+    encoded.extend_from_slice(&cardinality.to_le_bytes());
+    if ranges {
+        let mut start: Option<u32> = None;
+        let mut previous: Option<u32> = None;
+        for document in bitmap.iter() {
+            if previous.is_some_and(|previous| document != previous.saturating_add(1)) {
+                let start_value = start.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact ngram range is missing its start".to_owned(),
+                    )
+                })?;
+                let previous_value = previous.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact ngram range is missing its end".to_owned(),
+                    )
+                })?;
+                encoded.extend_from_slice(&start_value.to_le_bytes());
+                encoded.extend_from_slice(&(previous_value - start_value).to_le_bytes());
+                start = Some(document);
+            } else if start.is_none() {
+                start = Some(document);
+            }
+            previous = Some(document);
+        }
+        if let (Some(start), Some(previous)) = (start, previous) {
+            encoded.extend_from_slice(&start.to_le_bytes());
+            encoded.extend_from_slice(&(previous - start).to_le_bytes());
+        }
+    } else {
+        for document in bitmap.iter() {
+            encoded.extend_from_slice(&document.to_le_bytes());
+        }
+    }
+    Ok(encoded)
+}
+
+pub(super) fn decode_ngram_bitmap(
+    encoded: &[u8],
+) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
+    let header = encoded.get(..16).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact ngram bitmap header is truncated".to_owned(),
+        )
+    })?;
+    if &header[..4] != b"TDN1" || header[5..8] != [0u8; 3] || header[4] > 1 {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact ngram bitmap header is invalid".to_owned(),
+        ));
+    }
+    let cardinality = u64::from_le_bytes(header[8..16].try_into().map_err(|_| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact ngram bitmap cardinality is malformed".to_owned(),
+        )
+    })?);
+    let width = if header[4] == 1 { 8usize } else { 4usize };
+    if !(encoded.len() - 16).is_multiple_of(width) {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact ngram bitmap payload is truncated".to_owned(),
+        ));
+    }
+    let mut bitmap = RoaringBitmap::new();
+    let mut previous: Option<u32> = None;
+    for item in encoded[16..].chunks_exact(width) {
+        let start = u32::from_le_bytes(item[..4].try_into().map_err(|_| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact ngram bitmap document is malformed".to_owned(),
+            )
+        })?);
+        let end = if width == 8 {
+            let run = u32::from_le_bytes(item[4..8].try_into().map_err(|_| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact ngram bitmap run is malformed".to_owned(),
+                )
+            })?);
+            start.checked_add(run).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact ngram bitmap run overflowed".to_owned(),
+                )
+            })?
+        } else {
+            start
+        };
+        if previous.is_some_and(|previous| start <= previous) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact ngram bitmap documents are not strictly ordered".to_owned(),
+            ));
+        }
+        bitmap.insert_range(start..=end);
+        previous = Some(end);
+    }
+    if bitmap.len() != cardinality {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact ngram bitmap cardinality does not verify".to_owned(),
+        ));
+    }
+    Ok(bitmap)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

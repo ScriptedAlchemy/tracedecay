@@ -29,9 +29,9 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use super::format::{
     CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, encode_field, metadata_digest,
-    new_verified_receipt, padded_receipt, verify_artifact_table_layout,
-    verify_required_artifact_indexes,
+    decode_ngram_bitmap, decode_padded_receipt, decode_padded_receipt_with_control, encode_field,
+    metadata_digest, new_verified_receipt, ngram_page_digest, padded_receipt,
+    verify_artifact_table_layout, verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{PreparedCodeLexicalArtifactPageV1, prepare_page as prepare_page_values};
@@ -40,7 +40,8 @@ use super::{
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1, CodeLexicalArtifactBatchLimitV1,
-    CodeLexicalArtifactErrorV1, checkpoint, open_builder_connection, sqlite_corrupt, sqlite_error,
+    CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
+    open_builder_connection, sqlite_corrupt, sqlite_error,
 };
 use crate::retrieval::lexical::LexicalFieldV1;
 
@@ -49,8 +50,6 @@ use super::super::CodeLexicalProjectionMetadataV1;
 const DOCUMENT_TERM_POSTINGS_QUERY: &str = "SELECT field, term, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY field, term";
 const DOCUMENT_EXACT_POSTINGS_QUERY: &str =
     "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term";
-const DOCUMENT_NGRAM_POSTINGS_QUERY: &str =
-    "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram";
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor \
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
@@ -123,7 +122,7 @@ impl FinalizationSectionV1 {
     const fn full_query(self) -> &'static str {
         match self {
             Self::SourcePages => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
             Self::DocumentIntegrity => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
@@ -142,7 +141,7 @@ impl FinalizationSectionV1 {
                 "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id"
             }
             Self::NgramPostings => {
-                "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id"
+                "SELECT page_ordinal, kind, ngram, documents, cardinality FROM ngram_postings ORDER BY page_ordinal, kind, ngram"
             }
             Self::FieldStatistics => "SELECT field, total_length FROM field_stats ORDER BY field",
             Self::TermStatistics => {
@@ -156,10 +155,10 @@ impl FinalizationSectionV1 {
     const fn seek_query(self, after: bool) -> &'static str {
         match (self, after) {
             (Self::SourcePages, false) => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
             }
             (Self::SourcePages, true) => {
-                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
             }
             (Self::DocumentIntegrity, false) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
@@ -198,10 +197,10 @@ impl FinalizationSectionV1 {
                 "SELECT field, term, document_id FROM exact_postings WHERE (field, term, document_id) > (?1, ?2, ?3) ORDER BY field, term, document_id LIMIT ?4"
             }
             (Self::NgramPostings, false) => {
-                "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id LIMIT ?1"
+                "SELECT page_ordinal, kind, ngram, documents, cardinality FROM ngram_postings ORDER BY page_ordinal, kind, ngram LIMIT ?1"
             }
             (Self::NgramPostings, true) => {
-                "SELECT kind, ngram, document_id FROM ngram_postings WHERE (kind, ngram, document_id) > (?1, ?2, ?3) ORDER BY kind, ngram, document_id LIMIT ?4"
+                "SELECT page_ordinal, kind, ngram, documents, cardinality FROM ngram_postings WHERE (page_ordinal, kind, ngram) > (?1, ?2, ?3) ORDER BY page_ordinal, kind, ngram LIMIT ?4"
             }
             (Self::FieldStatistics, false) => {
                 "SELECT field, total_length FROM field_stats ORDER BY field LIMIT ?1"
@@ -240,9 +239,9 @@ enum PersistedFinalizationKeyV1 {
         document_id: i64,
     },
     IntegerIntegerInteger {
+        page_ordinal: i64,
         kind: i64,
         ngram: i64,
-        document_id: i64,
     },
     TextText {
         field: String,
@@ -1876,24 +1875,25 @@ fn projected_chunk_prepared_retained_upper_bound_bytes(
     let normalized_text_bytes = text_bytes;
     let (_, normalized_scratch) = document_ngram_scratch(normalized_text_bytes)?;
     let (_, raw_scratch) = document_ngram_scratch(text_bytes)?;
-    // Preparation retains `(kind, ngram)` tuples, not the `u32` scratch
-    // values. Vec growth can reserve up to the next geometric capacity, so
-    // two tuple slots are charged for every authorized scratch slot.
-    let ngram_tuple_slots = normalized_scratch
+    // Every authorized n-gram slot may become a distinct ordered-map key with
+    // its own Roaring container while already-encoded shards accumulate.
+    // The exact prepared ledger separately charges those encoded blobs.
+    let ngram_aggregation_bytes = normalized_scratch
         .checked_add(raw_scratch)
         .and_then(|bytes| bytes.checked_div(std::mem::size_of::<u32>()))
-        .and_then(|slots| slots.checked_mul(2))
-        .and_then(|slots| slots.checked_mul(std::mem::size_of::<(i64, i64)>()))
+        .and_then(|slots| slots.checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1))
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact prepared n-gram slot charge overflowed".to_owned(),
+                "lexical artifact prepared n-gram aggregation charge overflowed".to_owned(),
             )
         })?;
-    transient.checked_add(ngram_tuple_slots).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Contract(
-            "lexical artifact prepared document charge overflowed".to_owned(),
-        )
-    })
+    transient
+        .checked_add(ngram_aggregation_bytes)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact prepared document charge overflowed".to_owned(),
+            )
+        })
 }
 
 /// Page-level prepared ownership that is not attributable to one chunk or
@@ -2206,7 +2206,9 @@ fn append_prepared_postings(
         )
         .map_err(sqlite_error)?;
     let mut ngram_statement = transaction
-        .prepare_cached("INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, ?3)")
+        .prepare_cached(
+            "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
         .map_err(sqlite_error)?;
     for page in pages {
         for document in &page.documents {
@@ -2230,11 +2232,18 @@ fn append_prepared_postings(
                     ])
                     .map_err(sqlite_error)?;
             }
-            for (kind, ngram) in &document.ngram_postings {
-                ngram_statement
-                    .execute(params![kind, ngram, document.document_id])
-                    .map_err(sqlite_error)?;
-            }
+        }
+        for shard in &page.ngram_shards {
+            checkpoint(control)?;
+            ngram_statement
+                .execute(params![
+                    i64::try_from(page.page_ordinal).map_err(contract_number)?,
+                    shard.kind,
+                    shard.ngram,
+                    shard.documents.as_slice(),
+                    i64::try_from(shard.cardinality).map_err(contract_number)?,
+                ])
+                .map_err(sqlite_error)?;
         }
     }
     Ok(())
@@ -2281,7 +2290,7 @@ fn insert_prepared_source_page(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
         .execute(
-            "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 i64::try_from(page.page_ordinal).map_err(contract_number)?,
                 page.page_digest.as_str(),
@@ -2291,6 +2300,7 @@ fn insert_prepared_source_page(
                 i64::try_from(page.import_count).map_err(contract_number)?,
                 i64::try_from(page.import_payload_bytes).map_err(contract_number)?,
                 page.import_dictionary_digest.as_str(),
+                page.ngram_digest.as_str(),
                 page.next_cursor.as_slice(),
             ],
         )
@@ -2349,6 +2359,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 import_count INTEGER NOT NULL,
                 import_payload_bytes INTEGER NOT NULL,
                 import_dictionary_digest TEXT NOT NULL,
+                ngram_digest TEXT NOT NULL,
                 next_cursor BLOB NOT NULL
             );
             -- Every derived document and import receives its digest in the
@@ -2397,10 +2408,12 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 PRIMARY KEY(field, term, document_id)
             ) WITHOUT ROWID;
             CREATE TABLE ngram_postings (
+                page_ordinal INTEGER NOT NULL,
                 kind INTEGER NOT NULL,
                 ngram INTEGER NOT NULL,
-                document_id INTEGER NOT NULL,
-                PRIMARY KEY(document_id, kind, ngram)
+                documents BLOB NOT NULL,
+                cardinality INTEGER NOT NULL CHECK(cardinality > 0),
+                PRIMARY KEY(page_ordinal, kind, ngram)
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -2415,6 +2428,8 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TRIGGER immutable_import_integrity_delete BEFORE DELETE ON import_integrity BEGIN SELECT RAISE(ABORT, 'immutable lexical import integrity'); END;
             CREATE TRIGGER immutable_import_evidence_update BEFORE UPDATE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
             CREATE TRIGGER immutable_import_evidence_delete BEFORE DELETE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
+            CREATE TRIGGER immutable_ngram_postings_update BEFORE UPDATE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
+            CREATE TRIGGER immutable_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
             ",
         )
         .map_err(sqlite_error)
@@ -2482,7 +2497,7 @@ fn authenticated_authority_epoch(
                 SELECT 1 FROM rows AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
                 UNION ALL SELECT 1 FROM term_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
                 UNION ALL SELECT 1 FROM exact_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
-                UNION ALL SELECT 1 FROM ngram_postings AS content LEFT JOIN document_integrity AS authority USING(document_id) WHERE authority.document_id IS NULL
+                UNION ALL SELECT 1 FROM ngram_postings AS content LEFT JOIN source_pages AS authority USING(page_ordinal) WHERE authority.page_ordinal IS NULL
             )",
             [],
             |row| row.get(0),
@@ -2755,7 +2770,7 @@ fn build_serving_index_step(
         6 => hotpath::measure_block!(
             "query.artifact.finalization.index.ngram_postings_by_ngram",
             transaction.execute_batch(
-                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, document_id)",
+                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal)",
             )
         ),
         _ => {
@@ -3047,15 +3062,15 @@ fn advance_section_rows(
         (
             FinalizationSectionV1::NgramPostings,
             Some(PersistedFinalizationKeyV1::IntegerIntegerInteger {
+                page_ordinal,
                 kind,
                 ngram,
-                document_id,
             }),
         ) => advance_native_section_rows(
             transaction,
             section,
             section.seek_query(true),
-            params![kind, ngram, document_id, limit],
+            params![page_ordinal, kind, ngram, limit],
             state,
             control,
         ),
@@ -3114,7 +3129,9 @@ fn advance_native_section_rows<P: rusqlite::Params>(
         }
         if matches!(
             section,
-            FinalizationSectionV1::DocumentIntegrity | FinalizationSectionV1::ImportIntegrity
+            FinalizationSectionV1::SourcePages
+                | FinalizationSectionV1::DocumentIntegrity
+                | FinalizationSectionV1::ImportIntegrity
         ) {
             verify_integrity_row(transaction, section, row, control)?;
         }
@@ -3170,9 +3187,9 @@ fn native_row_key(
         }),
         FinalizationSectionV1::NgramPostings => {
             Ok(PersistedFinalizationKeyV1::IntegerIntegerInteger {
-                kind: row.get(0).map_err(sqlite_error)?,
-                ngram: row.get(1).map_err(sqlite_error)?,
-                document_id: row.get(2).map_err(sqlite_error)?,
+                page_ordinal: row.get(0).map_err(sqlite_error)?,
+                kind: row.get(1).map_err(sqlite_error)?,
+                ngram: row.get(2).map_err(sqlite_error)?,
             })
         }
         FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => Ok(
@@ -3191,14 +3208,28 @@ fn verify_integrity_row(
     row: &rusqlite::Row<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let expected: String = row
-        .get(if section == FinalizationSectionV1::DocumentIntegrity {
-            2
-        } else {
-            1
-        })
-        .map_err(sqlite_error)?;
+    let expected_column = match section {
+        FinalizationSectionV1::SourcePages => 8,
+        FinalizationSectionV1::DocumentIntegrity => 2,
+        FinalizationSectionV1::ImportIntegrity => 1,
+        _ => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact integrity verification selected the wrong section".to_owned(),
+            ));
+        }
+    };
+    let expected: String = row.get(expected_column).map_err(sqlite_error)?;
     let actual = match section {
+        FinalizationSectionV1::SourcePages => match row.get_ref(0).map_err(sqlite_error)? {
+            ValueRef::Integer(page_ordinal) if page_ordinal >= 0 => {
+                ngram_page_integrity_digest(transaction, page_ordinal, control)?
+            }
+            _ => {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact source-page ngram receipt has an invalid key".to_owned(),
+                ));
+            }
+        },
         FinalizationSectionV1::DocumentIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
             ValueRef::Integer(document) if document >= 0 => {
                 document_integrity_digest(transaction, document, control)?
@@ -3452,7 +3483,7 @@ fn document_integrity_digest(
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v2\0");
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
     hasher.update(document.to_le_bytes());
     let row_count = hash_document_table(
         transaction,
@@ -3483,15 +3514,70 @@ fn document_integrity_digest(
         document,
         control,
     )?;
-    hash_document_table(
-        transaction,
-        &mut hasher,
-        "ngram_posting",
-        DOCUMENT_NGRAM_POSTINGS_QUERY,
-        document,
-        control,
-    )?;
     integrity_digest(hasher)
+}
+
+fn ngram_page_integrity_digest(
+    transaction: &Transaction<'_>,
+    page_ordinal: i64,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let (chunk_count, cursor_bytes): (i64, Vec<u8>) = transaction
+        .query_row(
+            "SELECT chunk_count, next_cursor FROM source_pages WHERE page_ordinal = ?1",
+            [page_ordinal],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sqlite_error)?;
+    let chunk_count = u64::try_from(chunk_count).map_err(contract_number)?;
+    let cursor = decode_cursor(&cursor_bytes)?;
+    let first_document = cursor
+        .emitted_chunks()
+        .checked_sub(chunk_count)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact ngram page cursor regressed its chunk count".to_owned(),
+            )
+        })?;
+    let final_document = cursor.emitted_chunks();
+    let mut statement = transaction
+        .prepare(
+            "SELECT kind, ngram, documents, cardinality FROM ngram_postings WHERE page_ordinal = ?1 ORDER BY kind, ngram",
+        )
+        .map_err(sqlite_error)?;
+    let mut query = statement.query([page_ordinal]).map_err(sqlite_error)?;
+    let mut shards = Vec::<(i64, i64, Vec<u8>, u64)>::new();
+    while let Some(row) = query.next().map_err(sqlite_error)? {
+        checkpoint(control)?;
+        let kind = row.get(0).map_err(sqlite_error)?;
+        let ngram = row.get(1).map_err(sqlite_error)?;
+        let documents: Vec<u8> = row.get(2).map_err(sqlite_error)?;
+        let cardinality: i64 = row.get(3).map_err(sqlite_error)?;
+        let bitmap = decode_ngram_bitmap(&documents)?;
+        if i64::try_from(bitmap.len()).map_err(contract_number)? != cardinality
+            || bitmap.iter().any(|document| {
+                let document = u64::from(document);
+                document < first_document || document >= final_document
+            })
+        {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact ngram bitmap disagrees with its source page".to_owned(),
+            ));
+        }
+        shards.push((
+            kind,
+            ngram,
+            documents,
+            u64::try_from(cardinality).map_err(contract_number)?,
+        ));
+    }
+    ngram_page_digest(
+        u64::try_from(page_ordinal).map_err(contract_number)?,
+        shards.iter().map(|(kind, ngram, documents, cardinality)| {
+            (*kind, *ngram, documents.as_slice(), *cardinality)
+        }),
+    )
 }
 
 fn hash_document_table(
@@ -3919,16 +4005,29 @@ fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 
 #[cfg(feature = "hotpath")]
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    let postings = pages
+    let relational_postings = pages
         .iter()
         .flat_map(|page| &page.documents)
-        .map(|document| {
-            document.term_postings.len()
-                + document.exact_postings.len()
-                + document.ngram_postings.len()
-        })
+        .map(|document| document.term_postings.len() + document.exact_postings.len())
         .sum::<usize>();
-    hotpath::gauge!("query.artifact.batch.posting_rows_total").inc(postings as u64);
+    let ngram_shards = pages
+        .iter()
+        .map(|page| page.ngram_shards.len())
+        .sum::<usize>();
+    let ngram_documents = pages
+        .iter()
+        .flat_map(|page| &page.ngram_shards)
+        .map(|shard| shard.cardinality)
+        .sum::<u64>();
+    let ngram_bytes = pages
+        .iter()
+        .flat_map(|page| &page.ngram_shards)
+        .map(|shard| shard.documents.len())
+        .sum::<usize>();
+    hotpath::gauge!("query.artifact.batch.posting_rows_total").inc(relational_postings as u64);
+    hotpath::gauge!("query.artifact.batch.ngram_shard_rows_total").inc(ngram_shards as u64);
+    hotpath::gauge!("query.artifact.batch.ngram_documents_total").inc(ngram_documents);
+    hotpath::gauge!("query.artifact.batch.ngram_bytes_total").inc(ngram_bytes as u64);
 }
 
 #[cfg(not(feature = "hotpath"))]
@@ -4093,7 +4192,9 @@ fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 
 
 #[cfg(test)]
 mod tests {
+    use super::super::format::encode_ngram_bitmap;
     use super::*;
+    use roaring::RoaringBitmap;
     use rusqlite::StatementStatus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracedecay_domain::{
@@ -4181,6 +4282,34 @@ mod tests {
     }
 
     #[test]
+    fn canonical_write_limit_refuses_ngram_receipt_past_the_exact_boundary() {
+        let ngram_receipt_bytes = "sha256:".len() + 64;
+        let mut ledger = CanonicalBatchLimitLedgerV1::default();
+        assert!(
+            ledger
+                .try_admit(
+                    0,
+                    CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1
+                        - ngram_receipt_bytes,
+                )
+                .expect("admit bytes below the ngram receipt boundary")
+                .is_none()
+        );
+        let exceeded = ledger
+            .try_admit(0, ngram_receipt_bytes + 1)
+            .expect("evaluate ngram receipt boundary")
+            .expect("one byte past the write boundary must be refused");
+        assert_eq!(
+            exceeded.limit,
+            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes
+        );
+        assert_eq!(
+            exceeded.required,
+            CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1 + 1
+        );
+    }
+
+    #[test]
     fn finalization_monitor_spawn_failure_is_typed_and_leaves_sqlite_reusable() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
         create_schema(&connection).expect("create artifact schema");
@@ -4206,16 +4335,20 @@ mod tests {
     }
 
     #[test]
-    fn ngram_staging_key_preserves_document_order_without_a_serving_index() {
+    fn ngram_staging_key_preserves_source_page_order_without_a_serving_index() {
         let connection = Connection::open_in_memory().expect("open artifact database");
         create_schema(&connection).expect("create artifact schema");
-        for (document_id, ngram) in [(0i64, 90i64), (0, 100), (1, 10), (1, 20)] {
+        for (page_ordinal, ngram, document) in
+            [(0i64, 90i64, 0u32), (0, 100, 0), (1, 10, 1), (1, 20, 1)]
+        {
+            let bitmap = RoaringBitmap::from_iter([document]);
+            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram bitmap");
             connection
                 .execute(
-                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
-                    params![ngram, document_id],
+                    "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, 1, ?2, ?3, 1)",
+                    params![page_ordinal, ngram, encoded],
                 )
-                .expect("seed document-ordered ngram posting");
+                .expect("seed page-ordered ngram posting");
         }
 
         let serving_indexes: i64 = connection
@@ -4232,7 +4365,7 @@ mod tests {
 
         let mut statement = connection
             .prepare(
-                "SELECT document_id, kind, ngram FROM ngram_postings ORDER BY document_id, kind, ngram",
+                "SELECT page_ordinal, kind, ngram FROM ngram_postings ORDER BY page_ordinal, kind, ngram",
             )
             .expect("prepare staging-order scan");
         let rows = statement
@@ -4250,7 +4383,7 @@ mod tests {
         assert_eq!(
             statement.get_status(StatementStatus::Sort),
             0,
-            "document-order catch-up must be the maintained table order"
+            "source-page catch-up must be the maintained table order"
         );
     }
 
@@ -4258,11 +4391,17 @@ mod tests {
     fn deferred_ngram_serving_index_is_unique_and_query_selective() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
         create_schema(&connection).expect("create artifact schema");
-        for (document_id, ngram) in [(1i64, 10i64), (1, 20), (2, 10)] {
+        for (page_ordinal, ngram, documents) in [
+            (0i64, 10i64, vec![1u32, 2]),
+            (0, 20, vec![1]),
+            (1, 10, vec![3]),
+        ] {
+            let bitmap = RoaringBitmap::from_iter(documents);
+            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram bitmap");
             connection
                 .execute(
-                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
-                    params![ngram, document_id],
+                    "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, 1, ?2, ?3, ?4)",
+                    params![page_ordinal, ngram, encoded, bitmap.len() as i64],
                 )
                 .expect("seed ngram posting");
         }
@@ -4293,36 +4432,30 @@ mod tests {
             .expect("query serving-index columns")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect serving-index columns");
-        assert_eq!(columns, ["kind", "ngram", "document_id"]);
+        assert_eq!(columns, ["kind", "ngram", "page_ordinal"]);
 
-        let query = "SELECT document_id FROM ngram_postings \
-                     WHERE kind = ?1 AND ngram IN (?2, ?3) \
-                     GROUP BY document_id HAVING COUNT(DISTINCT ngram) = ?4 \
-                     ORDER BY document_id";
+        let query = "SELECT documents, cardinality FROM ngram_postings \
+                     WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal";
         let plan = connection
             .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
             .expect("prepare ngram serving plan")
-            .query_map(params![1i64, 10i64, 20i64, 2i64], |row| {
-                row.get::<_, String>(3)
-            })
+            .query_map(params![1i64, 10i64], |row| row.get::<_, String>(3))
             .expect("query ngram serving plan")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect ngram serving plan");
         assert!(
             plan.iter()
-                .any(|detail| detail.contains("USING COVERING INDEX ngram_postings_by_ngram")),
+                .any(|detail| detail.contains("USING INDEX ngram_postings_by_ngram")),
             "phrase candidates must use the deferred serving index, got {plan:?}"
         );
-        let documents = connection
+        let shard_cardinalities = connection
             .prepare(query)
             .expect("prepare ngram serving query")
-            .query_map(params![1i64, 10i64, 20i64, 2i64], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_map(params![1i64, 10i64], |row| row.get::<_, i64>(1))
             .expect("query ngram candidates")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect ngram candidates");
-        assert_eq!(documents, [1]);
+        assert_eq!(shard_cardinalities, [2, 1]);
     }
 
     #[test]
@@ -4405,7 +4538,7 @@ mod tests {
     }
 
     #[test]
-    fn one_document_integrity_row_does_not_visit_unrelated_generation_rows() {
+    fn one_document_integrity_row_does_not_visit_unrelated_relational_rows() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
         create_schema(&connection).expect("create artifact schema");
         let transaction = connection.transaction().expect("start seed transaction");
@@ -4422,28 +4555,18 @@ mod tests {
                     params![document_id.to_le_bytes().as_slice(), document_id],
                 )
                 .expect("seed exact posting");
-            transaction
-                .execute(
-                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
-                    params![document_id, document_id],
-                )
-                .expect("seed ngram posting");
         }
         transaction.commit().expect("commit seed transaction");
         let transaction = connection
             .transaction()
             .expect("start index-build transaction");
-        for ordinal in [2, 5, 6] {
+        for ordinal in [2, 5] {
             build_serving_index_step(&transaction, ordinal)
                 .expect("build document integrity index");
         }
         transaction.commit().expect("commit integrity index");
 
-        for query in [
-            DOCUMENT_TERM_POSTINGS_QUERY,
-            DOCUMENT_EXACT_POSTINGS_QUERY,
-            DOCUMENT_NGRAM_POSTINGS_QUERY,
-        ] {
+        for query in [DOCUMENT_TERM_POSTINGS_QUERY, DOCUMENT_EXACT_POSTINGS_QUERY] {
             let mut statement = connection.prepare(query).expect("prepare integrity query");
             {
                 let mut rows = statement.query([1_024i64]).expect("query one document");
@@ -4539,7 +4662,7 @@ mod tests {
         create_schema(&connection).expect("create artifact schema");
         connection
             .execute(
-                "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor) VALUES (0, 'page', 'cumulative', 1, 1, 1, 1, 'imports', X'00')",
+                "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, next_cursor) VALUES (0, 'page', 'cumulative', 1, 1, 1, 1, 'imports', 'ngrams', X'00')",
                 [],
             )
             .expect("seed source page");
@@ -4579,10 +4702,12 @@ mod tests {
                 [],
             )
             .expect("seed exact posting");
+        let encoded =
+            encode_ngram_bitmap(&RoaringBitmap::from_iter([0])).expect("encode ngram bitmap");
         connection
             .execute(
-                "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, 1, 0)",
-                [],
+                "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (0, 1, 1, ?1, 1)",
+                [encoded],
             )
             .expect("seed ngram posting");
         connection

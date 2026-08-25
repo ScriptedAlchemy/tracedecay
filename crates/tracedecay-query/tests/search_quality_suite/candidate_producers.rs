@@ -1145,6 +1145,68 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
 }
 
 #[test]
+fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let generation = metadata.generation.clone();
+    let chunks = pages
+        .iter()
+        .flat_map(|page| page.chunks().iter().cloned())
+        .collect::<Vec<_>>();
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks)
+        .expect("one-shot lexical projection");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("ngram-bitmap-shards.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+    builder
+        .append_pages(&pages, &control)
+        .expect("commit one durable source batch");
+
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect ngram shards");
+    let (stored_rows, distinct_keys): (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT printf('%d:%d', kind, ngram)) FROM ngram_postings",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count durable ngram keys");
+    assert!(stored_rows > 0, "the fixture must produce ngram candidates");
+    assert_eq!(
+        stored_rows, distinct_keys,
+        "one atomic source batch must store one bitmap shard per distinct (kind, ngram), not one row per matching document"
+    );
+    drop(connection);
+
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("open finalized bitmap artifact");
+    let mut request = lexical_request(
+        "rendre return value",
+        &["rendre"],
+        &[],
+        &["return value"],
+        2,
+        8,
+    );
+    request.generation = generation;
+    assert_eq!(
+        LexicalLane::new(reader)
+            .retrieve_lexical(&request)
+            .expect("bitmap artifact lexical query"),
+        LexicalLane::new(one_shot)
+            .retrieve_lexical(&request)
+            .expect("one-shot lexical query")
+    );
+}
+
+#[test]
 fn content_addressed_reader_rejects_atomic_same_size_replacement() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -2661,6 +2723,65 @@ fn disk_artifact_batch_ledger_charges_every_parallel_preparation_upper_bound() {
 }
 
 #[test]
+fn disk_artifact_page_ledger_charges_live_ngram_map_and_encoded_shard_overlap() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.artifact".to_owned(),
+        "src/artifact.ts".to_owned(),
+        b"export functionabcdefghijklmnopqrstuvwxyz0123456789(value: string) { return value + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ9876543210'; }\n".to_vec(),
+    )]);
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    assert_eq!(
+        pages.len(),
+        1,
+        "the adversarial fixture must occupy one page"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let builder = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("ngram-overlap-ledger.sqlite"),
+        fixture.metadata,
+    )
+    .expect("create artifact");
+    let prepared = builder
+        .prepare_pages(&pages, &ArtifactControl { cancelled: false })
+        .expect("prepare adversarial ngram page");
+    let page = &pages[0];
+    let prepared = &prepared[0];
+    let logical_memberships = page
+        .chunks()
+        .iter()
+        .map(|chunk| {
+            chunk
+                .chunk()
+                .sanitized_text
+                .as_str()
+                .as_bytes()
+                .windows(3)
+                .collect::<BTreeSet<_>>()
+                .len()
+        })
+        .sum::<usize>();
+    let distinct_keys = page
+        .chunks()
+        .iter()
+        .flat_map(|chunk| chunk.chunk().sanitized_text.as_str().as_bytes().windows(3))
+        .collect::<BTreeSet<_>>()
+        .len();
+    // A distinct key owns an ordered-map node and one Roaring container; each
+    // membership owns sparse-container capacity while encoded output already
+    // accumulates. These deliberately conservative per-item bounds are below
+    // the production charge, but far above the unrelated one-document scratch.
+    let strict_live_map_lower_bound = distinct_keys
+        .checked_mul(64)
+        .and_then(|bytes| bytes.checked_add(logical_memberships.saturating_mul(128)))
+        .expect("ledger lower bound");
+    assert!(
+        prepared.preparation_scratch_bytes() >= strict_live_map_lower_bound,
+        "aggregation scratch must coexist with encoded shards: charged={}, strict map lower bound={strict_live_map_lower_bound}, distinct_keys={distinct_keys}, memberships={logical_memberships}",
+        prepared.preparation_scratch_bytes(),
+    );
+}
+
+#[test]
 fn disk_artifact_one_page_wrapper_matches_the_batch_path() {
     let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
     let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -2684,6 +2805,40 @@ fn disk_artifact_one_page_wrapper_matches_the_batch_path() {
             .append_pages(&pages[..1], &control)
             .expect("append through batch path")
     );
+}
+
+#[test]
+fn disk_artifact_page_shards_have_batch_width_independent_receipts() {
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(
+        pages.len() >= 2,
+        "fixture must exercise multiple source pages"
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let control = ArtifactControl { cancelled: false };
+    let mut one_by_one = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("page-shards-one-by-one.sqlite"),
+        fixture.metadata.clone(),
+    )
+    .expect("create one-page-width artifact");
+    for page in &pages {
+        one_by_one
+            .append_page(page, &control)
+            .expect("append one source page");
+    }
+    let mut batched = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("page-shards-batched.sqlite"),
+        fixture.metadata,
+    )
+    .expect("create batched artifact");
+    batched
+        .append_pages(&pages, &control)
+        .expect("append every source page atomically");
+
+    let one_by_one = finish_staged_artifact(&mut one_by_one, &source_receipt, &control);
+    let batched = finish_staged_artifact(&mut batched, &source_receipt, &control);
+    assert_eq!(one_by_one.artifact_digest(), batched.artifact_digest());
+    assert_eq!(one_by_one.section_digests(), batched.section_digests());
 }
 
 #[test]
