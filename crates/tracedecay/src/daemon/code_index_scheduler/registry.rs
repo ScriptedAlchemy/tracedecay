@@ -4485,20 +4485,20 @@ impl tracedecay_usecases::feedback::cycle_production::ProductionFeedbackDocument
 /// published record with `ImpactTargetFileMismatch` / `GenerationMismatch`,
 /// because the saved-edit cycle's impact target is minted here as
 /// `file.daemon.<digest>` under this generation.
-impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
+impl tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1
     for CodeIndexSchedulerRegistryV1
 {
     fn resolve(
         &self,
         project_root: PathBuf,
-    ) -> crate::diagnostics_publication::CodeIndexPublicationIdentityFuture<'_> {
+    ) -> tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityFuture<'_> {
         let registry = self.clone();
         Box::pin(async move {
             let root = project_root.canonicalize().ok()?;
             let current = registry.latest_complete_ready(&root).await?;
             let snapshot = current.generation.snapshot();
             Some(
-                crate::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
+                tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
                     current.generation.manifest().generation_id.clone(),
                     current.generation.manifest().seal.sealed_at,
                     snapshot.repository.clone(),

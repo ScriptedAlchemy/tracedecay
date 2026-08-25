@@ -21,14 +21,14 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use crate::diagnose::{Severity, parse_cargo_output};
-use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
-use crate::diagnostics_query::DiagnosticsQuery;
-use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, is_test_file};
+use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
+use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_usecases::diagnostics_query::DiagnosticsQuery;
+use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
 use tracedecay_usecases::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
@@ -372,7 +372,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
-    parsed: &[crate::diagnose::Diagnostic],
+    parsed: &[tracedecay_usecases::diagnose::Diagnostic],
 ) -> Value {
     use tracedecay_domain::ComponentVersion;
 
@@ -392,7 +392,7 @@ async fn publish_parsed_compiler_diagnostics(
     let database = cg.dashboard_database_guard();
     let store = DiagnosticsStore::new(database.as_ref().clone());
     let outcome =
-        crate::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
+        tracedecay_usecases::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
             &root,
             code_index_identity,
             &store,
@@ -407,11 +407,11 @@ async fn publish_parsed_compiler_diagnostics(
 /// Renders the typed publication outcome for the diagnose response. Every
 /// refusal keeps its name so an empty Problems list is explainable.
 fn compiler_publication_report(
-    outcome: &crate::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
+    outcome: &tracedecay_usecases::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
 ) -> Value {
-    use crate::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1 as Outcome;
+    use tracedecay_usecases::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1 as Outcome;
 
-    let names = |skips: &[crate::diagnostics_publication::CompilerDiagnosticResolutionSkipV1]| {
+    let names = |skips: &[tracedecay_usecases::diagnostics_publication::CompilerDiagnosticResolutionSkipV1]| {
         skips.iter().map(ToString::to_string).collect::<Vec<_>>()
     };
     match outcome {

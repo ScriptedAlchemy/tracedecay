@@ -8744,11 +8744,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use crate::diagnostics_publication::{
-        CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
-        publish_compiler_diagnostics_through_code_index_v1,
-    };
-    use crate::diagnostics_store::DiagnosticsStore;
     use tracedecay_domain::feedback::{
         FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
         FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
@@ -8758,6 +8753,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     };
     use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
     use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
+    use tracedecay_usecases::diagnostics_publication::{
+        CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
+        publish_compiler_diagnostics_through_code_index_v1,
+    };
+    use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
     use tracedecay_usecases::lsp_runtime::{
         DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
         LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
@@ -8835,7 +8835,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     .await
     .expect("open diagnostics database");
 
-    let parsed = crate::diagnose::parse_cargo_output(
+    let parsed = tracedecay_usecases::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:2:22\n",
     );
     assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
@@ -9079,11 +9079,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 /// the LSP projection could only refuse.
 #[tokio::test]
 async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
-    use crate::diagnostics_publication::{
+    use tracedecay_domain::ComponentVersion;
+    use tracedecay_usecases::diagnostics_publication::{
         CompilerDiagnosticPublicationOutcomeV1, publish_compiler_diagnostics_through_code_index_v1,
     };
-    use crate::diagnostics_store::DiagnosticsStore;
-    use tracedecay_domain::ComponentVersion;
+    use tracedecay_usecases::diagnostics_store::DiagnosticsStore;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let database_root = TempDir::new().expect("database root");
@@ -9101,7 +9101,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     .expect("open diagnostics database");
     let store = DiagnosticsStore::new(database.clone());
 
-    let parsed = crate::diagnose::parse_cargo_output(
+    let parsed = tracedecay_usecases::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:1:1\n",
     );
     let outcome = publish_compiler_diagnostics_through_code_index_v1(

@@ -127,8 +127,9 @@ pub(crate) type CodeIndexReconcileSink =
 /// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
 /// and a producer without it publishes nothing rather than minting its own file
 /// identity.
-pub(crate) type CodeIndexPublicationIdentityResolver =
-    Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static>;
+pub(crate) type CodeIndexPublicationIdentityResolver = Arc<
+    dyn tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static,
+>;
 
 /// Code-index search boundary contracts, owned by the query kernel.
 ///
