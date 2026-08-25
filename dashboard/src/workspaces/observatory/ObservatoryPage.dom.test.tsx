@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ObservatoryPage } from './ObservatoryPage.tsx';
 
 /**
@@ -25,6 +25,10 @@ const SAMPLE_CURRENT_ISO = '2025-07-20T09:26:40.000Z';
 describe('ObservatoryPage store telemetry', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('renders every budget and growth state honestly, and merges shared-file roles', async () => {
@@ -57,6 +61,63 @@ describe('ObservatoryPage store telemetry', () => {
     // explicit about the missing execution-owned history.
     expect(screen.getAllByText('growth could not be determined').length).toBe(5);
     expect(screen.getByText(/telemetry could not be determined for this store/)).toBeTruthy();
+  });
+
+  it('projects the active code-index generation as a compact pipeline card', async () => {
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), codeIndexFreshnessEnvelope());
+    renderObservatory();
+
+    await screen.findByText('generation.catchup.01');
+    const pipeline = screen.getByLabelText('Code-index pipeline');
+    const text = pipeline.textContent ?? '';
+    expect(text).toContain('bulk commit · 50.0%');
+    expect(text).toContain('generation.catchup.01');
+    expect(text).toContain('250 / 500 files');
+    expect(text).toContain('250 files/s · 16.0 MiB lexical bytes/s');
+    expect(text).toContain('elapsed 2m');
+    expect(text).toContain('last commit 240ms');
+  });
+
+  it('accepts a later generation with a restarted epoch and rejects its delayed predecessor', async () => {
+    vi.useFakeTimers();
+    const first = codeIndexFreshnessEnvelope();
+    const firstWorktree = first.payload.worktrees[0]!;
+    const firstProgress = firstWorktree.progress;
+    const replacement = {
+      ...first,
+      payload: {
+        ...first.payload,
+        worktrees: [
+          {
+            ...firstWorktree,
+            progress: {
+              ...firstProgress,
+              generation_id: 'generation.catchup.02',
+              progress_epoch: 0,
+              last_progress_micros: SAMPLE_CURRENT_MICROS + 1,
+              completed_files: 1,
+            },
+          },
+        ],
+      },
+    };
+    const progressResponses = [first, replacement, first];
+    let progressResponse = 0;
+    stubTelemetry(
+      telemetryPayload(),
+      emptyStorageFindingsPayload(),
+      () => progressResponses[Math.min(progressResponse++, progressResponses.length - 1)]!,
+    );
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('generation.catchup.01')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('generation.catchup.02')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('generation.catchup.01')).toBeNull();
   });
 
   it('distinguishes an unset budget from an undetermined one in the rendered state', async () => {
@@ -272,9 +333,16 @@ function renderObservatory() {
   );
 }
 
+async function advanceTimers(milliseconds: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(milliseconds);
+  });
+}
+
 function stubTelemetry(
   payload: unknown,
   findingsPayload: unknown = emptyStorageFindingsPayload(),
+  codeIndexFreshnessPayload: unknown | (() => unknown) = readyCodeIndexFreshnessEnvelope(),
 ) {
   vi.stubGlobal(
     'fetch',
@@ -283,6 +351,13 @@ function stubTelemetry(
       if (url === '/api/storage/telemetry') return jsonResponse(envelope(payload));
       if (url === '/api/storage/findings') {
         return jsonResponse(envelope(findingsPayload));
+      }
+      if (url === '/api/code-index/freshness') {
+        return jsonResponse(
+          typeof codeIndexFreshnessPayload === 'function'
+            ? codeIndexFreshnessPayload()
+            : codeIndexFreshnessPayload,
+        );
       }
       if (url === '/api/doctor/findings') {
         return jsonResponse(
@@ -298,6 +373,109 @@ function stubTelemetry(
       throw new Error(`unexpected fetch ${url}`);
     }),
   );
+}
+
+function codeIndexFreshnessEnvelope() {
+  return {
+    ...readyCodeIndexFreshnessEnvelope(),
+    domain_state: 'loading',
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+    payload: {
+      worktrees: [
+        {
+          ...codeIndexWorktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            generation_id: 'generation.catchup.01',
+            progress_epoch: 1,
+            sealed_source_digest: 'sha256:sealed-source-catchup',
+            phase: 'bulk_commit',
+            committed_pages: 16,
+            committed_chunks: 10_000,
+            committed_imports: 480,
+            committed_payload_bytes: 16 * 1024 * 1024,
+            completed_files: 250,
+            total_files: 500,
+            completed_lexical_bytes: 32 * 1024 * 1024,
+            total_lexical_bytes: 64 * 1024 * 1024,
+            current_batch_pages: 4,
+            current_batch_payload_bytes: 4 * 1024 * 1024,
+            elapsed_micros: 120_000_000,
+            last_commit_latency_micros: 240_000,
+            files_per_second: 250,
+            lexical_bytes_per_second: 16 * 1024 * 1024,
+            estimated_remaining_seconds: 120,
+            last_progress_micros: SAMPLE_CURRENT_MICROS,
+            blocked_reason: null,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    },
+  };
+}
+
+function readyCodeIndexFreshnessEnvelope() {
+  return {
+    schema_revision: 1,
+    scope: { project_id: 'tracedecay', storage_mode: 'project', store_root: '/store' },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: SAMPLE_CURRENT_MICROS },
+    source_watermark: null,
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'complete',
+      eligible: 1,
+      examined: 1,
+      matched: 1,
+      excluded: 0,
+      omitted: 0,
+      unknown: 0,
+      denominator: 1,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+    freshness: { state: 'fresh', observed_at_micros: SAMPLE_CURRENT_MICROS, watermark: null },
+    domain_state: 'ready',
+    legal_actions: [
+      { kind: 'refresh', operation: 'use-case.dashboard.code-index.freshness.refresh' },
+    ],
+    payload: {
+      worktrees: [{ ...codeIndexWorktree(), progress: null }],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    },
+  };
+}
+
+function codeIndexWorktree() {
+  return {
+    worktree_root: '/fast/projects/tracedecay',
+    repository_id: 'repository.tracedecay',
+    worktree_id: 'worktree.primary',
+    source_reference: 'refs/heads/main',
+    source_revision: null,
+    latest_generation_id: 'generation.2f8c41ab',
+    snapshot_content_identity: 'sha256:9c1f4a2e7b05',
+    sealed_at_micros: SAMPLE_CURRENT_MICROS - 214_000_000,
+    last_reconcile_micros: SAMPLE_CURRENT_MICROS - 8_400_000,
+    staleness_state: 'fresh',
+    hook_hint_count: 0,
+    coverage: 'complete',
+  };
 }
 
 function emptyStorageFindingsPayload() {

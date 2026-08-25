@@ -636,6 +636,46 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 export const CatalogGenerationIdSchema = z.string();
 export type CatalogGenerationId = z.infer<typeof CatalogGenerationIdSchema>;
 
+/** A typed reason an otherwise active generation cannot make durable progress. */
+export const CodeIndexBuildBlockedReasonV1Schema = z.enum(["artifact_store_unavailable", "resident_memory", "retry_backoff", "source_unavailable"]);
+export type CodeIndexBuildBlockedReasonV1 = z.infer<typeof CodeIndexBuildBlockedReasonV1Schema>;
+
+/** The durable build phase whose committed boundary the dashboard is reading.
+
+A phase is not inferred from scheduler state. The mounted registry publishes
+the exact phase that owns the active generation. */
+export const CodeIndexBuildPhaseV1Schema = z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]);
+export type CodeIndexBuildPhaseV1 = z.infer<typeof CodeIndexBuildPhaseV1Schema>;
+
+/** The latest committed progress boundary for one active code-index generation.
+
+Every count is scoped to `generation_id`. The snapshot never includes a
+staged page: work is reported only after the batch that owns it commits. */
+export const CodeIndexBuildProgressV1Schema = z.object({
+  blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]),
+  committed_chunks: z.number().int().safe().min(0),
+  committed_imports: z.number().int().safe().min(0),
+  committed_pages: z.number().int().safe().min(0),
+  committed_payload_bytes: z.number().int().safe().min(0),
+  completed_files: z.number().int().safe().min(0),
+  completed_lexical_bytes: z.number().int().safe().min(0),
+  current_batch_pages: z.number().int().safe().min(0),
+  current_batch_payload_bytes: z.number().int().safe().min(0),
+  elapsed_micros: z.number().int().safe().min(0),
+  estimated_remaining_seconds: z.number().int().safe().min(0).nullable(),
+  files_per_second: z.number().nullable(),
+  generation_id: z.string(),
+  last_commit_latency_micros: z.number().int().safe().min(0).nullable(),
+  last_progress_micros: z.number().int().safe(),
+  lexical_bytes_per_second: z.number().nullable(),
+  phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
+  progress_epoch: z.number().int().safe().min(0),
+  sealed_source_digest: z.string(),
+  total_files: z.number().int().safe().min(0),
+  total_lexical_bytes: z.number().int().safe().min(0),
+});
+export type CodeIndexBuildProgressV1 = z.infer<typeof CodeIndexBuildProgressV1Schema>;
+
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
@@ -685,6 +725,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
+  progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   repository_id: z.string().nullable(),
   sealed_at_micros: z.number().int().safe().nullable(),
   snapshot_content_identity: z.string().nullable(),

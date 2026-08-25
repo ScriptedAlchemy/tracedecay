@@ -361,6 +361,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Immutable progress snapshot independently readable while the scheduler
+    /// owns a long reconcile or text-artifact transaction.
+    pub(super) build_progress: super::CodeIndexBuildProgressSlotV1,
     /// Monotonic replacement epoch for the serving slot. It invalidates a
     /// branch-publication token even if a future worker re-seats an equal id.
     serving_generation_epoch: Arc<AtomicU64>,
@@ -2185,6 +2188,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
+        let build_progress = opened.build_progress_slot();
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
@@ -2676,6 +2680,7 @@ impl CodeIndexSchedulerRegistryV1 {
             semantic_vector_graph_provider: None,
             scheduler,
             serving_generation,
+            build_progress,
             serving_generation_epoch,
             serving_generation_installation,
             graph_activation,
@@ -3269,16 +3274,34 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
-        let (scheduler, reconcile_in_progress, serving_generation) = {
+        let (scheduler, reconcile_in_progress, serving_generation, build_progress) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&canonical_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.build_progress),
             )
         };
         tokio::task::spawn_blocking(move || {
+            let progress = hotpath::measure_block!("dashboard.code_index.progress", {
+                let progress = build_progress
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .snapshot()
+                    .map(|snapshot| snapshot.as_ref().clone());
+                #[cfg(feature = "hotpath")]
+                if let Some(progress) = progress.as_ref() {
+                    let age_micros = now_micros()
+                        .0
+                        .saturating_sub(progress.last_progress_micros)
+                        .max(0);
+                    hotpath::gauge!("dashboard.code_index.progress_age_micros")
+                        .set(u64::try_from(age_micros).unwrap_or(u64::MAX));
+                }
+                progress
+            });
             let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
             let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
@@ -3301,6 +3324,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         hook_hint_count: None,
                         coverage: "partial_refresh_in_progress".to_owned(),
+                        progress,
                         ..dashboard_freshness_identity(latest.as_ref())
                     };
                 }
@@ -3342,6 +3366,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     "partial_hook_hint_overflow"
                 }
                 .to_owned(),
+                progress,
                 ..dashboard_freshness_identity(latest.as_ref())
             }
         })

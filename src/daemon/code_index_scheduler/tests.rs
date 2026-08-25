@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -53,9 +53,9 @@ use super::registry::{
     ServingGenerationRollbackOutcomeV1,
 };
 use super::{
-    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexBuildProgressStateV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1,
+    CodeIndexCommittedProgressSampleV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1};
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
@@ -199,6 +199,46 @@ fn scheduler(
 ) -> CodeIndexWorktreeSchedulerV1 {
     CodeIndexWorktreeSchedulerV1::open(test_project_id(), fixture.path(), store_root, bytes)
         .expect("open worktree scheduler")
+}
+
+fn build_progress_snapshot(
+    scheduler: &CodeIndexWorktreeSchedulerV1,
+) -> Arc<crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1> {
+    scheduler
+        .build_progress_slot()
+        .read()
+        .expect("build progress slot")
+        .snapshot()
+        .expect("published build progress")
+}
+
+fn progress_snapshot_for_generation(
+    generation_id: &CodeGenerationId,
+    committed_pages: u64,
+) -> crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
+    crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
+        generation_id: generation_id.as_str().to_owned(),
+        progress_epoch: 0,
+        sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
+        phase: crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        committed_pages,
+        committed_chunks: committed_pages,
+        committed_imports: 0,
+        committed_payload_bytes: committed_pages,
+        completed_files: committed_pages,
+        total_files: 100,
+        completed_lexical_bytes: committed_pages,
+        total_lexical_bytes: 100,
+        current_batch_pages: 0,
+        current_batch_payload_bytes: 0,
+        elapsed_micros: 1,
+        last_commit_latency_micros: None,
+        files_per_second: None,
+        lexical_bytes_per_second: None,
+        estimated_remaining_seconds: None,
+        last_progress_micros: 1,
+        blocked_reason: None,
+    }
 }
 
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
@@ -2263,7 +2303,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         "pub fn caller() { callee(); }\npub fn callee() {}\n",
     )]);
     let store = TempDir::new().expect("store root");
-    {
+    let completed_before_restart = {
         let mut scheduler = scheduler(
             &fixture,
             store.path().to_path_buf(),
@@ -2289,7 +2329,13 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
                 .is_artifact_backed(),
             "a durable store must serve text queries from the published artifact"
         );
-    }
+        let progress = build_progress_snapshot(&scheduler);
+        assert_eq!(
+            progress.phase,
+            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        );
+        progress
+    };
 
     // The durable pointer must name the published content-addressed artifact.
     let pointer: serde_json::Value = serde_json::from_slice(
@@ -2347,6 +2393,62 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         owners.is_artifact_backed(),
         "the reopened owners must serve from the durable artifact"
     );
+    let completed_after_restart = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        completed_after_restart.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert_eq!(
+        completed_after_restart.generation_id,
+        completed_before_restart.generation_id
+    );
+    assert_eq!(
+        completed_after_restart.sealed_source_digest,
+        completed_before_restart.sealed_source_digest
+    );
+    assert_eq!(
+        completed_after_restart.committed_pages,
+        completed_before_restart.committed_pages
+    );
+    assert_eq!(
+        completed_after_restart.committed_chunks,
+        completed_before_restart.committed_chunks
+    );
+    assert_eq!(
+        completed_after_restart.committed_imports,
+        completed_before_restart.committed_imports
+    );
+    assert_eq!(
+        completed_after_restart.committed_payload_bytes,
+        completed_before_restart.committed_payload_bytes
+    );
+    assert_eq!(
+        completed_after_restart.completed_files,
+        completed_before_restart.completed_files
+    );
+    assert_eq!(
+        completed_after_restart.total_files,
+        completed_before_restart.total_files
+    );
+    assert_eq!(
+        completed_after_restart.completed_lexical_bytes,
+        completed_before_restart.completed_lexical_bytes
+    );
+    assert_eq!(
+        completed_after_restart.total_lexical_bytes,
+        completed_before_restart.total_lexical_bytes
+    );
+    assert_eq!(
+        completed_after_restart.completed_files,
+        completed_after_restart.total_files
+    );
+    assert_eq!(
+        completed_after_restart.completed_lexical_bytes,
+        completed_after_restart.total_lexical_bytes
+    );
+    assert_eq!(completed_after_restart.files_per_second, None);
+    assert_eq!(completed_after_restart.lexical_bytes_per_second, None);
+    assert_eq!(completed_after_restart.estimated_remaining_seconds, None);
 
     let generation = latest.generation().manifest().generation_id.clone();
     let base = RetrievalRequest {
@@ -3462,20 +3564,113 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
 }
 
 #[test]
-fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
-    let sources = (0..12)
-        .map(|ordinal| {
-            (
-                format!("src/file_{ordinal}.rs"),
-                format!("pub fn cancellation_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
-            )
-        })
-        .collect::<Vec<_>>();
-    let borrowed = sources
-        .iter()
-        .map(|(path, source)| (path.as_str(), source.as_str()))
-        .collect::<Vec<_>>();
-    let fixture = GitFixture::new(&borrowed);
+fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
+    let mut state = CodeIndexBuildProgressStateV1::new();
+    let first = Instant::now();
+    state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+        observed_at: first,
+        completed_files: 20,
+        completed_lexical_bytes: 4_000_000,
+    });
+    assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
+
+    state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+        observed_at: first + Duration::from_secs(2),
+        completed_files: 21,
+        completed_lexical_bytes: 14_000_000,
+    });
+    let (files_per_second, lexical_bytes_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
+    assert_eq!(files_per_second, Some(0.5));
+    assert_eq!(lexical_bytes_per_second, Some(5_000_000.0));
+    assert_eq!(
+        eta_seconds,
+        Some(3),
+        "ETA must use the multi-page lexical span, not uneven completed-file boundaries"
+    );
+}
+
+#[test]
+fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
+    let generation_a = CodeGenerationId::new("generation.progress-a").expect("generation A");
+    let generation_b = CodeGenerationId::new("generation.progress-b").expect("generation B");
+    let mut slot = super::CodeIndexBuildProgressSlotStateV1::default();
+
+    let original_a_owner = slot.replace_generation(generation_a.clone());
+    assert!(slot.publish(
+        &generation_a,
+        original_a_owner,
+        progress_snapshot_for_generation(&generation_a, 1),
+    ));
+
+    let generation_b_owner = slot.replace_generation(generation_b.clone());
+    assert!(slot.publish(
+        &generation_b,
+        generation_b_owner,
+        progress_snapshot_for_generation(&generation_b, 2),
+    ));
+
+    let replacement_a_owner = slot.replace_generation(generation_a.clone());
+    assert_ne!(replacement_a_owner, original_a_owner);
+    assert!(slot.publish(
+        &generation_a,
+        replacement_a_owner,
+        progress_snapshot_for_generation(&generation_a, 3),
+    ));
+    let replacement_a = slot.snapshot().expect("replacement A snapshot");
+
+    assert!(!slot.publish(
+        &generation_a,
+        original_a_owner,
+        progress_snapshot_for_generation(&generation_a, 99),
+    ));
+    let after_stale_original = slot.snapshot().expect("current A snapshot");
+    assert_eq!(after_stale_original.generation_id, generation_a.as_str());
+    assert_eq!(after_stale_original.committed_pages, 3);
+    assert_eq!(
+        after_stale_original.progress_epoch, replacement_a.progress_epoch,
+        "matching generation identity must not let the original A owner replace the newer A epoch"
+    );
+}
+
+#[test]
+fn dashboard_progress_advances_only_after_durable_batch_commit() {
+    struct CancelAfterPreparation {
+        progress: super::CodeIndexBuildProgressSlotV1,
+        observed_bulk_commit: std::sync::atomic::AtomicBool,
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelAfterPreparation {
+        fn is_cancelled(&self) -> bool {
+            let cancel = self
+                .progress
+                .read()
+                .expect("cancellation progress slot")
+                .snapshot()
+                .is_some_and(|snapshot| {
+                    snapshot.phase
+                        == crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+                });
+            if cancel {
+                self.observed_bulk_commit
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            cancel
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let mut source = String::new();
+    for ordinal in 0..600 {
+        writeln!(
+            source,
+            "pub fn cancellation_symbol_{ordinal}() -> usize {{ {ordinal} }}"
+        )
+        .expect("write cancellation fixture");
+    }
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
         &fixture,
@@ -3498,13 +3693,42 @@ fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
         .builder
         .progress()
         .expect("durable progress");
-
-    latest
-        .text_control_shutdown
-        .store(true, std::sync::atomic::Ordering::Release);
+    let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
-        latest.advance_text_serving(1),
+        dashboard_before.committed_pages,
+        progress_before.next_page_ordinal
+    );
+    assert_eq!(dashboard_before.committed_pages, 1);
+    assert!(
+        dashboard_before.completed_files < dashboard_before.total_files,
+        "the fixture must retain more authenticated source work after its first page"
+    );
+
+    let control = CancelAfterPreparation {
+        progress: scheduler.build_progress_slot(),
+        observed_bulk_commit: std::sync::atomic::AtomicBool::new(false),
+    };
+    let cancellation_started = Instant::now();
+    let cancellation = {
+        let mut build = latest
+            .text_projection_build
+            .lock()
+            .expect("text build state for controlled cancellation");
+        latest.advance_artifact_text_serving(&mut build, 1, &control)
+    };
+    assert_eq!(
+        cancellation,
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    );
+    assert!(
+        cancellation_started.elapsed() < Duration::from_secs(1),
+        "a cancelled scheduler batch must yield within the focused latency bound"
+    );
+    assert!(
+        control
+            .observed_bulk_commit
+            .load(std::sync::atomic::Ordering::Acquire),
+        "cancellation must occur after preparation publishes the bulk-commit boundary"
     );
     let progress_after = latest
         .text_projection_build
@@ -3516,16 +3740,93 @@ fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
         .progress()
         .expect("durable progress after cancellation");
     assert_eq!(progress_after, progress_before);
+    let dashboard_after = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        dashboard_after.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+    );
+    assert_eq!(dashboard_after.current_batch_pages, 1);
+    assert_eq!(
+        dashboard_after.committed_pages, dashboard_before.committed_pages,
+        "a prepared but cancelled batch must not publish staged pages as committed"
+    );
+    assert_eq!(
+        dashboard_after.completed_lexical_bytes, dashboard_before.completed_lexical_bytes,
+        "a cancelled batch must retain the prior exact sealed-source boundary"
+    );
     assert!(latest.text_serving_needs_work());
 
-    latest
-        .text_control_shutdown
-        .store(false, std::sync::atomic::Ordering::Release);
     while !latest
         .advance_text_serving(8)
         .expect("resume durable text build")
     {}
     assert!(latest.query_owners_are_warm());
+    let dashboard_ready = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        dashboard_ready.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert!(dashboard_ready.progress_epoch > dashboard_after.progress_epoch);
+}
+
+#[test]
+fn reopen_reconstructs_exact_committed_progress_without_fabricating_rate() {
+    let sources = (0..12)
+        .map(|ordinal| {
+            (
+                format!("src/reopen_{ordinal}.rs"),
+                format!("pub fn reopen_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let committed = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("publish generation"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        assert!(
+            !latest
+                .advance_text_serving(1)
+                .expect("commit one bounded source batch")
+        );
+        let progress = build_progress_snapshot(&scheduler);
+        assert!(progress.committed_pages > 0);
+        assert_eq!(progress.files_per_second, None);
+        assert_eq!(progress.lexical_bytes_per_second, None);
+        assert_eq!(progress.estimated_remaining_seconds, None);
+        progress
+    };
+
+    let reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let latest = reopened.latest_complete().expect("reopened generation");
+    assert!(
+        !latest
+            .advance_text_serving(0)
+            .expect("reconstruct durable cursor snapshot")
+    );
+    let reconstructed = build_progress_snapshot(&reopened);
+    assert_eq!(reconstructed.generation_id, committed.generation_id);
+    assert_eq!(reconstructed.committed_pages, committed.committed_pages);
+    assert_eq!(reconstructed.committed_chunks, committed.committed_chunks);
+    assert_eq!(reconstructed.committed_imports, committed.committed_imports);
+    assert_eq!(
+        reconstructed.committed_payload_bytes,
+        committed.committed_payload_bytes
+    );
+    assert_eq!(reconstructed.completed_files, committed.completed_files);
+    assert_eq!(
+        reconstructed.completed_lexical_bytes,
+        committed.completed_lexical_bytes
+    );
+    assert_eq!(reconstructed.files_per_second, None);
+    assert_eq!(reconstructed.lexical_bytes_per_second, None);
+    assert_eq!(reconstructed.estimated_remaining_seconds, None);
 }
 
 #[test]
@@ -3570,6 +3871,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
             .advance_text_serving(1)
             .expect("start original text projection")
     );
+    let original_progress = build_progress_snapshot(&scheduler);
     let original_state = Arc::downgrade(&original.text_projection_build);
     let original_generation = original.generation().manifest().generation_id.clone();
 
@@ -3588,6 +3890,41 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
         &original.text_projection_build,
         &replacement.text_projection_build
     ));
+    assert!(
+        scheduler
+            .build_progress_slot()
+            .read()
+            .expect("replacement progress slot")
+            .snapshot()
+            .is_none(),
+        "generation replacement clears the superseded snapshot before new work begins"
+    );
+    assert!(
+        !replacement
+            .advance_text_serving(0)
+            .expect("publish replacement progress baseline")
+    );
+    let replacement_progress = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        replacement_progress.generation_id,
+        replacement.generation().manifest().generation_id.as_str()
+    );
+    assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
+    original.publish_text_progress_phase(
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        99,
+        99,
+    );
+    let progress_after_stale_publish = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        progress_after_stale_publish.generation_id,
+        replacement_progress.generation_id
+    );
+    assert_eq!(
+        progress_after_stale_publish.progress_epoch, replacement_progress.progress_epoch,
+        "the old generation/owner epoch must not replace a newer generation snapshot"
+    );
+    assert_ne!(progress_after_stale_publish.current_batch_pages, 99);
     drop(original);
     assert!(
         original_state.upgrade().is_none(),
@@ -4805,6 +5142,71 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
     );
     assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(projected.coverage, "complete");
+}
+
+#[tokio::test]
+async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
+    let sources = (0..12)
+        .map(|ordinal| {
+            (
+                format!("src/dashboard_{ordinal}.rs"),
+                format!("pub fn dashboard_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let (scheduler, progress_slot) = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root).expect("mounted worktree");
+        (
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.build_progress),
+        )
+    };
+    let expected = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
+                break progress;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background text build publishes progress");
+
+    let scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+    let projected = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.dashboard_freshness(fixture.path()),
+    )
+    .await
+    .expect("dashboard projection must not wait for scheduler")
+    .expect("mounted freshness projection");
+    let projected_progress = projected.progress.expect("projected progress snapshot");
+    assert_eq!(projected_progress.generation_id, expected.generation_id);
+    assert!(projected_progress.progress_epoch >= expected.progress_epoch);
+    drop(scheduler_guard);
+    registry.shutdown().await;
 }
 
 /// A dashboard status view reports the last execution-owned scheduler state; it

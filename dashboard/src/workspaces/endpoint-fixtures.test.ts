@@ -23,7 +23,7 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 import type { CostsReadModelV1 } from '../contracts/generated.ts';
 
-import { resolveFixture } from '../../stories/fixtures/data.ts';
+import { CODE_INDEX_FRESHNESS_FIXTURES, resolveFixture } from '../../stories/fixtures/data.ts';
 import { MultiRootCapabilityV1Schema } from '../contracts/generated.ts';
 import { AnyObject } from '../data/query/payload.ts';
 import {
@@ -921,6 +921,56 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(worktree?.snapshot_content_identity).toBeTruthy();
     expect(worktree?.staleness_state).toBe('fresh');
     expect(worktree?.coverage).toBe('complete');
+  });
+
+  it('GET /api/code-index/freshness — progress fixtures preserve active and replacement boundaries', () => {
+    const schema = DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema);
+    const active = schema.parse(CODE_INDEX_FRESHNESS_FIXTURES.active);
+    const unavailableRate = schema.parse(CODE_INDEX_FRESHNESS_FIXTURES.unavailable_rate);
+    const readyAbsent = schema.parse(CODE_INDEX_FRESHNESS_FIXTURES.ready_absent);
+    const replacements = CODE_INDEX_FRESHNESS_FIXTURES.generation_replacement.map(
+      (fixture) => schema.parse(fixture),
+    );
+    expect(replacements).toHaveLength(3);
+    const beforeReplacement = replacements[0]!;
+    const afterReplacement = replacements[1]!;
+    const staleReplacement = replacements[2]!;
+
+    const activeProgress = active.payload.worktrees[0]?.progress;
+    expect(active.domain_state).toBe('loading');
+    expect(activeProgress).toMatchObject({
+      generation_id: 'generation.catchup.01',
+      progress_epoch: 1,
+      phase: 'bulk_commit',
+      completed_files: 250,
+      total_files: 500,
+      completed_lexical_bytes: 32 * 1024 * 1024,
+      total_lexical_bytes: 64 * 1024 * 1024,
+    });
+    expect(activeProgress?.files_per_second).toBe(250);
+    expect(activeProgress?.estimated_remaining_seconds).toBe(120);
+
+    const unavailableProgress = unavailableRate.payload.worktrees[0]?.progress;
+    expect(unavailableProgress?.files_per_second).toBeNull();
+    expect(unavailableProgress?.lexical_bytes_per_second).toBeNull();
+    expect(unavailableProgress?.estimated_remaining_seconds).toBeNull();
+    expect(unavailableProgress?.blocked_reason).toBe('retry_backoff');
+
+    expect(readyAbsent.domain_state).toBe('ready');
+    expect(readyAbsent.payload.worktrees[0]?.progress).toBeNull();
+
+    expect(beforeReplacement.payload.worktrees[0]?.progress?.generation_id).toBe(
+      'generation.catchup.01',
+    );
+    expect(afterReplacement.payload.worktrees[0]?.progress?.generation_id).toBe(
+      'generation.catchup.02',
+    );
+    expect(afterReplacement.payload.worktrees[0]?.progress?.progress_epoch).toBe(2);
+    expect(afterReplacement.payload.worktrees[0]?.progress?.completed_files).toBe(1);
+    expect(staleReplacement.payload.worktrees[0]?.progress).toMatchObject({
+      generation_id: 'generation.catchup.01',
+      progress_epoch: 1,
+    });
   });
 
   it('GET /api/remote/status — Remote Brain operational envelope', () => {

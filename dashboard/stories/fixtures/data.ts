@@ -2636,6 +2636,38 @@ const FEEDBACK_DESCRIPTOR = 'feedback-system-quality.v1';
 const COST_DESCRIPTOR = 'accounting-cost.v1';
 
 /**
+ * The same freshness endpoint at four truthful mounted-registry moments. The
+ * static visual-audit route stays ready/absent; the remaining snapshots give
+ * DOM and endpoint-contract tests a complete active, rate-unavailable, and
+ * superseded-generation read without inventing query parameters the API does
+ * not accept.
+ */
+export const CODE_INDEX_FRESHNESS_FIXTURES = {
+  active: codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+  unavailable_rate: codeIndexFreshnessEnvelope(
+    codeIndexBuildProgressFixture({
+      files_per_second: null,
+      lexical_bytes_per_second: null,
+      estimated_remaining_seconds: null,
+      blocked_reason: 'retry_backoff',
+    }),
+  ),
+  ready_absent: codeIndexFreshnessEnvelope(null),
+  generation_replacement: [
+    codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+    codeIndexFreshnessEnvelope(
+      codeIndexBuildProgressFixture({
+        generation_id: 'generation.catchup.02',
+        progress_epoch: 2,
+        completed_files: 1,
+      }),
+    ),
+    // A delayed pre-supersession read. Consumers must retain the newer epoch.
+    codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+  ],
+} as const;
+
+/**
  * Exact-path fixture map. Keys are the pathname (query string stripped by the
  * resolver). Anything not listed resolves to the prefix table, then to {}.
  */
@@ -2698,7 +2730,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // Code-index freshness. Served against a mounted daemon scheduler, which is
   // the state the audit needs to shoot — the unattached case is a state chip
   // with no reading behind it.
-  '/api/code-index/freshness': codeIndexFreshnessEnvelope(),
+  '/api/code-index/freshness': CODE_INDEX_FRESHNESS_FIXTURES.ready_absent,
   '/api/remote/status': remoteOperationalStatusEnvelope(),
   // Work. The two mounted read routes. Unlike every other fixture here these
   // are wrapped in the application's `HttpJsonEnvelope` rather than
@@ -3466,7 +3498,8 @@ function remoteOperationalStatusEnvelope(): Record<string, unknown> {
 }
 
 /** GET /api/code-index/freshness (src/dashboard/code_index_freshness_api.rs). */
-function codeIndexFreshnessEnvelope(): Record<string, unknown> {
+function codeIndexFreshnessEnvelope(progress: Record<string, unknown> | null): Record<string, unknown> {
+  const active = progress !== null;
   const payload = {
     worktrees: [
       {
@@ -3475,33 +3508,63 @@ function codeIndexFreshnessEnvelope(): Record<string, unknown> {
         worktree_id: 'worktree.primary',
         source_reference: 'refs/heads/codex/tracedecay-total-redesign-plan',
         source_revision: null,
-        latest_generation_id: 'generation.2f8c41ab',
-        snapshot_content_identity: 'sha256:9c1f4a2e7b05',
-        sealed_at_micros: nowMicros - 214_000_000,
+        latest_generation_id: active ? null : 'generation.2f8c41ab',
+        snapshot_content_identity: active ? null : 'sha256:9c1f4a2e7b05',
+        sealed_at_micros: active ? null : nowMicros - 214_000_000,
         last_reconcile_micros: nowMicros - 8_400_000,
-        staleness_state: 'fresh',
+        staleness_state: active ? 'indexing' : 'fresh',
         hook_hint_count: 0,
         coverage: 'complete',
+        progress,
       },
     ],
     note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
   };
   return {
-    ...envelope(payload, 'ready', [
+    ...envelope(payload, active ? 'loading' : 'ready', [
       { kind: 'refresh', operation: 'use-case.dashboard.code-index.freshness.refresh' },
     ]),
     coverage: {
-      completeness: 'complete',
-      eligible: 1,
-      examined: 1,
-      matched: 1,
-      excluded: 0,
-      omitted: 0,
-      unknown: 0,
-      denominator: 1,
+      completeness: active ? 'unknown' : 'complete',
+      eligible: active ? null : 1,
+      examined: active ? null : 1,
+      matched: active ? null : 1,
+      excluded: active ? null : 0,
+      omitted: active ? null : 0,
+      unknown: active ? null : 0,
+      denominator: active ? null : 1,
       unit: 'mounted_worktree',
       omission_reasons: [],
     },
+  };
+}
+
+function codeIndexBuildProgressFixture(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    generation_id: 'generation.catchup.01',
+    progress_epoch: 1,
+    sealed_source_digest: 'sha256:sealed-source-catchup',
+    phase: 'bulk_commit',
+    committed_pages: 16,
+    committed_chunks: 10_000,
+    committed_imports: 480,
+    committed_payload_bytes: 16 * 1024 * 1024,
+    completed_files: 250,
+    total_files: 500,
+    completed_lexical_bytes: 32 * 1024 * 1024,
+    total_lexical_bytes: 64 * 1024 * 1024,
+    current_batch_pages: 4,
+    current_batch_payload_bytes: 4 * 1024 * 1024,
+    elapsed_micros: 120_000_000,
+    last_commit_latency_micros: 240_000,
+    files_per_second: 250,
+    lexical_bytes_per_second: 16 * 1024 * 1024,
+    estimated_remaining_seconds: 120,
+    last_progress_micros: nowMicros - 1_000_000,
+    blocked_reason: null,
+    ...overrides,
   };
 }
 
