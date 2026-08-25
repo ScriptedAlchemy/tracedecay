@@ -6,7 +6,7 @@
  *   MSW-backed fixtures (`fixtures/route.ts`) — no daemon required — then walks
  *   the code-driven story registry and captures each surface across
  *   light+dark themes and 320/768/1440 widths, writing PNGs and a machine
- *   `manifest.json` to `audit-gallery/`. An axe accessibility scan runs per
+ *   `manifest.json` to `audit-gallery/`. A render check runs per
  *   surface and its violations are recorded in the manifest.
  *
  * `npm run visual:audit -- --diff`
@@ -15,7 +15,7 @@
  *   pixel counts (and writing diff PNGs) in the manifest.
  *
  * WIDTHS ARE PINNED TO THE BASELINES, NOT TO PLAN 11. The plan's viewport,
- * zoom and media matrix lives in `e2e/axe-harness.ts` and `e2e/axe-explorer.ts`
+ * zoom and media matrix has been retired along with the accessibility harness
  * — the two gates CI runs. This harness keeps 320/768/1440 at a height of 900
  * because `audit-baselines/` holds seventy-five committed PNGs named and sized
  * for exactly that geometry: moving to 320x568 and 768x1024 would make every
@@ -24,10 +24,8 @@
  * nothing, which is the precise failure this file's exit code was rewritten to
  * stop. Re-baselining is a deliberate act for whoever owns those PNGs.
  *
- * What this harness does carry from the plan, because neither costs a pixel:
- * the same axe tag set as the gates (WCAG 2.1 included — it used to scan two
- * tags fewer than the gate that shares its bundle), and the two Plan 11
- * measurements no axe rule performs. Its route coverage is the widest in the
+ * What this harness does carry from the plan, because it costs no pixels: the
+ * two Plan 11 measurements. Its route coverage is the widest in the
  * repository — every registered story surface, not the handful of routes the
  * scenario gates visit — so it is where an undersized control on a workspace
  * nobody audits turns up.
@@ -40,13 +38,12 @@
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import type { Server } from 'node:http';
 import { STORY_SURFACES } from './registry.ts';
 import { installApiFixtures } from './fixtures/route.ts';
-import { STILLNESS_INIT, startStaticServer } from '../e2e/axe-harness.ts';
+import { STILLNESS_INIT, startStaticServer } from '../e2e/static-server.ts';
 import {
   MIN_TOUCH_TARGET_PX,
   REFLOW_PROBE,
@@ -72,12 +69,6 @@ const DIFF_MODE = process.argv.slice(2).includes('--diff');
 type Theme = (typeof THEMES)[number];
 type Width = (typeof WIDTHS)[number];
 
-interface AxeResult {
-  violations: number;
-  byImpact: Record<string, number>;
-  ruleIds: string[];
-}
-
 interface DiffResult {
   baseline: string;
   status: 'match' | 'diff' | 'no-baseline' | 'size-mismatch';
@@ -92,7 +83,6 @@ interface ShotEntry {
   width: Width;
   file: string;
   bytes: number;
-  axe: AxeResult | null;
   /** Document width against viewport width, plus what ran past the edge. */
   reflow?: ReflowReport;
   /** Operable targets measured, and those under 44x44 CSS pixels. */
@@ -132,23 +122,6 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
   throw new Error(`server at ${baseURL} not ready within ${timeoutMs}ms: ${String(lastErr)}`);
 }
 
-
-async function runAxe(page: Page): Promise<AxeResult> {
-  // The same four tags the gates use. This scanned `wcag2a` and `wcag2aa`
-  // only, so every WCAG 2.1 rule was unchecked on the eight workspaces the
-  // scenario gates never visit.
-  const results = await new AxeBuilder({ page })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-    .analyze();
-  const byImpact: Record<string, number> = {};
-  const ruleIds: string[] = [];
-  for (const v of results.violations) {
-    const impact = v.impact ?? 'unknown';
-    byImpact[impact] = (byImpact[impact] ?? 0) + 1;
-    ruleIds.push(v.id);
-  }
-  return { violations: results.violations.length, byImpact, ruleIds };
-}
 
 function diffAgainstBaseline(file: string, shotBuf: Buffer): DiffResult {
   const baselinePath = path.join(BASELINE_DIR, file);
@@ -221,7 +194,7 @@ async function main(): Promise<void> {
   // server emits runtime errors the release build does not have (esbuild's
   // `__name` helper reaching the page among them), and a route that throws
   // still renders the router's accessible error boundary — which screenshots
-  // happily and scores a clean axe pass. `AUDIT_BASE_URL` still wins, for
+  // happily. `AUDIT_BASE_URL` still wins, for
   // auditing an already-running server on purpose.
   const preset = process.env['AUDIT_BASE_URL'];
   let staticServer: Server | null = null;
@@ -240,7 +213,6 @@ async function main(): Promise<void> {
 
   let browser: Browser | null = null;
   const surfaces: SurfaceEntry[] = [];
-  const axeTotals = { violations: 0, byImpact: {} as Record<string, number> };
   const pageErrors: string[] = [];
   let screenshotCount = 0;
 
@@ -253,7 +225,7 @@ async function main(): Promise<void> {
     const context = await browser.newContext({ deviceScaleFactor: 1 });
     const page = await context.newPage();
     // A crashed route renders the router's own accessible error boundary, which
-    // screenshots happily and scores a clean axe pass. A page error therefore
+    // screenshots happily. A page error therefore
     // fails the run rather than being invisible in the manifest.
     page.on('pageerror', (error) => {
       pageErrors.push(error.message);
@@ -290,11 +262,6 @@ async function main(): Promise<void> {
               fullPage: true,
             });
             screenshotCount += 1;
-            const axe = await runAxe(page);
-            axeTotals.violations += axe.violations;
-            for (const [impact, n] of Object.entries(axe.byImpact)) {
-              axeTotals.byImpact[impact] = (axeTotals.byImpact[impact] ?? 0) + n;
-            }
             const reflow = (await page.evaluate(REFLOW_PROBE)) as ReflowReport;
             const targets = (await page.evaluate(TOUCH_TARGET_PROBE)) as TouchTargetReport;
             const tag = `${surface.id}/${theme}/${width}`;
@@ -311,7 +278,6 @@ async function main(): Promise<void> {
               width,
               file,
               bytes: buf.length,
-              axe,
               reflow,
               targets,
               planFailures,
@@ -319,14 +285,14 @@ async function main(): Promise<void> {
             if (DIFF_MODE) shot.diff = diffAgainstBaseline(file, buf as Buffer);
             entry.shots.push(shot);
             console.log(
-              `[audit] ${file}  axe=${axe.violations}` +
+              `[audit] ${file}` +
                 `  reflow=${reflow.scrollWidth}/${reflow.clientWidth}` +
                 `  targets=${targets.undersized.length}/${targets.examined} under ${MIN_TOUCH_TARGET_PX}px` +
                 (shot.diff ? `  diff=${shot.diff.status}` : ''),
             );
             for (const f of planFailures) console.log(`           ! ${f}`);
           } catch (err) {
-            entry.shots.push({ theme, width, file, bytes: 0, axe: null, error: String(err) });
+            entry.shots.push({ theme, width, file, bytes: 0, error: String(err) });
             console.warn(`[audit] FAILED ${file}: ${String(err)}`);
           }
         }
@@ -370,11 +336,9 @@ async function main(): Promise<void> {
     widths: WIDTHS,
     viewportHeight: VIEWPORT_HEIGHT,
     minTouchTargetPx: MIN_TOUCH_TARGET_PX,
-    axeTags: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'],
     surfaceCount: STORY_SURFACES.length,
     screenshotCount,
     expectedScreenshotCount: STORY_SURFACES.length * THEMES.length * WIDTHS.length,
-    axeSummary: axeTotals,
     planFailureCount: planFailures.length,
     undersizedTargets: [...undersized.entries()].map(([selector, v]) => ({ selector, ...v })),
     surfaces,
@@ -388,9 +352,6 @@ async function main(): Promise<void> {
   );
   console.log(
     `[audit] screenshots=${screenshotCount}/${manifest.expectedScreenshotCount}  gallery=${path.relative(ROOT, GALLERY_DIR)}/`,
-  );
-  console.log(
-    `[audit] axe violations=${axeTotals.violations} byImpact=${JSON.stringify(axeTotals.byImpact)}`,
   );
   console.log(
     `[audit] plan assertions: ${planFailures.length} shot(s) failed; ` +
@@ -452,7 +413,6 @@ async function main(): Promise<void> {
   if (
     failed.length > 0 ||
     pageErrors.length > 0 ||
-    axeTotals.violations > 0 ||
     diffs.length > 0 ||
     planFailures.length > 0
   ) {
