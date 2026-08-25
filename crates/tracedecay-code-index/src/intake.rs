@@ -270,40 +270,41 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         )
     }
 
-    #[hotpath::measure(label = "code_index.intake.bind_file")]
     fn bind_file(
         &self,
         capability: &SanitizedSnapshotCapabilityV1,
         project_id: &ProjectId,
         file: ValidatedCodeFileV1,
     ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1> {
-        if project_id.validate().is_err() {
-            return Err(IntakeRejectionV1::UnsanitizedInput);
-        }
-        if file.snapshot_digest != capability.snapshot.intake_digest
-            || file.file.disposition != SnapshotFileDispositionV1::Present
-            || content_digest(&file.sanitized_bytes) != file.file.content_digest
-            || std::str::from_utf8(&file.sanitized_bytes).is_err()
-        {
-            return Err(IntakeRejectionV1::UnsanitizedInput);
-        }
-        let admitted_file = capability
-            .files_by_occurrence
-            .get(&file.file.file_occurrence_id)
-            .and_then(|index| capability.snapshot.snapshot.files.get(*index));
-        if admitted_file != Some(&file.file) {
-            return Err(IntakeRejectionV1::UnsanitizedInput);
-        }
-        let snapshot = &capability.snapshot.snapshot;
-        let authority = ReceiptBoundCodeFileAuthorityV1 {
-            project_id: project_id.clone(),
-            repository_id: snapshot.repository.clone(),
-            worktree_id: snapshot.worktree.clone(),
-            reference: snapshot.reference.clone(),
-            logical_path: file.file.logical_path.clone(),
-            content_digest: file.file.content_digest.clone(),
-        };
-        Ok(ReceiptBoundCodeFileV1 { file, authority })
+        crate::hotpath_observe::measure_hot_loop!("code_index.intake.bind_file", {
+            if project_id.validate().is_err() {
+                return Err(IntakeRejectionV1::UnsanitizedInput);
+            }
+            if file.snapshot_digest != capability.snapshot.intake_digest
+                || file.file.disposition != SnapshotFileDispositionV1::Present
+                || content_digest(&file.sanitized_bytes) != file.file.content_digest
+                || std::str::from_utf8(&file.sanitized_bytes).is_err()
+            {
+                return Err(IntakeRejectionV1::UnsanitizedInput);
+            }
+            let admitted_file = capability
+                .files_by_occurrence
+                .get(&file.file.file_occurrence_id)
+                .and_then(|index| capability.snapshot.snapshot.files.get(*index));
+            if admitted_file != Some(&file.file) {
+                return Err(IntakeRejectionV1::UnsanitizedInput);
+            }
+            let snapshot = &capability.snapshot.snapshot;
+            let authority = ReceiptBoundCodeFileAuthorityV1 {
+                project_id: project_id.clone(),
+                repository_id: snapshot.repository.clone(),
+                worktree_id: snapshot.worktree.clone(),
+                reference: snapshot.reference.clone(),
+                logical_path: file.file.logical_path.clone(),
+                content_digest: file.file.content_digest.clone(),
+            };
+            Ok(ReceiptBoundCodeFileV1 { file, authority })
+        })
     }
 }
 
