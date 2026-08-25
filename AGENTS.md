@@ -13,18 +13,26 @@ compiles.
 
 ## Layout
 
-- `src/` — main `tracedecay` crate (daemon, MCP tools, global DB, sessions,
-  code index, application services).
-- `crates/` — workspace member crates (`tracedecay-api`, `-application`,
-  `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`, rusqlite
-  parity/runtime crates).
+- The repository root is a **virtual workspace** — it has no package of its
+  own. Every crate lives under `crates/`.
+- `crates/tracedecay/` — the composition-root library (daemon, MCP tools,
+  global DB, sessions, code index, application services). Its integration
+  suites are `crates/tracedecay/tests/`, and the ones that use the fixture
+  surface in `tests/common/` declare `required-features = ["test-helpers"]`.
+- `crates/tracedecay-cli/` — the shipped `tracedecay` binary. Build it with
+  `cargo build -p tracedecay-cli --bin tracedecay`, never `-p tracedecay`.
+- `crates/` — the remaining workspace member crates (`tracedecay-api`,
+  `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
+  rusqlite parity/runtime crates).
 - `dashboard/` — the single embedded dashboard (React + rsbuild + vitest).
   `dashboard/src/contracts/` is generated from Rust schemas via schemars —
   never hand-edit it; regenerate with the `contracts:generate` script and
   verify with `contracts:check`.
 - `plugin/` — host bundles (Claude, Codex, Cursor, Kimi, opencode).
-- `tests/` — integration test suites; `benches/` — criterion benches;
-  `benchmark_data/` — benchmark fixtures, harnesses, and provenance;
+- `tests/` — shared fixtures, distribution suites, and shell/Python gates that
+  no single crate owns; crate-level integration suites and criterion benches
+  live under that crate's own `tests/` and `benches/`.
+- `benchmark_data/` — benchmark fixtures, harnesses, and provenance;
   `evals/` — memory, hermetic, and agent-adoption evals; `docs/` — plans and guides.
 - `scripts/` — CI/dev gates (commit-msg check, bundle checks, release drift).
 
