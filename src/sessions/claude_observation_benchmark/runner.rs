@@ -25,6 +25,50 @@ use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 use tracedecay_usecases::observation::ObservationCancellation;
 
+/// Installs the process-wide background CPU authority these benchmarks need.
+///
+/// They drive the real observation pipeline, and host admission refuses every
+/// capture with `background_cpu_unavailable` when no authority is installed.
+/// Production installs it during daemon bootstrap, which a benchmark never
+/// runs, and `tracedecay-global-db`'s equivalent harness helper is
+/// `#[cfg(test)] pub(crate)`, so it cannot be reused from here.
+fn ensure_background_cpu_authority() {
+    use std::num::NonZeroUsize;
+    use tracedecay_runtime_core::background_cpu::{
+        install_process_background_cpu, process_background_cpu,
+    };
+
+    use std::sync::{Arc, OnceLock};
+    use tracedecay_runtime_core::resident_memory::{
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    };
+
+    static BENCHMARK_RESIDENT_MEMORY: OnceLock<Arc<ProcessResidentMemoryV1>> = OnceLock::new();
+
+    if process_background_cpu().is_none() {
+        // A sibling benchmark can win the process-wide installation race at a
+        // different canonical width; reuse that authority rather than making
+        // success depend on execution order.
+        if install_process_background_cpu(NonZeroUsize::MIN).is_err() {
+            assert!(
+                process_background_cpu().is_some(),
+                "background CPU authority is neither installable nor already installed"
+            );
+        }
+    }
+
+    // The Codex provider path additionally refuses with
+    // `BackgroundResourceUnavailable { resource: "process resident-memory
+    // authority" }` until preparation resources are configured.
+    let memory = Arc::clone(BENCHMARK_RESIDENT_MEMORY.get_or_init(|| {
+        Arc::new(ProcessResidentMemoryV1::new(
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        ))
+    }));
+    let _ = tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
+        .configure_preparation_resources(memory);
+}
+
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
 };
@@ -81,6 +125,7 @@ impl Fixture {
             .expect("create Claude benchmark fixture tree");
         fs::create_dir_all(&profile).expect("create benchmark profile root");
         write_records(&transcript, &session_id);
+        ensure_background_cpu_authority();
         let runtime = HostAdmissionTestRuntimeV1::profile(&profile)
             .await
             .expect("open registered benchmark runtime");
@@ -397,6 +442,7 @@ impl ProviderFixture {
         let project_id = enroll_provider_benchmark_project(&project);
         let source_path =
             write_provider_fixture(kind, temp.path(), &home, &project, repetition).await;
+        ensure_background_cpu_authority();
         let runtime = if matches!(kind, ProviderKind::Claude) {
             HostAdmissionTestRuntimeV1::profile(&profile)
                 .await

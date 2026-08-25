@@ -15,9 +15,7 @@
     "visual:audit": "tsx stories/audit.ts",
     "visual:topography": "tsx stories/topography-audit.ts",
     "live:sweep": "tsx stories/live-sweep.ts",
-    "live:multiproject": "tsx stories/live-multiproject.ts",
-    "axe:audit": "tsx e2e/axe-audit.ts",
-    "axe:explorer": "tsx e2e/axe-explorer.ts"
+    "live:multiproject": "tsx stories/live-multiproject.ts"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.3.0",
@@ -39,7 +37,6 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "1.61.1",
     "@rsbuild/core": "^1.7.6",
     "@rsbuild/plugin-react": "^1.1.0",
