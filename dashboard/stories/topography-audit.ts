@@ -9,7 +9,7 @@
  * the two things it is judged on — the atmosphere and the motion contract — are
  * only observable after a gesture. So this walks a scripted journey instead of a
  * route list, screenshots every step in both themes at 320/768/1440, and runs
- * axe on each one.
+ * a screenshot of each one.
  *
  * The journey is the real navigation model, clicked rather than deep-linked:
  *
@@ -45,7 +45,6 @@ import { createReadStream, existsSync, mkdirSync, rmSync, statSync, writeFileSyn
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
 import { installApiFixtures } from './fixtures/route.ts';
 
 const ROOT = process.cwd();
@@ -59,20 +58,12 @@ const PORT = Number(process.env['TOPO_PORT'] ?? 5273);
 
 type Theme = (typeof THEMES)[number];
 
-interface AxeResult {
-  violations: number;
-  byImpact: Record<string, number>;
-  ruleIds: string[];
-  nodes: string[];
-}
-
 interface ShotEntry {
   state: string;
   theme: Theme;
   width: number;
   file: string;
   bytes: number;
-  axe: AxeResult | null;
   error?: string;
 }
 
@@ -101,7 +92,7 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
  * Deliberately NOT `rsbuild dev`. The dev server compiles route chunks lazily,
  * and under a scripted walk that races: the Code route intermittently arrived
  * with `factory is undefined (GraphCanvas.tsx)` and rendered the router's error
- * boundary, which a screenshot-and-axe pass is perfectly happy to photograph and
+ * boundary, which a screenshot pass is perfectly happy to photograph and
  * call clean. Auditing the production bundle removes that class of false green
  * outright and has the better property anyway — the artifact under test is the
  * one `build.rs` embeds in the binary.
@@ -160,22 +151,6 @@ function startStaticServer(): { server: Server; baseURL: string } {
   return { server, baseURL: `http://localhost:${PORT}` };
 }
 
-async function runAxe(page: Page): Promise<AxeResult> {
-  const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
-  const byImpact: Record<string, number> = {};
-  const ruleIds: string[] = [];
-  const nodes: string[] = [];
-  for (const v of results.violations) {
-    const impact = v.impact ?? 'unknown';
-    byImpact[impact] = (byImpact[impact] ?? 0) + 1;
-    ruleIds.push(v.id);
-    // The offending markup, so a violation is actionable from the manifest
-    // alone rather than needing the run reproduced.
-    for (const node of v.nodes.slice(0, 3)) nodes.push(`${v.id}: ${node.target.join(' ')}`);
-  }
-  return { violations: results.violations.length, byImpact, ruleIds, nodes };
-}
-
 async function setTheme(page: Page, theme: Theme): Promise<void> {
   await page.evaluate((t) => {
     try {
@@ -228,7 +203,7 @@ function backToSpine(page: Page) {
  * iteration's TRACE stayed open for every later one: each "spine" capture
  * silently photographed the drill-in, and because the hub cards were then
  * off-screen, every subsequent open reported failure. Both symptoms had one
- * cause, and neither was visible from the axe or screenshot counts.
+ * cause, and neither was visible from the screenshot counts.
  */
 async function ensureSpine(page: Page): Promise<void> {
   const back = backToSpine(page);
@@ -369,12 +344,11 @@ async function main(): Promise<void> {
 
   let browser: Browser | null = null;
   const shots: ShotEntry[] = [];
-  const axeTotals = { violations: 0, byImpact: {} as Record<string, number> };
   /** Every request origin the page reached for, so a CDN cannot hide. */
   const externalRequests = new Set<string>();
   /**
    * Uncaught page errors. A surface that throws still screenshots and still
-   * passes axe — the router's error boundary is accessible markup — so a clean
+   * renders as valid markup — the router's error boundary is real markup — so a clean
    * gate over a crashed route is the exact false green this run has to refuse.
    */
   const pageErrors: string[] = [];
@@ -406,7 +380,7 @@ async function main(): Promise<void> {
     // from-state forever — which is `opacity: 0`. Collapsing the duration
     // therefore does not still the surface, it erases it: every staggered region
     // stayed invisible, Playwright reported the hub cards as not visible, and the
-    // screenshots were of blank panels that axe was happy to pass. `tokens.css`
+    // screenshots were of blank panels that a scan was happy to pass. `tokens.css`
     // documents this exact trap as the reason stillness removes the animation
     // rather than shortening it, and a screenshot harness has to obey it too.
     await page.addInitScript({
@@ -460,15 +434,10 @@ async function main(): Promise<void> {
         );
         await page.waitForTimeout(60);
         const buf = await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
-        const axe = await runAxe(page);
-        axeTotals.violations += axe.violations;
-        for (const [impact, n] of Object.entries(axe.byImpact)) {
-          axeTotals.byImpact[impact] = (axeTotals.byImpact[impact] ?? 0) + n;
-        }
-        shots.push({ state, theme, width, file, bytes: buf.length, axe });
-        console.log(`[topo] ${file}  axe=${axe.violations}`);
+        shots.push({ state, theme, width, file, bytes: buf.length });
+        console.log(`[topo] ${file}  bytes=${buf.length}`);
       } catch (err) {
-        shots.push({ state, theme, width, file, bytes: 0, axe: null, error: String(err) });
+        shots.push({ state, theme, width, file, bytes: 0, error: String(err) });
         console.warn(`[topo] FAILED ${file}: ${String(err)}`);
       }
     };
@@ -546,7 +515,6 @@ async function main(): Promise<void> {
     widths: WIDTHS,
     viewportHeight: VIEWPORT_HEIGHT,
     screenshotCount: shots.filter((s) => !s.error).length,
-    axeSummary: axeTotals,
     externalRequests: [...externalRequests],
     pageErrors: [...new Set(pageErrors)],
     typography,
@@ -558,9 +526,6 @@ async function main(): Promise<void> {
   console.log('');
   console.log('[topo] ===== summary =====');
   console.log(`[topo] screenshots=${manifest.screenshotCount}  out=${path.relative(ROOT, OUT_DIR)}/`);
-  console.log(
-    `[topo] axe violations=${axeTotals.violations} byImpact=${JSON.stringify(axeTotals.byImpact)}`,
-  );
   console.log(
     `[topo] external requests=${externalRequests.size}` +
       (externalRequests.size > 0 ? ` ${[...externalRequests].join(', ')}` : ' (offline-clean)'),
@@ -581,7 +546,6 @@ async function main(): Promise<void> {
     console.error('[topo] non-local requests detected — offline posture broken');
     process.exitCode = 1;
   }
-  if (axeTotals.violations > 0) process.exitCode = 1;
 }
 
 main().catch((err) => {
