@@ -10061,6 +10061,10 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             }
         }
     };
+    assert!(
+        executed.served_stale,
+        "an explicit overflow keeps the currently served text generation stale until reconcile settles"
+    );
     let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let overflow_settled = {
@@ -10184,6 +10188,14 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .expect("ready progress stays observable")
             .phase,
         crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    let current = registry
+        .execute_query_search(&scope, core_search_request("alpha_0000"))
+        .await
+        .expect("settled graph-off text query");
+    assert!(
+        !current.served_stale,
+        "a reconciled graph-off text owner must report current exact and lexical coverage"
     );
 
     let query_scope = CodeQueryScope::new(executed.generation.clone(), None).expect("query scope");
