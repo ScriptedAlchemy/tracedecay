@@ -3,8 +3,8 @@ use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
-use crate::mcp::JsonRpcResponse;
 use std::process::Command;
+use tracedecay_jsonrpc::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_usecases::context::CancellationToken;
 
@@ -2873,7 +2873,7 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let initialize_request: crate::mcp::JsonRpcRequest =
+    let initialize_request: tracedecay_jsonrpc::JsonRpcRequest =
         serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -2925,7 +2925,7 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
-    let initialize_request: crate::mcp::JsonRpcRequest =
+    let initialize_request: tracedecay_jsonrpc::JsonRpcRequest =
         serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

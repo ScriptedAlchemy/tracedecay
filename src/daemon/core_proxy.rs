@@ -23,13 +23,14 @@ use super::{
     version_skew_action,
 };
 use crate::errors::{Result, TraceDecayError};
-#[cfg(not(unix))]
-use crate::mcp::McpTransport;
+use crate::mcp::StdioTransport;
 #[cfg(unix)]
 use crate::mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
+use tracedecay_jsonrpc::JsonRpcRequest;
+#[cfg(not(unix))]
+use tracedecay_jsonrpc::McpTransport;
 #[cfg(unix)]
-use crate::mcp::{ErrorCode, JsonRpcResponse};
-use crate::mcp::{JsonRpcRequest, StdioTransport};
+use tracedecay_jsonrpc::{ErrorCode, JsonRpcResponse};
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///

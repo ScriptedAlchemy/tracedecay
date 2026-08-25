@@ -9,7 +9,7 @@ use std::sync::{
 use serde_json::json;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;

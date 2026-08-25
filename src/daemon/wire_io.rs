@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) async fn write_json_rpc_response(
     transport: &mut impl McpTransport,
-    response: &crate::mcp::JsonRpcResponse,
+    response: &tracedecay_jsonrpc::JsonRpcResponse,
 ) -> Result<()> {
     transport
         .write_line(&serde_json::to_string(response)?)
@@ -53,9 +53,9 @@ mod wire_bound_tests {
         BrokerStreamTransport, DaemonLifecycle, read_line_handling_wire_oversized,
         serve_routed_rmcp_connection,
     };
-    use crate::mcp::McpTransport;
     use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tracedecay_jsonrpc::McpTransport;
     use tracedecay_usecases::host_admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
     use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};

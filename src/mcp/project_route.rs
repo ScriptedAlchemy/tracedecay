@@ -551,9 +551,10 @@ mod tests {
         HookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES, SharedHookProjectRouteCache,
         WorkspaceProjectRoute, project_route_identity_matches,
     };
-    use crate::daemon::{HookAgent, HookRouteMetadata, ProductionProjectCompositionHarnessV1};
+    use crate::daemon::ProductionProjectCompositionHarnessV1;
     use crate::mcp::hook_events::{HookEvent, HookEventKind};
     use crate::mcp::server::McpServer;
+    use tracedecay_hooks::core_events::{HookAgent, HookRouteMetadata};
 
     struct ResolvedRouteFixture {
         _isolation: TempDir,

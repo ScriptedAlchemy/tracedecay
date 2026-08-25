@@ -13,9 +13,9 @@ use super::{
     log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
     write_json_rpc_response,
 };
-use crate::mcp::ErrorCode;
 use crate::support::weak_registry::WeakRegistry;
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_jsonrpc::ErrorCode;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;
@@ -459,7 +459,7 @@ fn invocation_saturation_response(
 }
 
 async fn write_invocation_response(
-    transport: &mut impl crate::mcp::McpTransport,
+    transport: &mut impl tracedecay_jsonrpc::McpTransport,
     response: &super::DaemonInvocationResponse,
 ) -> Result<()> {
     transport
@@ -530,7 +530,7 @@ pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResp
 }
 
 pub(crate) async fn reject_reserved_bulk_request(
-    transport: &mut impl crate::mcp::McpTransport,
+    transport: &mut impl tracedecay_jsonrpc::McpTransport,
     request_line: &str,
     capacity: usize,
 ) -> Result<()> {
@@ -547,7 +547,7 @@ pub(crate) async fn reject_reserved_bulk_request(
 }
 
 pub(crate) async fn reject_admitted_request(
-    transport: &mut impl crate::mcp::McpTransport,
+    transport: &mut impl tracedecay_jsonrpc::McpTransport,
     request_line: &str,
     saturation: DaemonClientSaturationResponse,
 ) -> Result<()> {
