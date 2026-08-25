@@ -1960,6 +1960,7 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
         CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
     >,
     lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+    hydration: CodeLexicalArtifactReaderV1,
     /// Holds the complete advertised reader ceiling in the process resident-
     /// memory authority while these owners serve.
     _reader_reservation: Arc<ResidentMemoryReservationV1>,
@@ -1979,13 +1980,63 @@ impl ProductionCodeIndexQueryOwnersV1 {
             CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
         >,
         lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+        hydration: CodeLexicalArtifactReaderV1,
         reader_reservation: ResidentMemoryReservationV1,
     ) -> Self {
         Self {
             exact,
             lexical,
+            hydration,
             _reader_reservation: Arc::new(reader_reservation),
         }
+    }
+
+    fn occurrence_by_binding(
+        &self,
+        binding: &tracedecay_query::retrieval::ports::CodeCandidateBindingV1,
+    ) -> Result<
+        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
+        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
+    > {
+        self.hydration
+            .occurrence_by_binding(binding)
+            .map_err(|_| {
+                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
+            })?
+            .map(
+                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
+                    file: occurrence.file,
+                    symbol: occurrence.symbol,
+                    chunk: Some(occurrence.chunk),
+                    path: occurrence.logical_path,
+                    span: occurrence.source_span,
+                },
+            )
+            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
+    }
+
+    fn occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<
+        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
+        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
+    > {
+        self.hydration
+            .occurrence_by_chunk(chunk)
+            .map_err(|_| {
+                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
+            })?
+            .map(
+                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
+                    file: occurrence.file,
+                    symbol: occurrence.symbol,
+                    chunk: Some(occurrence.chunk),
+                    path: occurrence.logical_path,
+                    span: occurrence.source_span,
+                },
+            )
+            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
     }
 
     pub fn retrieve_lexical(
@@ -3477,10 +3528,12 @@ impl LatestCodeTextGenerationV1 {
         }
         let authority = exact_serving_authority()?;
         let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
+        let hydration = reader.clone();
         let lexical = LexicalLane::new(reader);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::artifact(
             exact,
             lexical,
+            hydration,
             reader_reservation,
         ));
         let _ = self.query_owners.set(owners);
@@ -4123,12 +4176,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             return Ok(None);
         }
-        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
-            return Ok(None);
-        };
-        if witness.generation_id != metadata.manifest().generation_id.as_str()
-            || !witness.ignored_source_paths.is_empty()
-            || !self.ignored_source_admissions.is_empty()
+        let witness = RestoreFreshnessWitnessV1::load(&self.store_root);
+        if witness.as_ref().is_some_and(|witness| {
+            witness.generation_id != metadata.manifest().generation_id.as_str()
+                || !witness.ignored_source_paths.is_empty()
+        }) || !self.ignored_source_admissions.is_empty()
         {
             return Ok(None);
         }
@@ -4151,7 +4203,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             hints.overflow || !hints.paths.is_empty()
         };
-        if !has_hints {
+        if !has_hints && let Some(witness) = witness.as_ref() {
             if witness.git_metadata_signature != sampled_metadata.stable_signature()
                 || witness.stat_signature != sampled_signature
             {
@@ -4186,6 +4238,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             || captured.snapshot.source_revision != metadata.snapshot().source_revision
             || captured.snapshot.content_identity != metadata.snapshot().content_identity
         {
+            if witness.is_none() {
+                // Without the durable ignored-source roster witness, an
+                // unequal capture cannot distinguish a real edit from a file
+                // the sealed generation intentionally excluded. Fall back to
+                // the complete authority for that changed-source case. An
+                // equal authoritative capture is sufficient to verify the
+                // retained text generation without decoding it.
+                return Ok(None);
+            }
             let pointer = self
                 .publication
                 .read_publication_pointer()
@@ -4290,15 +4351,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         let snapshot_content_identity = captured.snapshot.content_identity;
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
-        RestoreFreshnessWitnessV1 {
-            generation_id: witness.generation_id,
-            git_metadata_signature: sampled_metadata.stable_signature(),
-            stat_signature: sampled_signature,
-            repository_parse_identity_digest: witness.repository_parse_identity_digest,
-            ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
-            ignored_source_paths: witness.ignored_source_paths,
+        if let Some(witness) = witness {
+            RestoreFreshnessWitnessV1 {
+                generation_id: witness.generation_id,
+                git_metadata_signature: sampled_metadata.stable_signature(),
+                stat_signature: sampled_signature,
+                repository_parse_identity_digest: witness.repository_parse_identity_digest,
+                ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
+                ignored_source_paths: witness.ignored_source_paths,
+            }
+            .persist(&self.store_root);
         }
-        .persist(&self.store_root);
         let outcome = CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
             snapshot_content_identity,
             overflow_reconciled: drained_hints.overflow(),
@@ -4893,12 +4956,23 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&self.git_metadata)
-            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
             self.request_background_reconcile();
             return true;
         }
-        false
+        if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+            return false;
+        }
+        if self
+            .worktree_stat_signature()
+            .is_ok_and(|signature| self.last_stat_signature.as_ref() == Some(&signature))
+        {
+            self.last_reconciled_at = Instant::now();
+            self.last_reconciled_at_micros = Some(now_micros().0);
+            return false;
+        }
+        self.request_background_reconcile();
+        true
     }
 
     /// The exact identity this scheduler is currently bound to.

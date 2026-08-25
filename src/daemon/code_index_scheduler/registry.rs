@@ -3544,6 +3544,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
+                    let text_ready = text
+                        .as_ref()
+                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
                     let identity = if latest.is_some() {
                         dashboard_freshness_identity(latest.as_ref())
                     } else {
@@ -3553,7 +3556,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros: None,
                         staleness_state: Some(
-                            if latest.is_some() {
+                            if latest.is_some() || text_ready {
                                 "refreshing"
                             } else {
                                 "indexing"
@@ -3577,20 +3580,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            let text_ready = text
+                .as_ref()
+                .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
             let hook_hint_count = scheduler.pending_hint_count();
             let staleness_state = if refreshing {
-                if latest.is_some() {
+                if latest.is_some() || text_ready {
                     "refreshing"
                 } else {
                     "indexing"
                 }
             } else if stale || hook_hint_count != Some(0) {
-                if latest.is_some() {
+                if latest.is_some() || text_ready {
                     "stale"
                 } else {
                     "indexing"
                 }
-            } else if latest.is_some() {
+            } else if latest.is_some() || text_ready {
                 "fresh"
             } else {
                 "indexing"
@@ -4014,6 +4020,64 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()?;
         (text_matches_scope_identity(&latest, scope) && latest.text_serving_is_ready())
             .then_some(latest)
+    }
+
+    /// Resolve graph-independent exact/lexical serving through the same cheap
+    /// freshness ladder as complete-generation queries. The immutable text
+    /// owner remains servable while a real edit is reconciled in the retained
+    /// background worker; a quiet repository only refreshes its stat witness
+    /// clock and posts no wake.
+    pub(in crate::daemon) async fn latest_text_fresh_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let (root, scheduler, text_generation, wake, pending_wake) = {
+            let mounted = self.mounted.lock().await;
+            let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            (
+                root.clone(),
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.text_generation),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
+            )
+        };
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || {
+            if gix::open(&root).is_err() {
+                return None;
+            }
+            let latest = text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .filter(|latest| {
+                    latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
+                })?;
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::BusyFollowUp,
+                    );
+                    return Some(latest);
+                }
+            };
+            if scheduler.request_fresh_for_query_background() {
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
+            Some(latest)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     pub(in crate::daemon) async fn latest_complete_serving_for_scope(

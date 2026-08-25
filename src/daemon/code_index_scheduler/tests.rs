@@ -9914,6 +9914,11 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             latest.generation.manifest().privacy_domain.clone(),
         )
     };
+    std::fs::remove_file(
+        super::scoped_code_index_store_root(store.path(), fixture.path())
+            .join("freshness_witness.v1"),
+    )
+    .expect("remove restore witness to reproduce a cold preserved-profile mount");
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
@@ -9970,12 +9975,16 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .acquire_owned()
         .await
         .expect("pause text projection after a bounded committed slice");
-    let last_reconciled_before_status_polls = {
+    let (last_reconciled_before_status_polls, original_staleness_threshold) = {
         let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_staleness_threshold = scheduler.policy.staleness_threshold;
         scheduler.policy.staleness_threshold = Duration::ZERO;
-        scheduler.last_reconciled_at_micros()
+        (
+            scheduler.last_reconciled_at_micros(),
+            original_staleness_threshold,
+        )
     };
     for _ in 0..8 {
         assert!(
@@ -10021,6 +10030,11 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         assert!(progress.progress_epoch >= progress_before_overflow.progress_epoch);
         assert!(progress.committed_pages >= progress_before_overflow.committed_pages);
     }
+    scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .policy
+        .staleness_threshold = original_staleness_threshold;
     drop(status_poll_admission);
     let last_reconciled_before_overflow = scheduler
         .lock()
@@ -10155,6 +10169,98 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .public_fallback_lane_coverage
             .get(&RetrieverKind::Graph),
         Some(&PublicRetrieverStatus::Unavailable)
+    );
+
+    let dashboard = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("graph-off dashboard freshness");
+    assert_eq!(dashboard.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(dashboard.coverage, "complete");
+    assert_eq!(
+        dashboard
+            .progress
+            .as_ref()
+            .expect("ready progress stays observable")
+            .phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+
+    let query_scope = CodeQueryScope::new(executed.generation.clone(), None).expect("query scope");
+    let exact_operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let exact_context = application_context(
+        &exact_operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let exact_request =
+        ExactOccurrenceRequest::new("alpha_0000", None, query_scope.clone(), query_meta())
+            .expect("exact request");
+    let exact = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &exact_context,
+                operation: &exact_operation,
+            },
+            &exact_request,
+        )
+        .await;
+    let exact_page = match exact {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("exact payload"),
+        outcome => panic!("ready graph-off exact owner was unavailable: {outcome:?}"),
+    };
+    assert_eq!(exact_page.generation, executed.generation);
+    assert!(
+        exact_page
+            .items
+            .iter()
+            .any(|record| record.occurrence.path == "src/file_0000.rs"),
+        "artifact-backed exact hydration returns the canonical source path"
+    );
+
+    let phrase_operation =
+        callable_code_operation(CallableCodeOperationKind::PhraseSearch).expect("operation");
+    let phrase_context = application_context(
+        &phrase_operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "alpha_0000",
+        SanitizerRevision::new("sanitizer.query.fixture").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.query.fixture").expect("normalization"),
+    )
+    .expect("query");
+    let phrase_request = PhraseSearchRequest::new(
+        query,
+        vec!["alpha_0000".to_owned()],
+        Vec::new(),
+        0,
+        query_scope,
+        query_meta(),
+    )
+    .expect("phrase request");
+    let phrase = registry
+        .phrase_search(
+            RetrievalPortContext {
+                request: &phrase_context,
+                operation: &phrase_operation,
+            },
+            &phrase_request,
+        )
+        .await;
+    let phrase_page = match phrase {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("phrase payload"),
+        outcome => panic!("ready graph-off phrase owner was unavailable: {outcome:?}"),
+    };
+    assert_eq!(phrase_page.generation, executed.generation);
+    assert!(
+        phrase_page
+            .items
+            .iter()
+            .any(|record| record.occurrence.path == "src/file_0000.rs"),
+        "artifact-backed lexical hydration returns the canonical source path"
     );
     registry.shutdown().await;
 }
