@@ -97,10 +97,13 @@ impl CaptureProgressV1 {
     pub(super) fn observe_candidate(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
-            self.candidate_files.fetch_add(1, Ordering::Relaxed);
+            let candidate_files = self
+                .candidate_files
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
             self.candidate_bytes
                 .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(false);
+            self.publish_at_cadence(candidate_files, false);
         }
         #[cfg(not(feature = "hotpath"))]
         let _ = bytes;
@@ -110,10 +113,13 @@ impl CaptureProgressV1 {
     pub(super) fn observe_processed(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
-            self.processed_files.fetch_add(1, Ordering::Relaxed);
+            let processed_files = self
+                .processed_files
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
             self.processed_bytes
                 .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(false);
+            self.publish_at_cadence(processed_files, false);
         }
         #[cfg(not(feature = "hotpath"))]
         let _ = bytes;
@@ -123,10 +129,13 @@ impl CaptureProgressV1 {
     pub(super) fn observe_captured(&self, bytes: usize) {
         #[cfg(feature = "hotpath")]
         {
-            self.captured_files.fetch_add(1, Ordering::Relaxed);
+            let captured_files = self
+                .captured_files
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
             self.captured_bytes
                 .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(false);
+            self.publish_at_cadence(captured_files, false);
         }
         #[cfg(not(feature = "hotpath"))]
         let _ = bytes;
@@ -134,17 +143,13 @@ impl CaptureProgressV1 {
 
     #[cfg(feature = "hotpath")]
     #[inline(always)]
-    fn publish_at_cadence(&self, force: bool) {
+    fn publish_at_cadence(&self, observation_count: u64, force: bool) {
+        if !force && !Self::cadence_is_due(observation_count) {
+            return;
+        }
         let candidate_files = self.candidate_files.load(Ordering::Relaxed);
         let processed_files = self.processed_files.load(Ordering::Relaxed);
         let captured_files = self.captured_files.load(Ordering::Relaxed);
-        if !force
-            && !candidate_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
-            && !processed_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
-            && !captured_files.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
-        {
-            return;
-        }
         hotpath::gauge!("code_index.capture.candidate_files").set(candidate_files);
         hotpath::gauge!("code_index.capture.candidate_bytes")
             .set(self.candidate_bytes.load(Ordering::Relaxed));
@@ -155,12 +160,18 @@ impl CaptureProgressV1 {
         hotpath::gauge!("code_index.capture.captured_bytes")
             .set(self.captured_bytes.load(Ordering::Relaxed));
     }
+
+    #[cfg(feature = "hotpath")]
+    #[inline(always)]
+    fn cadence_is_due(observation_count: u64) -> bool {
+        observation_count != 0 && observation_count.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
+    }
 }
 
 impl Drop for CaptureProgressV1 {
     fn drop(&mut self) {
         #[cfg(feature = "hotpath")]
-        self.publish_at_cadence(true);
+        self.publish_at_cadence(0, true);
     }
 }
 
@@ -588,6 +599,43 @@ mod tests {
         CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, SharedCodeIndexBytePoolV1,
         branch_generations, classify_capture_failure,
     };
+
+    #[cfg(feature = "hotpath")]
+    use super::{CAPTURE_PROGRESS_UPDATE_PERIOD, CaptureProgressV1};
+
+    #[cfg(feature = "hotpath")]
+    #[test]
+    fn zero_captured_large_tree_uses_bounded_candidate_cadence() {
+        let candidate_count = CAPTURE_PROGRESS_UPDATE_PERIOD * 64;
+        let progress = CaptureProgressV1::new();
+        for _ in 0..candidate_count {
+            progress.observe_candidate(1);
+        }
+        assert_eq!(
+            progress
+                .candidate_files
+                .load(std::sync::atomic::Ordering::Relaxed),
+            candidate_count
+        );
+        assert_eq!(
+            progress
+                .captured_files
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        let publish_points = (1..=candidate_count)
+            .filter(|count| CaptureProgressV1::cadence_is_due(*count))
+            .collect::<Vec<_>>();
+
+        assert_eq!(publish_points.len(), 64);
+        assert_eq!(
+            publish_points.first().copied(),
+            Some(CAPTURE_PROGRESS_UPDATE_PERIOD)
+        );
+        assert_eq!(publish_points.last().copied(), Some(candidate_count));
+        assert!(!CaptureProgressV1::cadence_is_due(0));
+    }
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(crate::git::git_program())
