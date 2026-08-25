@@ -38,8 +38,8 @@ use tracedecay_private_fs::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    ResidentMemoryAdmissionFailureV1,
-    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryReservationV1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -3076,7 +3076,7 @@ impl LatestCodeTextGenerationV1 {
         })?;
         let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
         while remaining > 0 && artifact_build.source_receipt.is_none() {
-            let maximum_batch_pages = remaining.min(TEXT_ARTIFACT_BATCH_PAGES_V1).max(1);
+            let maximum_batch_pages = remaining.clamp(1, TEXT_ARTIFACT_BATCH_PAGES_V1);
             let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
                 maximum_batch_pages,
                 TEXT_ARTIFACT_BATCH_BYTES_V1,
@@ -3989,6 +3989,108 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    /// Verify an unchanged retained text generation without decoding the full
+    /// graph-bearing generation.
+    ///
+    /// Graph-off mounts already authenticated the complete sealed bytes while
+    /// opening their lexical page source. For an ordinary source roster, the
+    /// durable freshness witness proves a quiet mount; an explicit hint is
+    /// settled by one authoritative capture whose snapshot identity must equal
+    /// the authenticated text metadata. A changed source or an ignored-source
+    /// roster falls back to the complete reconcile path.
+    fn reconcile_retained_text_generation(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        if metadata.manifest().project_id != self.project_id
+            || metadata.snapshot().repository != self.repository_id
+            || metadata.snapshot().worktree.as_ref() != Some(&self.worktree_id)
+        {
+            return Ok(None);
+        }
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return Ok(None);
+        };
+        if witness.generation_id != metadata.manifest().generation_id.as_str()
+            || !witness.ignored_source_paths.is_empty()
+            || !self.ignored_source_admissions.is_empty()
+        {
+            return Ok(None);
+        }
+        let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let Some(sampled_signature) = self.worktree_stat_signature().ok() else {
+            return Ok(None);
+        };
+        let has_hints = {
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hints.overflow || !hints.paths.is_empty()
+        };
+        if !has_hints {
+            if witness.git_metadata_signature != sampled_metadata.stable_signature()
+                || witness.stat_signature != sampled_signature
+            {
+                return Ok(None);
+            }
+            let snapshot_content_identity = metadata.snapshot().content_identity.clone();
+            self.latest_content_identity = Some(snapshot_content_identity.clone());
+            self.mark_reconciled_state(sampled_metadata, Some(sampled_signature));
+            return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+                CodeIndexNoopEvidenceV1 {
+                    snapshot_content_identity,
+                    overflow_reconciled: false,
+                },
+            )));
+        }
+
+        let capture_epoch = self.epoch.load(Ordering::Acquire);
+        let mut captured =
+            self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
+        if captured.snapshot.reference != metadata.snapshot().reference
+            || captured.snapshot.source_revision != metadata.snapshot().source_revision
+            || captured.snapshot.content_identity != metadata.snapshot().content_identity
+        {
+            return Ok(None);
+        }
+        let hints = {
+            let mut hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.epoch.load(Ordering::Acquire) != capture_epoch {
+                return Ok(None);
+            }
+            hints.take()
+        };
+        drop(std::mem::take(&mut captured.captured_files));
+        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+        let snapshot_content_identity = captured.snapshot.content_identity;
+        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
+        RestoreFreshnessWitnessV1 {
+            generation_id: witness.generation_id,
+            git_metadata_signature: sampled_metadata.stable_signature(),
+            stat_signature: sampled_signature,
+            repository_parse_identity_digest: witness.repository_parse_identity_digest,
+            ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
+            ignored_source_paths: witness.ignored_source_paths,
+        }
+        .persist(&self.store_root);
+        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+            CodeIndexNoopEvidenceV1 {
+                snapshot_content_identity,
+                overflow_reconciled: hints.overflow,
+            },
+        )))
+    }
+
     /// Load a complete identity-valid generation for stale serving.
     ///
     /// This does not claim freshness: a cancelled refresh or live ref switch
@@ -4338,13 +4440,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         metadata: identity::GitMetadataFingerprintV1,
         signature: Option<String>,
     ) {
+        self.mark_reconciled_state(metadata, signature);
+        self.persist_freshness_witness();
+    }
+
+    fn mark_reconciled_state(
+        &mut self,
+        metadata: identity::GitMetadataFingerprintV1,
+        signature: Option<String>,
+    ) {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
         self.freshness_unknown = false;
         self.last_reconciled_at = Instant::now();
         self.last_reconciled_at_micros = Some(now_micros().0);
         self.verified_against_source = true;
-        self.persist_freshness_witness();
     }
 
     /// Record the restore-time freshness witness for the current active
@@ -4433,12 +4543,25 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         admission: GenerationDecodeAdmissionV1,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
-        let latest = self.latest_complete_ready_for_query_with(admission)?;
-        if latest.is_none() {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        if self.freshness_unknown
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+        {
+            self.request_background_reconcile();
             return Ok(None);
         }
         match self.worktree_stat_signature() {
-            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => Ok(latest),
+            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
+                // The exact-source stat fence is stronger than the elapsed
+                // tier-2 arm. Refresh only the monotonic admission clock: no
+                // reconcile receipt or wall timestamp is fabricated, and a
+                // clean status census cannot turn into a full capture loop.
+                self.last_reconciled_at = Instant::now();
+                Ok(self.latest_complete_with(admission))
+            }
             _ => {
                 self.request_background_reconcile();
                 Ok(None)
@@ -4856,13 +4979,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        self.capture_admitted_candidate(
-            registry,
-            logical_path,
-            control,
-            None,
-            explicitly_admitted,
-        )
+        self.capture_admitted_candidate(registry, logical_path, control, None, explicitly_admitted)
     }
 
     fn ignored_admission_paths(&self) -> BTreeSet<&str> {
@@ -4905,6 +5022,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         control: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
+        self.capture_authoritative_snapshot_with_active_generation_reuse(control, true)
+    }
+
+    fn capture_authoritative_snapshot_without_active_generation_reuse(
+        &self,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
+        self.capture_authoritative_snapshot_with_active_generation_reuse(control, false)
+    }
+
+    fn capture_authoritative_snapshot_with_active_generation_reuse(
+        &self,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+        allow_active_generation_reuse: bool,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -4921,7 +5053,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if self.ignored_source_admissions.is_empty()
+        if allow_active_generation_reuse
+            && self.ignored_source_admissions.is_empty()
             && classification.changes().is_empty()
             && let (Some(reference), Some(revision), Some(tree)) = (
                 self.identity.head_ref(),

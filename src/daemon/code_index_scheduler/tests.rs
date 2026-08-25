@@ -4025,7 +4025,7 @@ fn source_epoch_advance_does_not_discard_immutable_text_progress() {
     };
 
     assert!(
-        matches!(result, Ok(false) | Ok(true)),
+        matches!(result, Ok(false | true)),
         "a worktree freshness epoch must not cancel immutable generation work: {result:?}"
     );
     assert!(
@@ -5417,7 +5417,14 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     .await
     .expect("background text build publishes progress");
 
-    let scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
     let projected = tokio::time::timeout(
         Duration::from_secs(1),
         registry.dashboard_freshness(fixture.path()),
@@ -5428,7 +5435,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     let projected_progress = projected.progress.expect("projected progress snapshot");
     assert_eq!(projected_progress.generation_id, expected.generation_id);
     assert!(projected_progress.progress_epoch >= expected.progress_epoch);
-    drop(scheduler_guard);
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
     registry.shutdown().await;
 }
 
@@ -9855,6 +9865,296 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     );
 
     super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
+    registry.shutdown().await;
+}
+
+/// A graph-off cold mount must keep the authenticated lightweight text owner
+/// authoritative when an overflow reconcile arrives between bounded text
+/// slices. Rebinding the same sealed generation through the full-generation
+/// cache clears the live progress slot, invalidates the surviving owner's
+/// epoch, and decodes gigabytes that graph-off serving never needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() {
+    let sources = (0..512)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, privacy_domain) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().privacy_domain.clone(),
+        )
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    registry
+        .mount_query_authority(fixture.path(), &scope, query_authority(privacy_domain))
+        .await
+        .expect("mount query authority");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (owner_epoch_before_overflow, progress_before_overflow) = loop {
+        let observed = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (owner_epoch, Some(progress)) = observed
+            && progress.committed_pages > 0
+            && progress.phase
+                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        {
+            break (owner_epoch, progress);
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "text projection completed before exposing bounded live progress"
+        );
+        tokio::task::yield_now().await;
+    };
+    let status_poll_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("pause text projection after a bounded committed slice");
+    let last_reconciled_before_status_polls = {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scheduler.policy.staleness_threshold = Duration::ZERO;
+        scheduler.last_reconciled_at_micros()
+    };
+    for _ in 0..8 {
+        assert!(
+            !registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+            "graph-off status census has no fully decoded generation"
+        );
+    }
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            scheduler.pending_hint_count(),
+            Some(0),
+            "stat-equal status polling must not fabricate an overflow reconcile"
+        );
+        assert_eq!(
+            scheduler.last_reconciled_at_micros(),
+            last_reconciled_before_status_polls,
+            "stat-equal status polling must not run a capture pass"
+        );
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "graph-off status polling must not decode the full generation"
+        );
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(progress.owner_epoch, owner_epoch_before_overflow);
+        let progress = progress
+            .snapshot()
+            .expect("status polling preserves live text progress");
+        assert_eq!(
+            progress.daemon_incarnation,
+            progress_before_overflow.daemon_incarnation
+        );
+        assert_eq!(
+            progress.producer_incarnation,
+            progress_before_overflow.producer_incarnation
+        );
+        assert!(progress.progress_epoch >= progress_before_overflow.progress_epoch);
+        assert!(progress.committed_pages >= progress_before_overflow.committed_pages);
+    }
+    drop(status_poll_admission);
+    let last_reconciled_before_overflow = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .last_reconciled_at_micros();
+    assert!(
+        registry.notify_hook_overflow(fixture.path()).await,
+        "mounted graph-off worktree accepts the overflow reconcile"
+    );
+
+    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let executed = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("alpha_0000"))
+            .await
+        {
+            Ok(executed) => break executed,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= query_deadline,
+                    "graph-off text projection never became queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let overflow_settled = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler.pending_hint_count() == Some(0)
+                && scheduler.last_reconciled_at_micros() != last_reconciled_before_overflow
+        };
+        if overflow_settled
+            && !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= overflow_deadline,
+            "graph-off overflow did not settle through a real no-op reconcile"
+        );
+        tokio::task::yield_now().await;
+    }
+    let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decode_count = scheduler.sealed_decode_count();
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            progress.owner_epoch,
+            progress
+                .snapshot()
+                .expect("ready text progress remains visible"),
+            decode_count,
+        )
+    };
+    assert_eq!(owner_epoch_after_overflow, owner_epoch_before_overflow);
+    assert_eq!(
+        progress_after_overflow.generation_id,
+        progress_before_overflow.generation_id
+    );
+    assert_eq!(
+        progress_after_overflow.daemon_incarnation,
+        progress_before_overflow.daemon_incarnation
+    );
+    assert_eq!(
+        progress_after_overflow.producer_incarnation,
+        progress_before_overflow.producer_incarnation
+    );
+    assert!(progress_after_overflow.progress_epoch > progress_before_overflow.progress_epoch);
+    assert!(progress_after_overflow.committed_pages >= progress_before_overflow.committed_pages);
+    assert_eq!(
+        progress_after_overflow.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert_eq!(
+        decode_count, 0,
+        "graph-off text serving must not decode the full generation"
+    );
+    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(
+        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+    ))
+    .expect("read text artifact root")
+    .filter_map(Result::ok)
+    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    .collect::<Vec<_>>();
+    assert_eq!(
+        artifact_names
+            .iter()
+            .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
+            .count(),
+        1,
+        "one durable artifact owns ready text serving"
+    );
+    assert_eq!(
+        artifact_names
+            .iter()
+            .filter(|name| name.starts_with(".text-artifact-") && name.ends_with(".staging"))
+            .count(),
+        0,
+        "ready text serving leaves no abandoned staging owner"
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::ExactLiteral),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Lexical),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Graph),
+        Some(&PublicRetrieverStatus::Unavailable)
+    );
     registry.shutdown().await;
 }
 

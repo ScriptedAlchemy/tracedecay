@@ -2413,6 +2413,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let scheduler = Arc::clone(&worker_scheduler);
                 let serving_generation = Arc::clone(&worker_serving_generation);
                 let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
+                let graph_activation_enabled = worker_graph_activation.policy().is_enabled();
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
@@ -2440,8 +2441,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             if matches!(
                                 &error,
                                 tracedecay_query::retrieval::RetrievalPortError::Cancelled
-                            )
-                            {
+                            ) {
                                 let mut current = worker_text_generation
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2472,6 +2472,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 if text_slice_incomplete {
+                    if !graph_activation_enabled {
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("query.artifact.slice.continue_total").inc(1_u64);
+                        continue;
+                    }
                     if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
                         #[cfg(feature = "hotpath")]
                         hotpath::gauge!("query.artifact.slice.continue_total").inc(1_u64);
@@ -2513,10 +2518,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // split must not hide a sealed generation for the duration
                 // of reconcile. Stale is truthful; do not mark_reconciled.
                 let mut seat_retry_pending = false;
-                if serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_none()
+                if graph_activation_enabled
+                    && serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_none()
                 {
                     let remount_scheduler = Arc::clone(&scheduler);
                     let remount = tokio::task::spawn_blocking(move || {
@@ -2621,17 +2627,38 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     continue;
                 }
+                let retained_text_metadata = (!graph_activation_enabled).then(|| {
+                    worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .map(|text| text.metadata().clone())
+                });
                 let mut result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let mut result = scheduler.activate_or_reconcile();
+                    let mut result = if graph_activation_enabled {
+                        scheduler.activate_or_reconcile()
+                    } else if let Some(metadata) = retained_text_metadata.flatten() {
+                        match scheduler.reconcile_retained_text_generation(&metadata) {
+                            Ok(Some(outcome)) => Ok(outcome),
+                            Ok(None) => scheduler.reconcile_now(),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        scheduler.reconcile_now()
+                    };
                     // A terminal outcome may publish a newer complete generation;
                     // swap serving to that after graph activation below.
-                    let mut latest = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|_| scheduler.latest_complete());
+                    let mut latest = graph_activation_enabled
+                        .then(|| {
+                            result
+                                .as_ref()
+                                .ok()
+                                .and_then(|_| scheduler.latest_complete())
+                        })
+                        .flatten();
                     let replay_binding = latest.as_ref().map(|latest| {
                         scheduler.code_graph_replay_binding(
                             &latest.generation().manifest().generation_id,
@@ -3571,12 +3598,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
-        let (scheduler, serving_generation, hints, wake, pending_wake) = {
+        let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
@@ -3636,6 +3664,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 return Some(latest);
+            }
+            // A graph-off mount can already own authenticated text serving
+            // while its graph-bearing generation deliberately remains
+            // unseated. That owner is a real remedy for lexical/exact reads;
+            // do not misclassify it as a cold open and inject an overflow that
+            // would supersede its bounded projection.
+            if text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                return None;
             }
             // Cold open has no servable generation. Verification and any
             // rebuild stay with the retained owner; reads only request the
@@ -3812,6 +3852,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation),
             )
         };
+        // The census asks only whether a fully decoded generation is already
+        // seated. A graph-off mount deliberately leaves this slot empty while
+        // its authenticated text owner is warming. Return that known answer
+        // before entering the exact freshness probe: probing an unseated slot
+        // cannot produce a decoded owner, and on an initial lightweight mount
+        // it would turn `freshness_unknown` into a fabricated overflow wake.
+        if serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            return None;
+        }
         let mut scheduler = match scheduler.try_lock() {
             Ok(scheduler) => scheduler,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -3870,13 +3923,28 @@ impl CodeIndexSchedulerRegistryV1 {
         // MCP search resolves its generation before it asks for query authority,
         // so this is the first authenticated demand boundary on that path.
         self.activate_for_scope(scope);
-        let root = {
+        let (root, graph_activation_enabled, text_generation) = {
             let mounted = self.mounted.try_lock().ok()?;
-            unique_mounted_for_scope(&mounted, scope)
-                .unique()?
-                .0
-                .clone()
+            let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            (
+                root.clone(),
+                worktree.graph_activation.policy().is_enabled(),
+                Arc::clone(&worktree.text_generation),
+            )
         };
+        // Graph-off mounts authenticate the sealed text source before its
+        // bounded projection becomes ready. During that window the text owner
+        // is the canonical warming authority; falling through to AwaitDecode
+        // would reconstruct the graph-bearing generation solely to report the
+        // same typed unavailability, defeating the lightweight cutover.
+        if !graph_activation_enabled
+            && text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        {
+            return None;
+        }
         let latest = self.latest_complete_ready_with(&root, admission).await?;
         // Checkout-identity gate: the ready ladder verified currency against
         // the live worktree, so a scope whose branch label was resolved on
@@ -3991,7 +4059,7 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         };
-        let (scheduler, serving_generation, hints, wake, pending_wake) = {
+        let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
             };
@@ -4001,6 +4069,7 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
@@ -4047,7 +4116,11 @@ impl CodeIndexSchedulerRegistryV1 {
             let nothing_servable = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none();
+                .is_none()
+                && text_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none();
             // Nothing is servable at all, so the ladder's suppression cannot
             // apply: a reconcile is the only thing that can ever make this scope
             // answerable, and no other caller on this path will ask for it.
@@ -4247,40 +4320,6 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
-#[cfg(test)]
-mod text_slice_fairness_tests {
-    use super::{CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1};
-
-    #[test]
-    fn pending_reconcile_is_serviced_between_bounded_text_slices() {
-        let pending = PendingWakeV1::default();
-        let wake = tokio::sync::Notify::new();
-        assert!(
-            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
-            "a text-only self-wake may advance the next bounded slice"
-        );
-
-        CodeIndexSchedulerRegistryV1::note_wake(
-            &pending,
-            &wake,
-            CodeIndexCadenceTriggerV1::HookHint,
-        );
-        assert!(
-            !CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
-            "a pending source reconcile must win before another text slice"
-        );
-
-        let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
-            &pending,
-            CodeIndexCadenceTriggerV1::Mount,
-        );
-        assert!(
-            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
-            "text continuation resumes only after reconcile claims the pending arrival"
-        );
-    }
-}
-
 impl tracedecay_usecases::feedback::cycle_production::ProductionFeedbackDocumentIdentityPort
     for CodeIndexSchedulerRegistryV1
 {
@@ -4446,4 +4485,38 @@ fn feedback_document_logical_path(
         .to_str()
         .map(|path| path.replace('\\', "/"))
         .ok_or_else(|| LspRuntimeFailure::new("feedback-document-path-unavailable"))
+}
+
+#[cfg(test)]
+mod text_slice_fairness_tests {
+    use super::{CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1};
+
+    #[test]
+    fn pending_reconcile_is_serviced_between_bounded_text_slices() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        assert!(
+            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "a text-only self-wake may advance the next bounded slice"
+        );
+
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::HookHint,
+        );
+        assert!(
+            !CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "a pending source reconcile must win before another text slice"
+        );
+
+        let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
+            "text continuation resumes only after reconcile claims the pending arrival"
+        );
+    }
 }
