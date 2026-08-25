@@ -292,9 +292,10 @@ function hasActiveCodeIndexBuild(
 ): boolean {
   return (
     result?.outcome === 'envelope' &&
-    result.envelope.payload.worktrees.some(
-      (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
-    )
+    (result.envelope.domain_state !== 'ready' ||
+      result.envelope.payload.worktrees.some(
+        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
+      ))
   );
 }
 

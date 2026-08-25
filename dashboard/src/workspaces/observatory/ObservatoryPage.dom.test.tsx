@@ -80,6 +80,70 @@ describe('ObservatoryPage store telemetry', () => {
     expect(text).toContain('last commit 240ms');
   });
 
+  it('keeps polling ready progress until the freshness envelope is ready', async () => {
+    vi.useFakeTimers();
+    const building = codeIndexFreshnessEnvelope();
+    const buildingWorktree = building.payload.worktrees[0]!;
+    const readyProgress = {
+      ...buildingWorktree.progress,
+      phase: 'ready',
+      completed_files: 500,
+      completed_lexical_bytes: 64 * 1024 * 1024,
+      estimated_remaining_seconds: 0,
+    };
+    const transitioning = {
+      ...building,
+      domain_state: 'partial',
+      payload: {
+        ...building.payload,
+        worktrees: [
+          {
+            ...buildingWorktree,
+            latest_generation_id: readyProgress.generation_id,
+            staleness_state: 'stale',
+            coverage: 'partial',
+            progress: readyProgress,
+          },
+        ],
+      },
+    };
+    const authoritativeReady = readyCodeIndexFreshnessEnvelope();
+    const ready = {
+      ...authoritativeReady,
+      payload: {
+        ...authoritativeReady.payload,
+        worktrees: [
+          {
+            ...authoritativeReady.payload.worktrees[0]!,
+            latest_generation_id: readyProgress.generation_id,
+            progress: readyProgress,
+          },
+        ],
+      },
+    };
+    const progressResponses = [transitioning, ready, ready];
+    let progressResponse = 0;
+    stubTelemetry(
+      telemetryPayload(),
+      emptyStorageFindingsPayload(),
+      () => progressResponses[Math.min(progressResponse++, progressResponses.length - 1)]!,
+    );
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
+    expect(progressResponse).toBe(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
+    expect(progressResponse).toBe(2);
+    await advanceTimers(29_998);
+    expect(progressResponse).toBe(2);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(progressResponse).toBe(3);
+  });
+
   it('accepts a later generation with a restarted epoch and rejects its delayed predecessor', async () => {
     vi.useFakeTimers();
     const first = codeIndexFreshnessEnvelope();
