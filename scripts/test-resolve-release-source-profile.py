@@ -34,7 +34,11 @@ class FixtureResult:
 def run_fixture(manifest: str) -> FixtureResult:
     with tempfile.TemporaryDirectory() as temporary_directory:
         source = Path(temporary_directory)
-        source.joinpath("Cargo.toml").write_text(manifest, encoding="utf-8")
+        # The resolver reads the product package manifest, not the workspace
+        # root: `crates/tracedecay/Cargo.toml` is where the feature table lives.
+        product = source.joinpath("crates", "tracedecay")
+        product.mkdir(parents=True)
+        product.joinpath("Cargo.toml").write_text(manifest, encoding="utf-8")
         output = source / "github-output.txt"
         completed = subprocess.run(
             [
