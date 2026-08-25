@@ -129,6 +129,14 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
 /// `journal_mode = DELETE`: a sealed artifact is one content-addressed file,
 /// and a WAL sidecar would fall outside its digest; bounded finalization
 /// persists its own verified progress, so rollback-journal durability suffices.
+/// SQLite's auxiliary sorter width reuses the canonical code-index worker
+/// authority: the connection thread occupies one admitted worker and SQLite
+/// may use only the remainder. `temp_store = FILE` keeps corpus-wide CREATE
+/// INDEX runs disk-backed; their allocator/statement overhead remains outside
+/// this module's narrowed memory-ledger claim. The modeled-reservation gauge
+/// reports the caller plus effective helpers at the canonical 128 MiB worker
+/// charge; it is a subset of the scheduler's existing admission, not another
+/// cache or a second memory authority.
 fn open_builder_connection(
     path: &Path,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
@@ -150,6 +158,34 @@ fn open_builder_connection(
     connection
         .pragma_update(None, "cache_size", cache_kib)
         .map_err(sqlite_error)?;
+    let requested_sorter_workers =
+        tracedecay_code_index::parallelism::indexing_workers().saturating_sub(1);
+    let requested_sorter_workers_i64 = i64::try_from(requested_sorter_workers)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    connection
+        .pragma_update(None, "threads", requested_sorter_workers_i64)
+        .map_err(sqlite_error)?;
+    let effective_sorter_workers: i64 = connection
+        .pragma_query_value(None, "threads", |row| row.get(0))
+        .map_err(sqlite_error)?;
+    let effective_sorter_workers = usize::try_from(effective_sorter_workers).map_err(|_| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "SQLite returned a negative lexical sorter worker limit".to_owned(),
+        )
+    })?;
+    if effective_sorter_workers > requested_sorter_workers {
+        return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+            "SQLite granted {effective_sorter_workers} lexical sorter workers above the canonical {requested_sorter_workers} auxiliary-worker bound"
+        )));
+    }
+    hotpath::gauge!("query.artifact.sqlite_sorter_workers.requested").set(requested_sorter_workers);
+    hotpath::gauge!("query.artifact.sqlite_sorter_workers.effective").set(effective_sorter_workers);
+    hotpath::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes").set(
+        tracedecay_code_index::parallelism::worker_reservation_bytes(
+            effective_sorter_workers.saturating_add(1),
+        ),
+    );
+    hotpath::gauge!("query.artifact.sqlite_sorter.temp_store_file").set(1u64);
     Ok(connection)
 }
 
@@ -190,6 +226,41 @@ mod tests {
         assert_eq!(
             synchronous, 1,
             "artifact staging must use synchronous=NORMAL"
+        );
+        let temp_store: i64 = connection
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .expect("temp-store pragma");
+        assert_eq!(
+            temp_store, 1,
+            "SQLite sorter PMAs must spill to files rather than retaining the corpus in memory"
+        );
+    }
+
+    #[test]
+    fn builder_connections_reuse_canonical_worker_width_for_sqlite_sorters() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let connection = open_builder_connection(&directory.path().join("workers.sqlite"))
+            .expect("builder connection");
+        let capability_probe =
+            rusqlite::Connection::open_in_memory().expect("open SQLite worker capability probe");
+        capability_probe
+            .pragma_update(None, "threads", i64::MAX)
+            .expect("probe SQLite worker ceiling");
+        let sqlite_worker_ceiling: i64 = capability_probe
+            .pragma_query_value(None, "threads", |row| row.get(0))
+            .expect("read SQLite worker ceiling");
+        let admitted_auxiliary_threads = tracedecay_code_index::parallelism::indexing_workers()
+            .saturating_sub(1)
+            .min(
+                usize::try_from(sqlite_worker_ceiling).expect("nonnegative SQLite worker ceiling"),
+            );
+        let configured_threads: i64 = connection
+            .pragma_query_value(None, "threads", |row| row.get(0))
+            .expect("read artifact SQLite worker limit");
+        assert_eq!(
+            usize::try_from(configured_threads).expect("nonnegative artifact worker limit"),
+            admitted_auxiliary_threads,
+            "SQLite must receive the maximum auxiliary width available below the canonical worker bound and its own compile-time ceiling"
         );
     }
 }
