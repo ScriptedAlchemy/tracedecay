@@ -272,15 +272,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
-    pub(super) fn capture_candidate_bytes(
-        &self,
-        registry: &StaticLanguageRegistry,
-        logical_path: &str,
-        raw_bytes: &[u8],
-    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
-        self.capture_candidate_bytes_with_progress(registry, logical_path, raw_bytes, None)
-    }
-
     pub(super) fn capture_candidate_bytes_with_progress(
         &self,
         registry: &StaticLanguageRegistry,
