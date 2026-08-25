@@ -37,9 +37,9 @@ pub(crate) async fn handle_recursion(
     // shorter / more interesting cycles when the cap kicks in. We still need
     // every cyclic SCC enumerated before sorting (truncating early would bias
     // toward Tarjan emission order), but we cap the per-SCC path search.
-    let mut cyclic_sccs: Vec<Vec<String>> = crate::graph::scc::tarjan_scc(&adj)
+    let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_usecases::graph::scc::tarjan_scc(&adj)
         .into_iter()
-        .filter(|scc| crate::graph::scc::is_cyclic_scc(scc, &adj))
+        .filter(|scc| tracedecay_usecases::graph::scc::is_cyclic_scc(scc, &adj))
         .collect();
     cyclic_sccs.sort_by_key(Vec::len);
 

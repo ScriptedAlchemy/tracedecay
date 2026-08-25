@@ -8,7 +8,7 @@ pub(crate) async fn handle_outline(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    use crate::context::read_modes::render_map;
+    use tracedecay_usecases::context::read_modes::render_map;
 
     let file =
         args.get("file")

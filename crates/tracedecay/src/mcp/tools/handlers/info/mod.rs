@@ -45,8 +45,6 @@ use tracedecay_usecases::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
 
-use crate::context::read_modes::{LineRange, ReadMode};
-use crate::context::source_read::{SourceReadRequest, read_source, resolve_indexed_source_file};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use crate::path_tree::format_compact_annotated_path_list;
@@ -54,6 +52,10 @@ use crate::project_registry::{ProjectRegistryView, render_project_registry_view}
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::NodeKind;
+use tracedecay_usecases::context::read_modes::{LineRange, ReadMode};
+use tracedecay_usecases::context::source_read::{
+    SourceReadRequest, read_source, resolve_indexed_source_file,
+};
 
 use self::verified::{
     INFO_RELATION_LIMIT, all_symbols, end_line, indexed_files, info_graph_error,

@@ -9,7 +9,7 @@ pub mod test_risk;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
-use super::scc::tarjan_scc;
+use tracedecay_usecases::graph::scc::tarjan_scc;
 
 // The four structural-health value types are the shared authority in
 // `tracedecay-usecases`; re-export them so root callers keep a single type

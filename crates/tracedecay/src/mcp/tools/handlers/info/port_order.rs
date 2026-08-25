@@ -227,11 +227,11 @@ pub(crate) async fn handle_port_order(
             .collect();
         cycle_adj.insert(node_id, kept);
     }
-    let sccs = crate::graph::scc::tarjan_scc(&cycle_adj);
+    let sccs = tracedecay_usecases::graph::scc::tarjan_scc(&cycle_adj);
 
     let mut cycles = Vec::<PortCycleV1>::new();
     for scc in sccs {
-        if !crate::graph::scc::is_cyclic_scc(&scc, &cycle_adj) {
+        if !tracedecay_usecases::graph::scc::is_cyclic_scc(&scc, &cycle_adj) {
             continue;
         }
         let scc_set: HashSet<&str> = scc.iter().copied().collect();

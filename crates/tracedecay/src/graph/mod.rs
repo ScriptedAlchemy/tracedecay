@@ -1,5 +1,4 @@
 /// Tarjan's strongly-connected-components algorithm.
-pub mod scc;
 
 /// Structural health analysis algorithms.
 pub mod health;

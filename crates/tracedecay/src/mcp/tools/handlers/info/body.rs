@@ -95,7 +95,7 @@ pub(crate) async fn handle_body(
 /// a location line, an optional signature, a token count, and a fenced code
 /// block tagged with the file's language extension.
 fn render_body_md(value: &Value) -> String {
-    use crate::context::read_modes::estimate_tokens;
+    use tracedecay_usecases::context::read_modes::estimate_tokens;
 
     let mut md = Md::new();
     let matches = value.get("matches").and_then(Value::as_array);
