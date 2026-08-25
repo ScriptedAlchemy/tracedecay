@@ -1,11 +1,8 @@
 use std::collections::BTreeSet;
 
-use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
-use super::{
-    ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES, CodeLexicalArtifactErrorV1, checkpoint, sqlite_error,
-};
+use super::{ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES, CodeLexicalArtifactErrorV1, checkpoint};
 
 pub(super) const NGRAM_NORMALIZED: i64 = 0;
 pub(super) const NGRAM_RAW_OVERRIDE: i64 = 1;
@@ -60,13 +57,11 @@ fn reserve_ngram_scratch(
     Ok(scratch)
 }
 
-pub(super) fn insert_document_ngrams(
-    transaction: &Transaction<'_>,
-    kind: i64,
-    document: i64,
+/// Canonical bounded value projection for out-of-transaction preparation.
+pub(super) fn document_ngrams(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
+) -> Result<Vec<u32>, CodeLexicalArtifactErrorV1> {
     let (_, scratch_bytes) = document_ngram_scratch(bytes.len())?;
     if scratch_bytes > ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
@@ -89,23 +84,23 @@ pub(super) fn insert_document_ngrams(
             "lexical n-gram allocator retained {allocated_bytes} bytes beyond the {scratch_bytes}-byte scratch authority"
         )));
     }
+    let mut observed = 0usize;
     for width in 1..=bytes.len().min(3) {
-        ngrams.extend(bytes.windows(width).map(pack_byte_ngram));
+        for window in bytes.windows(width) {
+            if observed.is_multiple_of(4_096) {
+                checkpoint(control)?;
+            }
+            ngrams.push(pack_byte_ngram(window));
+            observed = observed.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact n-gram work count overflowed".to_owned(),
+                )
+            })?;
+        }
     }
     ngrams.sort_unstable();
     ngrams.dedup();
-    let mut statement = transaction
-        .prepare("INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, ?3)")
-        .map_err(sqlite_error)?;
-    for (ordinal, ngram) in ngrams.into_iter().enumerate() {
-        if ordinal % 4_096 == 0 {
-            checkpoint(control)?;
-        }
-        statement
-            .execute(params![kind, i64::from(ngram), document])
-            .map_err(sqlite_error)?;
-    }
-    Ok(())
+    Ok(ngrams)
 }
 
 pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {

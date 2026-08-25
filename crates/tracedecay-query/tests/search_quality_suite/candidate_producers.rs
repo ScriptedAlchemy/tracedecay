@@ -18,7 +18,8 @@ use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
     CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageReadV1,
+    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
+    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
@@ -486,6 +487,125 @@ fn real_verified_pages() -> (
     real_verified_pages_with_maximum_page_chunks(128)
 }
 
+fn page_batch_identities(pages: &[VerifiedSealedLexicalPageV1]) -> Vec<(u64, String, Vec<u8>)> {
+    pages
+        .iter()
+        .map(|page| {
+            (
+                page.page_ordinal(),
+                page.page_digest().as_str().to_owned(),
+                page.next_cursor()
+                    .persisted_bytes()
+                    .expect("persist page cursor"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn sealed_source_rejected_batch_retries_byte_identical_pages_and_cursor() {
+    let fixture = real_lexical_source_fixture();
+    let control = ArtifactControl { cancelled: false };
+    let mut source = fixture.open_source(1);
+    let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(2, 64 * 1024 * 1024)
+        .expect("two-page batch bounds");
+    let cursor_before = source.cursor().persisted_bytes().expect("initial cursor");
+    let mut rejected_identities = None;
+    let rejected = source
+        .next_page_batch_if(&control, bounds, |pages| {
+            rejected_identities = Some(page_batch_identities(pages));
+            Err("reject staged batch")
+        })
+        .expect("stage rejected batch");
+    assert!(matches!(rejected, Err("reject staged batch")));
+    assert_eq!(
+        source.cursor().persisted_bytes().expect("rejected cursor"),
+        cursor_before,
+        "callback rejection must retain the byte-exact source cursor"
+    );
+
+    let retried = source
+        .next_page_batch_if(&control, bounds, |_| Ok::<(), &'static str>(()))
+        .expect("retry staged batch")
+        .expect("accept retried batch");
+    let VerifiedSealedLexicalPageBatchReadV1::Pages(retried_pages) = retried else {
+        panic!("fixture must emit a retried page batch");
+    };
+    assert_eq!(
+        page_batch_identities(&retried_pages),
+        rejected_identities.expect("rejected page identities"),
+        "retry must reproduce the exact ordered pages"
+    );
+    assert_eq!(
+        source.cursor().persisted_bytes().expect("accepted cursor"),
+        retried_pages
+            .last()
+            .expect("retried pages")
+            .next_cursor()
+            .persisted_bytes()
+            .expect("final accepted cursor"),
+        "acceptance advances exactly to the final page"
+    );
+}
+
+#[test]
+fn sealed_source_batch_bounds_and_completion_never_advance_empty_work() {
+    assert!(VerifiedSealedLexicalPageBatchBoundsV1::new(0, 1).is_err());
+    assert!(VerifiedSealedLexicalPageBatchBoundsV1::new(1, 0).is_err());
+
+    let fixture = real_lexical_source_fixture();
+    let control = ArtifactControl { cancelled: false };
+    let (pages, _) = drain_verified_pages(&fixture, 1);
+    let first_page_bound =
+        std::mem::size_of::<VerifiedSealedLexicalPageV1>() + pages[0].retained_owned_bytes() - 1;
+    let too_small = VerifiedSealedLexicalPageBatchBoundsV1::new(1, first_page_bound)
+        .expect("sub-page batch bound");
+    let mut source = fixture.open_source(1);
+    let cursor_before = source.cursor().persisted_bytes().expect("initial cursor");
+    let callbacks = AtomicUsize::new(0);
+    assert!(
+        source
+            .next_page_batch_if(&control, too_small, |_| {
+                callbacks.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .is_err(),
+        "a first page above the retained-byte bound is a typed source error"
+    );
+    assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        source.cursor().persisted_bytes().expect("refused cursor"),
+        cursor_before
+    );
+
+    let bounds =
+        VerifiedSealedLexicalPageBatchBoundsV1::new(2, 64 * 1024 * 1024).expect("drain bounds");
+    loop {
+        let before = callbacks.load(Ordering::SeqCst);
+        let read = source
+            .next_page_batch_if(&control, bounds, |_| {
+                callbacks.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .expect("drain source")
+            .expect("accept source batch");
+        match read {
+            VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => {
+                assert!(!pages.is_empty(), "page batches are never empty");
+                assert_eq!(callbacks.load(Ordering::SeqCst), before + 1);
+            }
+            VerifiedSealedLexicalPageBatchReadV1::Complete(_) => {
+                assert_eq!(
+                    callbacks.load(Ordering::SeqCst),
+                    before,
+                    "completion must bypass the page callback"
+                );
+                break;
+            }
+        }
+    }
+}
+
 fn finish_staged_artifact(
     builder: &mut CodeLexicalArtifactBuilderV1,
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
@@ -518,14 +638,19 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
         source: &mut VerifiedSealedLexicalPageSourceV1<R>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
+        let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(16, 32 * 1024 * 1024)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
         let receipt = loop {
             let staged_pages = self.progress()?.next_page_ordinal;
             let admitted = source
-                .next_page_if(control, |page| {
-                    if page.page_ordinal() < staged_pages {
+                .next_page_batch_if(control, bounds, |pages| {
+                    if pages
+                        .last()
+                        .is_some_and(|page| page.page_ordinal() < staged_pages)
+                    {
                         Ok(())
                     } else {
-                        self.append_page(page, control).map(|_| ())
+                        self.append_pages(pages, control).map(|_| ())
                     }
                 })
                 .map_err(|error| match error {
@@ -535,8 +660,8 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
                     error => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
                 })?;
             match admitted? {
-                VerifiedSealedLexicalPageReadV1::Page(_) => {}
-                VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+                VerifiedSealedLexicalPageBatchReadV1::Pages(_) => {}
+                VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => break receipt,
             }
         };
         Ok(finish_staged_artifact(self, &receipt, control))
@@ -1818,6 +1943,231 @@ fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
 }
 
 #[test]
+fn disk_artifact_multi_page_append_rolls_back_the_whole_fresh_suffix() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "fixture must emit a multi-page batch");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("atomic-page-batch.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+
+    // Force the second page's document insert to fail after the first page
+    // has already performed relational writes in the same transaction.
+    let second_document = i64::try_from(pages[0].chunk_count()).expect("first page document count");
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open failure fixture");
+    connection
+        .execute(
+            "INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, 'forced-conflict', X'7b7d')",
+            [second_document],
+        )
+        .expect("install second-page conflict");
+    drop(connection);
+
+    assert!(matches!(
+        builder.append_pages(&pages[..2], &control),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    assert_eq!(
+        builder
+            .progress()
+            .expect("progress after rollback")
+            .next_page_ordinal,
+        0,
+        "a failed later page must roll back every earlier page in the batch"
+    );
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect rolled back batch");
+    let receipts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM source_pages", [], |row| row.get(0))
+        .expect("source receipt count");
+    assert_eq!(receipts, 0, "no page receipt may escape the failed batch");
+    connection
+        .execute("DELETE FROM rows WHERE document_id = ?1", [second_document])
+        .expect("remove forced conflict");
+    drop(connection);
+
+    let progress = builder
+        .append_pages(&pages[..2], &control)
+        .expect("retry exact ordered batch");
+    assert_eq!(progress.next_page_ordinal, 2);
+    assert_eq!(
+        progress.completed_chunks,
+        pages[0].chunk_count() + pages[1].chunk_count()
+    );
+}
+
+#[test]
+fn disk_artifact_receipt_failure_rolls_back_prior_page_rows_and_receipts() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "fixture must emit a multi-page batch");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("receipt-failure-batch.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    let connection = rusqlite::Connection::open(&artifact_path).expect("install receipt failpoint");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_page_receipt
+             BEFORE INSERT ON source_pages
+             WHEN NEW.page_ordinal = 1
+             BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END;",
+        )
+        .expect("create receipt failpoint");
+    drop(connection);
+
+    assert!(builder.append_pages(&pages[..2], &control).is_err());
+    assert_eq!(
+        builder
+            .progress()
+            .expect("progress after receipt failure")
+            .next_page_ordinal,
+        0
+    );
+    assert_eq!(
+        staged_row_cardinality(&artifact_path).0,
+        0,
+        "receipt failure must roll back all prior relational writes"
+    );
+}
+
+#[test]
+fn disk_artifact_committed_batch_replays_after_restart_without_duplicate_rows() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "fixture must emit a multi-page batch");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("commit-ack-gap.sqlite");
+    let metadata = fixture.metadata;
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
+    let control = ArtifactControl { cancelled: false };
+    builder
+        .append_pages(&pages[..2], &control)
+        .expect("commit exact ordered batch");
+    assert_eq!(
+        builder
+            .progress()
+            .expect("durable progress after commit")
+            .next_page_ordinal,
+        2,
+        "the whole batch must be durable before source acknowledgement"
+    );
+    drop(builder);
+    let mut builder = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume after a process boundary");
+    let replay = builder
+        .append_pages(&pages[..2], &control)
+        .expect("replay batch after source cursor was not acknowledged");
+    assert_eq!(replay.next_page_ordinal, 2);
+    assert_eq!(
+        staged_row_cardinality(&artifact_path).0,
+        pages[0].chunk_count() + pages[1].chunk_count(),
+        "restart replay must not duplicate relational rows"
+    );
+}
+
+#[test]
+fn disk_artifact_batch_ledger_charges_every_parallel_preparation_upper_bound() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    assert!(pages.len() >= 2, "fixture must emit a multi-page batch");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let builder = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("batch-ledger.sqlite"),
+        fixture.metadata,
+    )
+    .expect("create artifact");
+    let control = ArtifactControl { cancelled: false };
+    let pages = pages.as_slice();
+    assert!(
+        pages.iter().any(|page| !page.imports().is_empty()),
+        "ledger fixture must retain import evidence"
+    );
+    assert!(
+        pages.iter().flat_map(|page| page.chunks()).any(|chunk| {
+            chunk.chunk().sanitized_text.as_str().len() >= 3
+                && (!chunk.chunk().subtokens.is_empty() || !chunk.chunk().exact_terms.is_empty())
+        }),
+        "ledger fixture must exercise term and n-gram preparation"
+    );
+    let source_retained = pages
+        .iter()
+        .try_fold(0usize, |total, page| {
+            total.checked_add(page.retained_owned_bytes())
+        })
+        .expect("retained page sum");
+    let conservative_charge = builder
+        .page_batch_ledger_charge_bytes(pages)
+        .expect("batch ledger charge");
+    let prepared = builder
+        .prepare_pages(pages, &control)
+        .expect("prepare deterministic ledger probe");
+    let prepared_retained = prepared
+        .iter()
+        .map(|page| page.retained_owned_bytes())
+        .sum::<usize>();
+    let effective_workers =
+        tracedecay_code_index::parallelism::indexing_workers().min(prepared.len());
+    let mut scratch = prepared
+        .iter()
+        .map(|page| page.preparation_scratch_bytes())
+        .collect::<Vec<_>>();
+    scratch.sort_unstable_by(|left, right| right.cmp(left));
+    let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
+    let exact_prepared_charge = source_retained + prepared_retained + active_scratch;
+    assert!(
+        conservative_charge >= exact_prepared_charge,
+        "pre-preparation admission undercounted live batch components: conservative={conservative_charge}, source={source_retained}, prepared={prepared_retained}, active_scratch={active_scratch}, workers={effective_workers}, exact={exact_prepared_charge}"
+    );
+    for (source, prepared) in pages.iter().zip(&prepared) {
+        let conservative = builder
+            .page_ledger_charge_bytes(source)
+            .expect("one-page ledger charge");
+        let exact = prepared
+            .ledger_charge_bytes()
+            .expect("prepared page charge");
+        assert!(
+            conservative >= exact,
+            "page {} preflight undercounted exact components: conservative={conservative}, source={}, prepared={}, scratch={}, exact={exact}",
+            source.page_ordinal(),
+            prepared.source_retained_bytes(),
+            prepared.retained_owned_bytes(),
+            prepared.preparation_scratch_bytes(),
+        );
+    }
+}
+
+#[test]
+fn disk_artifact_one_page_wrapper_matches_the_batch_path() {
+    let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let control = ArtifactControl { cancelled: false };
+    let mut wrapper = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("one-page-wrapper.sqlite"),
+        fixture.metadata.clone(),
+    )
+    .expect("create wrapper artifact");
+    let mut batch = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("one-page-batch.sqlite"),
+        fixture.metadata,
+    )
+    .expect("create batch artifact");
+
+    assert_eq!(
+        wrapper
+            .append_page(&pages[0], &control)
+            .expect("append through wrapper"),
+        batch
+            .append_pages(&pages[..1], &control)
+            .expect("append through batch path")
+    );
+}
+
+#[test]
 fn disk_artifact_budget_refusal_precedes_progress_and_accepts_boundary() {
     let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
     let metadata = fixture.metadata.clone();
@@ -1859,7 +2209,7 @@ fn disk_artifact_budget_refusal_precedes_progress_and_accepts_boundary() {
         .len();
     assert!(matches!(
         refused.append_page(&pages[0], &control),
-        Err(CodeLexicalArtifactErrorV1::Contract(_))
+        Err(CodeLexicalArtifactErrorV1::BatchTooLarge { .. })
     ));
     assert_eq!(
         refused

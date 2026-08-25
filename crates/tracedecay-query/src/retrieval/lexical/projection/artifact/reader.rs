@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 #[cfg(any(test, feature = "hotpath"))]
 use rusqlite::StatementStatus;
@@ -59,15 +59,7 @@ pub struct CodeLexicalArtifactReaderV1 {
     retained_owned_bytes: usize,
 }
 
-#[cfg(feature = "hotpath")]
-type ArtifactConnectionMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
 type ArtifactConnectionMutex<T> = StdMutex<T>;
-
-#[cfg(feature = "hotpath")]
-type ArtifactConnectionMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-#[cfg(not(feature = "hotpath"))]
-type ArtifactConnectionMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
 impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -321,14 +313,11 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
         Ok(Self {
-            // Every clone shares one rusqlite handle. The instrumented mutex
-            // exposes both shared-reader coordination wait and the full
-            // serialized SQL hold rather than attributing that time to the
-            // outer lane alone. This is one handle, not a connection pool.
-            connection: Arc::new(hotpath::mutex!(
-                StdMutex::new(connection),
-                label = "query.artifact.connection"
-            )),
+            // Every clone shares one rusqlite handle. Readers are replaced on
+            // remount, while Hotpath 0.24 retains every instrumented mutex
+            // identity for the process lifetime, so this per-reader lock must
+            // remain plain. Static query spans retain operation visibility.
+            connection: Arc::new(StdMutex::new(connection)),
             metadata,
             receipt: stored,
             retained_owned_bytes,
@@ -432,9 +421,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
-    fn lock_connection(
-        &self,
-    ) -> Result<ArtifactConnectionMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
+    fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
         self.connection.lock().map_err(|_| {
             CodeLexicalArtifactErrorV1::Io("lexical artifact reader lock is poisoned".to_owned())
         })
@@ -2005,7 +1992,8 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
-        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(_)
+        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Corrupt(error)
         | CodeLexicalArtifactErrorV1::Io(error)
         | CodeLexicalArtifactErrorV1::Missing(error) => {
@@ -2019,6 +2007,7 @@ mod tests {
     use std::cmp::Reverse;
     use std::collections::{BTreeSet, BinaryHeap};
     use std::path::PathBuf;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rusqlite::{Connection, params};
@@ -2027,7 +2016,7 @@ mod tests {
 
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
-        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
+        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactConnectionMutex, ArtifactQueryMetricsV1,
         CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
         map_query_artifact_error, ngram_document_query, query_ngrams, retain_bounded,
         union_document_queries, visit_document_ids, visit_lexical_rows,
@@ -2091,6 +2080,23 @@ mod tests {
         })
         .expect("SQLite stream succeeds");
         documents
+    }
+
+    #[cfg(feature = "hotpath")]
+    #[test]
+    fn repeated_feature_on_reader_connections_use_plain_mutexes_and_preserve_queries() {
+        for expected in 0..16i64 {
+            let connection: ArtifactConnectionMutex<Connection> =
+                StdMutex::new(Connection::open_in_memory().expect("in-memory SQLite"));
+
+            let value = connection
+                .lock()
+                .expect("reader connection lock")
+                .query_row("SELECT ?1", [expected], |row| row.get::<_, i64>(0))
+                .expect("query through reader connection lock");
+
+            assert_eq!(value, expected);
+        }
     }
 
     #[test]

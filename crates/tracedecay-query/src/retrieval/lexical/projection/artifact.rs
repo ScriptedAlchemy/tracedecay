@@ -12,16 +12,18 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexIn
 mod builder;
 mod format;
 mod postings;
+mod prepared;
 mod reader;
 
 pub use builder::{
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
 };
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
 };
+pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 
 /// Default and maximum budget for the artifact build memory ledger.
@@ -29,12 +31,10 @@ pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 /// This is a *ledger claim over tracked allocations*, not a hard RSS bound.
 /// The enforced ledger charges, as if simultaneous: the SQLite page-cache
 /// authority granted to the staging connection, the builder-retained
-/// projection metadata (identity and logical-path capacities), the sealed
-/// page's retained owned bytes, and a conservative arithmetic per-chunk/
-/// per-import transient upper bound — the cloned chunk, projected row,
-/// field/token vectors and frequency map, serialization buffers, and
-/// n-gram scratch. A page whose charge exceeds the budget is refused before
-/// any preflight allocation, staging mutation, or source advance.
+/// projection metadata (identity and logical-path capacities), every sealed
+/// page retained by an admitted batch, every prepared relational value, and
+/// the widest in-flight per-record preparation scratch. A batch whose charge
+/// exceeds the budget is refused before SQLite mutation or source advance.
 ///
 /// Explicitly outside the claim (the narrowed part): SQLite's `cache_size`
 /// is a target the engine may transiently exceed, per-statement and
@@ -49,6 +49,15 @@ pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 256 * 1024
 /// target, not a hard allocator bound.
 pub const CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
 pub const CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1: usize = 96 * 1024 * 1024;
+pub const CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1: usize = 2_000_000;
+pub const CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1: usize = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeLexicalArtifactBatchLimitV1 {
+    Memory,
+    PreparedRows,
+    EstimatedWriteBytes,
+}
 
 /// Page-cache authority granted to artifact connections; charged in full
 /// against the memory ledgers because SQLite may use all of it. Sized to
@@ -72,6 +81,14 @@ pub enum CodeLexicalArtifactErrorV1 {
     Missing(String),
     #[error("lexical artifact reservation is unavailable: {0}")]
     Unreserved(String),
+    #[error(
+        "lexical artifact page batch exceeds its {limit:?} bound: needs {required}, maximum {maximum}"
+    )]
+    BatchTooLarge {
+        limit: CodeLexicalArtifactBatchLimitV1,
+        required: usize,
+        maximum: usize,
+    },
     #[error("lexical artifact operation was interrupted: {0:?}")]
     Interrupted(CodeIndexInterruptionV1),
     #[error("lexical artifact contract violation: {0}")]

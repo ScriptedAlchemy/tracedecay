@@ -6337,6 +6337,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "hotpath",
+ "rayon",
  "roaring",
  "rusqlite",
  "serde",
