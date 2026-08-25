@@ -1,4 +1,4 @@
-use std::cmp::Reverse;
+use std::cmp::{Ordering as CmpOrdering, Reverse};
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::num::NonZeroUsize;
@@ -61,6 +61,7 @@ const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 // layout; general allocator metadata remains outside the ledger contract.
 const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
 const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
+const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
 // This gate serializes mutation within the private-profile/stable-handle
 // authority. It denies ordinary second-connection DML, but is not a
 // cryptographic defense against malicious same-UID code that deliberately
@@ -73,6 +74,54 @@ const BUILDER_MUTATION_APPEND: u8 = 1;
 struct PreparedTermInsertRefV1<'a> {
     document_id: i64,
     posting: &'a PreparedTermPostingV1,
+}
+
+impl PreparedTermInsertRefV1<'_> {
+    fn key(&self) -> (&str, &str, i64) {
+        (
+            self.posting.field.as_str(),
+            self.posting.term.as_str(),
+            self.document_id,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedTermMergeCursorV1<'a> {
+    entry: PreparedTermInsertRefV1<'a>,
+    run_index: usize,
+    run_offset: usize,
+}
+
+impl PartialEq for PreparedTermMergeCursorV1<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry.key() == other.entry.key()
+            && self.run_index == other.run_index
+            && self.run_offset == other.run_offset
+    }
+}
+
+impl Eq for PreparedTermMergeCursorV1<'_> {}
+
+impl PartialOrd for PreparedTermMergeCursorV1<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PreparedTermMergeCursorV1<'_> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.entry
+            .key()
+            .cmp(&other.entry.key())
+            .then_with(|| self.run_index.cmp(&other.run_index))
+            .then_with(|| self.run_offset.cmp(&other.run_offset))
+    }
+}
+
+struct PreparedTermInsertPlanV1<'a> {
+    entries: Vec<PreparedTermInsertRefV1<'a>>,
+    merge_heap: BinaryHeap<Reverse<PreparedTermMergeCursorV1<'a>>>,
 }
 
 const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
@@ -1184,7 +1233,7 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             pages,
         )?;
-        let term_insert_plan = hotpath::measure_block!(
+        let mut term_insert_plan = hotpath::measure_block!(
             "query.artifact.batch.term_order",
             prepare_term_insert_plan(
                 self.fixed_ledger_charge_bytes,
@@ -1211,7 +1260,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 record_batch_row_metrics(pages);
                 hotpath::measure_block!(
                     "query.artifact.batch.postings",
-                    append_prepared_postings(&transaction, pages, &term_insert_plan, control)
+                    append_prepared_postings(&transaction, pages, &mut term_insert_plan, control)
                 )?;
                 record_batch_posting_metrics(pages);
                 hotpath::measure_block!("query.artifact.batch.receipts", {
@@ -1914,8 +1963,15 @@ fn prepared_term_row_count(
 }
 
 fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    term_rows
+    let entries = term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
+        .ok_or_else(batch_ledger_overflow)?;
+    let runs = term_rows.div_ceil(TERM_INSERT_SORT_RUN_ROWS);
+    let merge_heap = runs
+        .checked_mul(std::mem::size_of::<PreparedTermMergeCursorV1<'static>>())
+        .ok_or_else(batch_ledger_overflow)?;
+    entries
+        .checked_add(merge_heap)
         .ok_or_else(batch_ledger_overflow)
 }
 
@@ -1974,7 +2030,7 @@ fn prepare_term_insert_plan<'a>(
     memory_budget_bytes: usize,
     pages: &'a [PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<Vec<PreparedTermInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
+) -> Result<PreparedTermInsertPlanV1<'a>, CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
     let mut term_rows = 0usize;
     for page in pages {
@@ -2005,8 +2061,8 @@ fn prepare_term_insert_plan<'a>(
         ));
     }
 
-    let mut plan = Vec::new();
-    plan.try_reserve_exact(term_rows).map_err(|error| {
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(term_rows).map_err(|error| {
         CodeLexicalArtifactErrorV1::Io(format!(
             "bounded lexical term insert plan allocation failed: {error}"
         ))
@@ -2015,7 +2071,7 @@ fn prepare_term_insert_plan<'a>(
         checkpoint(control)?;
         for document in &page.documents {
             checkpoint(control)?;
-            plan.extend(
+            entries.extend(
                 document
                     .term_postings
                     .iter()
@@ -2026,20 +2082,73 @@ fn prepare_term_insert_plan<'a>(
             );
         }
     }
-    plan.sort_unstable_by(|left, right| {
-        (
-            left.posting.field.as_str(),
-            left.posting.term.as_str(),
-            left.document_id,
-        )
-            .cmp(&(
-                right.posting.field.as_str(),
-                right.posting.term.as_str(),
-                right.document_id,
-            ))
-    });
+    for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
+        checkpoint(control)?;
+        run.sort_unstable_by(|left, right| left.key().cmp(&right.key()));
+        checkpoint(control)?;
+    }
     checkpoint(control)?;
-    Ok(plan)
+
+    let run_count = term_rows.div_ceil(TERM_INSERT_SORT_RUN_ROWS);
+    let mut merge_heap = BinaryHeap::new();
+    merge_heap.try_reserve_exact(run_count).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "bounded lexical term merge heap allocation failed: {error}"
+        ))
+    })?;
+    for (run_index, run) in entries.chunks(TERM_INSERT_SORT_RUN_ROWS).enumerate() {
+        checkpoint(control)?;
+        let Some(entry) = run.first().copied() else {
+            continue;
+        };
+        merge_heap.push(Reverse(PreparedTermMergeCursorV1 {
+            entry,
+            run_index,
+            run_offset: 0,
+        }));
+    }
+    Ok(PreparedTermInsertPlanV1 {
+        entries,
+        merge_heap,
+    })
+}
+
+fn next_term_insert<'a>(
+    plan: &mut PreparedTermInsertPlanV1<'a>,
+) -> Result<Option<PreparedTermInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
+    let Some(Reverse(cursor)) = plan.merge_heap.pop() else {
+        return Ok(None);
+    };
+    let next_offset = cursor
+        .run_offset
+        .checked_add(1)
+        .ok_or_else(batch_ledger_overflow)?;
+    if next_offset < TERM_INSERT_SORT_RUN_ROWS {
+        let run_start = cursor
+            .run_index
+            .checked_mul(TERM_INSERT_SORT_RUN_ROWS)
+            .ok_or_else(batch_ledger_overflow)?;
+        let next_index = run_start
+            .checked_add(next_offset)
+            .ok_or_else(batch_ledger_overflow)?;
+        let run_end = run_start
+            .checked_add(TERM_INSERT_SORT_RUN_ROWS)
+            .ok_or_else(batch_ledger_overflow)?
+            .min(plan.entries.len());
+        if next_index < run_end {
+            let entry = plan.entries.get(next_index).copied().ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical term merge cursor escaped its bounded run".to_owned(),
+                )
+            })?;
+            plan.merge_heap.push(Reverse(PreparedTermMergeCursorV1 {
+                entry,
+                run_index: cursor.run_index,
+                run_offset: next_offset,
+            }));
+        }
+    }
+    Ok(Some(cursor.entry))
 }
 
 fn sum_prepared_metric(
@@ -2548,7 +2657,7 @@ fn append_prepared_imports(
 fn append_prepared_postings(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
-    term_insert_plan: &[PreparedTermInsertRefV1<'_>],
+    term_insert_plan: &mut PreparedTermInsertPlanV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut term_statement = transaction
@@ -2566,8 +2675,10 @@ fn append_prepared_postings(
             "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(sqlite_error)?;
-    for (ordinal, entry) in term_insert_plan.iter().enumerate() {
-        if ordinal.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+    let expected_term_rows = term_insert_plan.entries.len();
+    let mut inserted_term_rows = 0usize;
+    while let Some(entry) = next_term_insert(term_insert_plan)? {
+        if inserted_term_rows.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
             checkpoint(control)?;
         }
         term_statement
@@ -2578,6 +2689,14 @@ fn append_prepared_postings(
                 entry.posting.frequency
             ])
             .map_err(sqlite_error)?;
+        inserted_term_rows = inserted_term_rows
+            .checked_add(1)
+            .ok_or_else(batch_ledger_overflow)?;
+    }
+    if inserted_term_rows != expected_term_rows {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "lexical term merge omitted planned postings".to_owned(),
+        ));
     }
     for page in pages {
         for document in &page.documents {

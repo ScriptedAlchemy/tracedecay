@@ -3,7 +3,7 @@ use std::fmt;
 use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -176,6 +176,13 @@ struct CancelAtObservation {
     observations: AtomicUsize,
 }
 
+struct CancelAtObservationWithJournalProbe {
+    cancellation_observation: usize,
+    observations: AtomicUsize,
+    journal_path: PathBuf,
+    journal_seen: AtomicBool,
+}
+
 struct CancelOnBackgroundObservation {
     caller: std::thread::ThreadId,
 }
@@ -207,6 +214,23 @@ impl CancelAtObservation {
     }
 }
 
+impl CancelAtObservationWithJournalProbe {
+    fn new(artifact_path: &Path, cancellation_observation: usize) -> Self {
+        let mut journal_path = artifact_path.as_os_str().to_owned();
+        journal_path.push("-journal");
+        Self {
+            cancellation_observation,
+            observations: AtomicUsize::new(0),
+            journal_path: PathBuf::from(journal_path),
+            journal_seen: AtomicBool::new(false),
+        }
+    }
+
+    fn journal_seen(&self) -> bool {
+        self.journal_seen.load(Ordering::SeqCst)
+    }
+}
+
 impl CodeIndexExecutionControlV1 for CancelAtObservation {
     fn is_cancelled(&self) -> bool {
         let observations = self
@@ -214,6 +238,25 @@ impl CodeIndexExecutionControlV1 for CancelAtObservation {
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         observations >= self.cancellation_observation
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+impl CodeIndexExecutionControlV1 for CancelAtObservationWithJournalProbe {
+    fn is_cancelled(&self) -> bool {
+        let observations = self
+            .observations
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        if observations < self.cancellation_observation {
+            return false;
+        }
+        self.journal_seen
+            .store(self.journal_path.exists(), Ordering::SeqCst);
+        true
     }
 
     fn is_deadline_exceeded(&self) -> bool {
@@ -1775,6 +1818,7 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 #[test]
 fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() {
     const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
+    const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
@@ -1802,9 +1846,16 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
         .expect("count prepared term rows");
     let term_rows = usize::try_from(term_rows).expect("term row count");
     assert!(term_rows > 0, "fixture must emit term postings");
-    let plan_ledger = term_rows
+    let entry_ledger = term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
         .expect("term plan ledger charge");
+    let merge_heap_ledger = term_rows
+        .div_ceil(TERM_INSERT_SORT_RUN_ROWS)
+        .checked_mul(std::mem::size_of::<(i64, usize, usize, usize)>())
+        .expect("term merge heap ledger charge");
+    let plan_ledger = entry_ledger
+        .checked_add(merge_heap_ledger)
+        .expect("complete term plan ledger charge");
     let exact_budget = fixed_ledger
         .checked_add(prepared_ledger)
         .and_then(|bytes| bytes.checked_add(plan_ledger))
@@ -1846,11 +1897,11 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
     let mut interrupted = CodeLexicalArtifactBuilderV1::create(&interrupted_path, metadata.clone())
         .expect("create interrupted term plan builder");
     let documents = usize::try_from(prepared[0].chunk_count()).expect("prepared document count");
-    // append entry + plan entry + page/document count pass + page/document
-    // collection pass + the post-sort checkpoint.
+    // Append entry + plan entry + both page/document passes + checkpoints
+    // before and after the single bounded run + the post-run checkpoint.
     let post_sort_observation = documents
         .checked_mul(2)
-        .and_then(|observations| observations.checked_add(5))
+        .and_then(|observations| observations.checked_add(7))
         .expect("post-sort observation");
     let cancellation = CancelAtObservation::new(post_sort_observation);
     assert!(matches!(
@@ -1894,6 +1945,111 @@ fn disk_artifact_term_insert_plan_obeys_exact_memory_boundary_before_mutation() 
         .append_prepared_pages(&prepared, &control)
         .expect("accept exact term plan boundary");
     assert_eq!(progress.next_page_ordinal, 1);
+}
+
+#[test]
+fn disk_artifact_term_run_sort_observes_cancellation_before_transaction_entry() {
+    const TERM_SORT_RUN_ROWS: usize = 4_096;
+
+    let mut source = String::with_capacity(192 * 1024);
+    for ordinal in 0..768 {
+        source.push_str(&format!(
+            "export function ordered_symbol_{ordinal:04}(input_value: string) {{ const local_value_{ordinal:04} = input_value + 'term_{ordinal:04}'; return local_value_{ordinal:04}; }}\n"
+        ));
+    }
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.artifact.term-runs".to_owned(),
+        "src/term-runs.ts".to_owned(),
+        source.into_bytes(),
+    )]);
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    assert!(
+        pages.iter().all(|page| page.imports().is_empty()),
+        "term-run fixture must reach document writes without import checkpoints"
+    );
+    let metadata = fixture.metadata;
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let probe_path = directory.path().join("term-run-probe.sqlite");
+    let mut probe = CodeLexicalArtifactBuilderV1::create(&probe_path, metadata.clone())
+        .expect("create term-run probe");
+    let control = ArtifactControl { cancelled: false };
+    let prepared = probe
+        .prepare_pages(&pages, &control)
+        .expect("prepare multi-run term batch");
+    probe
+        .append_prepared_pages(&prepared, &control)
+        .expect("append term-run probe");
+    let term_rows = rusqlite::Connection::open(&probe_path)
+        .expect("open term-run probe")
+        .query_row("SELECT COUNT(*) FROM term_postings", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("count term-run rows");
+    let term_rows = usize::try_from(term_rows).expect("term-run row count");
+    assert!(
+        term_rows > TERM_SORT_RUN_ROWS,
+        "fixture must require at least two bounded sort runs: {term_rows}"
+    );
+    drop(probe);
+
+    let interrupted_path = directory.path().join("term-run-interrupted.sqlite");
+    let mut interrupted = CodeLexicalArtifactBuilderV1::create(&interrupted_path, metadata.clone())
+        .expect("create interrupted term-run builder");
+    let page_count = prepared.len();
+    let document_count = prepared.iter().try_fold(0usize, |documents, page| {
+        usize::try_from(page.chunk_count())
+            .ok()
+            .and_then(|page_documents| documents.checked_add(page_documents))
+    });
+    let document_count = document_count.expect("prepared document count");
+    // Entry checkpoints plus both page/document passes consume
+    // 2 + 2*pages + 2*documents observations. The third later observation is
+    // the checkpoint before the second bounded sort run. With one monolithic
+    // sort it instead occurs after the first document row has opened SQLite's
+    // DELETE-mode rollback journal, making this regression non-vacuous.
+    let cancellation_observation = page_count
+        .checked_mul(2)
+        .and_then(|observations| {
+            document_count
+                .checked_mul(2)
+                .and_then(|documents| observations.checked_add(documents))
+        })
+        .and_then(|observations| observations.checked_add(5))
+        .expect("second term sort run observation");
+    let cancellation =
+        CancelAtObservationWithJournalProbe::new(&interrupted_path, cancellation_observation);
+    assert!(matches!(
+        interrupted.append_prepared_pages(&prepared, &cancellation),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+    assert!(
+        !cancellation.journal_seen(),
+        "sort-scale cancellation must be observed before SQLite opens its rollback journal"
+    );
+    assert_eq!(
+        interrupted
+            .progress()
+            .expect("progress after run-sort interruption")
+            .next_page_ordinal,
+        0
+    );
+    assert_eq!(staged_row_cardinality(&interrupted_path), (0, 0));
+    drop(interrupted);
+
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &interrupted_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen after run-sort interruption");
+    assert_eq!(
+        resumed
+            .append_prepared_pages(&prepared, &control)
+            .expect("retry interrupted term runs")
+            .next_page_ordinal,
+        u64::try_from(prepared.len()).expect("prepared page count")
+    );
 }
 
 #[test]
