@@ -23,6 +23,7 @@ use crate::{
 };
 
 const DIGEST_CHECK_INTERVAL_BYTES: u64 = 64 * 1024;
+const CHECKED_VEC_INITIAL_CAPACITY_BYTES: usize = 1_024;
 
 #[path = "generation/identity.rs"]
 mod identity;
@@ -937,6 +938,8 @@ struct CheckedVecWriter<'a> {
     max_bytes: usize,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
     failure: Option<GraphDbError>,
+    #[cfg(test)]
+    allocation_growths: usize,
 }
 
 impl<'a> CheckedVecWriter<'a> {
@@ -951,6 +954,8 @@ impl<'a> CheckedVecWriter<'a> {
             max_bytes,
             check,
             failure: None,
+            #[cfg(test)]
+            allocation_growths: 0,
         })
     }
 
@@ -960,6 +965,11 @@ impl<'a> CheckedVecWriter<'a> {
         }
         (self.check)()?;
         Ok(self.bytes)
+    }
+
+    #[cfg(test)]
+    fn allocation_growths(&self) -> usize {
+        self.allocation_growths
     }
 }
 
@@ -975,14 +985,38 @@ impl Write for CheckedVecWriter<'_> {
                 "canonical graph replay exceeds its payload bound",
             ));
         }
-        if self.bytes.try_reserve_exact(bytes.len()).is_err() {
-            self.failure = Some(GraphDbError::budget_exhausted_count(
-                GraphBudgetKind::Write,
-                self.max_bytes,
-            ));
-            return Err(io::Error::other(
-                "canonical graph replay allocation exceeds its product budget",
-            ));
+        if next_len > self.bytes.capacity() {
+            let growth_target = if self.bytes.capacity() == 0 {
+                CHECKED_VEC_INITIAL_CAPACITY_BYTES
+            } else {
+                self.bytes
+                    .capacity()
+                    .checked_mul(2)
+                    .unwrap_or(self.max_bytes)
+            };
+            let target_capacity = growth_target.max(next_len).min(self.max_bytes);
+            let additional = target_capacity
+                .checked_sub(self.bytes.len())
+                .ok_or_else(|| {
+                    io::Error::other("canonical graph replay capacity is below its encoded length")
+                })?;
+            #[cfg(test)]
+            let capacity_before_reserve = self.bytes.capacity();
+            if self.bytes.try_reserve_exact(additional).is_err()
+                || self.bytes.capacity() > self.max_bytes
+            {
+                self.failure = Some(GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Write,
+                    self.max_bytes,
+                ));
+                return Err(io::Error::other(
+                    "canonical graph replay allocation exceeds its product budget",
+                ));
+            }
+            #[cfg(test)]
+            if self.bytes.capacity() != capacity_before_reserve {
+                self.allocation_growths += 1;
+            }
         }
         let length = u64::try_from(bytes.len())
             .map_err(|_| io::Error::other("canonical graph replay chunk is too large"))?;
@@ -1021,4 +1055,66 @@ fn checked_canonical_bytes<T: Serialize + ?Sized>(
     encoded
         .map_err(|error| GraphDbError::invalid(format!("failed to encode {subject}: {error}")))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod checked_vec_writer_tests {
+    use sha2::{Digest, Sha256};
+    use tracedecay_domain::canonical_text::encode_lowercase_hex;
+
+    use super::{CheckedVecWriter, GraphDbError, checked_canonical_bytes};
+
+    #[test]
+    fn many_tiny_serde_writes_use_bounded_amortized_growth() {
+        let value = vec![0_u8; 4_096];
+        let mut writer =
+            CheckedVecWriter::new(&|| Ok(()), 16 * 1_024).expect("bounded writer initializes");
+
+        serde_json::to_writer(&mut writer, &value).expect("fixture fits the writer bound");
+        let allocation_growths = writer.allocation_growths();
+        let actual = writer.finish().expect("bounded writer finishes");
+
+        assert_eq!(
+            actual,
+            serde_json::to_vec(&value).expect("fixture serializes")
+        );
+        assert_eq!(actual.len(), 8_193);
+        assert_eq!(
+            encode_lowercase_hex(&Sha256::digest(&actual)),
+            "cb113f74dc19a08fcacd246b84ca69e1dff17209792ea3bd8d1b34397f5eca92"
+        );
+        assert!(
+            allocation_growths <= 16,
+            "4,096 tiny values caused {allocation_growths} allocation growths"
+        );
+    }
+
+    #[test]
+    fn canonical_bytes_refuse_the_first_byte_past_the_bound() {
+        let value = vec![0_u8; 4_096];
+
+        let error = checked_canonical_bytes(&value, &|| Ok(()), "bounded fixture", 8_192)
+            .expect_err("8,193 encoded bytes must exceed the bound");
+
+        assert!(matches!(
+            error,
+            GraphDbError::InvalidRequest { message }
+                if message.contains("canonical graph replay exceeds its payload bound")
+        ));
+    }
+
+    #[test]
+    fn writer_capacity_never_exceeds_its_payload_bound() {
+        let value = vec![0_u8; 4_096];
+        let max_bytes = 8_192;
+        let mut writer =
+            CheckedVecWriter::new(&|| Ok(()), max_bytes).expect("bounded writer initializes");
+
+        let error = serde_json::to_writer(&mut writer, &value)
+            .expect_err("the final encoded byte must be refused");
+
+        assert!(error.to_string().contains("canonical graph replay exceeds"));
+        assert!(writer.bytes.len() <= max_bytes);
+        assert!(writer.bytes.capacity() <= max_bytes);
+    }
 }
