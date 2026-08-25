@@ -6,7 +6,6 @@
 //! `crates/tracedecay-query/tests/search_quality_suite`.
 
 use std::fs;
-use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tracedecay::search_eval::{

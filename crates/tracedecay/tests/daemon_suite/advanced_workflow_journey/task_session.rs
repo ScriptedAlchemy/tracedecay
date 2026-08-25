@@ -500,6 +500,63 @@ fn set_semantic_runtime_configuration(
         .unwrap_or_else(|error| panic!("{operation}: {error}"));
 }
 
+/// Waits for the daemon to re-establish the evaluated semantic profile after a
+/// physical restart.
+///
+/// Activation is durable, so a restart must return the runtime to `Current`
+/// under the *same* evaluated profile rather than silently falling back to the
+/// built-in default. Both halves are asserted: the runtime state proves the
+/// activated generation is live again, and the configuration read back through
+/// the daemon proves the evaluated selection itself survived the restart.
+pub(super) fn wait_for_evaluated_semantic_profile_current(
+    home: &Path,
+    project: &Path,
+    client: &Client,
+) {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let status = semantic_runtime_status(home, project);
+        if matches!(
+            status.as_ref().map(|status| &status.state),
+            Some(SemanticRuntimeStateV1::Current { .. })
+        ) {
+            break;
+        }
+        assert_semantic_lifecycle_not_failed(home, status.as_ref());
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the evaluated semantic profile to read current \
+             after physical restart: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let resolved = client
+        .execute::<ApplicationConfigurationGet>(
+            &tracedecay_application::configuration::ConfigurationGetRequestV1 {
+                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
+                    .expect("semantic runtime setting key"),
+            },
+        )
+        .expect("semantic runtime configuration after restart")
+        .result;
+    let ConfigurationValueV1::Text(encoded) = &resolved.effective_value else {
+        panic!(
+            "the semantic runtime setting must resolve to text, got {:?}",
+            resolved.effective_value
+        )
+    };
+    let configuration: SemanticConfig =
+        serde_json::from_str(encoded).expect("semantic runtime configuration JSON");
+    let active = configuration
+        .active_profile
+        .expect("the evaluated profile selection must survive a physical restart");
+    assert_eq!(
+        active.profile_id, EVALUATED_PROFILE_ID,
+        "a restart must restore the evaluated profile, not fall back to a default selection"
+    );
+}
+
 fn wait_for_semantic_generation(
     home: &Path,
     project: &Path,
