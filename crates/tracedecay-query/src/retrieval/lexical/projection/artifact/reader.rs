@@ -2007,6 +2007,7 @@ mod tests {
     use std::cmp::Reverse;
     use std::collections::{BTreeSet, BinaryHeap};
     use std::path::PathBuf;
+    #[cfg(feature = "hotpath")]
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2014,9 +2015,11 @@ mod tests {
     use tracedecay_domain::ManifestDigest;
     use tracedecay_private_fs::open_private_file;
 
+    #[cfg(feature = "hotpath")]
+    use super::ArtifactConnectionMutex;
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
-        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactConnectionMutex, ArtifactQueryMetricsV1,
+        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
         CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
         map_query_artifact_error, ngram_document_query, query_ngrams, retain_bounded,
         union_document_queries, visit_document_ids, visit_lexical_rows,
