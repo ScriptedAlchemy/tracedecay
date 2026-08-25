@@ -2240,8 +2240,12 @@ impl DaemonCodeTextArtifactStoreV1 {
             // a plan made before the descriptor was attached.
             let lock = acquire_code_generation_store_lock(&self.store_root)
                 .map_err(text_artifact_unavailable)?;
-            let (artifact_hex, artifact_size_bytes) =
-                sha256_private_file_hex_and_size(staging_path, control)?;
+            let (artifact_hex, artifact_size_bytes) = hotpath::measure_block!(
+                "query.artifact.store.state_digest",
+                sha256_private_file_hex_and_size(staging_path, control)
+            )?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.artifact.store.digest_bytes").set(artifact_size_bytes);
             let descriptor = DurableCodeTextArtifactDescriptorV1 {
                 generation_id: generation_id.clone(),
                 artifact_file: format!("text-artifact-{artifact_hex}.bin"),
@@ -2258,8 +2262,10 @@ impl DaemonCodeTextArtifactStoreV1 {
                     // object contains the named bytes. Verify the stable destination
                     // before withdrawing staging evidence; a symlink, non-regular
                     // object, truncated file, or same-name collision fails closed.
-                    let (existing_hex, existing_size_bytes) =
-                        sha256_private_file_hex_and_size(&final_path, control)?;
+                    let (existing_hex, existing_size_bytes) = hotpath::measure_block!(
+                        "query.artifact.store.dedupe_compare",
+                        sha256_private_file_hex_and_size(&final_path, control)
+                    )?;
                     if existing_size_bytes != artifact_size_bytes {
                         return Err(RetrievalPortError::Contract(
                             "existing code text artifact does not match its content address"
@@ -2279,8 +2285,11 @@ impl DaemonCodeTextArtifactStoreV1 {
                 }
                 Err(error) => return Err(text_artifact_unavailable(error)),
             }
-            DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
-                .map_err(text_artifact_unavailable)?;
+            hotpath::measure_block!(
+                "query.artifact.store.seal_fsync",
+                DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+                    .map_err(text_artifact_unavailable)
+            )?;
             let pointer = self
                 .publication
                 .read_publication_pointer()
@@ -2291,13 +2300,16 @@ impl DaemonCodeTextArtifactStoreV1 {
                             .to_owned(),
                     )
                 })?;
-            attach_verified_text_artifact_under_lock(
-                &lock,
-                &pointer,
-                sealed_identity,
-                descriptor.clone(),
-            )
-            .map_err(text_artifact_unavailable)?;
+            hotpath::measure_block!(
+                "query.artifact.store.pointer_commit",
+                attach_verified_text_artifact_under_lock(
+                    &lock,
+                    &pointer,
+                    sealed_identity,
+                    descriptor.clone(),
+                )
+                .map_err(text_artifact_unavailable)
+            )?;
             Ok(descriptor)
         })
     }
@@ -4121,6 +4133,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Retained-owner activation entry point. Foreground reads never call this.
+    #[hotpath::measure(label = "code_index.reconcile.pass")]
     pub(super) fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
