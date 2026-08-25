@@ -1,4 +1,7 @@
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::{
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    num::NonZeroUsize,
+};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ExactTechnicalTermV1;
@@ -701,7 +704,7 @@ impl VerifiedSealedLexicalPageBatchBoundsV1 {
     }
 }
 
-/// Result of one all-or-nothing lexical-page batch admission attempt.
+/// Result of one accepted lexical-page batch prefix.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // staged pages dominate this terminal read result
 pub enum VerifiedSealedLexicalPageBatchReadV1 {
@@ -731,10 +734,7 @@ enum StagedSealedLexicalPageReadV1 {
 
 #[allow(clippy::large_enum_variant)] // staged pages dominate this private batch result
 enum StagedSealedLexicalPageBatchReadV1 {
-    Pages {
-        pages: Vec<VerifiedSealedLexicalPageV1>,
-        cursor: VerifiedSealedLexicalCursorV1,
-    },
+    Pages(Vec<VerifiedSealedLexicalPageV1>),
     Complete(VerifiedSealedLexicalSourceReceiptV1),
 }
 
@@ -1061,15 +1061,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
     }
 
-    /// Stage a bounded ordered page batch and advance only after the caller
-    /// accepts the complete borrowed slice. The source cursor remains at its
-    /// pre-batch position on source or callback failure, so retrying emits the
-    /// same ordered page sequence.
+    /// Stage a bounded ordered page batch and advance only through the prefix
+    /// the caller durably accepts. The source cursor remains at its pre-batch
+    /// position on source, callback, or accepted-prefix validation failure, so
+    /// retrying emits the same ordered page sequence.
     pub fn next_page_batch_if<E>(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
         bounds: VerifiedSealedLexicalPageBatchBoundsV1,
-        admit: impl FnOnce(&[VerifiedSealedLexicalPageV1]) -> Result<(), E>,
+        admit: impl FnOnce(&[VerifiedSealedLexicalPageV1]) -> Result<NonZeroUsize, E>,
     ) -> Result<Result<VerifiedSealedLexicalPageBatchReadV1, E>, CodeIndexProductionErrorV1> {
         let staged = hotpath::measure_block!("code_index.lexical_source.batch_stage", {
             (|| {
@@ -1137,10 +1137,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 Ok(if let Some(receipt) = completion {
                     StagedSealedLexicalPageBatchReadV1::Complete(receipt)
                 } else {
-                    StagedSealedLexicalPageBatchReadV1::Pages {
-                        pages,
-                        cursor: working_cursor,
-                    }
+                    StagedSealedLexicalPageBatchReadV1::Pages(pages)
                 })
             })()
         })?;
@@ -1149,15 +1146,22 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             StagedSealedLexicalPageBatchReadV1::Complete(receipt) => {
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)))
             }
-            StagedSealedLexicalPageBatchReadV1::Pages {
-                pages,
-                cursor: working_cursor,
-            } => {
-                if let Err(error) = admit(&pages) {
-                    return Ok(Err(error));
+            StagedSealedLexicalPageBatchReadV1::Pages(mut pages) => {
+                let accepted_prefix = match admit(&pages) {
+                    Ok(accepted_prefix) => accepted_prefix,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let accepted_page_count = accepted_prefix.get();
+                if accepted_page_count > pages.len() {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical page batch accepted prefix exceeds staged page count"
+                            .to_owned(),
+                    ));
                 }
-                crate::hotpath_observe::record_pages(working_cursor.next_page_ordinal());
-                self.cursor = working_cursor;
+                let accepted_cursor = pages[accepted_page_count - 1].next_cursor().clone();
+                pages.truncate(accepted_page_count);
+                crate::hotpath_observe::record_pages(accepted_cursor.next_page_ordinal());
+                self.cursor = accepted_cursor;
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
             }
         }
@@ -2306,7 +2310,11 @@ mod lexical_page_source_tests {
     }
 
     fn fixture() -> SealedSourceFixture {
-        let source = BATCH_FIXTURE_SOURCE.as_bytes();
+        fixture_for_source(BATCH_FIXTURE_SOURCE)
+    }
+
+    fn fixture_for_source(source: &str) -> SealedSourceFixture {
+        let source = source.as_bytes();
         let file = SanitizedCodeFileV1 {
             file_occurrence_id: FileOccurrenceId::new("file.lexical-page-batch")
                 .expect("fixture file occurrence ID"),
@@ -2497,13 +2505,51 @@ mod lexical_page_source_tests {
         let rejected = source
             .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
                 assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
-                Err::<(), _>("builder rejects the complete batch")
+                Err::<NonZeroUsize, _>("builder rejects the complete batch")
             })
             .expect("source stages the rejected batch");
         assert_eq!(
             rejected.expect_err("callback refusal must be surfaced"),
             "builder rejects the complete batch"
         );
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("rejected cursor persists"),
+            cursor_before,
+        );
+
+        let retried = match source.next_page(&ActiveControl).expect("one-page retry") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
+        };
+        assert_page_matches(&retried, &expected[0]);
+    }
+
+    #[test]
+    fn out_of_range_accepted_prefix_keeps_the_exact_cursor_and_retries_the_first_page() {
+        let fixture = fixture();
+        let expected = one_page_expectations(&fixture);
+        assert!(
+            expected.len() >= 2,
+            "fixture must provide a multi-page source"
+        );
+        let mut source = fixture.open();
+        let cursor_before = source
+            .cursor()
+            .persisted_bytes()
+            .expect("initial cursor persists");
+        let error = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
+                assert_eq!(pages.len(), 2, "fixture stages a full two-page batch");
+                Ok::<_, ()>(
+                    NonZeroUsize::new(pages.len() + 1)
+                        .expect("out-of-range accepted prefix remains non-zero"),
+                )
+            })
+            .expect_err("out-of-range accepted prefix must be refused");
+        assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
         assert_eq!(
             source
                 .cursor()
@@ -2531,7 +2577,7 @@ mod lexical_page_source_tests {
         let batch = source
             .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
                 assert_eq!(pages.len(), 2);
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
             })
             .expect("source stages a count-bounded batch")
             .expect("callback accepts the count-bounded batch");
@@ -2546,6 +2592,54 @@ mod lexical_page_source_tests {
                 .expect("batch cursor persists"),
             expected[1].next_cursor,
         );
+    }
+
+    #[test]
+    fn accepts_only_fifteen_of_sixteen_staged_parser_backed_pages() {
+        let source_text = (0..16)
+            .map(|index| format!("pub fn batch_prefix_page_{index}() -> usize {{ {index} }}\n"))
+            .collect::<String>();
+        let fixture = fixture_for_source(&source_text);
+        let expected = one_page_expectations(&fixture);
+        assert!(
+            expected.len() >= 16,
+            "parser-backed fixture must expose sixteen one-page values"
+        );
+        let mut source = fixture.open();
+        let accepted = source
+            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..16]), |pages| {
+                assert_eq!(
+                    pages.len(),
+                    16,
+                    "fixture stages sixteen parser-backed pages"
+                );
+                Ok::<_, ()>(NonZeroUsize::new(15).expect("fifteen is non-zero"))
+            })
+            .expect("source stages the parser-backed batch")
+            .expect("callback accepts a fifteen-page prefix");
+        let accepted = pages(accepted);
+        assert_eq!(accepted.len(), 15);
+        for (page, expected) in accepted.iter().zip(&expected[..15]) {
+            assert_page_matches(page, expected);
+        }
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("accepted-prefix cursor persists"),
+            expected[14].next_cursor,
+        );
+
+        let next = match source
+            .next_page(&ActiveControl)
+            .expect("read the first unaccepted page")
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => {
+                panic!("the sixteenth staged page must remain available")
+            }
+        };
+        assert_page_matches(&next, &expected[15]);
     }
 
     #[test]
@@ -2579,7 +2673,7 @@ mod lexical_page_source_tests {
         let batch = source
             .next_page_batch_if(&ActiveControl, bounds, |pages| {
                 assert_eq!(pages.len(), 1, "larger next page must stay unstaged");
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
             })
             .expect("source stages the retained-byte-bounded batch")
             .expect("callback accepts the retained-byte-bounded batch");
@@ -2613,7 +2707,7 @@ mod lexical_page_source_tests {
         let accepted = source
             .next_page_batch_if(&ActiveControl, bounds_for(&expected), |pages| {
                 assert_eq!(pages.len(), expected.len());
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
             })
             .expect("source stages the final batch")
             .expect("callback accepts the final batch");
@@ -2627,7 +2721,7 @@ mod lexical_page_source_tests {
         let complete = source
             .next_page_batch_if(&ActiveControl, bounds_for(&expected), |_| {
                 callback_called = true;
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::MIN)
             })
             .expect("completed source stays readable")
             .expect("completion has no callback error");
@@ -2661,7 +2755,7 @@ mod lexical_page_source_tests {
         let error = source
             .next_page_batch_if(&control, bounds_for(&expected[..2]), |_| {
                 callback_called = true;
-                Ok::<(), ()>(())
+                Ok::<_, ()>(NonZeroUsize::MIN)
             })
             .expect_err("cancellation must interrupt batch staging");
         assert!(matches!(
