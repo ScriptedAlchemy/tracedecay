@@ -138,7 +138,14 @@ pub(super) fn prepare_page(
     let mut documents = Vec::with_capacity(page.chunks().len());
     let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
     let mut logical_ngram_postings = 0usize;
-    for (offset, admitted) in page.chunks().iter().enumerate() {
+    if page.symbol_displays().len() != page.chunks().len() {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "sealed lexical symbol-display cardinality does not match its chunks".to_owned(),
+        ));
+    }
+    for (offset, (admitted, display)) in
+        page.chunks().iter().zip(page.symbol_displays()).enumerate()
+    {
         checkpoint(control)?;
         let document = first_document
             .checked_add(u64::try_from(offset).map_err(contract_number)?)
@@ -151,6 +158,7 @@ pub(super) fn prepare_page(
             metadata,
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
+            display.as_ref(),
             control,
         )?;
         let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
@@ -343,6 +351,7 @@ fn prepare_document(
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
+    display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
@@ -365,7 +374,7 @@ fn prepare_document(
                 chunk.anchor.file_occurrence_id
             ))
         })?;
-    let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path);
+    let (row, fields) = ProjectedChunkV1::from_ref(chunk, logical_path, display);
     let mut term_postings = Vec::new();
     for (field, terms) in &fields {
         checkpoint(control)?;

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     num::NonZeroUsize,
 };
@@ -18,6 +19,9 @@ const SOURCE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source.v1\0";
 const IMPORT_DICTIONARY_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-import-dictionary.v1\0";
 const IMPORT_RECORD_DOMAIN: &[u8] = b"import\0";
 const SOURCE_CHAIN_RECORD_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source-chain.v1\0";
+const SYMBOL_DISPLAY_RECORD_DOMAIN: &[u8] = b"symbol-display\0";
+const SOURCE_SYMBOL_DISPLAY_CHAIN_RECORD_DOMAIN: &[u8] =
+    b"tracedecay.sealed-lexical-symbol-display-chain.v1\0";
 const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
     b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
@@ -231,6 +235,42 @@ impl VerifiedSealedLexicalCursorV1 {
     }
 }
 
+/// Compact parser-attested display identity for one symbol-backed chunk.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct VerifiedSealedLexicalSymbolDisplayV1 {
+    occurrence: SymbolOccurrenceId,
+    simple_name: String,
+    qualified_name: String,
+    kind: String,
+}
+
+impl VerifiedSealedLexicalSymbolDisplayV1 {
+    pub fn occurrence(&self) -> &SymbolOccurrenceId {
+        &self.occurrence
+    }
+
+    pub fn simple_name(&self) -> &str {
+        &self.simple_name
+    }
+
+    pub fn qualified_name(&self) -> &str {
+        &self.qualified_name
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn retained_owned_bytes(&self) -> usize {
+        self.occurrence
+            .as_str()
+            .len()
+            .saturating_add(self.simple_name.capacity())
+            .saturating_add(self.qualified_name.capacity())
+            .saturating_add(self.kind.capacity())
+    }
+}
+
 /// One bounded page of parser-backed, sanitized search chunks.
 #[derive(Debug)]
 pub struct VerifiedSealedLexicalPageV1 {
@@ -243,6 +283,7 @@ pub struct VerifiedSealedLexicalPageV1 {
     cumulative_digest: ManifestDigest,
     next_cursor: VerifiedSealedLexicalCursorV1,
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     previous_cursor: VerifiedSealedLexicalCursorV1,
 }
@@ -288,6 +329,14 @@ impl VerifiedSealedLexicalPageV1 {
         self.chunks.capacity()
     }
 
+    pub fn symbol_displays(&self) -> &[Option<VerifiedSealedLexicalSymbolDisplayV1>] {
+        &self.symbol_displays
+    }
+
+    pub fn symbol_display_capacity(&self) -> usize {
+        self.symbol_displays.capacity()
+    }
+
     pub fn imports(&self) -> &[CodeIndexImportEvidenceV1] {
         &self.imports
     }
@@ -324,7 +373,12 @@ impl VerifiedSealedLexicalPageV1 {
         let mut cumulative_digest = self.previous_cursor.cumulative_digest.clone();
         let mut import_dictionary_digest = self.previous_cursor.import_dictionary_digest.clone();
         let mut payload_bytes = 0u64;
-        for admitted in &self.chunks {
+        if self.symbol_displays.len() != self.chunks.len() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical symbol-display cardinality does not match its chunks".to_owned(),
+            ));
+        }
+        for (admitted, display) in self.chunks.iter().zip(&self.symbol_displays) {
             let serialized = serde_json::to_vec(admitted.chunk()).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed lexical chunk serialization failed: {error}"
@@ -333,6 +387,27 @@ impl VerifiedSealedLexicalPageV1 {
             hash_record(&mut page_hasher, &serialized)?;
             cumulative_digest =
                 advance_digest(&cumulative_digest, SOURCE_CHAIN_RECORD_DOMAIN, &serialized)?;
+            match (&admitted.chunk().anchor.symbol_occurrence_id, display) {
+                (Some(occurrence), Some(display)) if occurrence == display.occurrence() => {
+                    let serialized_display = serde_json::to_vec(display).map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed lexical symbol display serialization failed: {error}"
+                        ))
+                    })?;
+                    hash_symbol_display_record(&mut page_hasher, &serialized_display)?;
+                    cumulative_digest = advance_digest(
+                        &cumulative_digest,
+                        SOURCE_SYMBOL_DISPLAY_CHAIN_RECORD_DOMAIN,
+                        &serialized_display,
+                    )?;
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical symbol display does not match its chunk anchor".to_owned(),
+                    ));
+                }
+            }
             payload_bytes = payload_bytes
                 .checked_add(u64::try_from(serialized.len()).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -534,12 +609,28 @@ impl VerifiedSealedLexicalPageV1 {
                     .saturating_add(chunk.sanitized_text.as_str().len())
             },
         );
+        let symbol_display_bytes = self.symbol_displays.iter().fold(
+            self.symbol_displays
+                .capacity()
+                .saturating_mul(std::mem::size_of::<
+                    Option<VerifiedSealedLexicalSymbolDisplayV1>,
+                >()),
+            |bytes, display| {
+                bytes.saturating_add(display.as_ref().map_or(
+                    0,
+                    VerifiedSealedLexicalSymbolDisplayV1::retained_owned_bytes,
+                ))
+            },
+        );
         self.imports.iter().fold(
-            chunk_bytes.saturating_add(digest_bytes).saturating_add(
-                self.imports
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
-            ),
+            chunk_bytes
+                .saturating_add(symbol_display_bytes)
+                .saturating_add(digest_bytes)
+                .saturating_add(
+                    self.imports
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
+                ),
             |bytes, evidence| {
                 bytes
                     .saturating_add(evidence.logical_path.capacity())
@@ -719,6 +810,7 @@ pub enum VerifiedSealedLexicalPageBatchReadV1 {
 struct PendingSealedLexicalPageV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     page_bytes: usize,
+    symbol_displays: Vec<Option<VerifiedSealedLexicalSymbolDisplayV1>>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     import_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
@@ -1252,6 +1344,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let mut page_hasher = page_hasher(cursor.next_page_ordinal);
         let mut chunks = Vec::new();
         let mut page_bytes = 0usize;
+        let mut symbol_displays = Vec::new();
+        let mut symbol_display_bytes = 0usize;
         let mut imports = Vec::new();
         let mut import_bytes = 0usize;
 
@@ -1279,13 +1373,43 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             }
             while chunk_ordinal < admitted.chunks.len() {
                 checkpoint(control)?;
-                let serialized = serde_json::to_vec(admitted.chunks[chunk_ordinal].chunk())
+                let chunk = admitted.chunks[chunk_ordinal].chunk();
+                let display = match chunk.anchor.symbol_occurrence_id.as_ref() {
+                    Some(occurrence) => Some(
+                        admitted
+                            .symbol_displays
+                            .get(occurrence)
+                            .cloned()
+                            .ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed lexical symbol chunk has no parser-attested display identity"
+                                        .to_owned(),
+                                )
+                            })?,
+                    ),
+                    None => None,
+                };
+                let serialized_display = display
+                    .as_ref()
+                    .map(serde_json::to_vec)
+                    .transpose()
                     .map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed lexical chunk serialization failed: {error}"
+                            "sealed lexical symbol display serialization failed: {error}"
                         ))
                     })?;
-                if serialized.len() > self.maximum_page_bytes {
+                let serialized = serde_json::to_vec(chunk).map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed lexical chunk serialization failed: {error}"
+                    ))
+                })?;
+                let next_symbol_display_bytes = symbol_display_bytes
+                    .saturating_add(serialized_display.as_ref().map_or(0, Vec::len));
+                if serialized
+                    .len()
+                    .saturating_add(serialized_display.as_ref().map_or(0, Vec::len))
+                    > self.maximum_page_bytes
+                {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "one admitted lexical chunk exceeds the page byte bound".to_owned(),
                     ));
@@ -1293,6 +1417,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 if (!chunks.is_empty() || !imports.is_empty())
                     && (chunks.len() == self.maximum_page_chunks
                         || page_bytes
+                            .saturating_add(next_symbol_display_bytes)
                             .saturating_add(import_bytes)
                             .saturating_add(serialized.len())
                             > self.maximum_page_bytes)
@@ -1302,6 +1427,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         PendingSealedLexicalPageV1 {
                             chunks,
                             page_bytes,
+                            symbol_displays,
                             imports,
                             import_bytes,
                             cursor,
@@ -1315,12 +1441,22 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     SOURCE_CHAIN_RECORD_DOMAIN,
                     &serialized,
                 )?;
+                if let Some(serialized_display) = serialized_display.as_deref() {
+                    hash_symbol_display_record(&mut page_hasher, serialized_display)?;
+                    cursor.cumulative_digest = advance_digest(
+                        &cursor.cumulative_digest,
+                        SOURCE_SYMBOL_DISPLAY_CHAIN_RECORD_DOMAIN,
+                        serialized_display,
+                    )?;
+                }
                 page_bytes = page_bytes.checked_add(serialized.len()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical page byte count overflowed".to_owned(),
                     )
                 })?;
+                symbol_display_bytes = next_symbol_display_bytes;
                 chunks.push(admitted.chunks[chunk_ordinal].clone());
+                symbol_displays.push(display);
                 chunk_ordinal += 1;
                 cursor.next_chunk_ordinal = u64::try_from(chunk_ordinal).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -1333,6 +1469,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         PendingSealedLexicalPageV1 {
                             chunks,
                             page_bytes,
+                            symbol_displays,
                             imports,
                             import_bytes,
                             cursor,
@@ -1366,6 +1503,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 }
                 if (!chunks.is_empty() || !imports.is_empty())
                     && page_bytes
+                        .saturating_add(symbol_display_bytes)
                         .saturating_add(import_bytes)
                         .saturating_add(serialized.len())
                         > self.maximum_page_bytes
@@ -1375,6 +1513,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         PendingSealedLexicalPageV1 {
                             chunks,
                             page_bytes,
+                            symbol_displays,
                             imports,
                             import_bytes,
                             cursor,
@@ -1423,6 +1562,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     PendingSealedLexicalPageV1 {
                         chunks,
                         page_bytes,
+                        symbol_displays,
                         imports,
                         import_bytes,
                         cursor,
@@ -1438,6 +1578,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 PendingSealedLexicalPageV1 {
                     chunks,
                     page_bytes,
+                    symbol_displays,
                     imports,
                     import_bytes,
                     cursor,
@@ -1502,12 +1643,30 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
         let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
+        let mut symbol_displays = BTreeMap::new();
+        for symbol in &file.artifacts.symbols {
+            let display = VerifiedSealedLexicalSymbolDisplayV1 {
+                occurrence: symbol.occurrence.clone(),
+                simple_name: symbol.simple_name.clone(),
+                qualified_name: symbol.qualified_name.clone(),
+                kind: symbol.kind.clone(),
+            };
+            if symbol_displays
+                .insert(symbol.occurrence.clone(), display)
+                .is_some()
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file contains duplicate symbol display identities".to_owned(),
+                ));
+            }
+        }
         let imports = file.artifacts.imports;
         let chunks = exact_authority
             .admit_all(file.artifacts.chunks.chunks)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
         Ok(AdmittedSealedLexicalFileV1 {
             chunks,
+            symbol_displays,
             imports,
             next_file_offset,
         })
@@ -1538,6 +1697,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let PendingSealedLexicalPageV1 {
             chunks,
             page_bytes,
+            symbol_displays,
             imports,
             import_bytes,
             mut cursor,
@@ -1613,6 +1773,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             cumulative_digest: cursor.cumulative_digest.clone(),
             next_cursor: cursor.clone(),
             chunks,
+            symbol_displays,
             imports,
             previous_cursor: previous_cursor.clone(),
         };
@@ -1625,6 +1786,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 #[derive(Debug)]
 struct AdmittedSealedLexicalFileV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    symbol_displays: BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     next_file_offset: u64,
 }
@@ -2482,6 +2644,14 @@ fn hash_cursor(
 
 fn hash_import_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
     hasher.update(IMPORT_RECORD_DOMAIN);
+    hash_record(hasher, bytes)
+}
+
+fn hash_symbol_display_record(
+    hasher: &mut Sha256,
+    bytes: &[u8],
+) -> Result<(), CodeIndexProductionErrorV1> {
+    hasher.update(SYMBOL_DISPLAY_RECORD_DOMAIN);
     hash_record(hasher, bytes)
 }
 

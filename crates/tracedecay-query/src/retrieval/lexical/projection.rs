@@ -132,6 +132,9 @@ struct ProjectedChunkV1 {
     exact_terms: Vec<ExactTechnicalTermV1>,
     sanitized_text: BoundedSanitizedText,
     logical_path: String,
+    symbol_simple_name: Option<String>,
+    symbol_qualified_name: Option<String>,
+    symbol_kind: Option<String>,
     field_lengths: BTreeMap<LexicalFieldV1, usize>,
     normalized_text: String,
 }
@@ -150,6 +153,9 @@ impl ProjectedChunkV1 {
             chunk.exact_terms,
             chunk.sanitized_text,
             logical_path,
+            None,
+            None,
+            None,
             normalized_text,
             fields,
         )
@@ -161,6 +167,7 @@ impl ProjectedChunkV1 {
     fn from_ref(
         chunk: &CodeSearchChunkV1,
         logical_path: String,
+        display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
         let fields = Self::projected_fields(chunk, &logical_path);
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
@@ -171,6 +178,9 @@ impl ProjectedChunkV1 {
             chunk.exact_terms.clone(),
             chunk.sanitized_text.clone(),
             logical_path,
+            display.map(|display| display.simple_name().to_owned()),
+            display.map(|display| display.qualified_name().to_owned()),
+            display.map(|display| display.kind().to_owned()),
             normalized_text,
             fields,
         )
@@ -244,6 +254,9 @@ impl ProjectedChunkV1 {
         exact_terms: Vec<ExactTechnicalTermV1>,
         sanitized_text: BoundedSanitizedText,
         logical_path: String,
+        symbol_simple_name: Option<String>,
+        symbol_qualified_name: Option<String>,
+        symbol_kind: Option<String>,
         normalized_text: String,
         fields: BTreeMap<LexicalFieldV1, Vec<String>>,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
@@ -259,6 +272,9 @@ impl ProjectedChunkV1 {
                 exact_terms,
                 sanitized_text,
                 logical_path,
+                symbol_simple_name,
+                symbol_qualified_name,
+                symbol_kind,
                 field_lengths,
                 normalized_text,
             },
