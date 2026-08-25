@@ -25,6 +25,87 @@ use super::read_model::{
     DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
 };
 
+/// The durable build phase whose committed boundary the dashboard is reading.
+///
+/// A phase is not inferred from scheduler state. The mounted registry publishes
+/// the exact phase that owns the active generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexBuildPhaseV1 {
+    SourceScan,
+    RelationalPreparation,
+    BulkCommit,
+    IndexBuild,
+    Verification,
+    Ready,
+}
+
+/// A typed reason an otherwise active generation cannot make durable progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexBuildBlockedReasonV1 {
+    ResidentMemory,
+    SourceUnavailable,
+    ArtifactStoreUnavailable,
+    RetryBackoff,
+}
+
+/// The latest committed progress boundary for one active code-index generation.
+///
+/// Every count is scoped to `generation_id`. The snapshot never includes a
+/// staged page: work is reported only after the batch that owns it commits.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexBuildProgressV1 {
+    /// Exact generation receiving the committed build work.
+    pub generation_id: String,
+    /// Durable daemon-authority epoch that produced this snapshot.
+    ///
+    /// This orders snapshots across daemon restarts without relying on wall
+    /// clock time. `progress_epoch` is comparable only within one producer
+    /// incarnation.
+    pub producer_incarnation: u64,
+    /// Monotonic publication epoch for replacing delayed progress reads.
+    pub progress_epoch: u64,
+    /// Identity of the sealed source whose authenticated bounds define progress.
+    pub sealed_source_digest: String,
+    /// Durable pipeline phase that published this snapshot.
+    pub phase: CodeIndexBuildPhaseV1,
+    /// Source pages committed to the artifact database.
+    pub committed_pages: u64,
+    /// Search chunks committed to the artifact database.
+    pub committed_chunks: u64,
+    /// Import evidence rows committed to the artifact database.
+    pub committed_imports: u64,
+    /// Payload bytes committed to the artifact database.
+    pub committed_payload_bytes: u64,
+    /// Authenticated sealed-source file boundary completed by committed work.
+    pub completed_files: u64,
+    /// Authenticated sealed-source file bound for this generation.
+    pub total_files: u64,
+    /// Authenticated sealed lexical-byte boundary completed by committed work.
+    pub completed_lexical_bytes: u64,
+    /// Authenticated sealed lexical-byte bound for this generation.
+    pub total_lexical_bytes: u64,
+    /// Source pages in the batch currently being processed.
+    pub current_batch_pages: u64,
+    /// Sealed payload bytes in the batch currently being processed.
+    pub current_batch_payload_bytes: u64,
+    /// Monotonic elapsed time for this process's active generation build.
+    pub elapsed_micros: u64,
+    /// Duration of the last committed SQLite batch, when one exists.
+    pub last_commit_latency_micros: Option<u64>,
+    /// Rolling committed-file throughput, absent until it is established.
+    pub files_per_second: Option<f64>,
+    /// Rolling committed lexical-byte throughput, absent until it is established.
+    pub lexical_bytes_per_second: Option<f64>,
+    /// Estimated remaining build duration, absent without a truthful rate.
+    pub estimated_remaining_seconds: Option<u64>,
+    /// Unix-epoch timestamp of the last durable progress publication.
+    pub last_progress_micros: i64,
+    /// Reason the active generation cannot currently advance, when known.
+    pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
+}
+
 /// Freshness/generation state for one mounted worktree.
 ///
 /// `Deserialize` is part of the wire contract: the CLI status command decodes
@@ -58,6 +139,8 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub hook_hint_count: Option<u64>,
     /// Whether this read covers the complete mounted scheduler state.
     pub coverage: String,
+    /// Latest committed progress for the active generation, if one is mounted.
+    pub progress: Option<CodeIndexBuildProgressV1>,
 }
 
 pub type CodeIndexFreshnessReadFuture =
@@ -201,6 +284,7 @@ mod tests {
                     staleness_state: Some("fresh".to_owned()),
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
+                    progress: None,
                 })
             })
         }));
@@ -238,6 +322,7 @@ mod tests {
                     staleness_state: Some("indexing".to_owned()),
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
+                    progress: None,
                 })
             })
         }));
@@ -246,6 +331,70 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Loading);
         assert!(!envelope.coverage.is_complete());
+    }
+
+    #[tokio::test]
+    async fn freshness_route_preserves_committed_generation_progress_exactly() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|root| {
+            Box::pin(async move {
+                Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    repository_id: Some("repository.fixture".to_owned()),
+                    worktree_id: Some("worktree.fixture".to_owned()),
+                    source_reference: Some("refs/heads/main".to_owned()),
+                    source_revision: Some("commit.fixture".to_owned()),
+                    latest_generation_id: None,
+                    snapshot_content_identity: None,
+                    sealed_at_micros: None,
+                    last_reconcile_micros: Some(42),
+                    staleness_state: Some("indexing".to_owned()),
+                    hook_hint_count: Some(0),
+                    coverage: "complete".to_owned(),
+                    progress: Some(CodeIndexBuildProgressV1 {
+                        generation_id: "generation.catchup.01".to_owned(),
+                        producer_incarnation: 11,
+                        progress_epoch: 7,
+                        sealed_source_digest: "sha256:sealed-source-catchup".to_owned(),
+                        phase: CodeIndexBuildPhaseV1::BulkCommit,
+                        committed_pages: 16,
+                        committed_chunks: 10_000,
+                        committed_imports: 480,
+                        committed_payload_bytes: 16 * 1024 * 1024,
+                        completed_files: 250,
+                        total_files: 500,
+                        completed_lexical_bytes: 32 * 1024 * 1024,
+                        total_lexical_bytes: 64 * 1024 * 1024,
+                        current_batch_pages: 4,
+                        current_batch_payload_bytes: 4 * 1024 * 1024,
+                        elapsed_micros: 120_000_000,
+                        last_commit_latency_micros: Some(240_000),
+                        files_per_second: Some(250.0),
+                        lexical_bytes_per_second: Some(16.0 * 1024.0 * 1024.0),
+                        estimated_remaining_seconds: Some(120),
+                        last_progress_micros: 43,
+                        blocked_reason: None,
+                    }),
+                })
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        let progress = envelope.payload.worktrees[0]
+            .progress
+            .as_ref()
+            .expect("mounted build progress");
+        assert_eq!(progress.generation_id, "generation.catchup.01");
+        assert_eq!(progress.progress_epoch, 7);
+        assert_eq!(progress.phase, CodeIndexBuildPhaseV1::BulkCommit);
+        assert_eq!(progress.completed_files, 250);
+        assert_eq!(progress.total_files, 500);
+        assert_eq!(progress.completed_lexical_bytes, 32 * 1024 * 1024);
+        assert_eq!(progress.total_lexical_bytes, 64 * 1024 * 1024);
+        assert_eq!(progress.files_per_second, Some(250.0));
+        assert_eq!(progress.estimated_remaining_seconds, Some(120));
     }
 
     #[tokio::test]

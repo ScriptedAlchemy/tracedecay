@@ -11,22 +11,37 @@ use super::CodeIndexSchedulerRegistryV1;
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub fn new(max_worktrees: usize) -> Self {
-        Self::with_resident_memory(
+        Self::with_resident_memory_and_progress_producer_incarnation(
             max_worktrees,
             Arc::new(ProcessResidentMemoryV1::new(
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             )),
+            1,
         )
     }
 
+    #[cfg(test)]
     pub fn with_resident_memory(
         max_worktrees: usize,
         resident_memory: Arc<ProcessResidentMemoryV1>,
+    ) -> Self {
+        Self::with_resident_memory_and_progress_producer_incarnation(
+            max_worktrees,
+            resident_memory,
+            1,
+        )
+    }
+
+    pub fn with_resident_memory_and_progress_producer_incarnation(
+        max_worktrees: usize,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+        progress_producer_incarnation: u64,
     ) -> Self {
         let (generation_publications, _) =
             tokio::sync::broadcast::channel(super::GENERATION_PUBLICATION_CHANNEL_CAPACITY);
         Self {
             max_worktrees,
+            progress_producer_incarnation: progress_producer_incarnation.max(1),
             resident_memory,
             byte_pool: Arc::new(super::SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),

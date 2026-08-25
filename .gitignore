@@ -3,7 +3,6 @@
 .DS_Store
 .codegraph
 .tracedecay
-.mcp.json
 !plugin/.mcp.json
 .claude/settings.local.json
 .cursor/

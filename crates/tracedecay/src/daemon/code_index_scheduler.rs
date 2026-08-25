@@ -46,6 +46,9 @@ use tracedecay_usecases::code_index::{
 };
 
 use self::freshness_witness::RestoreFreshnessWitnessV1;
+use crate::dashboard::code_index_freshness_api::{
+    CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+};
 
 use crate::{
     code_index::{
@@ -60,8 +63,9 @@ use crate::{
             CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
             CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-            SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+            SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageBatchBoundsV1,
+            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+            VerifiedSealedLexicalSourceReceiptV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -78,7 +82,9 @@ use crate::{
         lexical::{
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-            CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
+            CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
+            CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationPhaseV1,
+            CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
             CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
             LexicalLaneRetriever,
         },
@@ -110,6 +116,8 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 16;
+const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 32 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
@@ -1533,8 +1541,155 @@ type GenerationServingCachesV1 = (
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
     Arc<Mutex<Option<CodeTextArtifactBuildV1>>>,
     Arc<AtomicBool>,
+    Arc<Mutex<CodeIndexBuildProgressStateV1>>,
+    u64,
     Arc<RwLock<CodeGraphActivationStateV1>>,
 );
+
+pub(super) type CodeIndexBuildProgressSlotV1 = Arc<RwLock<CodeIndexBuildProgressSlotStateV1>>;
+
+#[derive(Default)]
+pub(super) struct CodeIndexBuildProgressSlotStateV1 {
+    generation_id: Option<CodeGenerationId>,
+    owner_epoch: u64,
+    progress_epoch: u64,
+    snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
+}
+
+impl CodeIndexBuildProgressSlotStateV1 {
+    fn replace_generation(&mut self, generation_id: CodeGenerationId) -> u64 {
+        self.owner_epoch = self.owner_epoch.saturating_add(1).max(1);
+        self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
+        self.generation_id = Some(generation_id);
+        self.snapshot = None;
+        self.owner_epoch
+    }
+
+    fn publish(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+        mut snapshot: CodeIndexBuildProgressV1,
+    ) -> bool {
+        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.artifact.progress.rejected_stale_total").inc(1u64);
+            return false;
+        }
+        self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
+        snapshot.progress_epoch = self.progress_epoch;
+        #[cfg(feature = "hotpath")]
+        let published_phase = snapshot.phase;
+        self.snapshot = Some(Arc::new(snapshot));
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("query.artifact.progress.publication_total").inc(1u64);
+            match published_phase {
+                CodeIndexBuildPhaseV1::SourceScan => {
+                    hotpath::gauge!("query.artifact.progress.phase.source_scan_total").inc(1u64);
+                }
+                CodeIndexBuildPhaseV1::RelationalPreparation => {
+                    hotpath::gauge!("query.artifact.progress.phase.preparation_total").inc(1u64);
+                }
+                CodeIndexBuildPhaseV1::BulkCommit => {
+                    hotpath::gauge!("query.artifact.progress.phase.bulk_commit_total").inc(1u64);
+                }
+                CodeIndexBuildPhaseV1::IndexBuild => {
+                    hotpath::gauge!("query.artifact.progress.phase.index_build_total").inc(1u64);
+                }
+                CodeIndexBuildPhaseV1::Verification => {
+                    hotpath::gauge!("query.artifact.progress.phase.verification_total").inc(1u64);
+                }
+                CodeIndexBuildPhaseV1::Ready => {
+                    hotpath::gauge!("query.artifact.progress.phase.ready_total").inc(1u64);
+                }
+            }
+        }
+        true
+    }
+
+    pub(super) fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
+        self.snapshot.as_ref().map(Arc::clone)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CodeIndexCommittedProgressSampleV1 {
+    observed_at: Instant,
+    completed_files: u64,
+    completed_lexical_bytes: u64,
+}
+
+struct CodeIndexBuildProgressStateV1 {
+    started_at: Instant,
+    committed_samples: VecDeque<CodeIndexCommittedProgressSampleV1>,
+}
+
+impl CodeIndexBuildProgressStateV1 {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            committed_samples: VecDeque::with_capacity(2),
+        }
+    }
+
+    fn observe_committed(&mut self, sample: CodeIndexCommittedProgressSampleV1) {
+        if self.committed_samples.back().is_some_and(|previous| {
+            previous.completed_files == sample.completed_files
+                && previous.completed_lexical_bytes == sample.completed_lexical_bytes
+        }) {
+            return;
+        }
+        if self.committed_samples.len() == 2 {
+            self.committed_samples.pop_front();
+        }
+        self.committed_samples.push_back(sample);
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    fn rates_and_eta(&self, total_lexical_bytes: u64) -> (Option<f64>, Option<f64>, Option<u64>) {
+        let Some(previous) = self.committed_samples.front() else {
+            return (None, None, None);
+        };
+        let Some(current) = self.committed_samples.back() else {
+            return (None, None, None);
+        };
+        if self.committed_samples.len() < 2 || current.observed_at <= previous.observed_at {
+            return (None, None, None);
+        }
+        let elapsed_seconds = current
+            .observed_at
+            .duration_since(previous.observed_at)
+            .as_secs_f64();
+        if elapsed_seconds <= 0.0 {
+            return (None, None, None);
+        }
+        let files_per_second = current
+            .completed_files
+            .checked_sub(previous.completed_files)
+            .filter(|delta| *delta > 0)
+            .map(|delta| delta as f64 / elapsed_seconds);
+        let lexical_bytes_per_second = current
+            .completed_lexical_bytes
+            .checked_sub(previous.completed_lexical_bytes)
+            .filter(|delta| *delta > 0)
+            .map(|delta| delta as f64 / elapsed_seconds);
+        let estimated_remaining_seconds = lexical_bytes_per_second.and_then(|lexical_rate| {
+            let remaining = total_lexical_bytes.saturating_sub(current.completed_lexical_bytes);
+            let estimate = (remaining as f64 / lexical_rate).ceil();
+            (estimate.is_finite() && estimate >= 0.0 && estimate <= u64::MAX as f64)
+                .then_some(estimate as u64)
+        });
+        (
+            files_per_second,
+            lexical_bytes_per_second,
+            estimated_remaining_seconds,
+        )
+    }
+}
 
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
@@ -1547,6 +1702,12 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     /// are installed.
     text_projection_build: Arc<Mutex<Option<CodeTextArtifactBuildV1>>>,
     text_projection_failed: Arc<AtomicBool>,
+    text_progress_state: Arc<Mutex<CodeIndexBuildProgressStateV1>>,
+    text_progress_slot: CodeIndexBuildProgressSlotV1,
+    text_progress_owner_epoch: u64,
+    /// Existing durable daemon-authority epoch. It orders progress across
+    /// process restarts; the slot epoch orders only within this incarnation.
+    text_progress_producer_incarnation: u64,
     /// The durable text-artifact store for this generation's store root.
     text_artifact_store: DaemonCodeTextArtifactStoreV1,
     /// Exact scheduler authorities for shutdown and superseding source epochs.
@@ -2294,6 +2455,219 @@ impl LatestCompleteCodeIndexV1 {
         })
     }
 
+    fn publish_text_progress_boundary(
+        &self,
+        build: &CodeTextArtifactBuildV1,
+        progress: &tracedecay_query::retrieval::lexical::CodeLexicalArtifactBuildProgressV1,
+        phase: CodeIndexBuildPhaseV1,
+        current_batch_pages: u64,
+        current_batch_payload_bytes: u64,
+        last_commit_latency_micros: Option<u64>,
+        observe_committed: bool,
+    ) -> Result<(), RetrievalPortError> {
+        let source_cursor = build.source.cursor();
+        match progress.next_cursor.as_ref() {
+            Some(cursor) if cursor == source_cursor => {}
+            None if progress.next_page_ordinal == 0
+                && progress.completed_chunks == 0
+                && progress.completed_payload_bytes == 0
+                && progress.completed_imports == 0
+                && source_cursor.next_page_ordinal() == 0 => {}
+            _ => {
+                return Err(RetrievalPortError::Contract(
+                    "text-artifact progress does not match the accepted sealed-source cursor"
+                        .to_owned(),
+                ));
+            }
+        }
+        if progress.next_page_ordinal != source_cursor.next_page_ordinal()
+            || progress.completed_chunks != source_cursor.emitted_chunks()
+            || progress.completed_payload_bytes != source_cursor.emitted_payload_bytes()
+            || progress.completed_imports != source_cursor.emitted_imports()
+        {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact progress counters do not match the sealed-source cursor".to_owned(),
+            ));
+        }
+        let completed_files = build.source.completed_files();
+        let completed_lexical_bytes = build
+            .source
+            .completed_lexical_bytes()
+            .map_err(map_sealed_page_source_error)?;
+        let total_lexical_bytes = build.source.total_lexical_bytes();
+        let observed_at = Instant::now();
+        let observed_micros = now_micros().0;
+        let last_commit_latency_micros = last_commit_latency_micros.or_else(|| {
+            self.text_progress_slot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot()
+                .filter(|snapshot| {
+                    snapshot.generation_id == self.generation.manifest().generation_id.as_str()
+                })
+                .and_then(|snapshot| snapshot.last_commit_latency_micros)
+        });
+        let mut state = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if observe_committed && progress.next_page_ordinal > 0 {
+            state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+                observed_at,
+                completed_files,
+                completed_lexical_bytes,
+            });
+            #[cfg(feature = "hotpath")]
+            {
+                hotpath::gauge!("query.artifact.progress.committed_pages")
+                    .set(progress.next_page_ordinal);
+                hotpath::gauge!("query.artifact.progress.committed_lexical_bytes")
+                    .set(completed_lexical_bytes);
+            }
+        }
+        let (files_per_second, lexical_bytes_per_second, estimated_remaining_seconds) =
+            state.rates_and_eta(total_lexical_bytes);
+        let snapshot = CodeIndexBuildProgressV1 {
+            generation_id: self.generation.manifest().generation_id.as_str().to_owned(),
+            producer_incarnation: self.text_progress_producer_incarnation,
+            progress_epoch: 0,
+            sealed_source_digest: build.sealed_identity.digest.as_str().to_owned(),
+            phase,
+            committed_pages: progress.next_page_ordinal,
+            committed_chunks: progress.completed_chunks,
+            committed_imports: progress.completed_imports,
+            committed_payload_bytes: progress.completed_payload_bytes,
+            completed_files,
+            total_files: build.source.total_files(),
+            completed_lexical_bytes,
+            total_lexical_bytes,
+            current_batch_pages,
+            current_batch_payload_bytes,
+            elapsed_micros: state.elapsed_micros(),
+            last_commit_latency_micros,
+            files_per_second,
+            lexical_bytes_per_second,
+            estimated_remaining_seconds,
+            last_progress_micros: observed_micros,
+            blocked_reason: None,
+        };
+        drop(state);
+        self.publish_text_progress_snapshot(snapshot);
+        Ok(())
+    }
+
+    fn ready_text_progress_snapshot(
+        &self,
+        reader: &CodeLexicalArtifactReaderV1,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        source: &VerifiedSealedLexicalPageSourceV1<File>,
+    ) -> Result<CodeIndexBuildProgressV1, RetrievalPortError> {
+        let artifact = reader.verified_artifact();
+        let generation_id = &self.generation.manifest().generation_id;
+        if artifact.generation() != generation_id {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        let elapsed_micros = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed_micros();
+        Ok(CodeIndexBuildProgressV1 {
+            generation_id: generation_id.as_str().to_owned(),
+            producer_incarnation: self.text_progress_producer_incarnation,
+            progress_epoch: 0,
+            sealed_source_digest: sealed_identity.digest.as_str().to_owned(),
+            phase: CodeIndexBuildPhaseV1::Ready,
+            committed_pages: artifact.page_count(),
+            committed_chunks: artifact.total_chunks(),
+            committed_imports: artifact.total_imports(),
+            committed_payload_bytes: artifact.total_payload_bytes(),
+            completed_files: source.total_files(),
+            total_files: source.total_files(),
+            completed_lexical_bytes: source.total_lexical_bytes(),
+            total_lexical_bytes: source.total_lexical_bytes(),
+            current_batch_pages: 0,
+            current_batch_payload_bytes: 0,
+            elapsed_micros,
+            last_commit_latency_micros: None,
+            files_per_second: None,
+            lexical_bytes_per_second: None,
+            estimated_remaining_seconds: None,
+            last_progress_micros: now_micros().0,
+            blocked_reason: None,
+        })
+    }
+
+    fn publish_text_progress_snapshot(&self, snapshot: CodeIndexBuildProgressV1) {
+        let generation_id = &self.generation.manifest().generation_id;
+        hotpath::measure_block!("query.artifact.progress.publish", {
+            let _ = self
+                .text_progress_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .publish(generation_id, self.text_progress_owner_epoch, snapshot);
+        });
+    }
+
+    fn publish_text_progress_phase(
+        &self,
+        phase: CodeIndexBuildPhaseV1,
+        current_batch_pages: u64,
+        current_batch_payload_bytes: u64,
+    ) {
+        let generation_id = &self.generation.manifest().generation_id;
+        let elapsed_micros = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed_micros();
+        hotpath::measure_block!("query.artifact.progress.publish", {
+            let mut slot = self
+                .text_progress_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = slot.snapshot() else {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
+                return;
+            };
+            let mut snapshot = current.as_ref().clone();
+            snapshot.phase = phase;
+            snapshot.current_batch_pages = current_batch_pages;
+            snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
+            snapshot.elapsed_micros = elapsed_micros;
+            snapshot.blocked_reason = None;
+            let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+        });
+    }
+
+    fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
+        let generation_id = &self.generation.manifest().generation_id;
+        hotpath::measure_block!("query.artifact.progress.publish", {
+            let mut slot = self
+                .text_progress_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = slot.snapshot() else {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
+                return;
+            };
+            let mut snapshot = current.as_ref().clone();
+            snapshot.blocked_reason = Some(reason);
+            let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+        });
+    }
+
+    #[cfg(feature = "hotpath")]
+    fn text_progress_phase(&self) -> Option<CodeIndexBuildPhaseV1> {
+        self.text_progress_slot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
+            .map(|snapshot| snapshot.phase)
+    }
+
     /// Advance at most `maximum_work` bounded page/finalization operations on
     /// this sealed generation's durable text artifact. The mutex is both the
     /// generation-owned partial-state authority and the single-flight gate for
@@ -2318,6 +2692,10 @@ impl LatestCompleteCodeIndexV1 {
         if self.query_owners.get().is_some() {
             return Ok(true);
         }
+        let control = DaemonCodeIndexControlV1::new(
+            Arc::clone(&self.text_control_epoch),
+            Arc::clone(&self.text_control_shutdown),
+        );
         let mut build = self
             .text_projection_build
             .lock()
@@ -2325,22 +2703,20 @@ impl LatestCompleteCodeIndexV1 {
         if self.query_owners.get().is_some() {
             return Ok(true);
         }
-        self.advance_artifact_text_serving(&mut build, maximum_work)
+        self.advance_artifact_text_serving(&mut build, maximum_work, &control)
     }
 
     /// The durable-artifact journey: reopen a published head when one exists,
     /// otherwise stream the sealed generation through the staging builder one
     /// bounded page window at a time, finalize, publish, and reopen.
+    #[hotpath::measure(label = "query.artifact.batch.scheduler_wake")]
     fn advance_artifact_text_serving(
         &self,
         build: &mut Option<CodeTextArtifactBuildV1>,
         maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
         let store = &self.text_artifact_store;
-        let control = DaemonCodeIndexControlV1::new(
-            Arc::clone(&self.text_control_epoch),
-            Arc::clone(&self.text_control_shutdown),
-        );
         if build.is_none() {
             let generation_id = self.generation.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
@@ -2359,11 +2735,17 @@ impl LatestCompleteCodeIndexV1 {
                     &descriptor.artifact_digest,
                     descriptor.artifact_size_bytes,
                     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                    &control,
+                    control,
                 );
                 match reader {
                     Ok(reader) => {
+                        let sealed_identity = store.sealed_identity(&generation_id)?;
+                        let source = store.open_sealed_source(&sealed_identity, control)?;
+                        let ready_progress =
+                            self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
+                        drop(source);
                         self.install_artifact_owners(reader, reader_reservation)?;
+                        self.publish_text_progress_snapshot(ready_progress);
                         return Ok(true);
                     }
                     Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
@@ -2401,7 +2783,7 @@ impl LatestCompleteCodeIndexV1 {
             let artifacts_root = code_text_artifacts_root(store.store_root());
             ensure_private_text_artifacts_root(&artifacts_root)?;
             let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
-            let mut source = store.open_sealed_source(&sealed_identity, &control)?;
+            let mut source = store.open_sealed_source(&sealed_identity, control)?;
             let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
             let metadata = self.text_projection_metadata()?;
             let builder = if staging_path.exists() {
@@ -2409,11 +2791,11 @@ impl LatestCompleteCodeIndexV1 {
                     &staging_path,
                     metadata.clone(),
                     builder_budget,
-                    &control,
+                    control,
                 ) {
                     Ok(builder) => Ok(builder),
                     Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
-                        store.discard_incompatible_staging(&staging_path, &control)?;
+                        store.discard_incompatible_staging(&staging_path, control)?;
                         CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                             &staging_path,
                             metadata,
@@ -2433,17 +2815,27 @@ impl LatestCompleteCodeIndexV1 {
             let progress = builder.progress().map_err(map_text_artifact_error)?;
             if let Some(cursor) = progress.next_cursor.as_ref() {
                 source
-                    .restore_cursor(cursor, &control)
+                    .restore_cursor(cursor, control)
                     .map_err(map_sealed_page_source_error)?;
             }
-            *build = Some(CodeTextArtifactBuildV1 {
+            let initialized = CodeTextArtifactBuildV1 {
                 builder,
                 source,
                 sealed_identity,
                 source_receipt: None,
                 staging_path,
                 _build_reservation: build_reservation,
-            });
+            };
+            self.publish_text_progress_boundary(
+                &initialized,
+                &progress,
+                CodeIndexBuildPhaseV1::SourceScan,
+                0,
+                0,
+                None,
+                true,
+            )?;
+            *build = Some(initialized);
         }
         let artifact_build = build.as_mut().ok_or_else(|| {
             RetrievalPortError::Contract(
@@ -2451,21 +2843,171 @@ impl LatestCompleteCodeIndexV1 {
             )
         })?;
         let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
+        let mut maximum_batch_pages = remaining.min(TEXT_ARTIFACT_BATCH_PAGES_V1).max(1);
+        let mut maximum_batch_bytes = TEXT_ARTIFACT_BATCH_BYTES_V1;
         while remaining > 0 && artifact_build.source_receipt.is_none() {
-            let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
-            let admitted = source
-                .next_page_if(&control, |page| {
-                    builder.append_page(page, &control).map(|_| ())
+            maximum_batch_pages = maximum_batch_pages.min(remaining).max(1);
+            let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
+                maximum_batch_pages,
+                maximum_batch_bytes,
+            )
+            .map_err(map_sealed_page_source_error)?;
+            #[cfg(feature = "hotpath")]
+            let completed_lexical_bytes_before = artifact_build
+                .source
+                .completed_lexical_bytes()
+                .map_err(map_sealed_page_source_error)?;
+            self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
+            let mut durable_progress = None;
+            let mut commit_latency_micros = None;
+            let mut attempted_page_retained_bytes = Vec::new();
+            let admitted = {
+                let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
+                source.next_page_batch_if(control, bounds, |pages| {
+                    attempted_page_retained_bytes = pages
+                        .iter()
+                        .map(|page| page.retained_owned_bytes())
+                        .collect();
+                    let batch_pages = u64::try_from(pages.len()).map_err(|_| {
+                        CodeLexicalArtifactErrorV1::Contract(
+                            "text-artifact batch page count exceeds u64".to_owned(),
+                        )
+                    })?;
+                    let batch_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
+                        total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                            CodeLexicalArtifactErrorV1::Contract(
+                                "text-artifact batch payload bytes overflowed".to_owned(),
+                            )
+                        })
+                    })?;
+                    self.publish_text_progress_phase(
+                        CodeIndexBuildPhaseV1::RelationalPreparation,
+                        batch_pages,
+                        batch_payload_bytes,
+                    );
+                    let progress = hotpath::measure_block!("query.artifact.batch.builder", {
+                        let prepared = builder.prepare_pages(pages, control)?;
+                        self.publish_text_progress_phase(
+                            CodeIndexBuildPhaseV1::BulkCommit,
+                            batch_pages,
+                            batch_payload_bytes,
+                        );
+                        let commit_started = Instant::now();
+                        let progress = builder.append_prepared_pages(&prepared, control)?;
+                        commit_latency_micros = Some(
+                            u64::try_from(commit_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        );
+                        Ok::<_, CodeLexicalArtifactErrorV1>(progress)
+                    })?;
+                    durable_progress = Some(progress);
+                    Ok(())
                 })
-                .map_err(map_sealed_page_source_error)?
-                .map_err(map_text_artifact_error)?;
-            match admitted {
-                VerifiedSealedLexicalPageReadV1::Page(page) => {
-                    let _ = page;
-                    remaining -= 1;
+            };
+            let admitted = match admitted {
+                Ok(Ok(admitted)) => admitted,
+                Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
+                    if attempted_page_retained_bytes.len() <= 1 {
+                        if matches!(
+                            &error,
+                            CodeLexicalArtifactErrorV1::BatchTooLarge {
+                                limit: CodeLexicalArtifactBatchLimitV1::Memory,
+                                ..
+                            }
+                        ) {
+                            self.publish_text_progress_blocked(
+                                CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                            );
+                        }
+                        return Err(map_text_artifact_error(error));
+                    }
+                    maximum_batch_pages = attempted_page_retained_bytes.len() / 2;
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("query.artifact.batch.shrink_total").inc(1u64);
+                    maximum_batch_bytes = maximum_batch_pages
+                        .checked_mul(std::mem::size_of::<
+                            crate::code_index::production::VerifiedSealedLexicalPageV1,
+                        >())
+                        .and_then(|slots| {
+                            attempted_page_retained_bytes[..maximum_batch_pages]
+                                .iter()
+                                .try_fold(slots, |total, bytes| total.checked_add(*bytes))
+                        })
+                        .ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "reduced text-artifact batch retained bytes overflowed".to_owned(),
+                            )
+                        })?;
+                    continue;
                 }
-                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                Ok(Err(error @ CodeLexicalArtifactErrorV1::Unreserved(_))) => {
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    );
+                    return Err(map_text_artifact_error(error));
+                }
+                Ok(Err(
+                    error @ (CodeLexicalArtifactErrorV1::Io(_)
+                    | CodeLexicalArtifactErrorV1::Missing(_)),
+                )) => {
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                    );
+                    return Err(map_text_artifact_error(error));
+                }
+                Ok(Err(error)) => return Err(map_text_artifact_error(error)),
+                Err(error) => return Err(map_sealed_page_source_error(error)),
+            };
+            match admitted {
+                VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => {
+                    let page_count = pages.len();
+                    let progress = durable_progress.as_ref().ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "accepted text-artifact batch has no durable builder progress"
+                                .to_owned(),
+                        )
+                    })?;
+                    let batch_payload_bytes = pages.iter().try_fold(0_u64, |total, page| {
+                        total.checked_add(page.payload_bytes()).ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "accepted text-artifact batch payload bytes overflowed".to_owned(),
+                            )
+                        })
+                    })?;
+                    self.publish_text_progress_boundary(
+                        artifact_build,
+                        progress,
+                        CodeIndexBuildPhaseV1::BulkCommit,
+                        u64::try_from(page_count).unwrap_or(u64::MAX),
+                        batch_payload_bytes,
+                        commit_latency_micros,
+                        true,
+                    )?;
+                    #[cfg(feature = "hotpath")]
+                    {
+                        let committed_lexical_bytes = artifact_build
+                            .source
+                            .completed_lexical_bytes()
+                            .map_err(map_sealed_page_source_error)?
+                            .saturating_sub(completed_lexical_bytes_before);
+                        hotpath::gauge!("query.artifact.batch.committed_lexical_bytes_total")
+                            .inc(committed_lexical_bytes);
+                        if let Some(latency_micros) = commit_latency_micros {
+                            hotpath::gauge!("query.artifact.progress.latest_commit_latency_micros")
+                                .set(latency_micros);
+                        }
+                    }
+                    remaining = remaining.checked_sub(page_count).ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "accepted text-artifact batch exceeded its work budget".to_owned(),
+                        )
+                    })?;
+                    maximum_batch_bytes = TEXT_ARTIFACT_BATCH_BYTES_V1;
+                }
+                VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
                     artifact_build.source_receipt = Some(receipt);
+                    self.publish_text_progress_phase(CodeIndexBuildPhaseV1::IndexBuild, 0, 0);
                 }
             }
         }
@@ -2482,16 +3024,73 @@ impl LatestCompleteCodeIndexV1 {
                     "code text artifact finalization work budget overflowed".to_owned(),
                 )
             })?;
-        let finalized = artifact_build
-            .builder
-            .advance_finalization(source_receipt, finalization_rows, &control)
-            .map_err(map_text_artifact_error)?;
-        if !matches!(
-            finalized,
-            tracedecay_query::retrieval::lexical::CodeLexicalArtifactFinalizationStepV1::Ready(_)
+        #[cfg(feature = "hotpath")]
+        let finalized = if matches!(
+            self.text_progress_phase(),
+            Some(CodeIndexBuildPhaseV1::Verification)
         ) {
-            return Ok(false);
-        }
+            hotpath::measure_block!("query.artifact.finalization.digest_verify_wake", {
+                artifact_build.builder.advance_finalization(
+                    source_receipt,
+                    finalization_rows,
+                    control,
+                )
+            })
+        } else {
+            hotpath::measure_block!("query.artifact.index.build", {
+                artifact_build.builder.advance_finalization(
+                    source_receipt,
+                    finalization_rows,
+                    control,
+                )
+            })
+        };
+        #[cfg(not(feature = "hotpath"))]
+        let finalized =
+            artifact_build
+                .builder
+                .advance_finalization(source_receipt, finalization_rows, control);
+        let finalized = finalized.map_err(map_text_artifact_error)?;
+        let finalization_phase = match finalized {
+            CodeLexicalArtifactFinalizationStepV1::Pending { phase, .. } => {
+                let phase = match phase {
+                    CodeLexicalArtifactFinalizationPhaseV1::IndexBuild => {
+                        CodeIndexBuildPhaseV1::IndexBuild
+                    }
+                    CodeLexicalArtifactFinalizationPhaseV1::Verification => {
+                        CodeIndexBuildPhaseV1::Verification
+                    }
+                };
+                let progress = artifact_build
+                    .builder
+                    .progress()
+                    .map_err(map_text_artifact_error)?;
+                self.publish_text_progress_boundary(
+                    artifact_build,
+                    &progress,
+                    phase,
+                    0,
+                    0,
+                    None,
+                    false,
+                )?;
+                return Ok(false);
+            }
+            CodeLexicalArtifactFinalizationStepV1::Ready(_) => CodeIndexBuildPhaseV1::Verification,
+        };
+        let progress = artifact_build
+            .builder
+            .progress()
+            .map_err(map_text_artifact_error)?;
+        self.publish_text_progress_boundary(
+            artifact_build,
+            &progress,
+            finalization_phase,
+            0,
+            0,
+            None,
+            false,
+        )?;
         let finished = build.take().ok_or_else(|| {
             RetrievalPortError::Contract(
                 "code-index text artifact build state vanished during publication".to_owned(),
@@ -2513,7 +3112,7 @@ impl LatestCompleteCodeIndexV1 {
             &staging_path,
             self.generation.as_ref(),
             &sealed_identity,
-            &control,
+            control,
         )?;
         let reader_reservation = store.reserve_resident_memory(
             &self.generation.manifest().generation_id,
@@ -2527,10 +3126,11 @@ impl LatestCompleteCodeIndexV1 {
             &descriptor.artifact_digest,
             descriptor.artifact_size_bytes,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            &control,
+            control,
         )
         .map_err(map_text_artifact_error)?;
         self.install_artifact_owners(reader, reader_reservation)?;
+        self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         drop(build_reservation);
         Ok(true)
     }
@@ -2758,6 +3358,11 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     latest_content_identity: Option<ContentDigest>,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     query_owners: Mutex<Option<GenerationServingCachesV1>>,
+    /// Immutable generation-scoped build snapshot. The registry clones this
+    /// slot at mount so dashboard reads never acquire the scheduler mutex.
+    build_progress: CodeIndexBuildProgressSlotV1,
+    /// Durable daemon-authority epoch bound by the process registry at mount.
+    progress_producer_incarnation: u64,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -2861,6 +3466,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
             query_owners: Mutex::new(None),
+            build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
+            progress_producer_incarnation: 1,
             semantic_schedule: None,
         };
         Ok(scheduler)
@@ -2875,6 +3482,14 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub(super) fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+    }
+
+    pub(super) fn bind_progress_producer_incarnation(&mut self, producer_incarnation: u64) {
+        self.progress_producer_incarnation = producer_incarnation.max(1);
+    }
+
+    pub(super) fn build_progress_slot(&self) -> CodeIndexBuildProgressSlotV1 {
+        Arc::clone(&self.build_progress)
     }
 
     /// Reserve the installed worker plan on the canonical process authority.
@@ -3668,34 +4283,60 @@ impl CodeIndexWorktreeSchedulerV1 {
             record_index,
             text_projection_build,
             text_projection_failed,
+            text_progress_state,
+            text_progress_owner_epoch,
             graph_activation,
         ) = match cached.as_ref() {
-            Some((cached_id, owners, index, build, failed, interactive))
-                if cached_id == &generation_id =>
-            {
-                (
-                    Arc::clone(owners),
-                    Arc::clone(index),
-                    Arc::clone(build),
-                    Arc::clone(failed),
-                    Arc::clone(interactive),
-                )
-            }
+            Some((
+                cached_id,
+                owners,
+                index,
+                build,
+                failed,
+                progress,
+                progress_epoch,
+                interactive,
+            )) if cached_id == &generation_id => (
+                Arc::clone(owners),
+                Arc::clone(index),
+                Arc::clone(build),
+                Arc::clone(failed),
+                Arc::clone(progress),
+                *progress_epoch,
+                Arc::clone(interactive),
+            ),
             _ => {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
                 let build = Arc::new(Mutex::new(None));
                 let failed = Arc::new(AtomicBool::new(false));
+                let progress = Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new()));
                 let graph_activation = Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending));
+                let progress_epoch = hotpath::measure_block!("query.artifact.progress.publish", {
+                    self.build_progress
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .replace_generation(generation_id.clone())
+                });
                 *cached = Some((
                     generation_id,
                     Arc::clone(&owners),
                     Arc::clone(&index),
                     Arc::clone(&build),
                     Arc::clone(&failed),
+                    Arc::clone(&progress),
+                    progress_epoch,
                     Arc::clone(&graph_activation),
                 ));
-                (owners, index, build, failed, graph_activation)
+                (
+                    owners,
+                    index,
+                    build,
+                    failed,
+                    progress,
+                    progress_epoch,
+                    graph_activation,
+                )
             }
         };
         LatestCompleteCodeIndexV1 {
@@ -3704,6 +4345,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             record_index,
             text_projection_build,
             text_projection_failed,
+            text_progress_state,
+            text_progress_slot: Arc::clone(&self.build_progress),
+            text_progress_owner_epoch,
+            text_progress_producer_incarnation: self.progress_producer_incarnation,
             text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
                 &self.store_root,
                 &self.publication,
@@ -3759,24 +4404,36 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|generation| {
                 generation
                     .filter(|generation| self.validate_generation_identity(generation).is_ok())
-                    .map(|generation| LatestCompleteCodeIndexV1 {
-                        generation,
-                        query_owners: Arc::new(OnceLock::new()),
-                        record_index: Arc::new(OnceLock::new()),
-                        text_projection_build: Arc::new(Mutex::new(None)),
-                        text_projection_failed: Arc::new(AtomicBool::new(false)),
-                        text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
-                            &self.store_root,
-                            &self.publication,
-                            &self.resident_memory,
-                            &self.project_id,
-                            &self.worktree_id,
-                        ),
-                        text_control_epoch: Arc::clone(&self.epoch),
-                        text_control_shutdown: Arc::clone(&self.shutting_down),
-                        graph_activation: Arc::new(RwLock::new(
-                            CodeGraphActivationStateV1::Pending,
-                        )),
+                    .map(|generation| {
+                        let generation_id = generation.manifest().generation_id.clone();
+                        let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
+                        let text_progress_owner_epoch =
+                            progress_slot.replace_generation(generation_id);
+                        LatestCompleteCodeIndexV1 {
+                            generation,
+                            query_owners: Arc::new(OnceLock::new()),
+                            record_index: Arc::new(OnceLock::new()),
+                            text_projection_build: Arc::new(Mutex::new(None)),
+                            text_projection_failed: Arc::new(AtomicBool::new(false)),
+                            text_progress_state: Arc::new(Mutex::new(
+                                CodeIndexBuildProgressStateV1::new(),
+                            )),
+                            text_progress_slot: Arc::new(RwLock::new(progress_slot)),
+                            text_progress_owner_epoch,
+                            text_progress_producer_incarnation: self.progress_producer_incarnation,
+                            text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
+                                &self.store_root,
+                                &self.publication,
+                                &self.resident_memory,
+                                &self.project_id,
+                                &self.worktree_id,
+                            ),
+                            text_control_epoch: Arc::clone(&self.epoch),
+                            text_control_shutdown: Arc::clone(&self.shutting_down),
+                            graph_activation: Arc::new(RwLock::new(
+                                CodeGraphActivationStateV1::Pending,
+                            )),
+                        }
                     })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())

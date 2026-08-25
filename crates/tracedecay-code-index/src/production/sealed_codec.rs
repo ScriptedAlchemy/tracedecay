@@ -138,9 +138,10 @@ struct SealedPublishedGenerationEnvelopeV1 {
 }
 
 #[derive(Deserialize)]
-struct SealedPublishedGenerationRawEnvelopeV1 {
+struct SealedPublishedGenerationRawEnvelopeV1<'a> {
     state_digest: ManifestDigest,
-    generation: Box<RawValue>,
+    #[serde(borrow)]
+    generation: &'a RawValue,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +179,22 @@ fn read_admitted_bytes<R: std::io::Read>(
         CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
     })?;
     if read_limit - reader.limit() != admitted_len {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation length does not match its admitted length".to_owned(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn admit_sealed_generation_bytes(
+    bytes: &[u8],
+    admitted_len: u64,
+) -> Result<&[u8], CodeIndexProductionErrorV1> {
+    admit_sealed_generation_len(admitted_len)?;
+    let actual_len = u64::try_from(bytes.len()).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
+    })?;
+    if actual_len != admitted_len {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation length does not match its admitted length".to_owned(),
         ));
@@ -472,52 +489,74 @@ impl CodeIndexPublishedGenerationV1 {
     /// Restore and revalidate a complete sealed generation.
     #[hotpath::measure]
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
-        crate::hotpath_observe::record_seal_bytes(bytes.len() as u64);
         let admitted_len = u64::try_from(bytes.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
         })?;
-        Self::decode_sealed_reader(std::io::Cursor::new(bytes), admitted_len)
+        Self::decode_admitted_sealed_bytes(bytes, admitted_len)
     }
 
     pub fn decode_sealed_reader<R: std::io::Read>(
         reader: R,
         admitted_len: u64,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let bytes = read_admitted_bytes(reader, admitted_len)?;
-        let probe: SealedPublishedGenerationFormatProbeV1 = serde_json::from_slice(&bytes)
-            .map_err(|error| {
+        let bytes = hotpath::measure_block!(
+            "code_index.sealed_decode.admitted_read",
+            read_admitted_bytes(reader, admitted_len)
+        )?;
+        Self::decode_admitted_sealed_bytes(&bytes, admitted_len)
+    }
+
+    fn decode_admitted_sealed_bytes(
+        bytes: &[u8],
+        admitted_len: u64,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let bytes = hotpath::measure_block!(
+            "code_index.sealed_decode.input_admission",
+            admit_sealed_generation_bytes(bytes, admitted_len)
+        )?;
+        crate::hotpath_observe::record_seal_bytes(admitted_len);
+        let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
+            "code_index.sealed_decode.envelope_parse",
+            serde_json::from_slice(bytes).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation format probe failed: {error}"
                 ))
-            })?;
+            })
+        )?;
         let envelope = match probe.generation.format_revision {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => serde_json::from_slice::<
-                SealedPublishedGenerationEnvelopeV1,
-            >(&bytes)
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation decoding failed: {error}"
-                ))
-            })?,
-            SEALED_GENERATION_FORMAT_REVISION_V1 => {
-                let raw: SealedPublishedGenerationRawEnvelopeV1 = serde_json::from_slice(&bytes)
-                    .map_err(|error| {
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => hotpath::measure_block!(
+                "code_index.sealed_decode.persisted_materialization",
+                serde_json::from_slice::<SealedPublishedGenerationEnvelopeV1>(bytes).map_err(
+                    |error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed generation decoding failed: {error}"
                         ))
-                    })?;
+                    }
+                )
+            )?,
+            SEALED_GENERATION_FORMAT_REVISION_V1 => {
+                let raw: SealedPublishedGenerationRawEnvelopeV1 = hotpath::measure_block!(
+                    "code_index.sealed_decode.envelope_parse",
+                    serde_json::from_slice(bytes).map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed generation decoding failed: {error}"
+                        ))
+                    })
+                )?;
                 let expected_digest = json_generation_digest(raw.generation.get().as_bytes())?;
                 if expected_digest != raw.state_digest {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "sealed generation state digest does not match its payload".to_owned(),
                     ));
                 }
-                let generation: PersistedPublishedGenerationV1 =
+                let generation: PersistedPublishedGenerationV1 = hotpath::measure_block!(
+                    "code_index.sealed_decode.persisted_materialization",
                     serde_json::from_str(raw.generation.get()).map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed generation payload decoding failed: {error}"
                         ))
-                    })?;
+                    })
+                )?;
                 if generation.format_revision.0 != SEALED_GENERATION_FORMAT_REVISION_V1 {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "sealed generation format revision is incompatible".to_owned(),
@@ -552,62 +591,93 @@ impl CodeIndexPublishedGenerationV1 {
             ));
         }
 
-        let repository_parse_identity = envelope.generation.repository_parse_identity;
-        let ignored_source_roster = IgnoredSourceRosterV1::restore(
-            &envelope.generation.snapshot,
-            &repository_parse_identity,
-            envelope.generation.ignored_source_admissions,
-            envelope.generation.ignored_source_admissions_digest,
-        )?;
-
-        let mut files = Vec::with_capacity(envelope.generation.files.len());
-        for file in envelope.generation.files {
-            let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-                .map_err(CodeIndexProductionErrorV1::Chunk)?;
-            files.push(FileGenerationArtifactsV1 {
-                authority: file.authority,
-                extraction: file.extraction,
-                artifacts: file.artifacts,
-                exact_authority,
-            });
-        }
-        let chunks = GenerationChunkManifestV1::new(
-            envelope.generation.manifest.generation_id.clone(),
-            files
-                .iter()
-                .map(|file| file.artifacts.chunks.clone())
-                .collect(),
-        )
-        .map_err(CodeIndexProductionErrorV1::Increment)?;
-        let symbols = GenerationSymbolIndexV1::new(
-            envelope.generation.manifest.generation_id.clone(),
-            files
-                .iter()
-                .flat_map(|file| file.artifacts.symbols.clone())
-                .collect(),
-        )
-        .map_err(CodeIndexProductionErrorV1::Lineage)?;
-        let imports = derive_import_evidence(&files);
-        let (edges, edge_abstentions) = collect_edge_evidence(&files);
-        let projection = ProjectionPublicationHandoffV1::restore(
-            envelope.generation.projection_request,
-            envelope.generation.projection_receipt,
-        )
-        .map_err(CodeIndexProductionErrorV1::Projection)?;
+        let PersistedPublishedGenerationV1 {
+            format_revision: _,
+            manifest,
+            snapshot,
+            repository_parse_identity,
+            ignored_source_admissions,
+            ignored_source_admissions_digest,
+            files: persisted_files,
+            lineage,
+            coverage,
+            capability,
+            projection_request,
+            projection_receipt,
+        } = envelope.generation;
+        let (
+            ignored_source_roster,
+            files,
+            chunks,
+            symbols,
+            imports,
+            edges,
+            edge_abstentions,
+            projection,
+        ) = hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
+            let ignored_source_roster = IgnoredSourceRosterV1::restore(
+                &snapshot,
+                &repository_parse_identity,
+                ignored_source_admissions,
+                ignored_source_admissions_digest,
+            )?;
+            let mut files = Vec::with_capacity(persisted_files.len());
+            for file in persisted_files {
+                let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                files.push(FileGenerationArtifactsV1 {
+                    authority: file.authority,
+                    extraction: file.extraction,
+                    artifacts: file.artifacts,
+                    exact_authority,
+                });
+            }
+            let chunks = GenerationChunkManifestV1::new(
+                manifest.generation_id.clone(),
+                files
+                    .iter()
+                    .map(|file| file.artifacts.chunks.clone())
+                    .collect(),
+            )
+            .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = GenerationSymbolIndexV1::new(
+                manifest.generation_id.clone(),
+                files
+                    .iter()
+                    .flat_map(|file| file.artifacts.symbols.clone())
+                    .collect(),
+            )
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            let imports = derive_import_evidence(&files);
+            let (edges, edge_abstentions) = collect_edge_evidence(&files);
+            let projection =
+                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
+                    .map_err(CodeIndexProductionErrorV1::Projection)?;
+            Ok::<_, CodeIndexProductionErrorV1>((
+                ignored_source_roster,
+                files,
+                chunks,
+                symbols,
+                imports,
+                edges,
+                edge_abstentions,
+                projection,
+            ))
+        })?;
         let generation = Self {
-            manifest: envelope.generation.manifest,
-            snapshot: envelope.generation.snapshot,
+            manifest,
+            snapshot,
             repository_parse_identity,
             ignored_source_roster,
             files,
             chunks,
             symbols,
-            lineage: envelope.generation.lineage,
+            lineage,
             imports,
             edges,
             edge_abstentions,
-            coverage: envelope.generation.coverage,
-            capability: envelope.generation.capability,
+            coverage,
+            capability,
             projection,
             validated: OnceLock::new(),
             admitted: OnceLock::new(),
@@ -634,7 +704,47 @@ impl CodeIndexPublishedGenerationV1 {
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
     use super::*;
+
+    struct LargestAllocationRecorderV1;
+
+    thread_local! {
+        static LARGEST_ALLOCATION_BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    unsafe impl GlobalAlloc for LargestAllocationRecorderV1 {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(layout.size())));
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(layout.size())));
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(largest.get().max(new_size)));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: LargestAllocationRecorderV1 = LargestAllocationRecorderV1;
+
+    fn measure_largest_allocation<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        LARGEST_ALLOCATION_BYTES.with(|largest| largest.set(0));
+        let value = work();
+        let largest = LARGEST_ALLOCATION_BYTES.with(Cell::get);
+        (value, largest)
+    }
 
     struct MaximumWriteSink {
         inner: std::io::Cursor<Vec<u8>>,
@@ -765,5 +875,58 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(message))
                 if message.contains("admitted length")
         ));
+    }
+
+    #[test]
+    fn borrowed_decode_does_not_allocate_a_second_corpus_sized_buffer() {
+        const PADDING_BYTES: usize = 8 * 1024 * 1024;
+        let wrong_digest = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
+        let mut sealed = format!(
+            "{{\"state_digest\":{},\"generation\":{{\"format_revision\":{},\"padding\":\"",
+            serde_json::to_string(&wrong_digest).expect("fixture digest serialization"),
+            SEALED_GENERATION_FORMAT_REVISION_V1,
+        )
+        .into_bytes();
+        sealed.resize(sealed.len() + PADDING_BYTES, b'x');
+        sealed.extend_from_slice(b"\"}}");
+
+        let (result, largest_allocation) =
+            measure_largest_allocation(|| CodeIndexPublishedGenerationV1::decode_sealed(&sealed));
+
+        assert!(matches!(
+            result,
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message.contains("state digest does not match")
+        ));
+        assert!(
+            largest_allocation < sealed.len() / 2,
+            "borrowed decode allocated {largest_allocation} bytes for a {} byte sealed input",
+            sealed.len()
+        );
+    }
+
+    #[test]
+    fn raw_v6_payload_borrows_the_callers_admitted_bytes() {
+        const PADDING_BYTES: usize = 4 * 1024 * 1024;
+        let digest = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
+        let mut sealed = format!(
+            "{{\"state_digest\":{},\"generation\":{{\"format_revision\":{},\"padding\":\"",
+            serde_json::to_string(&digest).expect("fixture digest serialization"),
+            SEALED_GENERATION_FORMAT_REVISION_V1,
+        )
+        .into_bytes();
+        sealed.resize(sealed.len() + PADDING_BYTES, b'x');
+        sealed.extend_from_slice(b"\"}}");
+
+        let raw: SealedPublishedGenerationRawEnvelopeV1 =
+            serde_json::from_slice(&sealed).expect("raw envelope parses");
+        let payload_start = raw.generation.get().as_ptr() as usize;
+        let admitted_start = sealed.as_ptr() as usize;
+        let admitted_end = admitted_start + sealed.len();
+
+        assert!(
+            (admitted_start..admitted_end).contains(&payload_start),
+            "the raw payload must point into the caller's admitted byte slice"
+        );
     }
 }

@@ -110,7 +110,8 @@ pub async fn run_foreground(
     let store_administration =
         StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
-    let invocation = DaemonInvocationState::default();
+    let invocation =
+        DaemonInvocationState::with_progress_producer_incarnation(authority.record().epoch);
     store_administration
         .configure_codex_preparation_resources(
             invocation.code_index_schedulers.process_resident_memory(),
@@ -497,6 +498,7 @@ async fn run_foreground_unix(
     )?;
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     let engine = DaemonEngine::default()
+        .with_progress_producer_incarnation(authority.record().epoch)
         .with_profile_identity(authority.profile_identity().clone())
         .with_http_application_registry(http_application_registry.clone());
     engine

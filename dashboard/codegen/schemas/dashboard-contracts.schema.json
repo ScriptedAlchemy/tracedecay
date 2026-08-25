@@ -2167,6 +2167,198 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeIndexBuildBlockedReasonV1": {
+      "description": "A typed reason an otherwise active generation cannot make durable progress.",
+      "enum": [
+        "resident_memory",
+        "source_unavailable",
+        "artifact_store_unavailable",
+        "retry_backoff"
+      ],
+      "type": "string"
+    },
+    "CodeIndexBuildPhaseV1": {
+      "description": "The durable build phase whose committed boundary the dashboard is reading.\n\nA phase is not inferred from scheduler state. The mounted registry publishes\nthe exact phase that owns the active generation.",
+      "enum": [
+        "source_scan",
+        "relational_preparation",
+        "bulk_commit",
+        "index_build",
+        "verification",
+        "ready"
+      ],
+      "type": "string"
+    },
+    "CodeIndexBuildProgressV1": {
+      "description": "The latest committed progress boundary for one active code-index generation.\n\nEvery count is scoped to `generation_id`. The snapshot never includes a\nstaged page: work is reported only after the batch that owns it commits.",
+      "properties": {
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexBuildBlockedReasonV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reason the active generation cannot currently advance, when known."
+        },
+        "committed_chunks": {
+          "description": "Search chunks committed to the artifact database.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_imports": {
+          "description": "Import evidence rows committed to the artifact database.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_pages": {
+          "description": "Source pages committed to the artifact database.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_payload_bytes": {
+          "description": "Payload bytes committed to the artifact database.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed_files": {
+          "description": "Authenticated sealed-source file boundary completed by committed work.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed_lexical_bytes": {
+          "description": "Authenticated sealed lexical-byte boundary completed by committed work.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current_batch_pages": {
+          "description": "Source pages in the batch currently being processed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current_batch_payload_bytes": {
+          "description": "Sealed payload bytes in the batch currently being processed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_micros": {
+          "description": "Monotonic elapsed time for this process's active generation build.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "estimated_remaining_seconds": {
+          "description": "Estimated remaining build duration, absent without a truthful rate.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "files_per_second": {
+          "description": "Rolling committed-file throughput, absent until it is established.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "generation_id": {
+          "description": "Exact generation receiving the committed build work.",
+          "type": "string"
+        },
+        "last_commit_latency_micros": {
+          "description": "Duration of the last committed SQLite batch, when one exists.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_progress_micros": {
+          "description": "Unix-epoch timestamp of the last durable progress publication.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "lexical_bytes_per_second": {
+          "description": "Rolling committed lexical-byte throughput, absent until it is established.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/CodeIndexBuildPhaseV1",
+          "description": "Durable pipeline phase that published this snapshot."
+        },
+        "producer_incarnation": {
+          "description": "Durable daemon-authority epoch that produced this snapshot.\n\nThis orders snapshots across daemon restarts without relying on wall\nclock time. `progress_epoch` is comparable only within one producer\nincarnation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "progress_epoch": {
+          "description": "Monotonic publication epoch for replacing delayed progress reads.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sealed_source_digest": {
+          "description": "Identity of the sealed source whose authenticated bounds define progress.",
+          "type": "string"
+        },
+        "total_files": {
+          "description": "Authenticated sealed-source file bound for this generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_lexical_bytes": {
+          "description": "Authenticated sealed lexical-byte bound for this generation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation_id",
+        "producer_incarnation",
+        "progress_epoch",
+        "sealed_source_digest",
+        "phase",
+        "committed_pages",
+        "committed_chunks",
+        "committed_imports",
+        "committed_payload_bytes",
+        "completed_files",
+        "total_files",
+        "completed_lexical_bytes",
+        "total_lexical_bytes",
+        "current_batch_pages",
+        "current_batch_payload_bytes",
+        "elapsed_micros",
+        "last_commit_latency_micros",
+        "files_per_second",
+        "lexical_bytes_per_second",
+        "estimated_remaining_seconds",
+        "last_progress_micros",
+        "blocked_reason"
+      ],
+      "type": "object"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -2332,6 +2524,17 @@
             "null"
           ]
         },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexBuildProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Latest committed progress for the active generation, if one is mounted."
+        },
         "repository_id": {
           "description": "Stable repository identity resolved by the scheduler.",
           "type": [
@@ -2399,7 +2602,8 @@
         "last_reconcile_micros",
         "staleness_state",
         "hook_hint_count",
-        "coverage"
+        "coverage",
+        "progress"
       ],
       "type": "object"
     },
