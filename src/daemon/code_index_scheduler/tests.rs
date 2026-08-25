@@ -70,6 +70,9 @@ use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
 };
+use tracedecay_query::retrieval::semantic::{
+    SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
+};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
 };
@@ -1053,6 +1056,18 @@ impl RerankExecutionControlV1 for ReadyRerankControlV1 {
 
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct ReadySemanticControlV1;
+
+impl SemanticExecutionControl for ReadySemanticControlV1 {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
     }
 }
 
@@ -10196,6 +10211,50 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     assert!(
         !current.served_stale,
         "a reconciled graph-off text owner must report current exact and lexical coverage"
+    );
+    let semantic = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::FallbackAllowed,
+        )
+        .await
+        .expect("graph-off fallback semantic query");
+    assert_eq!(semantic.query.generation, current.generation);
+    assert!(matches!(
+        semantic.semantic,
+        super::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            ..
+        }
+    ));
+    let strict = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::StrictSemantic,
+        )
+        .await;
+    assert!(matches!(
+        strict,
+        Err(
+            super::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            }
+        ) if generation == current.generation
+    ));
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "semantic fallback without an activated profile must not decode the sealed generation"
     );
     let text = registry
         .latest_text_serving_for_scope(&scope)
