@@ -23,8 +23,9 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use regex::{Captures, Match, Regex};
 use serde::Deserialize;
 use thiserror::Error;
@@ -119,6 +120,118 @@ pub(crate) enum CredentialRuleSetError {
         rule_id: String,
         reason: &'static str,
     },
+    #[error("credential keyword matcher could not be compiled")]
+    KeywordMatcher,
+}
+
+/// One compiled ruleset and its shared ASCII-case-insensitive keyword gate.
+///
+/// The catalogue evaluates every rule against the same source value. Compiling
+/// all keyword preconditions into one automaton makes that a single source
+/// scan, while the ordered pattern slice remains the only authority for rule
+/// precedence and redaction decisions.
+pub(crate) struct CredentialPatternSet {
+    patterns: Vec<CredentialPattern>,
+    keyword_matcher: KeywordMatcher,
+}
+
+impl CredentialPatternSet {
+    fn new(patterns: Vec<CredentialPattern>) -> Result<Self, CredentialRuleSetError> {
+        let keyword_matcher = KeywordMatcher::from_patterns(&patterns)?;
+        Ok(Self {
+            patterns,
+            keyword_matcher,
+        })
+    }
+
+    pub(crate) fn keyword_presence(&self, text: &str) -> Vec<bool> {
+        self.keyword_matcher.presence(text, &self.patterns)
+    }
+
+    #[cfg(test)]
+    fn unique_keyword_count(&self) -> usize {
+        self.keyword_matcher.pattern_count()
+    }
+}
+
+impl Deref for CredentialPatternSet {
+    type Target = [CredentialPattern];
+
+    fn deref(&self) -> &Self::Target {
+        &self.patterns
+    }
+}
+
+/// A single Aho–Corasick scan maps every keyword hit back to the rules whose
+/// precondition it satisfies. `None` is the truthful empty-keyword case: those
+/// rules all run and no matcher needs to scan the source.
+struct KeywordMatcher {
+    matcher: Option<AhoCorasick>,
+    keyword_rules: Vec<Vec<usize>>,
+}
+
+impl KeywordMatcher {
+    fn from_patterns(patterns: &[CredentialPattern]) -> Result<Self, CredentialRuleSetError> {
+        let mut keyword_rules = BTreeSet::new();
+        for pattern in patterns {
+            keyword_rules.extend(pattern.keywords.iter().cloned());
+        }
+        let keywords = keyword_rules.into_iter().collect::<Vec<_>>();
+        let mut rules_by_keyword = vec![Vec::new(); keywords.len()];
+        for (rule_index, pattern) in patterns.iter().enumerate() {
+            for keyword in &pattern.keywords {
+                let keyword_index = keywords
+                    .binary_search(keyword)
+                    .map_err(|_| CredentialRuleSetError::KeywordMatcher)?;
+                rules_by_keyword[keyword_index].push(rule_index);
+            }
+        }
+
+        let matcher = if keywords.is_empty() {
+            None
+        } else {
+            let mut builder = AhoCorasickBuilder::new();
+            builder.ascii_case_insensitive(true);
+            Some(
+                builder
+                    .build(&keywords)
+                    .map_err(|_| CredentialRuleSetError::KeywordMatcher)?,
+            )
+        };
+        Ok(Self {
+            matcher,
+            keyword_rules: rules_by_keyword,
+        })
+    }
+
+    fn presence(&self, text: &str, patterns: &[CredentialPattern]) -> Vec<bool> {
+        let mut presence = patterns
+            .iter()
+            .map(|pattern| pattern.keywords.is_empty())
+            .collect::<Vec<_>>();
+        let mut remaining = presence.iter().filter(|present| !**present).count();
+        let Some(matcher) = &self.matcher else {
+            return presence;
+        };
+
+        for found in matcher.find_overlapping_iter(text.as_bytes()) {
+            for &rule_index in &self.keyword_rules[found.pattern().as_usize()] {
+                if !presence[rule_index] {
+                    presence[rule_index] = true;
+                    remaining -= 1;
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        presence
+    }
+
+    #[cfg(test)]
+    fn pattern_count(&self) -> usize {
+        self.keyword_rules.len()
+    }
 }
 
 /// One compiled credential rule.
@@ -165,10 +278,13 @@ impl CredentialPattern {
         // Keyword gate first, exactly as upstream orders it: it is both the
         // rule's precondition and the cheapest possible reject, which is what
         // keeps a 200-rule catalogue affordable inline at ingest.
-        if !self.keywords_present(text) || !self.regex.is_match(text) {
+        let keywords_present = self.keywords_present(text);
+        if !keywords_present || !self.regex.is_match(text) {
             return false;
         }
-        !self.ranges(text).is_empty()
+        !self
+            .ranges_when_keywords_present(text, keywords_present)
+            .is_empty()
     }
 
     fn keywords_present(&self, text: &str) -> bool {
@@ -179,17 +295,22 @@ impl CredentialPattern {
                 .any(|keyword| contains_ignore_ascii_case(text, keyword))
     }
 
-    /// Byte ranges to redact. The whole match, not just the secret group: a
-    /// sanitizer must not leave secret bytes behind, and the context a rule
-    /// matched on is itself worth removing.
+    /// Test-only direct range surface. The whole match, not just the secret
+    /// group: a sanitizer must not leave secret bytes behind, and the context
+    /// a rule matched on is itself worth removing.
+    #[cfg(test)]
     pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
-        // Same keyword gate as `is_match`, and for the same reason: some
-        // rules (`sourcegraph-access-token` among them) accept a bare match
-        // that is only safe when their keyword precondition holds.
-        // `redact_text` calls `ranges` directly, bypassing `is_match`, so the
-        // gate has to live here too or a keyword-gated rule fires unguarded
-        // on every caller that doesn't separately check `is_match` first.
-        if !self.keywords_present(text) {
+        // Some rules (`sourcegraph-access-token`) accept a bare match that is
+        // safe only when their keyword precondition holds.
+        self.ranges_when_keywords_present(text, self.keywords_present(text))
+    }
+
+    pub(crate) fn ranges_when_keywords_present(
+        &self,
+        text: &str,
+        keywords_present: bool,
+    ) -> Vec<Range<usize>> {
+        if !keywords_present {
             return Vec::new();
         }
         if let Some(min_len) = self.assignment_min_len {
@@ -340,6 +461,12 @@ pub(crate) fn compile_credential_patterns(
         }
     }
     Ok(patterns)
+}
+
+pub(crate) fn compile_credential_pattern_set(
+    profile: CredentialPatternProfile,
+) -> Result<CredentialPatternSet, CredentialRuleSetError> {
+    CredentialPatternSet::new(compile_credential_patterns(profile)?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1018,6 +1145,10 @@ mod tests {
         compile_credential_patterns(profile).expect("credential ruleset compiles")
     }
 
+    fn pattern_set(profile: CredentialPatternProfile) -> CredentialPatternSet {
+        compile_credential_pattern_set(profile).expect("credential ruleset compiles")
+    }
+
     fn rule<'a>(patterns: &'a [CredentialPattern], id: &str) -> &'a CredentialPattern {
         patterns
             .iter()
@@ -1305,6 +1436,37 @@ mod tests {
             !sourcegraph
                 .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn combined_keyword_matcher_preserves_ascii_gate_parity_on_overlap() {
+        let compiled = pattern_set(CredentialPatternProfile::Observation);
+        let source = "sourcegraph sourceGRAPH sgP_\u{212A}ey";
+
+        let expected = compiled
+            .iter()
+            .map(|pattern| pattern.keywords_present(source))
+            .collect::<Vec<_>>();
+
+        assert_eq!(compiled.keyword_presence(source), expected);
+    }
+
+    #[test]
+    fn combined_keyword_matcher_uses_one_authority_for_a_large_no_match_source() {
+        let compiled = pattern_set(CredentialPatternProfile::Observation);
+        let source = "\0".repeat(8 * 1024 * 1024);
+
+        let expected = compiled
+            .iter()
+            .map(|pattern| pattern.keywords.is_empty())
+            .collect::<Vec<_>>();
+
+        assert_eq!(compiled.keyword_presence(&source), expected);
+        assert_eq!(
+            compiled.keyword_matcher.pattern_count(),
+            compiled.unique_keyword_count(),
+            "one combined matcher must own every distinct keyword"
         );
     }
 

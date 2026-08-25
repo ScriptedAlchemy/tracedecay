@@ -41,14 +41,22 @@ pub(crate) struct DaemonInvocationState {
 
 impl Default for DaemonInvocationState {
     fn default() -> Self {
+        Self::with_progress_producer_incarnation(1)
+    }
+}
+
+impl DaemonInvocationState {
+    /// Construct one daemon-generation invocation state whose dashboard
+    /// progress is ordered by the existing durable daemon-authority epoch.
+    pub(super) fn with_progress_producer_incarnation(producer_incarnation: u64) -> Self {
         let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
             DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
         ));
-        let code_index_schedulers =
-            code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
-                MAX_CACHED_PROJECT_SERVERS,
-                Arc::clone(&resident_memory),
-            );
+        let code_index_schedulers = code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory_and_progress_producer_incarnation(
+            MAX_CACHED_PROJECT_SERVERS,
+            Arc::clone(&resident_memory),
+            producer_incarnation,
+        );
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         let query_authority_provider =
@@ -71,9 +79,7 @@ impl Default for DaemonInvocationState {
                 tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
     }
-}
 
-impl DaemonInvocationState {
     pub(super) fn invocation_service(&self) -> DaemonInvocationService {
         self.service.clone()
     }
@@ -463,16 +469,16 @@ impl DaemonInvocationState {
         // observability lane uninstalled and nothing records.
         match self
             .service
-            .observability_producer_with_database(Some(&canonical_project_root))
+            .observability_producer(Some(&canonical_project_root))
             .await
         {
-            Some((session_db, producer)) => {
+            Some(producer) => {
                 if let Err(error) = self
                     .code_index_schedulers
                     .install_index_observability(
                         &canonical_project_root,
                         code_index_scheduler::observability::CodeIndexObservabilityV1::new(
-                            session_db, producer,
+                            producer,
                         ),
                     )
                     .await

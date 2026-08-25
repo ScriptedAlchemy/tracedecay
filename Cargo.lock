@@ -6337,6 +6337,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "hotpath",
+ "rayon",
  "roaring",
  "rusqlite",
  "serde",
@@ -6360,6 +6361,7 @@ dependencies = [
 name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "amari-holographic",
  "chrono",
  "criterion",

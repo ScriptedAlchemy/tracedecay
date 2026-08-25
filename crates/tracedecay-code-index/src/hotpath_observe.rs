@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "hotpath")]
 use std::time::Instant;
 
-#[cfg(feature = "hotpath")]
+#[cfg(any(feature = "hotpath", test))]
 const HOT_LOOP_SAMPLE_PERIOD: u64 = 32;
 
 #[cfg(feature = "hotpath")]
@@ -27,22 +27,45 @@ static WORKERS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static WORKERS_POOL_COORDINATION: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
-static GREP_FILE_SAMPLE: AtomicU64 = AtomicU64::new(0);
+static HOT_LOOP_SAMPLE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "hotpath")]
+#[must_use]
+#[inline(always)]
+fn is_hot_loop_sample(sequence: u64) -> bool {
+    sequence.is_multiple_of(HOT_LOOP_SAMPLE_PERIOD)
+}
 
 #[must_use]
 #[inline(always)]
 pub(crate) fn sample_hot_loop() -> bool {
     #[cfg(feature = "hotpath")]
     {
-        GREP_FILE_SAMPLE
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(HOT_LOOP_SAMPLE_PERIOD)
+        is_hot_loop_sample(HOT_LOOP_SAMPLE.fetch_add(1, Ordering::Relaxed))
     }
     #[cfg(not(feature = "hotpath"))]
     {
         false
     }
 }
+
+/// Measure one fixed-rate sample from a hot file loop.
+///
+/// The label must be a literal so callers cannot create path- or
+/// generation-shaped cardinality. The disabled path still evaluates only the
+/// work expression; its sampler is an inlined constant `false` with no atomic
+/// or clock access.
+macro_rules! measure_hot_loop {
+    ($label:literal, $work:expr) => {{
+        if $crate::hotpath_observe::sample_hot_loop() {
+            hotpath::measure_block!($label, $work)
+        } else {
+            $work
+        }
+    }};
+}
+
+pub(crate) use measure_hot_loop;
 
 #[cfg(any(feature = "hotpath", test))]
 #[inline(always)]
@@ -297,21 +320,26 @@ pub(crate) fn record_seal_bytes(bytes: u64) {
     }
 }
 
-pub(crate) struct TtfqStart(#[cfg(feature = "hotpath")] Instant);
+/// Start of one production-owner generation build. The matching observation
+/// ends only after the immutable generation has been published and is
+/// queryable through that owner; daemon scheduling/wake latency is measured
+/// separately by the reconcile cadence receipt.
+pub(crate) struct BuildToQueryableStart(#[cfg(feature = "hotpath")] Instant);
 
 #[inline(always)]
-pub(crate) fn start_ttfq() -> TtfqStart {
-    TtfqStart(
+pub(crate) fn start_build_to_queryable() -> BuildToQueryableStart {
+    BuildToQueryableStart(
         #[cfg(feature = "hotpath")]
         Instant::now(),
     )
 }
 
 #[inline(always)]
-pub(crate) fn record_ttfq(started: TtfqStart) {
+pub(crate) fn record_build_to_queryable(started: BuildToQueryableStart) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_index_ttfq_micros").set(started.0.elapsed().as_micros() as f64);
+        hotpath::gauge!("code_index_build_to_queryable_micros")
+            .set(started.0.elapsed().as_micros() as f64);
     }
     #[cfg(not(feature = "hotpath"))]
     {
@@ -346,6 +374,22 @@ pub(crate) fn record_rebuild_state(state: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hotpath")]
+    #[test]
+    fn hotpath_file_probe_cadence_uses_one_fixed_slot_per_period() {
+        let sampled = (0..(HOT_LOOP_SAMPLE_PERIOD * 2))
+            .filter(|sequence| is_hot_loop_sample(*sequence))
+            .collect::<Vec<_>>();
+
+        assert_eq!(sampled, vec![0, HOT_LOOP_SAMPLE_PERIOD]);
+    }
+
+    #[cfg(not(feature = "hotpath"))]
+    #[test]
+    fn hotpath_file_probe_sampler_is_dormant_without_the_feature() {
+        assert!((0..(HOT_LOOP_SAMPLE_PERIOD * 2)).all(|_| !sample_hot_loop()));
+    }
 
     #[test]
     fn pending_queue_decrements_when_each_worker_starts() {

@@ -2,11 +2,13 @@
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
+use roaring::RoaringBitmap;
 #[cfg(any(test, feature = "hotpath"))]
 use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
@@ -25,7 +27,7 @@ use super::builder::compute_section_digests;
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactOccurrenceV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_padded_receipt, encode_exact_field, encode_field, metadata_digest,
+    decode_ngram_bitmap, decode_padded_receipt, encode_exact_field, encode_field, metadata_digest,
     verify_required_artifact_indexes,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
@@ -59,15 +61,7 @@ pub struct CodeLexicalArtifactReaderV1 {
     retained_owned_bytes: usize,
 }
 
-#[cfg(feature = "hotpath")]
-type ArtifactConnectionMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
 type ArtifactConnectionMutex<T> = StdMutex<T>;
-
-#[cfg(feature = "hotpath")]
-type ArtifactConnectionMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-#[cfg(not(feature = "hotpath"))]
-type ArtifactConnectionMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
 impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -321,14 +315,11 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
         Ok(Self {
-            // Every clone shares one rusqlite handle. The instrumented mutex
-            // exposes both shared-reader coordination wait and the full
-            // serialized SQL hold rather than attributing that time to the
-            // outer lane alone. This is one handle, not a connection pool.
-            connection: Arc::new(hotpath::mutex!(
-                StdMutex::new(connection),
-                label = "query.artifact.connection"
-            )),
+            // Every clone shares one rusqlite handle. Readers are replaced on
+            // remount, while Hotpath 0.24 retains every instrumented mutex
+            // identity for the process lifetime, so this per-reader lock must
+            // remain plain. Static query spans retain operation visibility.
+            connection: Arc::new(StdMutex::new(connection)),
             metadata,
             receipt: stored,
             retained_owned_bytes,
@@ -432,9 +423,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
-    fn lock_connection(
-        &self,
-    ) -> Result<ArtifactConnectionMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
+    fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
         self.connection.lock().map_err(|_| {
             CodeLexicalArtifactErrorV1::Io("lexical artifact reader lock is poisoned".to_owned())
         })
@@ -533,6 +522,10 @@ struct ArtifactQueryMetricsV1 {
     probes: Cell<u64>,
     #[cfg(test)]
     fullscan_steps: Cell<u64>,
+    #[cfg(test)]
+    ngram_decoded_shards: Cell<u64>,
+    #[cfg(test)]
+    ngram_peak_candidates: Cell<u64>,
 }
 
 impl ArtifactQueryMetricsV1 {
@@ -579,6 +572,18 @@ impl ArtifactQueryMetricsV1 {
     fn observed_fullscan_steps(&self) -> u64 {
         self.fullscan_steps.get()
     }
+
+    #[cfg(test)]
+    fn observe_ngram_shard(&self) {
+        self.ngram_decoded_shards
+            .set(self.ngram_decoded_shards.get().saturating_add(1));
+    }
+
+    #[cfg(test)]
+    fn observe_ngram_candidates(&self, candidates: u64) {
+        self.ngram_peak_candidates
+            .set(self.ngram_peak_candidates.get().max(candidates));
+    }
 }
 
 /// A SQLite-owned candidate set. The query is evaluated row-by-row, so Rust
@@ -589,6 +594,7 @@ impl ArtifactQueryMetricsV1 {
 struct DocumentQueryV1 {
     sql: Option<String>,
     parameters: Vec<Value>,
+    maximum_bound_value_bytes: usize,
 }
 
 impl DocumentQueryV1 {
@@ -596,6 +602,7 @@ impl DocumentQueryV1 {
         Self {
             sql: None,
             parameters: Vec::new(),
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         }
     }
 
@@ -605,6 +612,7 @@ impl DocumentQueryV1 {
                 "SELECT document_id FROM term_postings WHERE field = ? AND term = ?".to_owned(),
             ),
             parameters: vec![Value::Text(field), Value::Text(term)],
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         }
     }
 
@@ -614,6 +622,7 @@ impl DocumentQueryV1 {
                 "SELECT document_id FROM term_postings WHERE term = ? AND field != ?".to_owned(),
             ),
             parameters: vec![Value::Text(term), Value::Text(excluded_field)],
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         }
     }
 
@@ -623,6 +632,7 @@ impl DocumentQueryV1 {
                 "SELECT document_id FROM exact_postings WHERE field = ? AND term = ?".to_owned(),
             ),
             parameters: vec![Value::Text(field), Value::Blob(term)],
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         }
     }
 }
@@ -632,50 +642,96 @@ impl DocumentQueryV1 {
 /// the only storage used for the set-operation work table.
 const ARTIFACT_UNION_COMPOUND_ARMS_V1: usize = 64;
 
-fn union_document_queries(queries: impl IntoIterator<Item = DocumentQueryV1>) -> DocumentQueryV1 {
-    let mut level = queries
+fn union_document_queries(
+    queries: impl IntoIterator<Item = DocumentQueryV1>,
+) -> Result<DocumentQueryV1, RetrievalPortError> {
+    let queries = queries
         .into_iter()
         .filter(|query| query.sql.is_some())
         .collect::<Vec<_>>();
-    if level.is_empty() {
-        return DocumentQueryV1::empty();
+    if queries.is_empty() {
+        return Ok(DocumentQueryV1::empty());
     }
+
+    // Keep each compound arm below SQLite's expression limit, while sharing
+    // equal bind values across arms. A large fuzzy/phrase request commonly
+    // repeats its encoded field, so retaining one bind slot for every textual
+    // occurrence needlessly crosses the portable 999-variable ceiling even
+    // though the request's distinct values remain bounded. Named parameters
+    // also remain safe when this query is embedded in the frequency probe.
+    let maximum_bound_value_bytes = queries
+        .iter()
+        .map(|query| query.maximum_bound_value_bytes)
+        .max()
+        .unwrap_or(ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1);
+    let mut parameters = Vec::new();
+    let mut level = queries
+        .into_iter()
+        .map(|query| {
+            let Some(sql) = query.sql else {
+                return Ok(String::new());
+            };
+            let sql = rewrite_union_query_parameters(&sql, &query.parameters, &mut parameters)?;
+            Ok(format!("SELECT document_id FROM ({sql})"))
+        })
+        .collect::<Result<Vec<_>, RetrievalPortError>>()?
+        .into_iter()
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
     while level.len() > 1 {
         level = level
             .chunks(ARTIFACT_UNION_COMPOUND_ARMS_V1)
-            .map(compound_union_document_queries)
+            .map(|queries| {
+                let sql = queries.join(" UNION ALL ");
+                format!("SELECT document_id FROM ({sql})")
+            })
             .collect();
     }
     let Some(root) = level.pop() else {
-        return DocumentQueryV1::empty();
+        return Ok(DocumentQueryV1::empty());
     };
-    DocumentQueryV1 {
-        sql: root
-            .sql
-            .map(|sql| format!("SELECT DISTINCT document_id FROM ({sql}) ORDER BY document_id")),
-        parameters: root.parameters,
-    }
+    Ok(DocumentQueryV1 {
+        sql: Some(format!(
+            "SELECT DISTINCT document_id FROM ({root}) ORDER BY document_id"
+        )),
+        parameters,
+        maximum_bound_value_bytes,
+    })
 }
 
-fn compound_union_document_queries(queries: &[DocumentQueryV1]) -> DocumentQueryV1 {
-    let mut sql = String::new();
-    let mut parameters = Vec::new();
-    for query in queries {
-        let Some(query_sql) = query.sql.as_deref() else {
+fn rewrite_union_query_parameters(
+    sql: &str,
+    query_parameters: &[Value],
+    parameters: &mut Vec<Value>,
+) -> Result<String, RetrievalPortError> {
+    let mut rewritten = String::with_capacity(sql.len());
+    let mut parameter_ordinal = 0usize;
+    for character in sql.chars() {
+        if character != '?' {
+            rewritten.push(character);
             continue;
-        };
-        if !sql.is_empty() {
-            sql.push_str(" UNION ALL ");
         }
-        sql.push_str("SELECT document_id FROM (");
-        sql.push_str(query_sql);
-        sql.push(')');
-        parameters.extend(query.parameters.iter().cloned());
+        let Some(value) = query_parameters.get(parameter_ordinal) else {
+            return Err(RetrievalPortError::Contract(
+                "document query SQL has more bind placeholders than values".to_owned(),
+            ));
+        };
+        let slot = if let Some(slot) = parameters.iter().position(|candidate| candidate == value) {
+            slot
+        } else {
+            parameters.push(value.clone());
+            parameters.len() - 1
+        };
+        rewritten.push_str(":d");
+        rewritten.push_str(&slot.to_string());
+        parameter_ordinal += 1;
     }
-    DocumentQueryV1 {
-        sql: Some(sql),
-        parameters,
+    if parameter_ordinal != query_parameters.len() {
+        return Err(RetrievalPortError::Contract(
+            "document query has values without bind placeholders".to_owned(),
+        ));
     }
+    Ok(rewritten)
 }
 
 fn visit_document_ids(
@@ -688,7 +744,11 @@ fn visit_document_ids(
             return Ok(());
         };
         ensure_sqlite_bind_capacity(0, query.parameters.len())?;
-        ensure_sqlite_bound_value_bytes(&query.parameters, std::iter::empty())?;
+        ensure_sqlite_bound_value_bytes(
+            query.maximum_bound_value_bytes,
+            &query.parameters,
+            std::iter::empty(),
+        )?;
         let mut statement = connection.prepare(sql).map_err(map_query_sql_error)?;
         let mut rows = statement
             .query(params_from_iter(query.parameters.iter()))
@@ -719,7 +779,11 @@ fn visit_lexical_rows(
             return Ok(());
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), terms.len())?;
-        ensure_sqlite_bound_value_bytes(&documents.parameters, terms.iter().map(String::as_str))?;
+        ensure_sqlite_bound_value_bytes(
+            documents.maximum_bound_value_bytes,
+            &documents.parameters,
+            terms.iter().map(String::as_str),
+        )?;
         let mut parameters =
             Vec::with_capacity(documents.parameters.len().saturating_add(terms.len()));
         let frequencies = if terms.is_empty() {
@@ -788,6 +852,34 @@ const ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1: usize = 999;
 /// individual SQLite call deterministically bounded instead.
 const ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1: usize =
     ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 * MAX_LEXICAL_QUERY_TERM_BYTES_V1;
+/// A phrase prefilter may legitimately name more documents than request text
+/// can occupy. Keep its one transient JSON1 bridge distinct from the generic
+/// query-input bound and below one eighth of the reader cache authority.
+const ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / 8;
+/// Bitmap queries may inspect only this many source-page shards per port call.
+/// The read port carries no execution-control handle, so this fixed work bound
+/// is the cancellation/deadline yield authority before control returns to the
+/// caller. A 4 KiB work unit leaves authority for blob decode and intersection.
+const ARTIFACT_NGRAM_QUERY_MAX_SHARDS_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / (4 * 1024);
+/// One encoded source-page shard is retained only while it is decoded and
+/// intersected. Keep that transient allocation below one eighth of the cache.
+const ARTIFACT_NGRAM_MAX_ENCODED_SHARD_BYTES_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / 8;
+/// The synchronous query may inspect at most one quarter of the reader cache
+/// in encoded shard bytes across all selected n-grams.
+const ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / 4;
+/// A sparse Roaring candidate can require containers and two-byte values in
+/// addition to its identifiers. Eight bytes per admitted identifier is a
+/// conservative authority that bounds the first (rarest) full union.
+const ARTIFACT_NGRAM_CANDIDATE_BITMAP_BYTES_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / 4;
+const ARTIFACT_NGRAM_CANDIDATE_BYTES_PER_DOCUMENT_V1: usize = 8;
+const ARTIFACT_NGRAM_MAX_CANDIDATES_V1: u64 = (ARTIFACT_NGRAM_CANDIDATE_BITMAP_BYTES_V1
+    / ARTIFACT_NGRAM_CANDIDATE_BYTES_PER_DOCUMENT_V1)
+    as u64;
 
 fn ensure_sqlite_bind_capacity(
     fixed_parameters: usize,
@@ -803,6 +895,7 @@ fn ensure_sqlite_bind_capacity(
 }
 
 fn ensure_sqlite_bound_value_bytes<'a>(
+    maximum_bytes: usize,
     fixed_parameters: &[Value],
     dynamic_text: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), RetrievalPortError> {
@@ -823,7 +916,7 @@ fn ensure_sqlite_bound_value_bytes<'a>(
                 .checked_add(value.len())
                 .ok_or(RetrievalPortError::BudgetExceeded)
         })?;
-    if total_bytes > ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1 {
+    if total_bytes > maximum_bytes {
         return Err(RetrievalPortError::BudgetExceeded);
     }
     Ok(())
@@ -832,30 +925,226 @@ fn ensure_sqlite_bound_value_bytes<'a>(
 /// The first fixed number of distinct n-grams forms a selective, bounded
 /// prefilter. It may admit a superset for a very long phrase; the row-level
 /// substring check remains the correctness authority before scoring.
-fn ngram_document_query(kind: i64, bytes: &[u8]) -> DocumentQueryV1 {
-    let ngrams = query_ngrams(bytes)
-        .into_iter()
-        .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
-        .collect::<Vec<_>>();
-    if ngrams.is_empty() {
-        return DocumentQueryV1::empty();
+fn ngram_document_query(
+    connection: &Connection,
+    kind: i64,
+    bytes: &[u8],
+    metrics: &ArtifactQueryMetricsV1,
+) -> Result<DocumentQueryV1, RetrievalPortError> {
+    hotpath::measure_block!("query.artifact.ngram.bitmap_query", {
+        let ngrams = query_ngrams(bytes)
+            .into_iter()
+            .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
+            .collect::<Vec<_>>();
+        if ngrams.is_empty() {
+            return Ok(DocumentQueryV1::empty());
+        }
+        let candidates = ngram_bitmap_candidates(connection, kind, &ngrams, metrics)?;
+        let encoded =
+            encode_ngram_candidate_json(&candidates, ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1)?;
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.artifact.ngram.query_candidates_total").inc(candidates.len());
+        Ok(DocumentQueryV1 {
+            sql: Some(
+                "SELECT CAST(value AS INTEGER) AS document_id FROM json_each(?) ORDER BY document_id"
+                    .to_owned(),
+            ),
+            parameters: vec![Value::Text(encoded)],
+            maximum_bound_value_bytes: ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1,
+        })
+    })
+}
+
+#[derive(Clone, Copy)]
+struct NgramSelectivityV1 {
+    ngram: u32,
+    cardinality: u64,
+}
+
+fn ngram_bitmap_candidates(
+    connection: &Connection,
+    kind: i64,
+    ngrams: &[u32],
+    _metrics: &ArtifactQueryMetricsV1,
+) -> Result<RoaringBitmap, RetrievalPortError> {
+    let mut remaining_shards = ARTIFACT_NGRAM_QUERY_MAX_SHARDS_V1;
+    let mut remaining_encoded_bytes = ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1;
+    let mut selectivities = Vec::with_capacity(ngrams.len());
+    let mut selectivity_statement = connection
+        .prepare(
+            "SELECT cardinality, length(documents) FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal LIMIT ?3",
+        )
+        .map_err(map_query_sql_error)?;
+    for ngram in ngrams {
+        let row_limit = remaining_shards
+            .checked_add(1)
+            .ok_or(RetrievalPortError::BudgetExceeded)?;
+        let mut rows = selectivity_statement
+            .query([
+                kind,
+                i64::from(*ngram),
+                i64::try_from(row_limit).map_err(contract_error)?,
+            ])
+            .map_err(map_query_sql_error)?;
+        let mut cardinality = 0u64;
+        let mut observed_shards = 0usize;
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            if observed_shards == remaining_shards {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
+            let shard_cardinality: i64 = row.get(0).map_err(map_query_sql_error)?;
+            let encoded_bytes: i64 = row.get(1).map_err(map_query_sql_error)?;
+            let shard_cardinality = u64::try_from(shard_cardinality).map_err(contract_error)?;
+            let encoded_bytes = usize::try_from(encoded_bytes).map_err(contract_error)?;
+            if shard_cardinality == 0 {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
+            charge_ngram_encoded_shard_bytes(
+                &mut remaining_encoded_bytes,
+                encoded_bytes,
+                ARTIFACT_NGRAM_MAX_ENCODED_SHARD_BYTES_V1,
+            )?;
+            cardinality = cardinality
+                .checked_add(shard_cardinality)
+                .ok_or(RetrievalPortError::BudgetExceeded)?;
+            observed_shards = observed_shards
+                .checked_add(1)
+                .ok_or(RetrievalPortError::BudgetExceeded)?;
+        }
+        drop(rows);
+        if cardinality == 0 {
+            return Ok(RoaringBitmap::new());
+        }
+        remaining_shards = remaining_shards
+            .checked_sub(observed_shards)
+            .ok_or(RetrievalPortError::BudgetExceeded)?;
+        selectivities.push(NgramSelectivityV1 {
+            ngram: *ngram,
+            cardinality,
+        });
     }
-    let placeholders = std::iter::repeat_n("?", ngrams.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut parameters = Vec::with_capacity(ngrams.len() + 2);
-    parameters.push(Value::Integer(kind));
-    parameters.extend(ngrams.iter().map(|ngram| Value::Integer(i64::from(*ngram))));
-    parameters.push(Value::Integer(ngrams.len() as i64));
-    DocumentQueryV1 {
-        sql: Some(format!(
-            "SELECT document_id FROM ngram_postings \
-             WHERE kind = ? AND ngram IN ({placeholders}) \
-             GROUP BY document_id HAVING COUNT(DISTINCT ngram) = ? \
-             ORDER BY document_id"
-        )),
-        parameters,
+    drop(selectivity_statement);
+    selectivities.sort_unstable_by_key(|selectivity| (selectivity.cardinality, selectivity.ngram));
+    if let Some(selectivity) = selectivities.first() {
+        ensure_ngram_candidate_cardinality(selectivity.cardinality)?;
     }
+
+    let mut candidates = None::<RoaringBitmap>;
+    #[cfg(feature = "hotpath")]
+    let mut observed_shards = 0u64;
+    #[cfg(feature = "hotpath")]
+    let mut observed_bytes = 0u64;
+    let mut statement = connection
+        .prepare(
+            "SELECT documents, cardinality FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal",
+        )
+        .map_err(map_query_sql_error)?;
+    for selectivity in selectivities {
+        let mut documents = RoaringBitmap::new();
+        let mut rows = statement
+            .query([kind, i64::from(selectivity.ngram)])
+            .map_err(map_query_sql_error)?;
+        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            let encoded: Vec<u8> = row.get(0).map_err(map_query_sql_error)?;
+            let cardinality: i64 = row.get(1).map_err(map_query_sql_error)?;
+            let shard = decode_ngram_bitmap(&encoded).map_err(map_query_artifact_error)?;
+            if i64::try_from(shard.len()).map_err(contract_error)? != cardinality {
+                return Err(RetrievalPortError::Contract(
+                    "lexical artifact ngram shard cardinality changed after verification"
+                        .to_owned(),
+                ));
+            }
+            if let Some(candidates) = candidates.as_ref() {
+                documents |= &shard & candidates;
+            } else {
+                documents |= shard;
+            }
+            ensure_ngram_candidate_cardinality(documents.len())?;
+            #[cfg(test)]
+            {
+                _metrics.observe_ngram_shard();
+                _metrics.observe_ngram_candidates(documents.len());
+            }
+            #[cfg(feature = "hotpath")]
+            {
+                observed_shards = observed_shards.saturating_add(1);
+                observed_bytes = observed_bytes.saturating_add(encoded.len() as u64);
+            }
+        }
+        drop(rows);
+        candidates = Some(documents);
+        if candidates.as_ref().is_none_or(RoaringBitmap::is_empty) {
+            break;
+        }
+    }
+    let candidates = candidates.unwrap_or_default();
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("query.artifact.ngram.query_shards_total").inc(observed_shards);
+        hotpath::gauge!("query.artifact.ngram.query_bytes_total").inc(observed_bytes);
+    }
+    Ok(candidates)
+}
+
+fn ensure_ngram_candidate_cardinality(cardinality: u64) -> Result<(), RetrievalPortError> {
+    if cardinality > ARTIFACT_NGRAM_MAX_CANDIDATES_V1 {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn charge_ngram_encoded_shard_bytes(
+    remaining_bytes: &mut usize,
+    shard_bytes: usize,
+    maximum_shard_bytes: usize,
+) -> Result<(), RetrievalPortError> {
+    if shard_bytes > maximum_shard_bytes {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    *remaining_bytes = remaining_bytes
+        .checked_sub(shard_bytes)
+        .ok_or(RetrievalPortError::BudgetExceeded)?;
+    Ok(())
+}
+
+fn encode_ngram_candidate_json(
+    candidates: &RoaringBitmap,
+    maximum_bytes: usize,
+) -> Result<String, RetrievalPortError> {
+    if maximum_bytes < 2 {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    let capacity = usize::try_from(candidates.len())
+        .map_err(contract_error)?
+        .checked_mul(11)
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or(RetrievalPortError::BudgetExceeded)?
+        .min(maximum_bytes);
+    let mut encoded = String::with_capacity(capacity);
+    encoded.push('[');
+    for (ordinal, document) in candidates.iter().enumerate() {
+        let digits = if document == 0 {
+            1
+        } else {
+            usize::try_from(document.ilog10()).map_err(contract_error)? + 1
+        };
+        let additional = digits + usize::from(ordinal != 0);
+        if encoded
+            .len()
+            .checked_add(additional)
+            .and_then(|bytes| bytes.checked_add(1))
+            .is_none_or(|bytes| bytes > maximum_bytes)
+        {
+            return Err(RetrievalPortError::BudgetExceeded);
+        }
+        if ordinal != 0 {
+            encoded.push(',');
+        }
+        write!(&mut encoded, "{document}").map_err(contract_error)?;
+    }
+    encoded.push(']');
+    Ok(encoded)
 }
 
 impl<'a> ArtifactQueryV1<'a> {
@@ -880,21 +1169,23 @@ impl<'a> ArtifactQueryV1<'a> {
         let fuzzy = self.fuzzy_expansions(request)?;
         let terms = lexical_terms(request, &fuzzy);
         let stats = self.lexical_stats(&terms)?;
-        let phrase_queries = request
-            .phrases
-            .iter()
-            .map(|phrase| {
-                let normalized = normalize_lexical(phrase);
-                let query = ngram_document_query(NGRAM_NORMALIZED, normalized.as_bytes());
-                (normalized, query)
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut phrase_queries = BTreeMap::new();
+        for phrase in &request.phrases {
+            let normalized = normalize_lexical(phrase);
+            let query = ngram_document_query(
+                self.connection,
+                NGRAM_NORMALIZED,
+                normalized.as_bytes(),
+                &self.metrics,
+            )?;
+            phrase_queries.insert(normalized, query);
+        }
         let mut phrase_frequencies = phrase_queries
             .keys()
             .cloned()
             .map(|phrase| (phrase, 0usize))
             .collect::<BTreeMap<_, _>>();
-        let phrase_documents = union_document_queries(phrase_queries.values().cloned());
+        let phrase_documents = union_document_queries(phrase_queries.values().cloned())?;
         visit_lexical_rows(
             self.connection,
             &phrase_documents,
@@ -1127,7 +1418,7 @@ impl<'a> ArtifactQueryV1<'a> {
             ));
         }
         sources.extend(phrase_queries.values().cloned());
-        Ok(union_document_queries(sources))
+        union_document_queries(sources)
     }
 
     fn exact_documents(
@@ -1143,13 +1434,17 @@ impl<'a> ArtifactQueryV1<'a> {
                     | ExactFieldV1::CompilerOrRuntimeError
             ) {
                 sources.push(ngram_document_query(
+                    self.connection,
                     NGRAM_NORMALIZED,
                     &literal.original_bytes,
-                ));
+                    &self.metrics,
+                )?);
                 sources.push(ngram_document_query(
+                    self.connection,
                     NGRAM_RAW_OVERRIDE,
                     &literal.original_bytes,
-                ));
+                    &self.metrics,
+                )?);
             }
             let field = encode_exact_field(literal.field).map_err(map_query_artifact_error)?;
             sources.push(DocumentQueryV1::exact(
@@ -1157,7 +1452,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 literal.canonical_bytes.clone(),
             ));
         }
-        Ok(union_document_queries(sources))
+        union_document_queries(sources)
     }
 
     fn visit_documents(
@@ -1272,7 +1567,11 @@ impl<'a> ArtifactQueryV1<'a> {
         terms: &BTreeSet<String>,
     ) -> Result<LexicalStatsCacheV1, RetrievalPortError> {
         ensure_sqlite_bind_capacity(0, terms.len())?;
-        ensure_sqlite_bound_value_bytes(&[], terms.iter().map(String::as_str))?;
+        ensure_sqlite_bound_value_bytes(
+            ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
+            &[],
+            terms.iter().map(String::as_str),
+        )?;
         let mut field_totals = BTreeMap::new();
         self.metrics.probe();
         let mut statement = self
@@ -1993,6 +2292,9 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
         source_span: row.anchor.source_span,
         logical_path: row.logical_path,
         sanitized_text: row.sanitized_text,
+        simple_name: row.symbol_simple_name,
+        qualified_name: row.symbol_qualified_name,
+        kind: row.symbol_kind,
     }
 }
 
@@ -2005,7 +2307,8 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
-        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(_)
+        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Corrupt(error)
         | CodeLexicalArtifactErrorV1::Io(error)
         | CodeLexicalArtifactErrorV1::Missing(error) => {
@@ -2019,17 +2322,25 @@ mod tests {
     use std::cmp::Reverse;
     use std::collections::{BTreeSet, BinaryHeap};
     use std::path::PathBuf;
+    #[cfg(feature = "hotpath")]
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use roaring::RoaringBitmap;
     use rusqlite::{Connection, params};
     use tracedecay_domain::ManifestDigest;
     use tracedecay_private_fs::open_private_file;
 
+    use super::super::format::encode_ngram_bitmap;
+    #[cfg(feature = "hotpath")]
+    use super::ArtifactConnectionMutex;
     use super::{
-        ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
-        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
-        CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
-        map_query_artifact_error, ngram_document_query, query_ngrams, retain_bounded,
+        ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
+        ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1, ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
+        ArtifactQueryMetricsV1, CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
+        DocumentQueryV1, NGRAM_NORMALIZED, charge_ngram_encoded_shard_bytes,
+        encode_ngram_candidate_json, ensure_ngram_candidate_cardinality, map_query_artifact_error,
+        ngram_bitmap_candidates, ngram_document_query, query_ngrams, retain_bounded,
         union_document_queries, visit_document_ids, visit_lexical_rows,
     };
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -2091,6 +2402,23 @@ mod tests {
         })
         .expect("SQLite stream succeeds");
         documents
+    }
+
+    #[cfg(feature = "hotpath")]
+    #[test]
+    fn repeated_feature_on_reader_connections_use_plain_mutexes_and_preserve_queries() {
+        for expected in 0..16i64 {
+            let connection: ArtifactConnectionMutex<Connection> =
+                StdMutex::new(Connection::open_in_memory().expect("in-memory SQLite"));
+
+            let value = connection
+                .lock()
+                .expect("reader connection lock")
+                .query_row("SELECT ?1", [expected], |row| row.get::<_, i64>(0))
+                .expect("query through reader connection lock");
+
+            assert_eq!(value, expected);
+        }
     }
 
     #[test]
@@ -2249,10 +2577,14 @@ mod tests {
         connection
             .execute_batch(
                 "CREATE TABLE ngram_postings (
+                    page_ordinal INTEGER NOT NULL,
                     kind INTEGER NOT NULL,
                     ngram INTEGER NOT NULL,
-                    document_id INTEGER NOT NULL
-                );",
+                    documents BLOB NOT NULL,
+                    cardinality INTEGER NOT NULL,
+                    PRIMARY KEY(page_ordinal, kind, ngram)
+                ) WITHOUT ROWID;
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);",
             )
             .expect("ngram fixture schema");
         let phrase = b"abcdefghijklmnopqrstuvw";
@@ -2262,29 +2594,129 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ngrams.len(), ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
         for (ordinal, ngram) in ngrams.iter().enumerate() {
+            let documents = if ordinal + 1 < ngrams.len() {
+                RoaringBitmap::from_iter([1, 2])
+            } else {
+                RoaringBitmap::from_iter([1])
+            };
+            let encoded = encode_ngram_bitmap(&documents).expect("encode ngram shard");
             connection
                 .execute(
-                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, 1)",
-                    params![NGRAM_NORMALIZED, i64::from(*ngram)],
+                    "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (0, ?1, ?2, ?3, ?4)",
+                    params![NGRAM_NORMALIZED, i64::from(*ngram), encoded, documents.len() as i64],
                 )
                 .expect("complete phrase posting");
-            if ordinal + 1 < ngrams.len() {
-                connection
-                    .execute(
-                        "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, 2)",
-                        params![NGRAM_NORMALIZED, i64::from(*ngram)],
-                    )
-                    .expect("incomplete phrase posting");
-            }
         }
 
-        let query = ngram_document_query(NGRAM_NORMALIZED, phrase);
+        let metrics = ArtifactQueryMetricsV1::default();
+        let query = ngram_document_query(&connection, NGRAM_NORMALIZED, phrase, &metrics)
+            .expect("build ngram bitmap query");
 
-        assert_eq!(
-            query.parameters.len(),
-            ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1 + 2
-        );
+        assert_eq!(query.parameters.len(), 1);
         assert_eq!(streamed_documents(&connection, &query), vec![1]);
+    }
+
+    #[test]
+    fn ngram_bitmap_query_processes_rare_shards_first_and_short_circuits_common_work() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        connection
+            .execute_batch(
+                "CREATE TABLE ngram_postings (
+                    page_ordinal INTEGER NOT NULL,
+                    kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL,
+                    documents BLOB NOT NULL,
+                    cardinality INTEGER NOT NULL,
+                    PRIMARY KEY(page_ordinal, kind, ngram)
+                ) WITHOUT ROWID;
+                CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal);",
+            )
+            .expect("ngram fixture schema");
+        for (page_ordinal, ngram, documents) in [
+            (0i64, 10u32, vec![1u32, 2]),
+            (1, 10, vec![3, 4]),
+            (2, 10, vec![5, 6]),
+            (0, 20, vec![2]),
+            (1, 30, vec![3]),
+        ] {
+            let bitmap = RoaringBitmap::from_iter(documents);
+            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram shard");
+            connection
+                .execute(
+                    "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![page_ordinal, NGRAM_NORMALIZED, i64::from(ngram), encoded, bitmap.len() as i64],
+                )
+                .expect("seed ngram shard");
+        }
+
+        let bounded_metrics = ArtifactQueryMetricsV1::default();
+        let matching =
+            ngram_bitmap_candidates(&connection, NGRAM_NORMALIZED, &[10, 20], &bounded_metrics)
+                .expect("intersect common and rare shards");
+        assert_eq!(matching.iter().collect::<Vec<_>>(), [2]);
+        assert_eq!(bounded_metrics.ngram_peak_candidates.get(), 1);
+        assert_eq!(bounded_metrics.ngram_decoded_shards.get(), 4);
+
+        let short_circuit_metrics = ArtifactQueryMetricsV1::default();
+        let empty = ngram_bitmap_candidates(
+            &connection,
+            NGRAM_NORMALIZED,
+            &[10, 20, 30],
+            &short_circuit_metrics,
+        )
+        .expect("short-circuit disjoint rare shards");
+        assert!(empty.is_empty());
+        assert_eq!(short_circuit_metrics.ngram_peak_candidates.get(), 1);
+        assert_eq!(
+            short_circuit_metrics.ngram_decoded_shards.get(),
+            2,
+            "the three-page common ngram must not be decoded after rare shards empty the candidate set"
+        );
+    }
+
+    #[test]
+    fn ngram_candidate_json_honors_its_distinct_transient_byte_authority() {
+        let candidates = RoaringBitmap::from_iter([1, 20, 300]);
+        let exact = "[1,20,300]";
+        assert_eq!(
+            encode_ngram_candidate_json(&candidates, exact.len())
+                .expect("exact candidate JSON boundary"),
+            exact
+        );
+        assert_eq!(
+            encode_ngram_candidate_json(&candidates, exact.len() - 1),
+            Err(crate::retrieval::ports::RetrievalPortError::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn ngram_candidate_bitmap_honors_its_reader_memory_authority() {
+        assert_eq!(
+            ensure_ngram_candidate_cardinality(ARTIFACT_NGRAM_MAX_CANDIDATES_V1),
+            Ok(())
+        );
+        assert_eq!(
+            ensure_ngram_candidate_cardinality(ARTIFACT_NGRAM_MAX_CANDIDATES_V1 + 1),
+            Err(crate::retrieval::ports::RetrievalPortError::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn ngram_query_rejects_cumulative_encoded_shards_past_its_authority() {
+        let mut remaining = 40usize;
+        for _ in 0..8 {
+            charge_ngram_encoded_shard_bytes(&mut remaining, 5, 5)
+                .expect("individually valid encoded shard");
+        }
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            charge_ngram_encoded_shard_bytes(&mut remaining, 1, 5),
+            Err(crate::retrieval::ports::RetrievalPortError::BudgetExceeded)
+        );
+        assert_eq!(
+            remaining, 0,
+            "a refused shard must not consume the retained query authority"
+        );
     }
 
     #[test]
@@ -2316,7 +2748,8 @@ mod tests {
             DocumentQueryV1::term_except("render".to_owned(), "subtoken".to_owned()),
             DocumentQueryV1::term_except("renderer".to_owned(), "subtoken".to_owned()),
             DocumentQueryV1::term("subtoken".to_owned(), "render".to_owned()),
-        ]);
+        ])
+        .expect("small document union");
 
         assert_eq!(streamed_documents(&connection, &query), vec![1, 2, 3]);
         assert_eq!(
@@ -2325,7 +2758,8 @@ mod tests {
                 &union_document_queries([DocumentQueryV1::term(
                     "subtoken".to_owned(),
                     "render".to_owned(),
-                )]),
+                )])
+                .expect("single document union"),
             ),
             vec![3],
             "one source query must preserve bitmap-like candidate deduplication"
@@ -2358,7 +2792,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let query = union_document_queries(sources);
+        let query = union_document_queries(sources).expect("large document union");
+        assert_eq!(
+            query.parameters.len(),
+            source_count as usize + 1,
+            "repeated field binds share one bounded SQLite parameter slot"
+        );
 
         assert_eq!(
             streamed_documents(&connection, &query),
@@ -2469,6 +2908,7 @@ mod tests {
         let documents = DocumentQueryV1 {
             sql: Some("SELECT ? AS document_id".to_owned()),
             parameters: vec![rusqlite::types::Value::Integer(1)],
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         };
         let terms = (0..ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1)
             .map(|term| format!("term-{term}"))
@@ -2495,6 +2935,7 @@ mod tests {
         let documents = DocumentQueryV1 {
             sql: Some("SELECT 1 AS document_id".to_owned()),
             parameters: Vec::new(),
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
         };
         let per_term_bytes =
             ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1 / ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 + 1;

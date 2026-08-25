@@ -2,7 +2,18 @@
 
 use tracedecay_application::ResolvedScope;
 
-use super::super::LatestCompleteCodeIndexV1;
+use super::super::{LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1};
+
+pub(in crate::daemon::code_index_scheduler) fn text_matches_scope_identity(
+    latest: &LatestCodeTextGenerationV1,
+    scope: &ResolvedScope,
+) -> bool {
+    let metadata = latest.metadata();
+    scope.validate().is_ok()
+        && metadata.manifest().project_id == scope.project_id
+        && metadata.snapshot().repository == scope.repository_id
+        && metadata.snapshot().worktree.as_ref() == Some(&scope.worktree_id)
+}
 
 /// The serving scope gate: project, repository, and worktree must equal the
 /// admitted scope's checkout identity. It admits only canonical scope digests.

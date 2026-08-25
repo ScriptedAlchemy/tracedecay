@@ -5,6 +5,72 @@ use super::*;
 const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
 const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 
+fn resolve_pr_comparison_commit(
+    repo: &gix::Repository,
+    requested: &str,
+) -> std::result::Result<gix::ObjectId, String> {
+    if requested == "HEAD" {
+        return repo
+            .rev_parse_single(requested)
+            .map_err(|error| format!("cannot resolve '{requested}': {error}"))?
+            .object()
+            .map_err(|error| format!("cannot read object for '{requested}': {error}"))?
+            .peel_to_commit()
+            .map(|commit| commit.id)
+            .map_err(|error| format!("cannot peel '{requested}' to commit: {error}"));
+    }
+    let local = exact_reference_commit(repo, &format!("refs/heads/{requested}"), requested)?;
+    let remote =
+        exact_reference_commit(repo, &format!("refs/remotes/origin/{requested}"), requested)?;
+    match (local, remote) {
+        (Some(local), Some(remote)) if local != remote => {
+            let merge_base = repo.merge_base(local, remote).map_err(|error| {
+                format!("cannot compare local and remote tips for '{requested}': {error}")
+            })?;
+            if merge_base == local {
+                Ok(remote)
+            } else if merge_base == remote {
+                Ok(local)
+            } else {
+                Err(format!(
+                    "branch '{requested}' has diverged local and origin tips; pass 'refs/heads/{requested}' or 'origin/{requested}' explicitly"
+                ))
+            }
+        }
+        (Some(local), _) => Ok(local),
+        (_, Some(remote)) => Ok(remote),
+        (None, None) => repo
+            .rev_parse_single(requested)
+            .map_err(|error| format!("cannot resolve '{requested}': {error}"))?
+            .object()
+            .map_err(|error| format!("cannot read object for '{requested}': {error}"))?
+            .peel_to_commit()
+            .map(|commit| commit.id)
+            .map_err(|error| format!("cannot peel '{requested}' to commit: {error}")),
+    }
+}
+
+fn exact_reference_commit(
+    repo: &gix::Repository,
+    full_name: &str,
+    requested: &str,
+) -> std::result::Result<Option<gix::ObjectId>, String> {
+    let Ok(full_name) = gix::refs::FullName::try_from(full_name) else {
+        return Ok(None);
+    };
+    let reference = repo
+        .try_find_reference(&full_name)
+        .map_err(|error| format!("cannot inspect '{requested}': {error}"))?;
+    reference
+        .map(|mut reference| {
+            reference
+                .peel_to_commit()
+                .map(|commit| commit.id)
+                .map_err(|error| format!("cannot peel '{requested}' to commit: {error}"))
+        })
+        .transpose()
+}
+
 /// Diff two git refs and return changed file paths with coarse status.
 pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
@@ -37,20 +103,12 @@ pub(super) fn git_pr_comparison_controlled(
     let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
     check_git_pr_cancelled(cancelled)?;
     let base_commit = repo
-        .rev_parse_single(base_ref)
-        .map_err(|e| format!("cannot resolve '{base_ref}': {e}"))?
-        .object()
-        .map_err(|e| format!("cannot read object for '{base_ref}': {e}"))?
-        .peel_to_commit()
-        .map_err(|e| format!("cannot peel '{base_ref}' to commit: {e}"))?;
+        .find_commit(resolve_pr_comparison_commit(&repo, base_ref)?)
+        .map_err(|error| format!("cannot read commit for '{base_ref}': {error}"))?;
     check_git_pr_cancelled(cancelled)?;
     let head_commit = repo
-        .rev_parse_single(head_ref)
-        .map_err(|e| format!("cannot resolve '{head_ref}': {e}"))?
-        .object()
-        .map_err(|e| format!("cannot read object for '{head_ref}': {e}"))?
-        .peel_to_commit()
-        .map_err(|e| format!("cannot peel '{head_ref}' to commit: {e}"))?;
+        .find_commit(resolve_pr_comparison_commit(&repo, head_ref)?)
+        .map_err(|error| format!("cannot read commit for '{head_ref}': {error}"))?;
     let base_oid = base_commit.id.to_string();
     let head_oid = head_commit.id.to_string();
     check_git_pr_cancelled(cancelled)?;
@@ -483,6 +541,143 @@ mod tests {
         assert_eq!(paths, ["feature.txt"]);
         assert_eq!(comparison.commits.len(), 1);
         assert_eq!(comparison.commits[0]["subject"], "feature");
+    }
+
+    #[test]
+    fn pr_comparison_resolves_a_remote_only_branch_by_human_name() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        test_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        test_git(root, &["switch", "--detach", "HEAD"]);
+        test_git(root, &["branch", "-D", "main"]);
+        test_git(root, &["switch", "-c", "feature"]);
+        std::fs::write(root.join("feature.txt"), "feature\n").expect("write feature");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "feature"]);
+
+        let comparison = git_pr_comparison(root, "main", "feature")
+            .expect("a human branch name resolves its remote-tracking tip");
+        let paths = comparison
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["feature.txt"]);
+
+        let explicit = git_pr_comparison(root, "origin/main", "feature")
+            .expect("an explicit remote-tracking ref resolves without an object id");
+        let explicit_paths = explicit
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(explicit_paths, ["feature.txt"]);
+    }
+
+    #[test]
+    fn pr_comparison_prefers_the_descendant_remote_tip_for_a_human_branch_name() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        let local_main = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("read local main");
+        assert!(local_main.status.success());
+        let local_main = String::from_utf8(local_main.stdout)
+            .expect("UTF-8 oid")
+            .trim()
+            .to_owned();
+
+        std::fs::write(root.join("remote.txt"), "remote advance\n").expect("write remote file");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "remote advance"]);
+        test_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        test_git(root, &["reset", "--hard", &local_main]);
+        test_git(
+            root,
+            &["switch", "-c", "feature", "refs/remotes/origin/main"],
+        );
+        std::fs::write(root.join("feature.txt"), "feature\n").expect("write feature");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "feature"]);
+
+        let comparison = git_pr_comparison(root, "main", "feature")
+            .expect("a human branch name selects the newer remote-tracking tip");
+        let paths = comparison
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["feature.txt"]);
+    }
+
+    #[test]
+    fn pr_comparison_refuses_to_guess_between_diverged_local_and_remote_tips() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        test_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::write(root.join("local.txt"), "local\n").expect("write local file");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "local advance"]);
+        test_git(root, &["switch", "--detach", "refs/remotes/origin/main"]);
+        std::fs::write(root.join("remote.txt"), "remote\n").expect("write remote file");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "remote advance"]);
+        test_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        test_git(root, &["switch", "main"]);
+
+        let Err(error) = git_pr_comparison(root, "main", "HEAD") else {
+            panic!("diverged human branch names must require an explicit ref");
+        };
+        assert!(
+            error.contains("has diverged local and origin tips"),
+            "typed ambiguity names both competing authorities: {error}"
+        );
+    }
+
+    #[test]
+    fn pr_comparison_default_head_never_aliases_the_remote_default_branch() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        test_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        test_git(
+            root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        test_git(root, &["switch", "-c", "feature"]);
+        std::fs::write(root.join("feature.txt"), "feature\n").expect("write feature");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "feature"]);
+
+        let comparison = git_pr_comparison(root, "main", "HEAD")
+            .expect("HEAD means the current checkout, never origin/HEAD");
+        let paths = comparison
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["feature.txt"]);
     }
 
     #[test]

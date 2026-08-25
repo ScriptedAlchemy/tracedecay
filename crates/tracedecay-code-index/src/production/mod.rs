@@ -76,9 +76,11 @@ mod generation_statistics;
 pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod lexical_page_source;
 pub use lexical_page_source::{
-    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    VerifiedSealedTextGenerationMetadataV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{
@@ -122,7 +124,10 @@ impl CodeIndexProductionConfigV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeIndexCapturedFileV1 {
     pub file_occurrence_id: FileOccurrenceId,
-    pub sanitized_bytes: Vec<u8>,
+    /// Canonical sanitized source allocation retained by the snapshot while
+    /// production reads it. Domain intake materializes only bounded per-file
+    /// `Vec` inputs where its serializable contract requires ownership.
+    pub sanitized_bytes: Arc<[u8]>,
     pub sensitivity_level: SensitivityLevelV1,
 }
 
@@ -261,10 +266,10 @@ struct FileGenerationArtifactsV1 {
 }
 
 enum IncrementFileMaterializationV1 {
-    CarryForward(FileGenerationArtifactsV1),
+    CarryForward(Arc<FileGenerationArtifactsV1>),
     ReExtracted {
         reuse_key: ManifestDigest,
-        artifact: FileGenerationArtifactsV1,
+        artifact: Arc<FileGenerationArtifactsV1>,
         fallback: bool,
     },
     Deleted,
@@ -295,7 +300,6 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 /// it unwind out of the pool instead aborted the whole fan-out and surfaced in
 /// the daemon only as an opaque `JoinError`, so a single malformed file took
 /// down every other file's work in the same generation.
-#[hotpath::measure]
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
@@ -341,11 +345,15 @@ where
 pub struct PhysicalCodeArtifactPoolStatsV1 {
     pub inserted: u64,
     pub reused: u64,
+    /// Artifact allocations still owned by a published or staged generation.
+    /// The physical pool indexes these allocations weakly and never extends
+    /// their lifetime.
+    pub resident: u64,
 }
 
 #[derive(Default)]
 struct PhysicalCodeArtifactPoolStateV1 {
-    artifacts: BTreeMap<ManifestDigest, Arc<FileGenerationArtifactsV1>>,
+    artifacts: BTreeMap<ManifestDigest, Weak<FileGenerationArtifactsV1>>,
     insertion_order: VecDeque<ManifestDigest>,
     inserted: u64,
     reused: u64,
@@ -359,62 +367,64 @@ pub struct SharedPhysicalCodeArtifactPoolV1 {
     state: Arc<Mutex<PhysicalCodeArtifactPoolStateV1>>,
 }
 
-#[hotpath::measure]
-fn clone_arc_under_lock<S, T>(
+fn upgrade_weak_under_lock<S, T>(
     state: &Mutex<S>,
-    select: impl FnOnce(&S) -> Option<Arc<T>>,
+    select: impl FnOnce(&S) -> Option<Weak<T>>,
 ) -> Option<Arc<T>> {
     let state = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    select(&state)
+    select(&state).and_then(|value| value.upgrade())
 }
 
 impl SharedPhysicalCodeArtifactPoolV1 {
-    #[hotpath::measure]
     fn reuse(
         &self,
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
-    ) -> Option<FileGenerationArtifactsV1> {
-        let artifact = {
-            let _coordination = worker.pool_coordination();
-            clone_arc_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
-        }?;
-        let rebound = artifact.rematerialize_for_file(file).ok()?;
-        {
-            let _coordination = worker.pool_coordination();
+    ) -> Option<Arc<FileGenerationArtifactsV1>> {
+        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
+            let artifact = {
+                let _coordination = worker.pool_coordination();
+                upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
+            }?;
+            let rebound = Arc::new(artifact.rematerialize_for_file(file).ok()?);
+            {
+                let _coordination = worker.pool_coordination();
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.reused = state.reused.saturating_add(1);
+            }
+            Some(rebound)
+        })
+    }
+
+    /// Record one generation-owned artifact under its physical reuse key.
+    /// The pool retains only a weak index entry, so indexing a cold generation
+    /// never deep-clones or pins the parsed/chunked payload.
+    fn insert(&self, key: ManifestDigest, artifact: &Arc<FileGenerationArtifactsV1>) {
+        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.insert", {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.reused = state.reused.saturating_add(1);
-        }
-        Some(rebound)
-    }
-
-    /// Record one artifact under its physical reuse key. The artifact is
-    /// cloned only when the key is actually admitted, so re-recording an
-    /// already-pooled key (every warm rebuild) costs a lock, not a deep copy.
-    #[hotpath::measure]
-    fn insert(&self, key: ManifestDigest, artifact: &FileGenerationArtifactsV1) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.artifacts.contains_key(&key) {
-            return;
-        }
-        while state.artifacts.len() >= MAX_PHYSICAL_CODE_ARTIFACTS {
-            let Some(evicted) = state.insertion_order.pop_front() else {
-                break;
-            };
-            state.artifacts.remove(&evicted);
-        }
-        state.insertion_order.push_back(key.clone());
-        state.artifacts.insert(key, Arc::new(artifact.clone()));
-        state.inserted = state.inserted.saturating_add(1);
+            if let Some(retained) = state.artifacts.get_mut(&key) {
+                *retained = Arc::downgrade(artifact);
+                return;
+            }
+            while state.artifacts.len() >= MAX_PHYSICAL_CODE_ARTIFACTS {
+                let Some(evicted) = state.insertion_order.pop_front() else {
+                    break;
+                };
+                state.artifacts.remove(&evicted);
+            }
+            state.insertion_order.push_back(key.clone());
+            state.artifacts.insert(key, Arc::downgrade(artifact));
+            state.inserted = state.inserted.saturating_add(1);
+        })
     }
 
     pub fn stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
@@ -425,31 +435,40 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         PhysicalCodeArtifactPoolStatsV1 {
             inserted: state.inserted,
             reused: state.reused,
+            resident: u64::try_from(
+                state
+                    .artifacts
+                    .values()
+                    .filter(|artifact| artifact.strong_count() > 0)
+                    .count(),
+            )
+            .unwrap_or(u64::MAX),
         }
     }
 }
 
 impl FileGenerationArtifactsV1 {
-    #[hotpath::measure]
     fn rematerialize_for_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
     ) -> Result<Self, ChunkingFailureV1> {
-        let target = file.validated_file();
-        let artifacts = self.artifacts.rematerialize_for_generation(
-            target.generation_id.clone(),
-            target.file.file_occurrence_id.clone(),
-        )?;
-        let exact_authority = self
-            .exact_authority
-            .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
-        let extraction = rebind_extraction_batch(&self.authority, &self.extraction, file)
-            .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
-        Ok(Self {
-            authority: file.authority().clone(),
-            extraction,
-            artifacts,
-            exact_authority,
+        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.rematerialize", {
+            let target = file.validated_file();
+            let artifacts = self.artifacts.rematerialize_for_generation(
+                target.generation_id.clone(),
+                target.file.file_occurrence_id.clone(),
+            )?;
+            let exact_authority = self
+                .exact_authority
+                .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
+            let extraction = rebind_extraction_batch(&self.authority, &self.extraction, file)
+                .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
+            Ok(Self {
+                authority: file.authority().clone(),
+                extraction,
+                artifacts,
+                exact_authority,
+            })
         })
     }
 }
@@ -465,7 +484,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     snapshot: SanitizedCodeSnapshotV1,
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_roster: IgnoredSourceRosterV1,
-    files: Vec<FileGenerationArtifactsV1>,
+    files: Vec<Arc<FileGenerationArtifactsV1>>,
     chunks: GenerationChunkManifestV1,
     symbols: GenerationSymbolIndexV1,
     lineage: Vec<SymbolLineageCandidateV1>,
@@ -965,7 +984,7 @@ impl CodeIndexPublishedGenerationV1 {
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
 
-        let mut files = self.files.iter().collect::<Vec<_>>();
+        let mut files = self.files.iter().map(Arc::as_ref).collect::<Vec<_>>();
         files.sort_by(|left, right| {
             left.artifacts
                 .chunks
@@ -987,41 +1006,44 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|candidate| (&candidate.file_occurrence_id, candidate))
             .collect::<HashMap<_, _>>();
-        collect_bounded_ordered(&files, |file, _worker| {
-            file.artifacts
-                .validate()
-                .map_err(CodeIndexProductionErrorV1::Chunk)?;
-            let occurrence = occurrences_by_id
-                .get(&file.artifacts.chunks.document.file_occurrence_id)
-                .copied();
-            if file.authority.project_id != self.manifest.project_id {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "published file authority project does not match the generation manifest"
-                        .to_owned(),
-                ));
-            }
-            if file.authority.repository_id != self.snapshot.repository
-                || file.authority.worktree_id != self.snapshot.worktree
-                || file.authority.reference != self.snapshot.reference
-                || occurrence.is_none_or(|occurrence| {
-                    occurrence.logical_path != file.authority.logical_path
-                        || occurrence.content_digest != file.authority.content_digest
-                })
-                || file.extraction.content_digest != file.authority.content_digest
-                || file.extraction.generation_id != self.manifest.generation_id
-                || file.extraction.file_occurrence_id
-                    != file.artifacts.chunks.document.file_occurrence_id
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
+        hotpath::measure_block!(
+            "code_index.collect.validate_files",
+            collect_bounded_ordered(&files, |file, _worker| {
+                file.artifacts
+                    .validate()
+                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                let occurrence = occurrences_by_id
+                    .get(&file.artifacts.chunks.document.file_occurrence_id)
+                    .copied();
+                if file.authority.project_id != self.manifest.project_id {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "published file authority project does not match the generation manifest"
+                            .to_owned(),
+                    ));
+                }
+                if file.authority.repository_id != self.snapshot.repository
+                    || file.authority.worktree_id != self.snapshot.worktree
+                    || file.authority.reference != self.snapshot.reference
+                    || occurrence.is_none_or(|occurrence| {
+                        occurrence.logical_path != file.authority.logical_path
+                            || occurrence.content_digest != file.authority.content_digest
+                    })
+                    || file.extraction.content_digest != file.authority.content_digest
+                    || file.extraction.generation_id != self.manifest.generation_id
+                    || file.extraction.file_occurrence_id
+                        != file.artifacts.chunks.document.file_occurrence_id
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
                     "extraction authority does not match its published project, repository, scope, path, or content"
                         .to_owned(),
                 ));
-            }
-            file.exact_authority
-                .validate_all(&file.artifacts.chunks.chunks)
-                .map_err(CodeIndexProductionErrorV1::Chunk)?;
-            Ok(())
-        })?;
+                }
+                file.exact_authority
+                    .validate_all(&file.artifacts.chunks.chunks)
+                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                Ok(())
+            })
+        )?;
         validate_import_evidence(&files, &self.imports)?;
         let mut chunks = files
             .iter()
@@ -1249,7 +1271,7 @@ where
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let started = crate::hotpath_observe::start_ttfq();
+        let started = crate::hotpath_observe::start_build_to_queryable();
         crate::hotpath_observe::record_generation_state("building");
         crate::hotpath_observe::record_rebuild_state("unknown");
         Self::checkpoint(control)?;
@@ -1448,7 +1470,7 @@ where
         self.publication
             .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
         crate::hotpath_observe::record_generation_state("queryable");
-        crate::hotpath_observe::record_ttfq(started);
+        crate::hotpath_observe::record_build_to_queryable(started);
         Ok(candidate)
     }
 
@@ -1497,7 +1519,6 @@ where
     /// snapshot order after the parallel sweep, and the key binds the same
     /// inputs either way, so recomputing it per recording was pure waste.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure]
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
@@ -1512,148 +1533,155 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
-    ) -> Result<(ManifestDigest, FileGenerationArtifactsV1), CodeIndexProductionErrorV1> {
-        Self::checkpoint(control)?;
-        let captured = captured_files
-            .get(&file.file_occurrence_id)
-            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-        let receipt_bound = intake
-            .bind_file(
-                capability,
-                &config.project_id,
-                ValidatedCodeFileV1 {
-                    generation_id: manifest.generation_id.clone(),
-                    file: file.clone(),
-                    snapshot_digest: capability.snapshot().intake_digest.clone(),
-                    sanitized_bytes: captured.sanitized_bytes.clone(),
-                },
-            )
-            .map_err(CodeIndexProductionErrorV1::Intake)?;
-        let language = file.language.as_ref().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "present snapshot file has no declared language".to_owned(),
-            )
-        })?;
-        let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "validated snapshot language has no descriptor".to_owned(),
-            )
-        })?;
-        let physical_reuse_key =
-            Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound, worker)
-        {
-            crate::hotpath_observe::add_reused_parses(1);
+    ) -> Result<(ManifestDigest, Arc<FileGenerationArtifactsV1>), CodeIndexProductionErrorV1> {
+        crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
             Self::checkpoint(control)?;
-            return Ok((physical_reuse_key, reused));
-        }
-        let snapshot = &capability.snapshot().snapshot;
-        let parser = extractor
-            .resolve_parser(receipt_bound.validated_file(), descriptor)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Extraction(ExtractionFailureV1::GrammarUnavailable {
-                    language: descriptor.language.clone(),
-                })
+            let captured = captured_files
+                .get(&file.file_occurrence_id)
+                .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
+            let receipt_bound = intake
+                .bind_file(
+                    capability,
+                    &config.project_id,
+                    ValidatedCodeFileV1 {
+                        generation_id: manifest.generation_id.clone(),
+                        file: file.clone(),
+                        snapshot_digest: capability.snapshot().intake_digest.clone(),
+                        sanitized_bytes: captured.sanitized_bytes.to_vec(),
+                    },
+                )
+                .map_err(CodeIndexProductionErrorV1::Intake)?;
+            let language = file.language.as_ref().ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "present snapshot file has no declared language".to_owned(),
+                )
             })?;
-        if crate::languages::canonical_language_id(parser.language_name())
-            != descriptor.language.as_str()
-        {
-            return Err(CodeIndexProductionErrorV1::Extraction(
-                ExtractionFailureV1::IncompatibleDescriptor {
-                    detail: format!(
-                        "descriptor {} resolved to a {} parser",
-                        descriptor.language,
-                        parser.language_name()
-                    ),
-                },
-            ));
-        }
-        let cancellation = ExtractionControlBridge { control };
-        let extraction = match parse_for_indexing(
-            retained_parses,
-            config,
-            snapshot,
-            repository_parse_identity,
-            file,
-            captured,
-            parser,
-        ) {
-            Ok((parse_artifacts, parsed_len)) => {
+            let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "validated snapshot language has no descriptor".to_owned(),
+                )
+            })?;
+            let physical_reuse_key =
+                Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
+            if let Some(reused) =
+                physical_artifacts.reuse(&physical_reuse_key, &receipt_bound, worker)
+            {
+                crate::hotpath_observe::add_reused_parses(1);
                 Self::checkpoint(control)?;
-                extractor
-                    .extract_preparsed(
-                        &receipt_bound,
-                        descriptor,
-                        parse_artifacts,
-                        parsed_len,
-                        &cancellation,
+                return Ok((physical_reuse_key, reused));
+            }
+            let snapshot = &capability.snapshot().snapshot;
+            let parser = extractor
+                .resolve_parser(receipt_bound.validated_file(), descriptor)
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Extraction(
+                        ExtractionFailureV1::GrammarUnavailable {
+                            language: descriptor.language.clone(),
+                        },
                     )
-                    .map_err(|error| match error {
-                        ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
-                            Self::interruption_error(control)
-                        }
-                        error => CodeIndexProductionErrorV1::Extraction(error),
-                    })?
+                })?;
+            if crate::languages::canonical_language_id(parser.language_name())
+                != descriptor.language.as_str()
+            {
+                return Err(CodeIndexProductionErrorV1::Extraction(
+                    ExtractionFailureV1::IncompatibleDescriptor {
+                        detail: format!(
+                            "descriptor {} resolved to a {} parser",
+                            descriptor.language,
+                            parser.language_name()
+                        ),
+                    },
+                ));
             }
-            // One file exceeding the bounded parse budget is evidence about
-            // that file, never about the generation: record it as a typed
-            // unsupported document with a reason and keep building, instead
-            // of failing the whole reconcile cycle and leaving the served
-            // generation permanently stale.
-            Err(CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut { .. })) => {
-                Self::checkpoint(control)?;
-                extractor
-                    .extract_parse_timed_out(&receipt_bound, descriptor)
-                    .map_err(CodeIndexProductionErrorV1::Extraction)?
-            }
-            Err(error) => return Err(error),
-        };
-        Self::checkpoint(control)?;
-        let (artifacts, exact_authority) = chunker
-            .index_file_with_authority_from_extraction(
-                &receipt_bound,
-                &extraction,
-                descriptor,
-                captured.sensitivity_level,
-                &cancellation,
-            )
-            .map_err(|error| match error {
-                ChunkingFailureV1::Cancelled => Self::interruption_error(control),
-                error => CodeIndexProductionErrorV1::Chunk(error),
-            })?;
-        Self::checkpoint(control)?;
-        let (authority, extraction, _) = extraction.into_parts();
-        let artifact = FileGenerationArtifactsV1 {
-            authority,
-            extraction,
-            artifacts,
-            exact_authority,
-        };
-        Ok((physical_reuse_key, artifact))
+            let cancellation = ExtractionControlBridge { control };
+            let extraction = match parse_for_indexing(
+                retained_parses,
+                config,
+                snapshot,
+                repository_parse_identity,
+                file,
+                captured,
+                parser,
+            ) {
+                Ok((parse_artifacts, parsed_len)) => {
+                    Self::checkpoint(control)?;
+                    extractor
+                        .extract_preparsed(
+                            &receipt_bound,
+                            descriptor,
+                            parse_artifacts,
+                            parsed_len,
+                            &cancellation,
+                        )
+                        .map_err(|error| match error {
+                            ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
+                                Self::interruption_error(control)
+                            }
+                            error => CodeIndexProductionErrorV1::Extraction(error),
+                        })?
+                }
+                // One file exceeding the bounded parse budget is evidence about
+                // that file, never about the generation: record it as a typed
+                // unsupported document with a reason and keep building, instead
+                // of failing the whole reconcile cycle and leaving the served
+                // generation permanently stale.
+                Err(CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut { .. })) => {
+                    Self::checkpoint(control)?;
+                    extractor
+                        .extract_parse_timed_out(&receipt_bound, descriptor)
+                        .map_err(CodeIndexProductionErrorV1::Extraction)?
+                }
+                Err(error) => return Err(error),
+            };
+            Self::checkpoint(control)?;
+            let (artifacts, exact_authority) = chunker
+                .index_file_with_authority_from_extraction(
+                    &receipt_bound,
+                    &extraction,
+                    descriptor,
+                    captured.sensitivity_level,
+                    &cancellation,
+                )
+                .map_err(|error| match error {
+                    ChunkingFailureV1::Cancelled => Self::interruption_error(control),
+                    error => CodeIndexProductionErrorV1::Chunk(error),
+                })?;
+            Self::checkpoint(control)?;
+            let (authority, extraction, _) = extraction.into_parts();
+            let artifact = Arc::new(FileGenerationArtifactsV1 {
+                authority,
+                extraction,
+                artifacts,
+                exact_authority,
+            });
+            Ok((physical_reuse_key, artifact))
+        })
     }
 
-    #[hotpath::measure]
     fn physical_reuse_key(
         config: &CodeIndexProductionConfigV1,
         file: &SanitizedCodeFileV1,
         descriptor: &tracedecay_domain::LanguageDescriptorV1,
         sensitivity_level: SensitivityLevelV1,
     ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-        canonical_sha256(&(
-            PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
-            &config.project_id,
-            &config.repository,
-            &file.logical_path,
-            &file.content_digest,
-            descriptor,
-            &config.sanitizer_revision,
-            &config.policy_revision,
-            &config.chunker_revision,
-            &config.privacy_domain,
-            config.privacy_key_epoch,
-            sensitivity_level,
-        ))
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+        crate::hotpath_observe::measure_hot_loop!("code_index.materialize.reuse_key", {
+            canonical_sha256(&(
+                PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
+                &config.project_id,
+                &config.repository,
+                &file.file_occurrence_id,
+                &file.logical_path,
+                &file.content_digest,
+                descriptor,
+                &config.sanitizer_revision,
+                &config.policy_revision,
+                &config.chunker_revision,
+                &config.privacy_domain,
+                config.privacy_key_epoch,
+                sensitivity_level,
+            ))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1678,23 +1706,26 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let extracted = collect_bounded_ordered(&present_files, |file, worker| {
-            Self::extract_file(
-                config,
-                physical_artifacts,
-                retained_parses,
-                intake,
-                capability,
-                manifest,
-                extractor,
-                chunker,
-                repository_parse_identity,
-                file,
-                captured_files,
-                control,
-                worker,
-            )
-        })?;
+        let extracted = hotpath::measure_block!(
+            "code_index.collect.materialize_full",
+            collect_bounded_ordered(&present_files, |file, worker| {
+                Self::extract_file(
+                    config,
+                    physical_artifacts,
+                    retained_parses,
+                    intake,
+                    capability,
+                    manifest,
+                    extractor,
+                    chunker,
+                    repository_parse_identity,
+                    file,
+                    captured_files,
+                    control,
+                    worker,
+                )
+            })
+        )?;
         // Parallel completion order is intentionally not cache authority.
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
@@ -1743,11 +1774,13 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let file_materializations = collect_bounded_ordered(
-            &increment.files,
-            |file_plan,
-             worker|
-             -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
+        let file_materializations = hotpath::measure_block!(
+            "code_index.collect.materialize_increment",
+            collect_bounded_ordered(
+                &increment.files,
+                |file_plan,
+                 worker|
+                 -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
                 Self::checkpoint(control)?;
                 match &file_plan.action {
                     FileExtractionActionV1::CarryForward {
@@ -1780,13 +1813,15 @@ where
                                     generation_id: manifest.generation_id.clone(),
                                     file: (**current_file).clone(),
                                     snapshot_digest: capability.snapshot().intake_digest.clone(),
-                                    sanitized_bytes: captured.sanitized_bytes.clone(),
+                                    sanitized_bytes: captured.sanitized_bytes.to_vec(),
                                 },
                             )
                             .map_err(CodeIndexProductionErrorV1::Intake)?;
                         if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
                             crate::hotpath_observe::add_reused_parses(1);
-                            Ok(IncrementFileMaterializationV1::CarryForward(artifact))
+                            Ok(IncrementFileMaterializationV1::CarryForward(Arc::new(
+                                artifact,
+                            )))
                         } else {
                             // Opaque exact evidence may refuse generation-local
                             // occurrence rebinding. Re-extract through the parser
@@ -1840,7 +1875,8 @@ where
                         Ok(IncrementFileMaterializationV1::Deleted)
                     }
                 }
-            },
+                },
+            )
         )?;
 
         let mut files = Vec::new();

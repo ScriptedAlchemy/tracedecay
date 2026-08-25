@@ -38,7 +38,7 @@ pub use delivery_recorder::{
 };
 pub use delivery_settlement::{DeliverySettlementAuthorityV1, DeliverySettlementEmissionV1};
 pub use emit::{
-    record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
+    emit_index, record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
     record_operation_resource, record_retrieval_query, record_storage,
 };
 pub use execution_emit::{

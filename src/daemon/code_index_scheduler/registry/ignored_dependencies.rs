@@ -120,9 +120,6 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable => {
             CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable
         }
-        CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment(error) => {
-            CodeIndexSchedulerErrorV1::SnapshotMemoryAdjustment(*error)
-        }
         CodeIndexSchedulerErrorV1::WorkerPlan(error) => {
             CodeIndexSchedulerErrorV1::WorkerPlan(error.clone())
         }

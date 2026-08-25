@@ -104,11 +104,11 @@ pub(super) fn def_pr_context() -> ToolDefinition {
             "properties": {
                 "base_ref": {
                     "type": "string",
-                    "description": "Base branch or ref to compare against (default: detected repository default branch)"
+                    "description": "Base branch or ref to compare against (default: detected repository default branch). A short branch name selects the descendant of its local and origin tracking tips; use an explicit ref when they diverge."
                 },
                 "head_ref": {
                     "type": "string",
-                    "description": "Head branch or ref (default: 'HEAD')"
+                    "description": "Head branch or ref (default: 'HEAD'). Accepts local branches, remote-tracking refs such as origin/topic, full refs, and Git revision expressions."
                 },
                 "maximum_symbols": {
                     "type": "integer",

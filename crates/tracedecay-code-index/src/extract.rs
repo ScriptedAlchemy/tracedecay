@@ -199,7 +199,6 @@ impl TreeSitterExtractor {
         })
     }
 
-    #[hotpath::measure]
     pub(crate) fn extract_preparsed(
         &self,
         file: &ReceiptBoundCodeFileV1,
@@ -208,30 +207,32 @@ impl TreeSitterExtractor {
         parsed_len: usize,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        if cancellation.is_cancelled() {
-            return Err(ExtractionFailureV1::Cancelled);
-        }
-        let authority = file.authority().clone();
-        let file = file.validated_file();
-        validate_descriptor(file, descriptor)?;
-        let admitted_prefix = file
-            .sanitized_bytes
-            .get(..parsed_len)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok());
-        if admitted_prefix.is_none() {
-            return Err(ExtractionFailureV1::ParseFailed {
-                detail: "retained parse prefix is not an admitted UTF-8 boundary".to_owned(),
-            });
-        }
-        finish_extraction(
-            authority,
-            file,
-            descriptor,
-            artifact,
-            parsed_len,
-            parsed_len < file.sanitized_bytes.len(),
-            cancellation,
-        )
+        crate::hotpath_observe::measure_hot_loop!("code_index.extract.incremental", {
+            if cancellation.is_cancelled() {
+                return Err(ExtractionFailureV1::Cancelled);
+            }
+            let authority = file.authority().clone();
+            let file = file.validated_file();
+            validate_descriptor(file, descriptor)?;
+            let admitted_prefix = file
+                .sanitized_bytes
+                .get(..parsed_len)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
+            if admitted_prefix.is_none() {
+                return Err(ExtractionFailureV1::ParseFailed {
+                    detail: "retained parse prefix is not an admitted UTF-8 boundary".to_owned(),
+                });
+            }
+            finish_extraction(
+                authority,
+                file,
+                descriptor,
+                artifact,
+                parsed_len,
+                parsed_len < file.sanitized_bytes.len(),
+                cancellation,
+            )
+        })
     }
 
     /// Typed evidence for one file whose bounded retained parse exceeded its
@@ -441,7 +442,7 @@ fn rows_digest(
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
     let mut imports = artifact.imports.clone();
-    hotpath::measure_block!("code_index_rows_digest_sort", {
+    crate::hotpath_observe::measure_hot_loop!("code_index_rows_digest_sort", {
         sort_canonical_rows(&mut nodes);
         sort_canonical_rows(&mut edges);
         sort_canonical_rows(&mut unresolved);
@@ -462,7 +463,7 @@ fn rows_digest(
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
     }
 
-    hotpath::measure_block!(
+    crate::hotpath_observe::measure_hot_loop!(
         "code_index_rows_digest_hash",
         canonical_sha256(&RowsPayload {
             separator: EXTRACTION_ROWS_SEPARATOR,
@@ -485,7 +486,7 @@ fn rows_digest(
 pub(crate) fn parser_import_rows_digest(
     imports: &[ExtractedImportEvidenceV1],
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
-    hotpath::measure_block!("code_index_parser_import_rows_digest", {
+    crate::hotpath_observe::measure_hot_loop!("code_index_parser_import_rows_digest", {
         let mut imports = imports.to_vec();
         imports.sort();
         canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(
@@ -497,55 +498,56 @@ pub(crate) fn parser_import_rows_digest(
 }
 
 impl LanguageExtractor for TreeSitterExtractor {
-    #[hotpath::measure]
     fn extract(
         &self,
         file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        if cancellation.is_cancelled() {
-            return Err(ExtractionFailureV1::Cancelled);
-        }
-        let authority = file.authority().clone();
-        let file = file.validated_file();
-        validate_descriptor(file, descriptor)?;
-
-        let parser = self.resolve_parser(file, descriptor).ok_or({
-            ExtractionFailureV1::GrammarUnavailable {
-                language: descriptor.language.clone(),
+        crate::hotpath_observe::measure_hot_loop!("code_index.extract.full", {
+            if cancellation.is_cancelled() {
+                return Err(ExtractionFailureV1::Cancelled);
             }
-        })?;
-        if canonical_language_id(parser.language_name()) != descriptor.language.as_str() {
-            return Err(ExtractionFailureV1::IncompatibleDescriptor {
-                detail: format!(
-                    "descriptor {} resolved to a {} parser",
-                    descriptor.language,
-                    parser.language_name()
-                ),
-            });
-        }
+            let authority = file.authority().clone();
+            let file = file.validated_file();
+            validate_descriptor(file, descriptor)?;
 
-        let source = std::str::from_utf8(&file.sanitized_bytes).map_err(|error| {
-            ExtractionFailureV1::ParseFailed {
-                detail: format!("sanitized bytes are not valid UTF-8: {error}"),
+            let parser = self.resolve_parser(file, descriptor).ok_or({
+                ExtractionFailureV1::GrammarUnavailable {
+                    language: descriptor.language.clone(),
+                }
+            })?;
+            if canonical_language_id(parser.language_name()) != descriptor.language.as_str() {
+                return Err(ExtractionFailureV1::IncompatibleDescriptor {
+                    detail: format!(
+                        "descriptor {} resolved to a {} parser",
+                        descriptor.language,
+                        parser.language_name()
+                    ),
+                });
             }
-        })?;
-        let parsed_len =
-            crate::chunks::snap_down(source, source.len().min(MAX_EXTRACTION_SOURCE_BYTES));
-        let extraction_source = &source[..parsed_len];
-        let source_was_capped = parsed_len < source.len();
 
-        let artifact = parser.extract_artifact(&file.file.logical_path, extraction_source);
-        finish_extraction(
-            authority,
-            file,
-            descriptor,
-            artifact,
-            parsed_len,
-            source_was_capped,
-            cancellation,
-        )
+            let source = std::str::from_utf8(&file.sanitized_bytes).map_err(|error| {
+                ExtractionFailureV1::ParseFailed {
+                    detail: format!("sanitized bytes are not valid UTF-8: {error}"),
+                }
+            })?;
+            let parsed_len =
+                crate::chunks::snap_down(source, source.len().min(MAX_EXTRACTION_SOURCE_BYTES));
+            let extraction_source = &source[..parsed_len];
+            let source_was_capped = parsed_len < source.len();
+
+            let artifact = parser.extract_artifact(&file.file.logical_path, extraction_source);
+            finish_extraction(
+                authority,
+                file,
+                descriptor,
+                artifact,
+                parsed_len,
+                source_was_capped,
+                cancellation,
+            )
+        })
     }
 }
 

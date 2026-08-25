@@ -57,7 +57,7 @@ fn import_request() -> CodeIndexBuildRequestV1 {
     });
     request.captured_files.push(CodeIndexCapturedFileV1 {
         file_occurrence_id: second_occurrence,
-        sanitized_bytes: second_bytes,
+        sanitized_bytes: Arc::from(second_bytes),
         sensitivity_level: SensitivityLevelV1::Public,
     });
     request.snapshot.content_identity = content_digest(

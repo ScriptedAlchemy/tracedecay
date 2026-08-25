@@ -118,11 +118,18 @@ pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
     scope: &ResolvedScope,
     cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let latest = registry
-        .latest_complete_fresh_for_scope(scope)
-        .await
-        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?;
-    let privacy_domain = latest.generation.manifest().privacy_domain.clone();
+    let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
+        text.metadata().manifest().privacy_domain.clone()
+    } else {
+        registry
+            .latest_complete_fresh_for_scope(scope)
+            .await
+            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
+            .generation
+            .manifest()
+            .privacy_domain
+            .clone()
+    };
     let workload: crate::search_eval::CandidateWorkloadV1 =
         serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
             .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
@@ -231,11 +238,18 @@ pub(in crate::daemon) async fn mount_query_authority_on_project_open(
     scope: &ResolvedScope,
     provider: &dyn QueryAuthorityProviderV1,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let latest = registry
-        .latest_complete_fresh_for_scope(scope)
-        .await
-        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?;
-    let privacy_domain = latest.generation.manifest().privacy_domain.clone();
+    let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
+        text.metadata().manifest().privacy_domain.clone()
+    } else {
+        registry
+            .latest_complete_fresh_for_scope(scope)
+            .await
+            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
+            .generation
+            .manifest()
+            .privacy_domain
+            .clone()
+    };
     let authority = prepare_query_authority(scope, &privacy_domain, provider)?;
     registry
         .mount_query_authority(project_root, scope, authority)
@@ -393,26 +407,42 @@ impl CodeIndexSchedulerRegistryV1 {
                 Some(ready) => (ready, false),
                 None => (serving, true),
             },
-            None => match self.latest_complete_ready_for_scope(scope).await {
-                Some(ready) => (ready, false),
-                None => {
-                    // Nothing servable and the ready gate refused. Search is the
-                    // one lane whose resolution never runs the freshness ladder,
-                    // so nothing else on this path will ever request the rebuild
-                    // that would remedy the failure — it would return this typed
-                    // error forever. Ask for the remedy exactly once per
-                    // admission (debounced on the pending wake), never inline and
-                    // never parking, then still fail typed rather than degrade
-                    // into an empty answer.
-                    self.request_query_background_reconcile(scope).await;
-                    let unverified = self.generation_is_unverified_for_scope(scope).await;
-                    return Err(if unverified {
-                        QuerySearchExecutionErrorV1::GenerationUnverified
-                    } else {
-                        QuerySearchExecutionErrorV1::GenerationUnavailable
-                    });
+            None => {
+                if let Some((text, current)) =
+                    self.latest_text_serving_freshness_for_scope(scope).await
+                {
+                    return execute_query_search_on_text(
+                        self,
+                        scope,
+                        input,
+                        text,
+                        None,
+                        !current,
+                        graph_control,
+                    )
+                    .await;
                 }
-            },
+                match self.latest_complete_ready_for_scope(scope).await {
+                    Some(ready) => (ready, false),
+                    None => {
+                        // Nothing servable and the ready gate refused. Search is the
+                        // one lane whose resolution never runs the freshness ladder,
+                        // so nothing else on this path will ever request the rebuild
+                        // that would remedy the failure — it would return this typed
+                        // error forever. Ask for the remedy exactly once per
+                        // admission (debounced on the pending wake), never inline and
+                        // never parking, then still fail typed rather than degrade
+                        // into an empty answer.
+                        self.request_query_background_reconcile(scope).await;
+                        let unverified = self.generation_is_unverified_for_scope(scope).await;
+                        return Err(if unverified {
+                            QuerySearchExecutionErrorV1::GenerationUnverified
+                        } else {
+                            QuerySearchExecutionErrorV1::GenerationUnavailable
+                        });
+                    }
+                }
+            }
         };
         execute_query_search_on_latest(self, scope, input, latest, served_stale, graph_control)
             .await
@@ -455,30 +485,56 @@ async fn execute_query_search_on_latest<C>(
 where
     C: GraphExecutionControl + 'static,
 {
+    let text = latest.text_generation_handle();
+    execute_query_search_on_text(
+        schedulers,
+        scope,
+        input,
+        text,
+        Some(latest),
+        served_stale,
+        graph_control,
+    )
+    .await
+}
+
+async fn execute_query_search_on_text<C>(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+    input: QuerySearchExecutionRequestV1,
+    text: super::LatestCodeTextGenerationV1,
+    graph_latest: Option<super::LatestCompleteCodeIndexV1>,
+    served_stale: bool,
+    graph_control: Arc<C>,
+) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
+where
+    C: GraphExecutionControl + 'static,
+{
     let authority = schedulers
         .query_authority_for_scope(scope)
         .await
         .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
-    let generation = latest.generation.manifest().generation_id.clone();
+    let metadata = text.metadata();
+    let generation = metadata.manifest().generation_id.clone();
     let request = RetrievalRequest {
         principal: input.principal,
         scope: RetrievalScope {
-            privacy_domain: latest.generation.manifest().privacy_domain.clone(),
+            privacy_domain: metadata.manifest().privacy_domain.clone(),
             root: SingleRootScopeV1 {
-                repository: latest.generation.snapshot().repository.clone(),
-                worktree: latest.generation.snapshot().worktree.clone(),
-                reference: latest.generation.snapshot().reference.clone(),
+                repository: metadata.snapshot().repository.clone(),
+                worktree: metadata.snapshot().worktree.clone(),
+                reference: metadata.snapshot().reference.clone(),
             },
         },
         temporal_mode: TemporalModeV1::Current,
         snapshot: RetrievalSnapshot {
             watermarks: VectorWatermark::default(),
             freshness_digest: FreshnessVectorDigest::new(
-                latest.generation.manifest().snapshot_digest.as_str(),
+                metadata.manifest().snapshot_digest.as_str(),
             )
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
             authorization_revision: input.authorization_revision,
-            captured_at: latest.generation.manifest().seal.sealed_at,
+            captured_at: metadata.manifest().seal.sealed_at,
         },
         profile_id: authority.profile().profile_id.clone(),
         budget: authority.profile().retrieval_budget,
@@ -487,7 +543,7 @@ where
         .sanitize(input.sanitizer_revision, input.normalization_revision)?;
     let request = sanitized.request();
     let query_view = sanitized.query_view();
-    let owners = latest.production_query_owners_with_budget(&request.budget)?;
+    let owners = text.production_query_owners_with_budget(&request.budget)?;
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
     let exact = owners.retrieve_exact(&ExactLaneRequest {
         base: request.clone(),
@@ -515,7 +571,10 @@ where
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
             detail: "exact and lexical lanes produced no graph seed".to_owned(),
         })
-    } else if let Ok(graph_serving) = latest.production_graph_serving() {
+    } else if let Some(graph_serving) = graph_latest
+        .as_ref()
+        .and_then(|latest| latest.production_graph_serving().ok())
+    {
         graph_serving.graph.retrieve_graph(
             &GraphLaneRequest {
                 base: request.clone(),

@@ -7,18 +7,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay_application::ConfigurationSetRequestV1;
 use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey};
-use tracedecay_domain::{
-    CalibrationProfileId, ComponentRevision, ManifestDigest, SemanticSearchIndexProfileV1,
-    VectorGenerationIdV1, canonical_sha256,
-};
-use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
-use tracedecay_usecases::config::retrieval::{
-    RetrievalCompatibilityPinsV1, SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
-};
-use tracedecay_usecases::semantic_runtime::{
-    SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
-    SemanticEvaluationProfileCandidateV1, SemanticRuntimeStateV1,
-};
+use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
+use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
@@ -228,127 +218,15 @@ pub(super) async fn wait_for_semantic_generation(
     .expect("production semantic generation did not publish")
 }
 
-pub(super) fn semantic_candidate(
-    code: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    vector: &PublishedVectorGenerationV1,
-) -> SemanticEvaluationProfileCandidateV1 {
-    let material =
-        crate::search_eval::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
-            .expect("checked-in evaluated profile material");
-    let embedding = vector.embedding_key().embedding_key();
-    let runtime_compatibility_digest = canonical_sha256(&(
-        "tracedecay.semantic-runtime-compatibility.v1",
-        &embedding.runtime_backend,
-        &embedding.runtime_build_revision,
-        embedding.device_class,
-        embedding.precision,
-    ))
-    .expect("runtime compatibility digest");
-    let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
-        .and_then(|profile| profile.index_key())
-        .expect("production exact-flat semantic index");
-    // These bound the evaluation execution only. The accepted profile is
-    // rebound to the evaluator's exact current/10x observations before it is
-    // persisted or becomes activation-eligible.
-    let configured_limits = crate::config::SemanticResourceCeilings::default();
-    let catalog = crate::semantic_code::production_fastembed_catalog();
-    let cataloged_model = catalog
-        .get(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID)
-        .expect("production catalog contains default model");
-    let model_bytes = cataloged_model
-        .members
-        .get("model")
-        .expect("production model member")
-        .length;
-    let tokenizer_bytes = cataloged_model
-        .members
-        .get("tokenizer")
-        .expect("production tokenizer member")
-        .length;
-    let vector_generation_id = vector.generation_id().clone();
-    let calibration = SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
-            .expect("calibration profile id"),
-        cohort_digest: canonical_sha256(&(
-            "tracedecay.semantic.evaluation-calibration-cohort.v1",
-            code.manifest().generation_id.clone(),
-            vector.source_manifest_digest().clone(),
-            code.capability().manifest_digest.clone(),
-            vector.embedding_key().clone(),
-            vector_generation_id.clone(),
-            embedding.model_artifact_digest.clone(),
-        ))
-        .expect("calibration cohort digest"),
-        projection_key: vector.projection_key().clone(),
-        vector_generation: vector_generation_id.clone(),
-        capability_manifest_digest: code.capability().manifest_digest.clone(),
-        maximum_distance_micros: i64::MAX,
-        minimum_margin_micros: 0,
-    };
-    SemanticEvaluationProfileCandidateV1 {
-        evaluated_profile_id: EVALUATED_PROFILE_ID.to_owned(),
-        profile: SemanticEvaluationFusionCandidateV1 {
-            profile_id: material.profile.profile_id.clone(),
-            calibrations: material.profile.calibrations.clone(),
-            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
-            weights_micros: material.profile.weights_micros.clone(),
-            diversity_policy_id: material.profile.diversity_policy_id.clone(),
-            rerank_policy_id: material.profile.rerank_policy_id.clone(),
-            retrieval_budget: material.profile.retrieval_budget,
-        },
-        diversity: SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
-        rerank: None,
-        compatibility: RetrievalCompatibilityPinsV1 {
-            semantic: Some(SemanticCompatibilityPinsV1 {
-                implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
-                    .expect("semantic implementation revision"),
-                fusion_revision: ComponentRevision::new(
-                    tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
-                )
-                .expect("fusion revision"),
-                artifact_manifest_digest: embedding.model_artifact_digest.clone(),
-                runtime_compatibility_digest,
-                projection: vector.embedding_key().clone(),
-                search_index_key,
-                vector_generation_id,
-                calibration,
-                resources: SemanticResourceRequirementV1 {
-                    model_bytes,
-                    tokenizer_bytes,
-                    resident_bytes: configured_limits.max_resident_bytes,
-                    threads: configured_limits.max_threads,
-                    max_concurrent_sessions: configured_limits.max_concurrent_sessions,
-                    batch_size: configured_limits.max_batch_size,
-                    sequence_length: configured_limits.max_sequence_length,
-                    load_deadline_ms: configured_limits.load_deadline_ms,
-                },
-            }),
-            rerank: None,
-        },
-    }
-}
-
 pub(super) async fn evaluate_native_profile(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-    candidate: SemanticEvaluationProfileCandidateV1,
 ) -> ManifestDigest {
     let resources = harness.resources.as_ref().expect("live harness");
-    let evaluation_limits = candidate
-        .compatibility
-        .semantic
-        .as_ref()
-        .expect("semantic evaluation limits")
-        .resources;
+    let evaluation_limits =
+        crate::daemon::semantic_evaluation::daemon_semantic_evaluation_resource_requirement(
+            crate::config::SemanticResourceCeilings::default(),
+        );
     let observed_at = tracedecay_domain::UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -377,7 +255,7 @@ pub(super) async fn evaluate_native_profile(
             None,
             crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                 request_id.as_str(),
-                candidate,
+                EVALUATED_PROFILE_ID.to_owned(),
                 observed_at,
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
                     observed_at.0
@@ -737,12 +615,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         first_vector.generation_id().clone(),
     )];
     let graph_before_first_evaluation = graph_bytes(&harness, &project, &first_generation).await;
-    let first_profile = evaluate_native_profile(
-        &harness,
-        &project,
-        semantic_candidate(&first_code, &first_vector),
-    )
-    .await;
+    let first_profile = evaluate_native_profile(&harness, &project).await;
     assert_eq!(
         graph_bytes(&harness, &project, &first_generation).await,
         graph_before_first_evaluation,
@@ -813,12 +686,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         ),
     ];
     let graph_before_second_evaluation = graph_bytes(&harness, &project, &generations).await;
-    let second_profile = evaluate_native_profile(
-        &harness,
-        &project,
-        semantic_candidate(&second_code, &second_vector),
-    )
-    .await;
+    let second_profile = evaluate_native_profile(&harness, &project).await;
     assert_eq!(
         graph_bytes(&harness, &project, &generations).await,
         graph_before_second_evaluation,

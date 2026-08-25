@@ -14,12 +14,12 @@ use super::assessment::{
     validate_assessment,
 };
 use super::detector_kernel::{
-    CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
-    JsonPathSegment, JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy,
-    compile_credential_patterns, entropy_bits_per_mille, high_entropy_ranges,
-    visit_json_object_keys, visit_sensitive_json_mut,
+    CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError, JsonPathSegment,
+    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, entropy_bits_per_mille,
+    high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
 };
 use super::length_prefixed_sha256_hex;
+use super::rules::{CredentialPatternSet, compile_credential_pattern_set};
 
 const REDACTED_EXACT: &str = "[TraceDecay redacted: exact credential]";
 const REDACTED_BEARER: &str = "[TraceDecay redacted: bearer token]";
@@ -679,12 +679,12 @@ fn memory_fact_receipt(
 pub(super) fn redact_text(
     text: &mut String,
     path: &str,
-    patterns: &[CredentialPattern],
+    patterns: &CredentialPatternSet,
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
     let mut candidates = Vec::new();
-    for pattern in patterns {
+    for (pattern, keywords_present) in patterns.iter().zip(patterns.keyword_presence(text)) {
         let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
         let priority = match pattern.kind() {
             CredentialPatternKind::PrivateKey => 4,
@@ -693,7 +693,7 @@ pub(super) fn redact_text(
         };
         candidates.extend(
             pattern
-                .ranges(text)
+                .ranges_when_keywords_present(text, keywords_present)
                 .into_iter()
                 .map(|range| (range, detector, confidence, replacement, priority)),
         );
@@ -770,12 +770,12 @@ pub(super) fn redact_text(
     changed
 }
 
-pub(super) fn credential_patterns() -> Result<&'static [CredentialPattern], DetectionError> {
-    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, CredentialRuleSetError>> =
+pub(super) fn credential_patterns() -> Result<&'static CredentialPatternSet, DetectionError> {
+    static PATTERNS: OnceLock<Result<CredentialPatternSet, CredentialRuleSetError>> =
         OnceLock::new();
     PATTERNS
-        .get_or_init(|| compile_credential_patterns(CredentialPatternProfile::Observation))
-        .as_deref()
+        .get_or_init(|| compile_credential_pattern_set(CredentialPatternProfile::Observation))
+        .as_ref()
         .map_err(|_| DetectionError::Initialization)
 }
 

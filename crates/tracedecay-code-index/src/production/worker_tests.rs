@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use super::*;
 
@@ -16,16 +16,22 @@ impl From<crate::parallelism::CodeIndexParallelismErrorV1> for WorkerTestError {
 }
 
 #[test]
-fn cloned_arc_lookup_releases_the_mutex_before_downstream_work() {
-    let state = Mutex::new(Some(Arc::new(7_u8)));
+fn upgraded_weak_lookup_releases_the_mutex_before_downstream_work() {
+    let owner = Arc::new(7_u8);
+    let state = Mutex::new(Some(Arc::downgrade(&owner)));
 
-    let value = clone_arc_under_lock(&state, |value| value.clone()).expect("pooled value");
+    let value = upgrade_weak_under_lock(&state, |value| value.clone()).expect("pooled value");
 
+    assert!(
+        Arc::ptr_eq(&owner, &value),
+        "weak cache lookup must recover the generation's exact allocation"
+    );
     let unlocked = state
         .try_lock()
         .expect("pooled lookup must not retain the mutex");
     assert_eq!(*value, 7);
-    assert_eq!(unlocked.as_deref(), Some(&7));
+    let retained = unlocked.as_ref().and_then(Weak::upgrade);
+    assert_eq!(retained.as_deref(), Some(&7));
 }
 
 #[test]

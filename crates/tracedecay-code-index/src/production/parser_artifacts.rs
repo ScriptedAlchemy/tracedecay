@@ -11,7 +11,7 @@ use super::{
     CodeIndexRepositoryParseIdentityV1,
 };
 
-#[hotpath::measure]
+#[hotpath::measure(label = "code_index.extract.parser_artifact")]
 pub(super) fn parse_for_indexing(
     retained_parses: &SharedRetainedParsePool,
     config: &CodeIndexProductionConfigV1,

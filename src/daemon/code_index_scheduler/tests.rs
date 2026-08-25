@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -53,9 +54,9 @@ use super::registry::{
     ServingGenerationRollbackOutcomeV1,
 };
 use super::{
-    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexBuildProgressStateV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1,
+    CodeIndexCommittedProgressSampleV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1};
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
@@ -68,6 +69,9 @@ use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
+};
+use tracedecay_query::retrieval::semantic::{
+    SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
@@ -199,6 +203,48 @@ fn scheduler(
 ) -> CodeIndexWorktreeSchedulerV1 {
     CodeIndexWorktreeSchedulerV1::open(test_project_id(), fixture.path(), store_root, bytes)
         .expect("open worktree scheduler")
+}
+
+fn build_progress_snapshot(
+    scheduler: &CodeIndexWorktreeSchedulerV1,
+) -> Arc<crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1> {
+    scheduler
+        .build_progress_slot()
+        .read()
+        .expect("build progress slot")
+        .snapshot()
+        .expect("published build progress")
+}
+
+fn progress_snapshot_for_generation(
+    generation_id: &CodeGenerationId,
+    committed_pages: u64,
+) -> crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
+    crate::dashboard::code_index_freshness_api::CodeIndexBuildProgressV1 {
+        generation_id: generation_id.as_str().to_owned(),
+        daemon_incarnation: 1,
+        producer_incarnation: 1,
+        progress_epoch: 0,
+        sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
+        phase: crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        committed_pages,
+        committed_chunks: committed_pages,
+        committed_imports: 0,
+        committed_payload_bytes: committed_pages,
+        completed_files: committed_pages,
+        total_files: 100,
+        completed_lexical_bytes: committed_pages,
+        total_lexical_bytes: 100,
+        current_batch_pages: 0,
+        current_batch_payload_bytes: 0,
+        elapsed_micros: 1,
+        last_commit_latency_micros: None,
+        files_per_second: None,
+        lexical_bytes_per_second: None,
+        estimated_remaining_seconds: None,
+        last_progress_micros: 1,
+        blocked_reason: None,
+    }
 }
 
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
@@ -1013,6 +1059,18 @@ impl RerankExecutionControlV1 for ReadyRerankControlV1 {
     }
 }
 
+struct ReadySemanticControlV1;
+
+impl SemanticExecutionControl for ReadySemanticControlV1 {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
 fn application_context(
     operation: &tracedecay_application::ApplicationOperation,
     repository: RepositoryId,
@@ -1518,10 +1576,25 @@ fn saved_edit_incremental_publish() {
         !latest.graph_edges().is_empty() || !latest.graph_abstentions().is_empty(),
         "graph lane must remain explicitly queryable"
     );
+    let mut text_passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("advance bounded production text serving")
+    {
+        text_passes += 1;
+        assert!(
+            text_passes < 10_000,
+            "incremental generation text serving never became ready"
+        );
+    }
     let owners = latest
         .production_query_owners()
         .expect("production exact/lexical/graph owners connect");
-    let _ = owners.is_artifact_backed();
+    assert!(
+        owners.is_artifact_backed(),
+        "incremental publish must serve real durable exact/lexical owners"
+    );
+    latest.warm_serving_caches();
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
@@ -2263,7 +2336,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         "pub fn caller() { callee(); }\npub fn callee() {}\n",
     )]);
     let store = TempDir::new().expect("store root");
-    {
+    let completed_before_restart = {
         let mut scheduler = scheduler(
             &fixture,
             store.path().to_path_buf(),
@@ -2289,7 +2362,13 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
                 .is_artifact_backed(),
             "a durable store must serve text queries from the published artifact"
         );
-    }
+        let progress = build_progress_snapshot(&scheduler);
+        assert_eq!(
+            progress.phase,
+            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        );
+        progress
+    };
 
     // The durable pointer must name the published content-addressed artifact.
     let pointer: serde_json::Value = serde_json::from_slice(
@@ -2347,6 +2426,62 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         owners.is_artifact_backed(),
         "the reopened owners must serve from the durable artifact"
     );
+    let completed_after_restart = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        completed_after_restart.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert_eq!(
+        completed_after_restart.generation_id,
+        completed_before_restart.generation_id
+    );
+    assert_eq!(
+        completed_after_restart.sealed_source_digest,
+        completed_before_restart.sealed_source_digest
+    );
+    assert_eq!(
+        completed_after_restart.committed_pages,
+        completed_before_restart.committed_pages
+    );
+    assert_eq!(
+        completed_after_restart.committed_chunks,
+        completed_before_restart.committed_chunks
+    );
+    assert_eq!(
+        completed_after_restart.committed_imports,
+        completed_before_restart.committed_imports
+    );
+    assert_eq!(
+        completed_after_restart.committed_payload_bytes,
+        completed_before_restart.committed_payload_bytes
+    );
+    assert_eq!(
+        completed_after_restart.completed_files,
+        completed_before_restart.completed_files
+    );
+    assert_eq!(
+        completed_after_restart.total_files,
+        completed_before_restart.total_files
+    );
+    assert_eq!(
+        completed_after_restart.completed_lexical_bytes,
+        completed_before_restart.completed_lexical_bytes
+    );
+    assert_eq!(
+        completed_after_restart.total_lexical_bytes,
+        completed_before_restart.total_lexical_bytes
+    );
+    assert_eq!(
+        completed_after_restart.completed_files,
+        completed_after_restart.total_files
+    );
+    assert_eq!(
+        completed_after_restart.completed_lexical_bytes,
+        completed_after_restart.total_lexical_bytes
+    );
+    assert_eq!(completed_after_restart.files_per_second, None);
+    assert_eq!(completed_after_restart.lexical_bytes_per_second, None);
+    assert_eq!(completed_after_restart.estimated_remaining_seconds, None);
 
     let generation = latest.generation().manifest().generation_id.clone();
     let base = RetrievalRequest {
@@ -2434,6 +2569,90 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         !lexical_batch.candidates.is_empty(),
         "the lexical lane must return results from the reopened artifact"
     );
+}
+
+#[test]
+fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+    }
+
+    let mut reopened = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert_eq!(reopened.sealed_decode_count(), 0);
+    let text = reopened
+        .servable_retained_text_generation()
+        .expect("active durable text generation");
+    let binding = text
+        .publication_binding
+        .clone()
+        .expect("retained generation binding");
+    let mut retained_history_update = reopened
+        .publication
+        .read_publication_pointer()
+        .expect("read active pointer")
+        .expect("active pointer");
+    retained_history_update.generation_index.clear();
+    retained_history_update.generation_index_truncated = true;
+    retained_history_update.generation_index_digest = None;
+    assert!(
+        binding.matches(Some(&retained_history_update)),
+        "retention-history changes must not supersede the same active seal"
+    );
+    let scan = build_progress_snapshot(&reopened);
+    assert_eq!(
+        scan.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
+    );
+    assert!(scan.total_lexical_bytes > 0);
+    assert_eq!(scan.completed_lexical_bytes, scan.total_lexical_bytes);
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "binding authenticated text metadata must not decode the full generation"
+    );
+    while !text
+        .advance_text_serving(64)
+        .expect("advance retained text generation")
+    {}
+    assert!(text.query_owners_are_warm());
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "exact and lexical owners must not require the full generation"
+    );
+    assert!(
+        text.advance_text_serving(1)
+            .expect("attached text descriptor preserves the active seal"),
+        "a text-head pointer update must not retire its own ready owner"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn caller() { replacement(); }\npub fn replacement() {}\n",
+    );
+    published(
+        reopened
+            .reconcile_now()
+            .expect("publish superseding generation"),
+    );
+    assert!(matches!(
+        text.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    ));
 }
 
 #[test]
@@ -2539,7 +2758,7 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     let publisher = thread::spawn(move || {
         artifact_store.publish(
             &staging,
-            &generation,
+            &generation.manifest().generation_id,
             &sealed_identity,
             publish_control.as_ref(),
         )
@@ -2665,7 +2884,12 @@ fn text_artifact_publish_rejects_a_permissive_artifacts_root() {
 
     assert!(
         matches!(
-            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            artifact_store.publish(
+                &staging,
+                &generation.manifest().generation_id,
+                &sealed_identity,
+                &NeverCancelled,
+            ),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication must fail closed instead of accepting a permissive artifact namespace"
@@ -2712,7 +2936,12 @@ fn text_artifact_publish_rejects_a_symlink_artifacts_root() {
 
     assert!(
         matches!(
-            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            artifact_store.publish(
+                &staging,
+                &generation.manifest().generation_id,
+                &sealed_identity,
+                &NeverCancelled,
+            ),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication must not traverse a symlink artifact namespace"
@@ -3462,20 +3691,113 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
 }
 
 #[test]
-fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
-    let sources = (0..12)
-        .map(|ordinal| {
-            (
-                format!("src/file_{ordinal}.rs"),
-                format!("pub fn cancellation_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
-            )
-        })
-        .collect::<Vec<_>>();
-    let borrowed = sources
-        .iter()
-        .map(|(path, source)| (path.as_str(), source.as_str()))
-        .collect::<Vec<_>>();
-    let fixture = GitFixture::new(&borrowed);
+fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
+    let mut state = CodeIndexBuildProgressStateV1::new();
+    let first = Instant::now();
+    state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+        observed_at: first,
+        completed_files: 20,
+        completed_lexical_bytes: 4_000_000,
+    });
+    assert_eq!(state.rates_and_eta(29_000_000), (None, None, None));
+
+    state.observe_committed(CodeIndexCommittedProgressSampleV1 {
+        observed_at: first + Duration::from_secs(2),
+        completed_files: 21,
+        completed_lexical_bytes: 14_000_000,
+    });
+    let (files_per_second, lexical_bytes_per_second, eta_seconds) = state.rates_and_eta(29_000_000);
+    assert_eq!(files_per_second, Some(0.5));
+    assert_eq!(lexical_bytes_per_second, Some(5_000_000.0));
+    assert_eq!(
+        eta_seconds,
+        Some(3),
+        "ETA must use the multi-page lexical span, not uneven completed-file boundaries"
+    );
+}
+
+#[test]
+fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
+    let generation_a = CodeGenerationId::new("generation.progress-a").expect("generation A");
+    let generation_b = CodeGenerationId::new("generation.progress-b").expect("generation B");
+    let mut slot = super::CodeIndexBuildProgressSlotStateV1::default();
+
+    let original_a_owner = slot.replace_generation(generation_a.clone());
+    assert!(slot.publish(
+        &generation_a,
+        original_a_owner,
+        progress_snapshot_for_generation(&generation_a, 1),
+    ));
+
+    let generation_b_owner = slot.replace_generation(generation_b.clone());
+    assert!(slot.publish(
+        &generation_b,
+        generation_b_owner,
+        progress_snapshot_for_generation(&generation_b, 2),
+    ));
+
+    let replacement_a_owner = slot.replace_generation(generation_a.clone());
+    assert_ne!(replacement_a_owner, original_a_owner);
+    assert!(slot.publish(
+        &generation_a,
+        replacement_a_owner,
+        progress_snapshot_for_generation(&generation_a, 3),
+    ));
+    let replacement_a = slot.snapshot().expect("replacement A snapshot");
+
+    assert!(!slot.publish(
+        &generation_a,
+        original_a_owner,
+        progress_snapshot_for_generation(&generation_a, 99),
+    ));
+    let after_stale_original = slot.snapshot().expect("current A snapshot");
+    assert_eq!(after_stale_original.generation_id, generation_a.as_str());
+    assert_eq!(after_stale_original.committed_pages, 3);
+    assert_eq!(
+        after_stale_original.progress_epoch, replacement_a.progress_epoch,
+        "matching generation identity must not let the original A owner replace the newer A epoch"
+    );
+}
+
+#[test]
+fn dashboard_progress_advances_only_after_durable_batch_commit() {
+    struct CancelAfterPreparation {
+        progress: super::CodeIndexBuildProgressSlotV1,
+        observed_bulk_commit: std::sync::atomic::AtomicBool,
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelAfterPreparation {
+        fn is_cancelled(&self) -> bool {
+            let cancel = self
+                .progress
+                .read()
+                .expect("cancellation progress slot")
+                .snapshot()
+                .is_some_and(|snapshot| {
+                    snapshot.phase
+                        == crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+                });
+            if cancel {
+                self.observed_bulk_commit
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            cancel
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let mut source = String::new();
+    for ordinal in 0..600 {
+        writeln!(
+            source,
+            "pub fn cancellation_symbol_{ordinal}() -> usize {{ {ordinal} }}"
+        )
+        .expect("write cancellation fixture");
+    }
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
         &fixture,
@@ -3498,13 +3820,42 @@ fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
         .builder
         .progress()
         .expect("durable progress");
-
-    latest
-        .text_control_shutdown
-        .store(true, std::sync::atomic::Ordering::Release);
+    let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
-        latest.advance_text_serving(1),
+        dashboard_before.committed_pages,
+        progress_before.next_page_ordinal
+    );
+    assert_eq!(dashboard_before.committed_pages, 1);
+    assert!(
+        dashboard_before.completed_files < dashboard_before.total_files,
+        "the fixture must retain more authenticated source work after its first page"
+    );
+
+    let control = CancelAfterPreparation {
+        progress: scheduler.build_progress_slot(),
+        observed_bulk_commit: std::sync::atomic::AtomicBool::new(false),
+    };
+    let cancellation_started = Instant::now();
+    let cancellation = {
+        let mut build = latest
+            .text_projection_build
+            .lock()
+            .expect("text build state for controlled cancellation");
+        latest.advance_artifact_text_serving(&mut build, 1, &control)
+    };
+    assert_eq!(
+        cancellation,
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    );
+    assert!(
+        cancellation_started.elapsed() < Duration::from_secs(1),
+        "a cancelled scheduler batch must yield within the focused latency bound"
+    );
+    assert!(
+        control
+            .observed_bulk_commit
+            .load(std::sync::atomic::Ordering::Acquire),
+        "cancellation must occur after preparation publishes the bulk-commit boundary"
     );
     let progress_after = latest
         .text_projection_build
@@ -3516,16 +3867,93 @@ fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
         .progress()
         .expect("durable progress after cancellation");
     assert_eq!(progress_after, progress_before);
+    let dashboard_after = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        dashboard_after.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+    );
+    assert_eq!(dashboard_after.current_batch_pages, 1);
+    assert_eq!(
+        dashboard_after.committed_pages, dashboard_before.committed_pages,
+        "a prepared but cancelled batch must not publish staged pages as committed"
+    );
+    assert_eq!(
+        dashboard_after.completed_lexical_bytes, dashboard_before.completed_lexical_bytes,
+        "a cancelled batch must retain the prior exact sealed-source boundary"
+    );
     assert!(latest.text_serving_needs_work());
 
-    latest
-        .text_control_shutdown
-        .store(false, std::sync::atomic::Ordering::Release);
     while !latest
         .advance_text_serving(8)
         .expect("resume durable text build")
     {}
     assert!(latest.query_owners_are_warm());
+    let dashboard_ready = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        dashboard_ready.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert!(dashboard_ready.progress_epoch > dashboard_after.progress_epoch);
+}
+
+#[test]
+fn reopen_reconstructs_exact_committed_progress_without_fabricating_rate() {
+    let sources = (0..12)
+        .map(|ordinal| {
+            (
+                format!("src/reopen_{ordinal}.rs"),
+                format!("pub fn reopen_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let committed = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("publish generation"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        assert!(
+            !latest
+                .advance_text_serving(1)
+                .expect("commit one bounded source batch")
+        );
+        let progress = build_progress_snapshot(&scheduler);
+        assert!(progress.committed_pages > 0);
+        assert_eq!(progress.files_per_second, None);
+        assert_eq!(progress.lexical_bytes_per_second, None);
+        assert_eq!(progress.estimated_remaining_seconds, None);
+        progress
+    };
+
+    let reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let latest = reopened.latest_complete().expect("reopened generation");
+    assert!(
+        !latest
+            .advance_text_serving(0)
+            .expect("reconstruct durable cursor snapshot")
+    );
+    let reconstructed = build_progress_snapshot(&reopened);
+    assert_eq!(reconstructed.generation_id, committed.generation_id);
+    assert_eq!(reconstructed.committed_pages, committed.committed_pages);
+    assert_eq!(reconstructed.committed_chunks, committed.committed_chunks);
+    assert_eq!(reconstructed.committed_imports, committed.committed_imports);
+    assert_eq!(
+        reconstructed.committed_payload_bytes,
+        committed.committed_payload_bytes
+    );
+    assert_eq!(reconstructed.completed_files, committed.completed_files);
+    assert_eq!(
+        reconstructed.completed_lexical_bytes,
+        committed.completed_lexical_bytes
+    );
+    assert_eq!(reconstructed.files_per_second, None);
+    assert_eq!(reconstructed.lexical_bytes_per_second, None);
+    assert_eq!(reconstructed.estimated_remaining_seconds, None);
 }
 
 #[test]
@@ -3551,6 +3979,105 @@ fn ordinary_background_reconcile_does_not_supersede_in_flight_text_work() {
 }
 
 #[test]
+fn same_daemon_scheduler_retire_remount_mints_new_progress_producer() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn producer_epoch() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let first = registry
+        .open_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .expect("first scheduler owner");
+    let (first_daemon, first_producer) = first.progress_incarnations_for_test();
+    drop(first);
+    let second = registry
+        .open_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .expect("replacement scheduler owner");
+    let (second_daemon, second_producer) = second.progress_incarnations_for_test();
+
+    assert_eq!(second_daemon, first_daemon);
+    assert!(
+        second_producer > first_producer,
+        "same-daemon scheduler replacement must outrank delayed low-epoch progress"
+    );
+}
+
+#[test]
+fn source_epoch_advance_does_not_discard_immutable_text_progress() {
+    let mut source = String::new();
+    for ordinal in 0..600 {
+        writeln!(
+            source,
+            "pub fn immutable_symbol_{ordinal}() -> usize {{ {ordinal} }}"
+        )
+        .expect("write immutable source fixture");
+    }
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let admitted = latest.text_execution_control();
+
+    // Reproduce a hook arriving after a text pass captures its control but
+    // before the sealed source's first cancellation checkpoint.
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+    let result = {
+        let mut build = latest
+            .text_projection_build
+            .lock()
+            .expect("generation text projection");
+        latest.advance_artifact_text_serving(&mut build, 1, &admitted)
+    };
+
+    assert!(
+        matches!(result, Ok(false | true)),
+        "a worktree freshness epoch must not cancel immutable generation work: {result:?}"
+    );
+    assert!(
+        latest
+            .text_projection_build
+            .lock()
+            .expect("retained text projection")
+            .is_some()
+            || latest.query_owners_are_warm(),
+        "the bounded pass must retain or complete its generation-owned progress"
+    );
+}
+
+#[test]
+fn shutdown_cancels_generation_owned_text_work() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown_text_work() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    scheduler
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    assert_eq!(
+        latest.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled),
+        "daemon shutdown must remain a cancellation fence for immutable text work"
+    );
+}
+
+#[test]
 fn generation_replacement_drops_incomplete_text_projection_state() {
     let fixture = GitFixture::new(&[
         ("src/first.rs", "pub fn first() {}\n"),
@@ -3565,11 +4092,13 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     published(scheduler.reconcile_now().expect("publish first generation"));
     let original = scheduler.latest_complete().expect("original generation");
+    let original_control = original.text_execution_control();
     assert!(
         !original
             .advance_text_serving(1)
             .expect("start original text projection")
     );
+    let original_progress = build_progress_snapshot(&scheduler);
     let original_state = Arc::downgrade(&original.text_projection_build);
     let original_generation = original.generation().manifest().generation_id.clone();
 
@@ -3584,10 +4113,57 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
         replacement.generation().manifest().generation_id,
         original_generation
     );
+    let superseded_result = {
+        let mut build = original
+            .text_projection_build
+            .lock()
+            .expect("superseded projection state");
+        original.advance_artifact_text_serving(&mut build, 1, &original_control)
+    };
+    assert_eq!(
+        superseded_result,
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled),
+        "a replacement serving generation must retire the prior text owner"
+    );
     assert!(!Arc::ptr_eq(
         &original.text_projection_build,
         &replacement.text_projection_build
     ));
+    assert!(
+        scheduler
+            .build_progress_slot()
+            .read()
+            .expect("replacement progress slot")
+            .snapshot()
+            .is_none(),
+        "generation replacement clears the superseded snapshot before new work begins"
+    );
+    assert!(
+        !replacement
+            .advance_text_serving(0)
+            .expect("publish replacement progress baseline")
+    );
+    let replacement_progress = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        replacement_progress.generation_id,
+        replacement.generation().manifest().generation_id.as_str()
+    );
+    assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
+    original.publish_text_progress_phase(
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        99,
+        99,
+    );
+    let progress_after_stale_publish = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        progress_after_stale_publish.generation_id,
+        replacement_progress.generation_id
+    );
+    assert_eq!(
+        progress_after_stale_publish.progress_epoch, replacement_progress.progress_epoch,
+        "the old generation/owner epoch must not replace a newer generation snapshot"
+    );
+    assert_ne!(progress_after_stale_publish.current_batch_pages, 99);
     drop(original);
     assert!(
         original_state.upgrade().is_none(),
@@ -3598,8 +4174,8 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
             .text_projection_build
             .lock()
             .expect("replacement projection state")
-            .is_none(),
-        "a replacement generation starts with independent empty projection state"
+            .is_some(),
+        "publishing the replacement baseline initializes only its independent projection state"
     );
 }
 
@@ -4805,6 +5381,81 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
     );
     assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(projected.coverage, "complete");
+}
+
+#[tokio::test]
+async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
+    let sources = (0..12)
+        .map(|ordinal| {
+            (
+                format!("src/dashboard_{ordinal}.rs"),
+                format!("pub fn dashboard_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let (scheduler, progress_slot) = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root).expect("mounted worktree");
+        (
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.build_progress),
+        )
+    };
+    let expected = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
+                break progress;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background text build publishes progress");
+
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
+    let projected = tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.dashboard_freshness(fixture.path()),
+    )
+    .await
+    .expect("dashboard projection must not wait for scheduler")
+    .expect("mounted freshness projection");
+    let projected_progress = projected.progress.expect("projected progress snapshot");
+    assert_eq!(projected_progress.generation_id, expected.generation_id);
+    assert!(projected_progress.progress_epoch >= expected.progress_epoch);
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
 }
 
 /// A dashboard status view reports the last execution-owned scheduler state; it
@@ -8789,11 +9440,11 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
-/// A retained generation is not serving until its persistent graph replay
-/// activates. A typed replay failure leaves the slot empty while the ordinary
-/// refresh remains pending.
+/// A retained text generation remains serving when persistent graph replay
+/// fails. The full graph owner stays absent while ordinary refresh remains
+/// pending, so exact/lexical availability never implies graph availability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
+async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
@@ -8801,18 +9452,21 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let scope = {
+    let (scope, seeded_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store, bytes);
         published(scheduler.reconcile_now().expect("seed generation"));
         let latest = scheduler.latest_complete().expect("seeded generation");
         let snapshot = latest.generation.snapshot();
-        ResolvedScope::new(
-            test_project_id(),
-            snapshot.repository.clone(),
-            snapshot.worktree.clone().expect("worktree id"),
-            snapshot.reference.clone(),
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().generation_id.clone(),
         )
-        .expect("resolved scope")
     };
 
     let profile = TempDir::new().expect("profile root");
@@ -8877,31 +9531,22 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
                 .scheduler,
         )
     };
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler held");
-        let _ = release_rx.recv();
-    });
-    held_rx.recv().expect("scheduler lock acquired");
     drop(admission);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+        if scheduler
+            .try_lock()
+            .is_ok_and(|scheduler| scheduler.sealed_decode_count() > 0)
+        {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "worker did not dequeue the retained graph replay"
+            "worker did not decode the retained generation for graph replay"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    release_tx.send(()).expect("release scheduler");
-    lock_thread.join().expect("join scheduler holder");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -8921,8 +9566,15 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
 
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        None,
-        "a retained generation cannot serve after persistent graph replay fails"
+        Some(seeded_generation_id),
+        "persistent graph replay failure must not withhold retained text serving"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "persistent graph replay failure must not expose a full graph owner"
     );
     registry.shutdown().await;
     graph_runtime
@@ -9232,6 +9884,890 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     registry.shutdown().await;
 }
 
+/// A graph-off cold mount must keep the authenticated lightweight text owner
+/// authoritative when an overflow reconcile arrives between bounded text
+/// slices. Rebinding the same sealed generation through the full-generation
+/// cache clears the live progress slot, invalidates the surviving owner's
+/// epoch, and decodes gigabytes that graph-off serving never needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() {
+    let sources = (0..512)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, privacy_domain) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().privacy_domain.clone(),
+        )
+    };
+    std::fs::remove_file(
+        super::scoped_code_index_store_root(store.path(), fixture.path())
+            .join("freshness_witness.v1"),
+    )
+    .expect("remove restore witness to reproduce a cold preserved-profile mount");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    registry
+        .mount_query_authority(fixture.path(), &scope, query_authority(privacy_domain))
+        .await
+        .expect("mount query authority");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (owner_epoch_before_overflow, progress_before_overflow) = loop {
+        let observed = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (owner_epoch, Some(progress)) = observed
+            && progress.committed_pages > 0
+            && progress.phase
+                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        {
+            break (owner_epoch, progress);
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "text projection completed before exposing bounded live progress"
+        );
+        tokio::task::yield_now().await;
+    };
+    let status_poll_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("pause text projection after a bounded committed slice");
+    let (last_reconciled_before_status_polls, original_staleness_threshold) = {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_staleness_threshold = scheduler.policy.staleness_threshold;
+        scheduler.policy.staleness_threshold = Duration::ZERO;
+        (
+            scheduler.last_reconciled_at_micros(),
+            original_staleness_threshold,
+        )
+    };
+    for _ in 0..8 {
+        assert!(
+            !registry.has_current_ready_decoded_for_root_scope(fixture.path(), &scope),
+            "graph-off status census has no fully decoded generation"
+        );
+    }
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            scheduler.pending_hint_count(),
+            Some(0),
+            "stat-equal status polling must not fabricate an overflow reconcile"
+        );
+        assert_eq!(
+            scheduler.last_reconciled_at_micros(),
+            last_reconciled_before_status_polls,
+            "stat-equal status polling must not run a capture pass"
+        );
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "graph-off status polling must not decode the full generation"
+        );
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(progress.owner_epoch, owner_epoch_before_overflow);
+        let progress = progress
+            .snapshot()
+            .expect("status polling preserves live text progress");
+        assert_eq!(
+            progress.daemon_incarnation,
+            progress_before_overflow.daemon_incarnation
+        );
+        assert_eq!(
+            progress.producer_incarnation,
+            progress_before_overflow.producer_incarnation
+        );
+        assert!(progress.progress_epoch >= progress_before_overflow.progress_epoch);
+        assert!(progress.committed_pages >= progress_before_overflow.committed_pages);
+    }
+    scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .policy
+        .staleness_threshold = original_staleness_threshold;
+    drop(status_poll_admission);
+    let last_reconciled_before_overflow = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .last_reconciled_at_micros();
+    assert!(
+        registry.notify_hook_overflow(fixture.path()).await,
+        "mounted graph-off worktree accepts the overflow reconcile"
+    );
+
+    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let executed = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("alpha_0000"))
+            .await
+        {
+            Ok(executed) => break executed,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= query_deadline,
+                    "graph-off text projection never became queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    assert!(
+        executed.served_stale,
+        "an explicit overflow keeps the currently served text generation stale until reconcile settles"
+    );
+    let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let overflow_settled = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler.pending_hint_count() == Some(0)
+                && scheduler.last_reconciled_at_micros() != last_reconciled_before_overflow
+        };
+        if overflow_settled
+            && !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= overflow_deadline,
+            "graph-off overflow did not settle through a real no-op reconcile"
+        );
+        tokio::task::yield_now().await;
+    }
+    let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decode_count = scheduler.sealed_decode_count();
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            progress.owner_epoch,
+            progress
+                .snapshot()
+                .expect("ready text progress remains visible"),
+            decode_count,
+        )
+    };
+    assert_eq!(owner_epoch_after_overflow, owner_epoch_before_overflow);
+    assert_eq!(
+        progress_after_overflow.generation_id,
+        progress_before_overflow.generation_id
+    );
+    assert_eq!(
+        progress_after_overflow.daemon_incarnation,
+        progress_before_overflow.daemon_incarnation
+    );
+    assert_eq!(
+        progress_after_overflow.producer_incarnation,
+        progress_before_overflow.producer_incarnation
+    );
+    assert!(progress_after_overflow.progress_epoch > progress_before_overflow.progress_epoch);
+    assert!(progress_after_overflow.committed_pages >= progress_before_overflow.committed_pages);
+    assert_eq!(
+        progress_after_overflow.phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    assert_eq!(
+        decode_count, 0,
+        "graph-off text serving must not decode the full generation"
+    );
+    let artifact_names = std::fs::read_dir(super::code_text_artifacts_root(
+        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+    ))
+    .expect("read text artifact root")
+    .filter_map(Result::ok)
+    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    .collect::<Vec<_>>();
+    assert_eq!(
+        artifact_names
+            .iter()
+            .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
+            .count(),
+        1,
+        "one durable artifact owns ready text serving"
+    );
+    assert_eq!(
+        artifact_names
+            .iter()
+            .filter(|name| name.starts_with(".text-artifact-") && name.ends_with(".staging"))
+            .count(),
+        0,
+        "ready text serving leaves no abandoned staging owner"
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::ExactLiteral),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Lexical),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Graph),
+        Some(&PublicRetrieverStatus::Unavailable)
+    );
+
+    let dashboard = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("graph-off dashboard freshness");
+    assert_eq!(dashboard.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(dashboard.coverage, "complete");
+    assert_eq!(
+        dashboard
+            .progress
+            .as_ref()
+            .expect("ready progress stays observable")
+            .phase,
+        crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+    );
+    let current = registry
+        .execute_query_search(&scope, core_search_request("alpha_0000"))
+        .await
+        .expect("settled graph-off text query");
+    assert!(
+        !current.served_stale,
+        "a reconciled graph-off text owner must report current exact and lexical coverage"
+    );
+    let semantic = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::FallbackAllowed,
+        )
+        .await
+        .expect("graph-off fallback semantic query");
+    assert_eq!(semantic.query.generation, current.generation);
+    assert!(matches!(
+        semantic.semantic,
+        super::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            ..
+        }
+    ));
+    let strict = registry
+        .execute_query_with_semantic(
+            fixture.path(),
+            &scope,
+            core_search_request("alpha_0000"),
+            Arc::new(ReadySemanticControlV1),
+            SemanticQueryModeV1::StrictSemantic,
+        )
+        .await;
+    assert!(matches!(
+        strict,
+        Err(
+            super::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            }
+        ) if generation == current.generation
+    ));
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "semantic fallback without an activated profile must not decode the sealed generation"
+    );
+    let text = registry
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .expect("ready graph-off text owner");
+    let candidate = current
+        .authorized
+        .fallback
+        .ordered_candidates
+        .first()
+        .expect("artifact-backed ranked candidate");
+    let (display, _) = crate::daemon::code_index_executor::code_index_text_search_display_binding(
+        &text,
+        current.sanitized.request(),
+        candidate,
+    )
+    .expect("artifact-backed result display");
+    assert_eq!(display.name, "alpha_0000");
+    assert_eq!(display.kind, "function");
+    assert_eq!(display.path, "src/file_0000.rs");
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "artifact-backed display hydration must not decode the sealed generation"
+    );
+
+    let query_scope = CodeQueryScope::new(executed.generation.clone(), None).expect("query scope");
+    let exact_operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let exact_context = application_context(
+        &exact_operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let exact_request =
+        ExactOccurrenceRequest::new("alpha_0000", None, query_scope.clone(), query_meta())
+            .expect("exact request");
+    let exact = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &exact_context,
+                operation: &exact_operation,
+            },
+            &exact_request,
+        )
+        .await;
+    let exact_page = match exact {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("exact payload"),
+        outcome => panic!("ready graph-off exact owner was unavailable: {outcome:?}"),
+    };
+    assert_eq!(exact_page.generation, executed.generation);
+    assert!(
+        exact_page
+            .items
+            .iter()
+            .any(|record| record.occurrence.path == "src/file_0000.rs"),
+        "artifact-backed exact hydration returns the canonical source path"
+    );
+
+    let phrase_operation =
+        callable_code_operation(CallableCodeOperationKind::PhraseSearch).expect("operation");
+    let phrase_context = application_context(
+        &phrase_operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "alpha_0000",
+        SanitizerRevision::new("sanitizer.query.fixture").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.query.fixture").expect("normalization"),
+    )
+    .expect("query");
+    let phrase_request = PhraseSearchRequest::new(
+        query,
+        vec!["alpha_0000".to_owned()],
+        Vec::new(),
+        0,
+        query_scope,
+        query_meta(),
+    )
+    .expect("phrase request");
+    let phrase = registry
+        .phrase_search(
+            RetrievalPortContext {
+                request: &phrase_context,
+                operation: &phrase_operation,
+            },
+            &phrase_request,
+        )
+        .await;
+    let phrase_page = match phrase {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("phrase payload"),
+        outcome => panic!("ready graph-off phrase owner was unavailable: {outcome:?}"),
+    };
+    assert_eq!(phrase_page.generation, executed.generation);
+    assert!(
+        phrase_page
+            .items
+            .iter()
+            .any(|record| record.occurrence.path == "src/file_0000.rs"),
+        "artifact-backed lexical hydration returns the canonical source path"
+    );
+    registry.shutdown().await;
+}
+
+/// A graph-off changed-source rebuild must use the same canonical worker-memory
+/// admission as the complete reconcile path. A denial occurs before capture,
+/// leaves the durable pointer and hint authority intact, and releases its RAII
+/// reservation so an adequately funded retry can publish without decoding A.
+#[test]
+fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn graph_off_memory_alpha() -> usize { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation A"));
+    let generation_a = scheduler
+        .publication
+        .read_publication_pointer()
+        .expect("read generation A pointer")
+        .expect("generation A pointer");
+    let metadata_a = scheduler
+        .servable_retained_text_generation()
+        .expect("verified generation A text handle")
+        .metadata()
+        .clone();
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn graph_off_memory_beta() -> usize { 2 }\n",
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qam", "publish memory generation B"],
+    );
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+
+    let tight_limit = NonZeroU64::new(1024 * 1024).expect("tight canonical limit");
+    assert!(
+        tracedecay_code_index::parallelism::worker_reservation_bytes(
+            tracedecay_code_index::parallelism::indexing_workers(),
+        ) > tight_limit.get(),
+        "the fixture limit must deny the installed worker plan"
+    );
+    let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
+    scheduler.bind_resident_memory(Arc::clone(&tight));
+    let denied = scheduler.reconcile_retained_text_generation(&metadata_a);
+    assert!(
+        matches!(
+            denied,
+            Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_))
+        ),
+        "graph-off capture must be refused by canonical worker admission: {denied:?}"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer after denial")
+            .expect("active pointer after denial"),
+        generation_a,
+        "denied capture must leave generation A durable"
+    );
+    assert_eq!(
+        tight.snapshot().used_bytes,
+        0,
+        "a denied worker reservation must not leak a charge"
+    );
+
+    let adequate = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&adequate));
+    let outcome = scheduler
+        .reconcile_retained_text_generation(&metadata_a)
+        .expect("adequately funded graph-off retry")
+        .expect("graph-off retry outcome");
+    let generation_b = published(outcome);
+    assert_ne!(
+        generation_b.generation_id.as_str(),
+        generation_a.generation_id
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read generation B pointer")
+            .expect("generation B pointer")
+            .generation_id,
+        generation_b.generation_id.as_str()
+    );
+    assert_eq!(scheduler.sealed_decode_count(), 0);
+    assert!(
+        adequate.snapshot().charges.iter().all(|charge| {
+            charge.key.component.as_str() != super::CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1
+        }),
+        "the successful retry must release its worker reservation"
+    );
+}
+
+/// Publishing a changed graph-off generation must hand text authority from the
+/// ready prior generation to the new durable pointer. Otherwise the worker's
+/// graph-only `latest` slot stays empty, neither serving swap runs, and queries
+/// can serve the old generation forever even though the pointer names newer
+/// source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_off_changed_source_advances_text_authority_without_full_decode() {
+    let sources = (0..256)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, privacy_domain) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                snapshot.worktree.clone().expect("worktree id"),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest.generation.manifest().privacy_domain.clone(),
+        )
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    registry
+        .mount_query_authority(fixture.path(), &scope, query_authority(privacy_domain))
+        .await
+        .expect("mount query authority");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let generation_a = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("alpha_0000"))
+            .await
+        {
+            Ok(executed) => break executed.generation,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= ready_deadline,
+                    "generation A never became text-queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    let owner_epoch_a = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(scheduler.sealed_decode_count(), 0);
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            progress
+                .snapshot()
+                .expect("generation A ready progress")
+                .generation_id,
+            generation_a.as_str()
+        );
+        progress.owner_epoch
+    };
+
+    fixture.edit(
+        "src/file_0000.rs",
+        "pub fn beta_0000() -> usize { 10_000 }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    let durable_generations_root = {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let durable = scheduler.publication.generations_root.clone();
+        let blocker = store.path().join("publication-root-blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write publication blocker");
+        scheduler.publication.generations_root = blocker;
+        durable
+    };
+    let reconcile_in_progress = {
+        Arc::clone(
+            &scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reconcile_in_progress,
+        )
+    };
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
+            .await,
+        "changed source wakes the mounted graph-off owner"
+    );
+
+    let attempt_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() <= attempt_deadline,
+            "transient publication failure was never attempted"
+        );
+        tokio::task::yield_now().await;
+    }
+    let restore_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        assert!(
+            std::time::Instant::now() <= restore_deadline,
+            "transient publication failure did not terminate"
+        );
+        tokio::task::yield_now().await;
+    }
+    {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !scheduler
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .paths
+                .is_empty(),
+            "transient publication failure lost the drained source hint"
+        );
+        assert_eq!(
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("read pointer after transient failure")
+                .expect("generation A remains durable")
+                .generation_id,
+            generation_a.as_str()
+        );
+        assert_eq!(scheduler.sealed_decode_count(), 0);
+        scheduler.publication.generations_root = durable_generations_root;
+    }
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/file_0000.rs".to_owned()])
+            .await,
+        "retry wake reaches the restored source hint"
+    );
+
+    let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let generation_b = loop {
+        let durable = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("read durable active pointer")
+                .map(|pointer| pointer.generation_id)
+        };
+        if let Some(durable) = durable
+            && durable != generation_a.as_str()
+        {
+            break CodeGenerationId::new(durable).expect("generation B id");
+        }
+        assert!(
+            std::time::Instant::now() <= publication_deadline,
+            "changed graph-off source never published durable generation B"
+        );
+        tokio::task::yield_now().await;
+    };
+
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let progress_b = loop {
+        let progress = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (owner_epoch, Some(progress)) = progress
+            && progress.generation_id == generation_b.as_str()
+            && progress.committed_pages > 0
+        {
+            assert!(owner_epoch > owner_epoch_a);
+            break progress;
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "durable generation B never acquired advancing text authority"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert!(progress_b.progress_epoch > 0);
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_b.clone()),
+        "generation A stops owning the graph-off query route"
+    );
+    if let Ok(executed) = registry
+        .execute_query_search(&scope, core_search_request("alpha_0000"))
+        .await
+    {
+        assert_ne!(
+            executed.generation, generation_a,
+            "generation A must not serve after B owns text progress"
+        );
+    }
+
+    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let executed_b = loop {
+        match registry
+            .execute_query_search(&scope, core_search_request("beta_0000"))
+            .await
+        {
+            Ok(executed) if executed.generation == generation_b => break executed,
+            Ok(executed) => panic!(
+                "stale generation {} served after durable B",
+                executed.generation
+            ),
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() <= query_deadline,
+                    "generation B never became text-queryable: {error}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::ExactLiteral),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Lexical),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed_b
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Graph),
+        Some(&PublicRetrieverStatus::Unavailable)
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        0,
+        "graph-off A-to-B publication must not decode a sealed generation"
+    );
+    registry.shutdown().await;
+}
+
 /// The canonical project setting must reach the scheduler's production policy
 /// boundary. A configured refusal still verifies and seats the sealed text
 /// generation, while the graph authority is never activated.
@@ -9442,9 +10978,10 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert!(
-        !latest.query_owners_are_warm(),
-        "same-root refusal was lost and entered retained owner hydration"
+        latest.query_owners_are_warm(),
+        "same-root graph refusal must preserve retained text hydration"
     );
+    assert!(latest.production_query_owners().is_ok());
     assert!(latest.production_graph_serving().is_err());
     registry.shutdown().await;
 }
@@ -9463,17 +11000,23 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let sealed_worktree_id = {
+    let (scope, sealed_worktree_id, sealed_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), bytes);
         published(scheduler.reconcile_now().expect("seed generation"));
-        scheduler
-            .latest_complete()
-            .expect("seeded generation")
-            .generation
-            .snapshot()
-            .worktree
-            .clone()
-            .expect("seeded worktree id")
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot.worktree.clone().expect("seeded worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+            latest.generation.manifest().generation_id.clone(),
+        )
     };
     // Change the worktree so a reconcile pass would seal a brand-new
     // generation if the worker fell through after the activation failure.
@@ -9516,10 +11059,32 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         1,
         "a retryable activation failure must not seal a duplicate generation"
     );
+    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= text_deadline,
+            "graph retry backoff withheld the retained text generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        None,
-        "a generation that never activated must not serve"
+        Some(sealed_generation_id),
+        "exact and lexical serving remains authoritative during graph retry"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "retryable graph activation must not expose an unactivated graph owner"
     );
 
     // Clearing the injected failure lets the scheduled backoff retry activate
@@ -9528,7 +11093,7 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if registry
-            .latest_generation_id(fixture.path())
+            .latest_complete_serving_for_scope(&scope)
             .await
             .is_some()
         {
@@ -9627,6 +11192,86 @@ async fn wait_for_event_to_ready(
     }
 }
 
+/// A successful reconcile is product state; optional lifecycle telemetry may
+/// not keep its in-progress guard or freshness response open while the
+/// observability store is busy.
+#[tokio::test]
+async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        fixture.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = Arc::new(
+        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+            database.clone(),
+            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                process_boot_id: "boot:code-index-readiness".to_owned(),
+                producer_revision: "code-index-readiness-test.v1".to_owned(),
+                configuration_revision: "code-index-readiness-config.v1".to_owned(),
+                policy_revision: "code-index-readiness-policy.v1".to_owned(),
+            },
+            8,
+        )
+        .expect("bounded producer"),
+    );
+    registry
+        .install_index_observability(
+            fixture.path(),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
+        )
+        .await
+        .expect("install observability lane");
+
+    let blocked_writer = database
+        .begin_write_transaction()
+        .await
+        .expect("hold observability writer");
+    let initial = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("dashboard freshness");
+        if freshness.staleness_state.as_deref() == Some("fresh") && freshness.coverage == "complete"
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "optional telemetry held successful reconcile readiness: {freshness:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    blocked_writer
+        .commit()
+        .await
+        .expect("release observability writer");
+    registry.shutdown().await;
+    producer.shutdown().await.expect("flush producer");
+}
+
 /// The installed observability lane must persist one canonical index
 /// lifecycle observation when a reconcile publishes a generation, and the
 /// retrieval-pipeline families when a query composition completes, all in the
@@ -9663,10 +11308,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     registry
         .install_index_observability(
             fixture.path(),
-            super::observability::CodeIndexObservabilityV1::new(
-                database.clone(),
-                Arc::clone(&producer),
-            ),
+            super::observability::CodeIndexObservabilityV1::new(Arc::clone(&producer)),
         )
         .await
         .expect("install observability lane");
@@ -9684,6 +11326,22 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
             .await
     );
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= ready_deadline,
+            "published text generation did not become queryable"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // One real query composition through the mounted authority carries the
     // retrieval-pipeline families through the bounded producer.
