@@ -1,7 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use rayon::prelude::*;
 use rusqlite::types::ValueRef;
@@ -47,6 +51,8 @@ const DOCUMENT_NGRAM_POSTINGS_QUERY: &str =
     "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram";
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest, cumulative_digest, next_cursor \
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
+const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
+const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalizationSectionV1 {
@@ -942,7 +948,10 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 
     /// Advance durable receipt construction without rereading the sealed
-    /// generation. `maximum_work` bounds the number of staged rows (or empty
+    /// generation. Before digest verification, one wake commits exactly one
+    /// set-wise statistics or serving-index statement and SQLite VM progress
+    /// observes cancellation during that statement. During digest
+    /// verification, `maximum_work` bounds the number of staged rows (or empty
     /// section completions) this call may consume.
     #[hotpath::measure(label = "query.artifact.finalization.digest_verify_wake")]
     pub fn advance_finalization(
@@ -1009,9 +1018,8 @@ impl CodeLexicalArtifactBuilderV1 {
                     .to_owned(),
             ));
         }
-        let mut remaining_work = maximum_work;
-        advance_pre_digest_work(&transaction, &mut state, &mut remaining_work, control)?;
         if state.phase != PersistedFinalizationPhaseV1::Digest {
+            advance_pre_digest_work(&transaction, &mut state, control)?;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             commit_finalization_transaction(transaction, &mut transaction_metrics)?;
@@ -1023,6 +1031,7 @@ impl CodeLexicalArtifactBuilderV1 {
             record_finalization_step(&step);
             return Ok(step);
         }
+        let mut remaining_work = maximum_work;
         let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
         while remaining_work > 0 && state.section_ordinal < section_count {
             checkpoint(control)?;
@@ -2308,37 +2317,117 @@ fn authenticated_authority_epoch(
 fn advance_pre_digest_work(
     transaction: &Transaction<'_>,
     state: &mut PersistedFinalizationStateV1,
-    remaining_work: &mut usize,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    while *remaining_work > 0 && state.phase != PersistedFinalizationPhaseV1::Digest {
-        checkpoint(control)?;
-        match state.phase {
-            PersistedFinalizationPhaseV1::Statistics => {
+    checkpoint(control)?;
+    match state.phase {
+        PersistedFinalizationPhaseV1::Statistics => {
+            with_cancellable_sqlite_statement(transaction, control, || {
                 derive_statistics_step(transaction, state.section_ordinal)?;
-                state.section_ordinal += 1;
-                if state.section_ordinal == 3 {
-                    state.phase = PersistedFinalizationPhaseV1::Indexes;
-                    state.section_ordinal = 0;
-                }
+                Ok(())
+            })?;
+            state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact statistics step overflowed".to_owned(),
+                )
+            })?;
+            if state.section_ordinal == 3 {
+                state.phase = PersistedFinalizationPhaseV1::Indexes;
+                state.section_ordinal = 0;
             }
-            PersistedFinalizationPhaseV1::Indexes => {
-                build_serving_index_step(transaction, state.section_ordinal)?;
-                state.section_ordinal += 1;
-                if state.section_ordinal == 7 {
-                    verify_required_artifact_indexes(transaction)?;
-                    state.phase = PersistedFinalizationPhaseV1::Digest;
-                    state.section_ordinal = 0;
-                    state.section_accumulator =
-                        initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
-                }
-            }
-            PersistedFinalizationPhaseV1::Digest => {}
         }
-        *remaining_work -= 1;
-        checkpoint(control)?;
+        PersistedFinalizationPhaseV1::Indexes => {
+            with_cancellable_sqlite_statement(transaction, control, || {
+                build_serving_index_step(transaction, state.section_ordinal)?;
+                Ok(())
+            })?;
+            state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact serving-index step overflowed".to_owned(),
+                )
+            })?;
+            if state.section_ordinal == 7 {
+                verify_required_artifact_indexes(transaction)?;
+                state.phase = PersistedFinalizationPhaseV1::Digest;
+                state.section_ordinal = 0;
+                state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
+            }
+        }
+        PersistedFinalizationPhaseV1::Digest => {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact selected pre-digest work after entering digest verification"
+                    .to_owned(),
+            ));
+        }
     }
+    checkpoint(control)?;
     Ok(())
+}
+
+fn with_cancellable_sqlite_statement<T>(
+    transaction: &Transaction<'_>,
+    control: &dyn CodeIndexExecutionControlV1,
+    operation: impl FnOnce() -> Result<T, CodeLexicalArtifactErrorV1>,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let interruption = Arc::new(AtomicU8::new(0));
+    let finished = Arc::new(AtomicBool::new(false));
+    let monitor_ready = Arc::new(AtomicBool::new(false));
+    let progress_interruption = Arc::clone(&interruption);
+    transaction
+        .progress_handler(
+            FINALIZATION_PROGRESS_INTERVAL_OPS,
+            Some(move || progress_interruption.load(Ordering::Acquire) != 0),
+        )
+        .map_err(sqlite_error)?;
+
+    let outcome = std::thread::scope(|scope| {
+        let monitor_interruption = Arc::clone(&interruption);
+        let monitor_finished = Arc::clone(&finished);
+        let monitor_ready_signal = Arc::clone(&monitor_ready);
+        scope.spawn(move || {
+            loop {
+                let reason = if control.is_cancelled() {
+                    1
+                } else if control.is_deadline_exceeded() {
+                    2
+                } else {
+                    0
+                };
+                if reason != 0 {
+                    monitor_interruption.store(reason, Ordering::Release);
+                }
+                monitor_ready_signal.store(true, Ordering::Release);
+                if reason != 0 || monitor_finished.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(FINALIZATION_CONTROL_POLL_INTERVAL);
+            }
+        });
+        while !monitor_ready.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        let outcome = catch_unwind(AssertUnwindSafe(operation));
+        finished.store(true, Ordering::Release);
+        outcome
+    });
+    transaction
+        .progress_handler(FINALIZATION_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>)
+        .map_err(sqlite_error)?;
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(payload) => resume_unwind(payload),
+    };
+    match interruption.load(Ordering::Acquire) {
+        1 => Err(CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+        )),
+        2 => Err(CodeLexicalArtifactErrorV1::Interrupted(
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        )),
+        _ => outcome,
+    }
 }
 
 fn derive_statistics_step(

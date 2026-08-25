@@ -174,6 +174,28 @@ struct CancelAtObservation {
     observations: AtomicUsize,
 }
 
+struct CancelOnBackgroundObservation {
+    caller: std::thread::ThreadId,
+}
+
+impl CancelOnBackgroundObservation {
+    fn new() -> Self {
+        Self {
+            caller: std::thread::current().id(),
+        }
+    }
+}
+
+impl CodeIndexExecutionControlV1 for CancelOnBackgroundObservation {
+    fn is_cancelled(&self) -> bool {
+        std::thread::current().id() != self.caller
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
 impl CancelAtObservation {
     fn new(cancellation_observation: usize) -> Self {
         Self {
@@ -1347,6 +1369,191 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
 }
 
 #[test]
+fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("restartable-setwise-steps.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+
+    // Give the aggregate and index statements a production-shaped VM loop.
+    // These rows use an authenticated document id, so the freeze accepts the
+    // base relation while the later digest would still reject the deliberate
+    // test-only document mismatch.
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open wide staging file");
+    connection
+        .execute_batch(
+            "WITH digits(value) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
+                  numbers(value) AS (
+                      SELECT ones.value + 10 * tens.value + 100 * hundreds.value +
+                             1000 * thousands.value + 10000 * ten_thousands.value
+                      FROM digits AS ones
+                      CROSS JOIN digits AS tens
+                      CROSS JOIN digits AS hundreds
+                      CROSS JOIN digits AS thousands
+                      CROSS JOIN digits AS ten_thousands
+                  ),
+                  authority AS (
+                      SELECT field, document_id FROM term_postings ORDER BY document_id LIMIT 1
+                  )
+             INSERT INTO term_postings(field, term, document_id, frequency)
+             SELECT authority.field, printf('restart-wide-%05d', numbers.value),
+                    authority.document_id, 1
+             FROM authority CROSS JOIN numbers;",
+        )
+        .expect("seed production-width posting relation");
+    drop(connection);
+
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 4_096, &control)
+            .expect("persist base freeze"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    assert_eq!(
+        persisted_finalization_position(&artifact_path),
+        ("statistics".to_owned(), 0)
+    );
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 4_096, &control)
+            .expect("derive only field statistics"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    assert_eq!(
+        persisted_finalization_position(&artifact_path),
+        ("statistics".to_owned(), 1),
+        "a production-sized wake commits exactly one corpus-wide step"
+    );
+    drop(builder);
+
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("restart after committed field statistics");
+    let cancellation = CancelOnBackgroundObservation::new();
+    assert!(matches!(
+        resumed.advance_finalization(&source_receipt, 4_096, &cancellation),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled
+        ))
+    ));
+    assert_eq!(
+        persisted_finalization_position(&artifact_path),
+        ("statistics".to_owned(), 1),
+        "cancellation inside the next SQLite statement must not advance its durable state"
+    );
+    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect cancelled step");
+    let field_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM field_stats", [], |row| row.get(0))
+        .expect("count committed field statistics");
+    let term_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM term_stats", [], |row| row.get(0))
+        .expect("count rolled-back term statistics");
+    assert!(
+        field_rows > 0,
+        "the prior committed step survives cancellation"
+    );
+    assert_eq!(term_rows, 0, "the interrupted step rolls back atomically");
+    drop(connection);
+    drop(resumed);
+
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("restart after cancelled term statistics");
+    resumed
+        .advance_finalization(&source_receipt, 4_096, &control)
+        .expect("retry only term statistics");
+    assert_eq!(
+        persisted_finalization_position(&artifact_path),
+        ("statistics".to_owned(), 2),
+        "retry resumes at the interrupted step instead of replaying the frozen prior step"
+    );
+    drop(resumed);
+
+    let mut expected_indexes = 0i64;
+    for expected_position in 0..=7u64 {
+        let mut resumed =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &artifact_path,
+                metadata.clone(),
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &control,
+            )
+            .expect("restart between corpus-wide steps");
+        resumed
+            .advance_finalization(&source_receipt, 4_096, &control)
+            .expect("advance one corpus-wide step");
+        drop(resumed);
+
+        if expected_position == 0 {
+            assert_eq!(
+                persisted_finalization_position(&artifact_path),
+                ("indexes".to_owned(), 0),
+                "the vocabulary step alone transitions to index construction"
+            );
+        } else {
+            expected_indexes += 1;
+            let expected_state = if expected_position == 7 {
+                ("digest".to_owned(), 0)
+            } else {
+                ("indexes".to_owned(), expected_position)
+            };
+            assert_eq!(
+                persisted_finalization_position(&artifact_path),
+                expected_state
+            );
+            let connection =
+                rusqlite::Connection::open(&artifact_path).expect("inspect serving indexes");
+            let indexes: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count committed serving indexes");
+            assert_eq!(
+                indexes, expected_indexes,
+                "each restarted production wake commits exactly one serving index"
+            );
+        }
+    }
+}
+
+fn persisted_finalization_position(path: &Path) -> (String, u64) {
+    let connection = rusqlite::Connection::open(path).expect("open finalization state");
+    let state: Vec<u8> = connection
+        .query_row(
+            "SELECT state FROM finalization_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finalization state");
+    let state: serde_json::Value =
+        serde_json::from_slice(&state).expect("decode finalization state");
+    let phase = state["phase"]
+        .as_str()
+        .expect("finalization phase")
+        .to_owned();
+    let ordinal = state["section_ordinal"]
+        .as_u64()
+        .expect("finalization section ordinal");
+    (phase, ordinal)
+}
+
+#[test]
 fn disk_artifact_admission_selects_the_exact_largest_contiguous_prefix() {
     let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
     assert!(
@@ -1574,12 +1781,14 @@ fn disk_artifact_resume_rejects_current_revision_with_wrong_term_index_shape() {
             .expect("freeze current artifact"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
-    assert!(matches!(
-        builder
-            .advance_finalization(&source_receipt, 10, &control)
-            .expect("build serving indexes"),
-        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
-    ));
+    for _ in 0..10 {
+        assert!(matches!(
+            builder
+                .advance_finalization(&source_receipt, 4_096, &control)
+                .expect("advance one statistics or serving-index step"),
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+        ));
+    }
     drop(builder);
 
     let connection = rusqlite::Connection::open(&artifact_path).expect("open index mutation");
@@ -1816,7 +2025,12 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
             .expect("persist freeze before authenticated scan"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
-    let corrupted = builder.advance_finalization(&source_receipt, 4_096, &control);
+    let corrupted = loop {
+        match builder.advance_finalization(&source_receipt, 4_096, &control) {
+            Ok(CodeLexicalArtifactFinalizationStepV1::Pending { .. }) => {}
+            result => break result,
+        }
+    };
     assert!(
         matches!(corrupted, Err(CodeLexicalArtifactErrorV1::Corrupt(_))),
         "mutated derived content must fail authenticated finalization: {corrupted:?}"
