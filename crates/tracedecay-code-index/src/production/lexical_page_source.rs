@@ -6,6 +6,8 @@ use std::{
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ExactTechnicalTermV1;
 
+use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR};
+
 use super::sealed_codec::{
     LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
 };
@@ -20,6 +22,7 @@ const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
     b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
 const LAYOUT_PROGRESS_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LEXICAL_GENERATION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 type PersistedSealedLexicalCursorFields = (
     String,
@@ -756,10 +759,33 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
     format_revision: u32,
+    metadata: VerifiedSealedTextGenerationMetadataV1,
     maximum_page_chunks: usize,
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     admitted_file: Option<(u64, AdmittedSealedLexicalFileV1)>,
+}
+
+/// Authenticated generation metadata needed by exact and lexical serving.
+///
+/// The full sealed generation can be gigabytes. This projection retains only
+/// the manifest and sanitized snapshot header that precede the files array;
+/// the layout scan authenticates the complete content-addressed seal before
+/// this value becomes observable.
+#[derive(Clone, Debug)]
+pub struct VerifiedSealedTextGenerationMetadataV1 {
+    manifest: CodeGenerationManifestV1,
+    snapshot: SanitizedCodeSnapshotV1,
+}
+
+impl VerifiedSealedTextGenerationMetadataV1 {
+    pub fn manifest(&self) -> &CodeGenerationManifestV1 {
+        &self.manifest
+    }
+
+    pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
+        &self.snapshot
+    }
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
@@ -795,6 +821,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical files array has an invalid byte span".to_owned(),
                 )
             })?;
+        let metadata = read_verified_text_metadata(&mut reader, &layout, control)?;
         Ok(Self {
             reader,
             file_count: layout.file_count,
@@ -804,6 +831,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
+            metadata,
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
@@ -820,7 +848,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// no whole-generation `Vec` is required merely to authenticate it.
     #[hotpath::measure]
     pub fn open_content_addressed(
-        mut reader: R,
+        reader: R,
         admitted_len: u64,
         expected_file_digest: ManifestDigest,
         maximum_page_chunks: usize,
@@ -832,11 +860,44 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed lexical page bounds must be non-zero".to_owned(),
             ));
         }
-        let layout = scan_layout(
+        Self::open_content_addressed_with_progress(
+            reader,
+            admitted_len,
+            expected_file_digest,
+            maximum_page_chunks,
+            maximum_page_bytes,
+            control,
+            |_, _| {},
+        )
+    }
+
+    /// Open a content-addressed source while reporting authenticated scan
+    /// bytes. The callback is invoked at zero, bounded byte intervals, and
+    /// exactly once with the admitted total before metadata is exposed.
+    #[hotpath::measure]
+    pub fn open_content_addressed_with_progress<F>(
+        mut reader: R,
+        admitted_len: u64,
+        expected_file_digest: ManifestDigest,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+        mut progress: F,
+    ) -> Result<Self, CodeIndexProductionErrorV1>
+    where
+        F: FnMut(u64, u64),
+    {
+        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page bounds must be non-zero".to_owned(),
+            ));
+        }
+        let layout = scan_layout_with_progress(
             &mut reader,
             admitted_len,
             Some(&expected_file_digest),
             control,
+            &mut progress,
         )?;
         let cursor = VerifiedSealedLexicalCursorV1::initial(
             layout.state_digest.clone(),
@@ -850,6 +911,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical files array has an invalid byte span".to_owned(),
                 )
             })?;
+        let metadata = read_verified_text_metadata(&mut reader, &layout, control)?;
         Ok(Self {
             reader,
             file_count: layout.file_count,
@@ -859,11 +921,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
+            metadata,
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
             admitted_file: None,
         })
+    }
+
+    pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
+        &self.metadata
     }
 
     /// Reopen an authenticated durable source at an accepted persisted cursor.
@@ -1562,6 +1629,8 @@ struct SealedLexicalLayoutV1 {
     first_file_offset: u64,
     files_end_offset: u64,
     maximum_file_bytes: u64,
+    manifest_range: Option<(u64, u64)>,
+    snapshot_range: Option<(u64, u64)>,
     #[cfg(test)]
     structural_byte_visits: u64,
     #[cfg(test)]
@@ -1575,6 +1644,22 @@ fn scan_layout<R: Read + Seek>(
     expected_file_digest: Option<&ManifestDigest>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
+    scan_layout_with_progress(
+        reader,
+        admitted_len,
+        expected_file_digest,
+        control,
+        &mut |_, _| {},
+    )
+}
+
+fn scan_layout_with_progress<R: Read + Seek>(
+    reader: &mut R,
+    admitted_len: u64,
+    expected_file_digest: Option<&ManifestDigest>,
+    control: &dyn CodeIndexExecutionControlV1,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
     if admitted_len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation exceeds the canonical byte limit".to_owned(),
@@ -1586,6 +1671,7 @@ fn scan_layout<R: Read + Seek>(
     hotpath::gauge!("code_index_lexical_layout_scan_attempts").inc(1);
     hotpath::gauge!("code_index_lexical_layout_bytes_total").set(admitted_len);
     hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(0);
+    progress(0, admitted_len);
     let mut scanner = LayoutScanner::default();
     let mut file_hasher = expected_file_digest.map(|_| Sha256::new());
     let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
@@ -1637,6 +1723,7 @@ fn scan_layout<R: Read + Seek>(
         let admitted_observed = observed.min(admitted_len);
         if admitted_observed >= next_progress || admitted_observed == admitted_len {
             hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(admitted_observed);
+            progress(admitted_observed, admitted_len);
             next_progress = admitted_observed.saturating_add(LAYOUT_PROGRESS_INTERVAL_BYTES);
         }
         remaining -= read_bytes;
@@ -1662,6 +1749,8 @@ enum LayoutKey {
     Generation,
     Files,
     FormatRevision,
+    Manifest,
+    Snapshot,
 }
 
 impl LayoutKey {
@@ -1671,6 +1760,8 @@ impl LayoutKey {
             b"generation" => Some(Self::Generation),
             b"files" => Some(Self::Files),
             b"format_revision" => Some(Self::FormatRevision),
+            b"manifest" => Some(Self::Manifest),
+            b"snapshot" => Some(Self::Snapshot),
             _ => None,
         }
     }
@@ -1698,6 +1789,9 @@ struct LayoutScanner {
     files_end_offset: Option<u64>,
     file_count: u64,
     maximum_file_bytes: u64,
+    captured_metadata_object: Option<(LayoutKey, u64, usize)>,
+    manifest_range: Option<(u64, u64)>,
+    snapshot_range: Option<(u64, u64)>,
     #[cfg(test)]
     structural_byte_visits: u64,
     #[cfg(test)]
@@ -1728,6 +1822,9 @@ impl Default for LayoutScanner {
             files_end_offset: None,
             file_count: 0,
             maximum_file_bytes: 0,
+            captured_metadata_object: None,
+            manifest_range: None,
+            snapshot_range: None,
             #[cfg(test)]
             structural_byte_visits: 0,
             #[cfg(test)]
@@ -1905,6 +2002,23 @@ impl LayoutScanner {
                     self.generation_hasher = Some(Sha256::new());
                     event = GenerationSpanEvent::Opened;
                 }
+                if matches!(
+                    self.pending_key,
+                    Some(LayoutKey::Manifest | LayoutKey::Snapshot)
+                ) && self.generation_depth == Some(self.brace_depth)
+                {
+                    let key = self.pending_key.ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed text metadata key disappeared".to_owned(),
+                        )
+                    })?;
+                    if self.captured_metadata_object.is_some() {
+                        return Err(CodeIndexProductionErrorV1::Contract(
+                            "sealed text metadata objects overlap".to_owned(),
+                        ));
+                    }
+                    self.captured_metadata_object = Some((key, offset, self.brace_depth + 1));
+                }
                 if self.files_depth == Some(self.bracket_depth)
                     && self.generation_depth == Some(self.brace_depth)
                     && self.current_file_start.is_none()
@@ -1915,6 +2029,25 @@ impl LayoutScanner {
                 self.pending_key = None;
             }
             b'}' => {
+                if let Some((key, start, depth)) = self.captured_metadata_object
+                    && depth == self.brace_depth
+                {
+                    let end = offset.checked_add(1).ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed text metadata end offset overflowed".to_owned(),
+                        )
+                    })?;
+                    match key {
+                        LayoutKey::Manifest => self.manifest_range = Some((start, end)),
+                        LayoutKey::Snapshot => self.snapshot_range = Some((start, end)),
+                        _ => {
+                            return Err(CodeIndexProductionErrorV1::Contract(
+                                "sealed text metadata capture has an invalid key".to_owned(),
+                            ));
+                        }
+                    }
+                    self.captured_metadata_object = None;
+                }
                 if let Some(start) = self.current_file_start
                     && self
                         .generation_depth
@@ -1992,6 +2125,7 @@ impl LayoutScanner {
             || self.brace_depth != 0
             || self.bracket_depth != 0
             || self.current_file_start.is_some()
+            || self.captured_metadata_object.is_some()
         {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical source has incomplete JSON structure".to_owned(),
@@ -2037,6 +2171,8 @@ impl LayoutScanner {
             first_file_offset,
             files_end_offset,
             maximum_file_bytes: self.maximum_file_bytes,
+            manifest_range: self.manifest_range,
+            snapshot_range: self.snapshot_range,
             #[cfg(test)]
             structural_byte_visits: self.structural_byte_visits,
             #[cfg(test)]
@@ -2077,6 +2213,93 @@ fn first_json_string_control(bytes: &[u8]) -> Option<usize> {
         .iter()
         .position(|byte| matches!(*byte, b'"' | b'\\'))
         .map(|relative| tail_base + relative)
+}
+
+fn read_verified_text_metadata<R: Read + Seek>(
+    reader: &mut R,
+    layout: &SealedLexicalLayoutV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
+    #[hotpath::measure]
+    fn decode_range<T: serde::de::DeserializeOwned, R: Read + Seek>(
+        reader: &mut R,
+        range: (u64, u64),
+        label: &'static str,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<T, CodeIndexProductionErrorV1> {
+        checkpoint(control)?;
+        let length = range.1.checked_sub(range.0).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata range is invalid"
+            ))
+        })?;
+        if length == 0 || length > MAX_LEXICAL_GENERATION_METADATA_BYTES {
+            return Err(CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata exceeds its byte bound"
+            )));
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata exceeds the platform limit"
+            ))
+        })?;
+        reader.seek(SeekFrom::Start(range.0)).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata seek failed: {error}"
+            ))
+        })?;
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata read failed: {error}"
+            ))
+        })?;
+        checkpoint(control)?;
+        serde_json::from_slice(&bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed {label} metadata decoding failed: {error}"
+            ))
+        })
+    }
+
+    let manifest: CodeGenerationManifestV1 = decode_range(
+        reader,
+        layout.manifest_range.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation manifest metadata is missing".to_owned(),
+            )
+        })?,
+        "manifest",
+        control,
+    )?;
+    let snapshot: SanitizedCodeSnapshotV1 = decode_range(
+        reader,
+        layout.snapshot_range.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation snapshot metadata is missing".to_owned(),
+            )
+        })?,
+        "snapshot",
+        control,
+    )?;
+    snapshot
+        .validate()
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let snapshot_digest = canonical_sha256(&(INTAKE_DIGEST_SEPARATOR, &snapshot))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    if snapshot_digest != manifest.snapshot_digest {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed text metadata snapshot digest does not match the manifest".to_owned(),
+        ));
+    }
+    let seal_digest = expected_seal_digest(&manifest)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    if seal_digest != manifest.seal.expected_digest {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed text metadata manifest seal is invalid".to_owned(),
+        ));
+    }
+    Ok(VerifiedSealedTextGenerationMetadataV1 { manifest, snapshot })
 }
 
 fn read_next_file_bytes<R: Read + Seek>(
@@ -2458,6 +2681,46 @@ mod lexical_page_source_tests {
 
     fn fixture() -> SealedSourceFixture {
         fixture_for_source(BATCH_FIXTURE_SOURCE)
+    }
+
+    #[test]
+    fn content_addressed_open_reports_authenticated_scan_progress_and_text_metadata() {
+        let fixture = fixture();
+        let file_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&fixture.sealed))
+            .expect("fixture file digest is canonical");
+        let mut progress = Vec::new();
+        let source = VerifiedSealedLexicalPageSourceV1::open_content_addressed_with_progress(
+            Cursor::new(fixture.sealed.clone()),
+            u64::try_from(fixture.sealed.len()).expect("fixture length fits u64"),
+            file_digest,
+            1,
+            1024 * 1024,
+            &ActiveControl,
+            |scanned, total| progress.push((scanned, total)),
+        )
+        .expect("authenticated source opens with progress");
+
+        assert_eq!(progress.first(), Some(&(0, fixture.sealed.len() as u64)));
+        assert_eq!(
+            progress.last(),
+            Some(&(fixture.sealed.len() as u64, fixture.sealed.len() as u64))
+        );
+        assert_eq!(
+            source.metadata().snapshot().repository.as_str(),
+            "repository.lexical-page-batch"
+        );
+        assert_eq!(
+            source.metadata().snapshot().files[0].logical_path,
+            "src/batch_fixture.rs"
+        );
+        assert_eq!(
+            source.metadata().manifest().project_id.as_str(),
+            "project.lexical-page-batch"
+        );
+        assert_eq!(
+            source.metadata().manifest().privacy_domain.as_str(),
+            "privacy.lexical-page-batch"
+        );
     }
 
     fn fixture_for_source(source: &str) -> SealedSourceFixture {
