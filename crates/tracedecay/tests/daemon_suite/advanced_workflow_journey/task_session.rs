@@ -18,31 +18,24 @@ use tracedecay_domain::configuration::{
     SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
 };
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, CalibrationProfileId, ComponentRevision, ManifestDigest,
-    ProjectId, RetrieverKind, SemanticSearchIndexProfileV1, TaskId, TemporalModeV1, UtcMicros,
-    VectorGenerationIdV1, WorkAttemptIdentityV1, canonical_sha256,
+    ManifestDigest, ProjectId, RetrieverKind, TaskId, TemporalModeV1, UtcMicros,
+    VectorGenerationIdV1, WorkAttemptIdentityV1,
 };
 use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
-use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_sdk::client::Client;
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
     ApplicationConfigurationSet, WorkRetrieveEvidence,
 };
 use tracedecay_semantic::{
-    DEFAULT_FASTEMBED_MODEL_ID, LoadedSemanticArtifactV1, SemanticModelLifecycleOwnerV1,
-    SemanticModelLifecycleStateV1, SemanticResourceCeilings,
-};
-use tracedecay_usecases::config::retrieval::{
-    RetrievalCompatibilityPinsV1, SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
+    SemanticResourceCeilings,
 };
 use tracedecay_usecases::retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_usecases::semantic_runtime::{
-    SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
-    SemanticEvaluationProfileCandidateV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 
 use super::{
@@ -397,22 +390,7 @@ fn activate_evaluated_semantic_profile(
     project_id: &ProjectId,
     installed: &InstalledSemanticFixture,
 ) -> ManifestDigest {
-    let (code, vector_generation) = wait_for_semantic_generation(home, project);
-    let lifecycle = SemanticModelLifecycleOwnerV1::open_default(
-        tracedecay_semantic::default_lifecycle_root_in(&home.join(".tracedecay")),
-    )
-    .expect("reopen installed semantic lifecycle");
-    let resources = journey_semantic_resources();
-    let projection =
-        LoadedSemanticArtifactV1::lifecycle_projection(&lifecycle, code.manifest(), resources)
-            .expect("derive the installed model's admitted projection");
-    let candidate = semantic_candidate(&code, &projection, vector_generation, resources);
-    let candidate_path = home.join("semantic-evaluation-candidate.json");
-    std::fs::write(
-        &candidate_path,
-        serde_json::to_vec_pretty(&candidate).expect("semantic candidate JSON"),
-    )
-    .expect("write semantic evaluation candidate");
+    let _ = wait_for_semantic_generation(home, project);
     let mut evaluator =
         std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay-search-eval-direct"));
     common::apply_tracedecay_home_env(&mut evaluator, home);
@@ -421,8 +399,8 @@ fn activate_evaluated_semantic_profile(
     let output = evaluator
         .args(["evaluate-and-publish", "--project-root"])
         .arg(project)
-        .arg("--candidate")
-        .arg(&candidate_path)
+        .arg("--profile")
+        .arg(EVALUATED_PROFILE_ID)
         .current_dir(project)
         .output()
         .expect("start direct semantic evaluator");
@@ -602,157 +580,6 @@ fn read_active_code_generation(
         .ok()?,
     )
     .ok()
-}
-
-fn semantic_candidate(
-    code: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    projection: &AdmittedEmbeddingProjectionKeyV1,
-    vector_generation_id: VectorGenerationIdV1,
-    evaluation_limits: SemanticResourceCeilings,
-) -> SemanticEvaluationProfileCandidateV1 {
-    let material =
-        tracedecay::search_eval::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
-            .expect("checked-in evaluated profile material");
-    let embedding = projection.embedding_key();
-    let runtime_compatibility_digest = canonical_sha256(&(
-        "tracedecay.semantic-runtime-compatibility.v1",
-        &embedding.runtime_backend,
-        &embedding.runtime_build_revision,
-        embedding.device_class,
-        embedding.precision,
-    ))
-    .expect("runtime compatibility digest");
-    let calibration = SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new(
-            "calibration.semantic.advanced-workflow-journey.v1",
-        )
-        .expect("calibration profile id"),
-        cohort_digest: canonical_sha256(&(
-            "tracedecay.semantic.advanced-workflow-journey.cohort.v1",
-            code.manifest().generation_id.clone(),
-            vector_generation_id.clone(),
-            code.capability().manifest_digest.clone(),
-        ))
-        .expect("calibration cohort digest"),
-        projection_key: projection.projection_key().clone(),
-        vector_generation: vector_generation_id.clone(),
-        capability_manifest_digest: code.capability().manifest_digest.clone(),
-        maximum_distance_micros: i64::MAX,
-        minimum_margin_micros: 0,
-    };
-    SemanticEvaluationProfileCandidateV1 {
-        evaluated_profile_id: EVALUATED_PROFILE_ID.to_owned(),
-        profile: SemanticEvaluationFusionCandidateV1 {
-            profile_id: material.profile.profile_id.clone(),
-            calibrations: material.profile.calibrations.clone(),
-            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
-            weights_micros: material.profile.weights_micros.clone(),
-            diversity_policy_id: material.profile.diversity_policy_id.clone(),
-            rerank_policy_id: material.profile.rerank_policy_id.clone(),
-            retrieval_budget: material.profile.retrieval_budget,
-        },
-        diversity: SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
-        rerank: None,
-        compatibility: RetrievalCompatibilityPinsV1 {
-            semantic: Some(SemanticCompatibilityPinsV1 {
-                implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
-                    .expect("semantic implementation revision"),
-                fusion_revision: ComponentRevision::new(
-                    "fusion.semantic.advanced-workflow-journey.v1",
-                )
-                .expect("fusion revision"),
-                artifact_manifest_digest: embedding.model_artifact_digest.clone(),
-                runtime_compatibility_digest,
-                projection: projection.clone(),
-                search_index_key: SemanticSearchIndexProfileV1::exact_flat_v1()
-                    .and_then(|profile| profile.index_key())
-                    .expect("production exact-flat semantic index"),
-                vector_generation_id,
-                calibration,
-                resources: SemanticResourceRequirementV1 {
-                    model_bytes: evaluation_limits.max_model_bytes,
-                    tokenizer_bytes: evaluation_limits.max_tokenizer_bytes,
-                    resident_bytes: evaluation_limits.max_resident_bytes,
-                    threads: evaluation_limits.max_threads,
-                    max_concurrent_sessions: evaluation_limits.max_concurrent_sessions,
-                    batch_size: evaluation_limits.max_batch_size,
-                    sequence_length: evaluation_limits.max_sequence_length,
-                    load_deadline_ms: evaluation_limits.load_deadline_ms,
-                },
-            }),
-            rerank: None,
-        },
-    }
-}
-
-/// Proves the evaluated profile is both selected through the public configuration
-/// authority and ready through the mounted runtime authority before TaskSession
-/// selection. TaskSession anchors deliberately retain only TaskSession provenance.
-pub(super) fn wait_for_evaluated_semantic_profile_current(
-    home: &Path,
-    project: &Path,
-    client: &Client,
-) {
-    let configured = client
-        .execute::<ApplicationConfigurationGet>(
-            &tracedecay_application::configuration::ConfigurationGetRequestV1 {
-                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
-                    .expect("semantic runtime setting key"),
-            },
-        )
-        .expect("read activated semantic runtime configuration through typed SDK")
-        .result;
-    let ConfigurationValueV1::Text(value) = &configured.effective_value else {
-        panic!(
-            "activated semantic runtime must retain its typed configuration text: {configured:?}"
-        );
-    };
-    let semantic_config: SemanticConfig = serde_json::from_str(value)
-        .unwrap_or_else(|error| panic!("decode activated semantic runtime configuration: {error}"));
-    let active_profile = semantic_config
-        .active_profile
-        .as_ref()
-        .expect("evaluated semantic profile must remain active through the typed SDK");
-    assert_eq!(
-        active_profile.profile_id, EVALUATED_PROFILE_ID,
-        "the evaluated semantic profile selected through the typed SDK must remain active"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let status = semantic_runtime_status(home, project)
-            .unwrap_or_else(|| panic!("runtime returned an invalid semantic status"));
-        if let SemanticRuntimeStateV1::Current { receipt } = &status.state {
-            let runtime_configuration = status
-                .configuration
-                .as_ref()
-                .expect("ready semantic runtime must report its activation configuration");
-            assert_eq!(
-                runtime_configuration.effective_behavior_digest,
-                configured.effective_behavior_digest,
-                "the runtime readiness receipt must authorize the exact evaluated configuration selected through the SDK"
-            );
-            assert_eq!(
-                receipt.configuration, *runtime_configuration,
-                "the ready semantic receipt must retain the runtime's exact activation configuration"
-            );
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for activated semantic runtime: {status:?}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
 }
 
 fn semantic_runtime_status(home: &Path, project: &Path) -> Option<SemanticRuntimeStatusV1> {

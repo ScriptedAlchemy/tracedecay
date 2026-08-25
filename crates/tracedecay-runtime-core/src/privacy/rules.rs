@@ -1446,10 +1446,10 @@ mod tests {
 
         let expected = compiled
             .iter()
-            .map(|pattern| pattern.keywords_present(&source))
+            .map(|pattern| pattern.keywords_present(source))
             .collect::<Vec<_>>();
 
-        assert_eq!(compiled.keyword_presence(&source), expected);
+        assert_eq!(compiled.keyword_presence(source), expected);
     }
 
     #[test]

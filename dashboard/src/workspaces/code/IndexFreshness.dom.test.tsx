@@ -364,6 +364,61 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps polling ready progress until the freshness envelope is ready', async () => {
+    vi.useFakeTimers();
+    const readyProgress = {
+      ...progress(),
+      phase: 'ready',
+      completed_files: 500,
+      completed_lexical_bytes: 64 * 1024 * 1024,
+      estimated_remaining_seconds: 0,
+    };
+    const transitioning = envelope('partial', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: readyProgress.generation_id,
+          staleness_state: 'stale',
+          coverage: 'partial',
+          progress: readyProgress,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const ready = envelope('ready', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: readyProgress.generation_id,
+          progress: readyProgress,
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(transitioning), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('Partial')).toBeTruthy();
+    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(screen.getByText('ready · 100.0%')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(29_998);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it('keeps a mounted ready worktree without progress on the 30-second cadence', async () => {
     vi.useFakeTimers();
     const ready = envelope('ready', {

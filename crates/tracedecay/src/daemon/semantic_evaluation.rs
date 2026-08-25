@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
@@ -8,10 +8,17 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tracedecay_application::ResolvedScope;
-use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::{
+    CalibrationProfileId, CodeGenerationId, ComponentRevision, SemanticSearchIndexProfileV1,
+    VectorGenerationIdV1, canonical_sha256,
+};
+use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
+use crate::config::retrieval::{
+    RetrievalCompatibilityPinsV1, SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
+};
 use crate::search_eval::semantic_native::{
     SemanticNativePendingReasonV1, SemanticNativeResourceProvenanceV1,
     SemanticNativeResourceSampleV1, SemanticNativeStageResultV1, SemanticProjectionCaseSampleV1,
@@ -28,6 +35,9 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
     SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationSnapshotPortV1,
     SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
+};
+use tracedecay_usecases::store::vector_generations::{
+    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -127,7 +137,7 @@ impl DaemonSemanticEvaluationControlV1 {
             .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)
     }
 
-    async fn interruptible<Output>(
+    pub(super) async fn interruptible<Output>(
         &self,
         operation: impl Future<Output = Output>,
     ) -> Result<Output, SemanticActivationCoordinationErrorV1> {
@@ -195,6 +205,187 @@ fn coordination_error_from_runtime(
         }
         SemanticRuntimeBackendErrorV1::Rejected => SemanticActivationCoordinationErrorV1::Rejected,
         SemanticRuntimeBackendErrorV1::Conflict => SemanticActivationCoordinationErrorV1::Conflict,
+    }
+}
+
+pub(super) async fn build_daemon_semantic_evaluation_candidate(
+    project_root: &Path,
+    scope: &ResolvedScope,
+    scheduler: &CodeIndexSchedulerRegistryV1,
+    evaluated_profile_id: &str,
+    configured_limits: crate::config::SemanticResourceCeilings,
+    control: Arc<DaemonSemanticEvaluationControlV1>,
+) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
+    control.checkpoint()?;
+    let snapshot = control
+        .interruptible(scheduler.semantic_evaluation_snapshot_for_scope(scope))
+        .await?
+        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let serving = control
+        .interruptible(scheduler.serving_code_scope(project_root))
+        .await?
+        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let code = serving
+        .serving_generation
+        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    if code.manifest().generation_id != snapshot.source_generation
+        || code.projection().request().changes.manifest_digest != snapshot.source_manifest_digest
+        || code.manifest().snapshot_digest != snapshot.snapshot_digest
+        || code.capability().manifest_digest != snapshot.capability_manifest_digest
+    {
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    }
+
+    let status = tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+        project_root,
+        None,
+    )
+    .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let vector_generation_id = semantic_publication_generation(&status.state)?;
+    let provider = control
+        .interruptible(scheduler.semantic_vector_graph_provider(project_root))
+        .await?
+        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let retained = control
+        .interruptible(provider.graph_for_generation(&code))
+        .await?
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let store =
+        GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id)
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
+            .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+    let vector = control
+        .interruptible(store.generation(&vector_generation_id, Arc::clone(retained.cancellation())))
+        .await?
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
+        .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+    if vector.source_generation() != &snapshot.source_generation
+        || vector.source_manifest_digest() != &snapshot.source_manifest_digest
+    {
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    }
+    daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, configured_limits)
+}
+
+pub(super) fn semantic_publication_generation(
+    state: &tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
+) -> Result<VectorGenerationIdV1, SemanticActivationCoordinationErrorV1> {
+    use tracedecay_usecases::semantic_runtime::{SemanticFallbackReasonV1, SemanticRuntimeStateV1};
+
+    match state {
+        SemanticRuntimeStateV1::Current { receipt } => Ok(receipt.activated_generation.clone()),
+        SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(_),
+            reason: SemanticFallbackReasonV1::Stale,
+        }
+        | SemanticRuntimeStateV1::Rollback { .. } => {
+            Err(SemanticActivationCoordinationErrorV1::Conflict)
+        }
+        SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(generation),
+            ..
+        } => Ok(generation.clone()),
+        _ => Err(SemanticActivationCoordinationErrorV1::Unavailable),
+    }
+}
+
+fn daemon_semantic_evaluation_candidate(
+    evaluated_profile_id: &str,
+    code: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    vector: &PublishedVectorGenerationV1,
+    configured_limits: crate::config::SemanticResourceCeilings,
+) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
+    let material =
+        crate::search_eval::load_default_evaluated_profile_material(evaluated_profile_id)
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    let embedding = vector.embedding_key().embedding_key();
+    let runtime_compatibility_digest = canonical_sha256(&(
+        "tracedecay.semantic-runtime-compatibility.v1",
+        &embedding.runtime_backend,
+        &embedding.runtime_build_revision,
+        embedding.device_class,
+        embedding.precision,
+    ))
+    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
+        .and_then(|profile| profile.index_key())
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    let resources = daemon_semantic_evaluation_resource_requirement(configured_limits);
+    let vector_generation_id = vector.generation_id().clone();
+    let calibration = SemanticCalibrationProfileV1 {
+        calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+        cohort_digest: canonical_sha256(&(
+            "tracedecay.semantic.evaluation-calibration-cohort.v1",
+            code.manifest().generation_id.clone(),
+            vector.source_manifest_digest().clone(),
+            code.capability().manifest_digest.clone(),
+            vector.embedding_key().clone(),
+            vector_generation_id.clone(),
+            embedding.model_artifact_digest.clone(),
+        ))
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+        projection_key: vector.projection_key().clone(),
+        vector_generation: vector_generation_id.clone(),
+        capability_manifest_digest: code.capability().manifest_digest.clone(),
+        maximum_distance_micros: i64::MAX,
+        minimum_margin_micros: 0,
+    };
+    Ok(SemanticEvaluationProfileCandidateV1 {
+        evaluated_profile_id: evaluated_profile_id.to_owned(),
+        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
+            profile_id: material.profile.profile_id.clone(),
+            calibrations: material.profile.calibrations.clone(),
+            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
+            weights_micros: material.profile.weights_micros.clone(),
+            diversity_policy_id: material.profile.diversity_policy_id.clone(),
+            rerank_policy_id: material.profile.rerank_policy_id.clone(),
+            retrieval_budget: material.profile.retrieval_budget,
+        },
+        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
+            policy_id: material.diversity.policy_id.clone(),
+            per_source_namespace: material.diversity.per_source_namespace,
+            per_source_instance: material.diversity.per_source_instance,
+            per_repository: material.diversity.per_repository,
+            per_file: material.diversity.per_file,
+            per_session_or_thread: material.diversity.per_session_or_thread,
+            per_copy_cluster: material.diversity.per_copy_cluster,
+            per_evidence_role: material.diversity.per_evidence_role,
+        },
+        rerank: None,
+        compatibility: RetrievalCompatibilityPinsV1 {
+            semantic: Some(SemanticCompatibilityPinsV1 {
+                implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
+                    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+                fusion_revision: ComponentRevision::new(
+                    tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
+                )
+                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+                artifact_manifest_digest: embedding.model_artifact_digest.clone(),
+                runtime_compatibility_digest,
+                projection: vector.embedding_key().clone(),
+                search_index_key,
+                vector_generation_id,
+                calibration,
+                resources,
+            }),
+            rerank: None,
+        },
+    })
+}
+
+pub(super) fn daemon_semantic_evaluation_resource_requirement(
+    configured_limits: crate::config::SemanticResourceCeilings,
+) -> SemanticResourceRequirementV1 {
+    SemanticResourceRequirementV1 {
+        model_bytes: configured_limits.max_model_bytes,
+        tokenizer_bytes: configured_limits.max_tokenizer_bytes,
+        resident_bytes: configured_limits.max_resident_bytes,
+        threads: configured_limits.max_threads,
+        max_concurrent_sessions: configured_limits.max_concurrent_sessions,
+        batch_size: configured_limits.max_batch_size,
+        sequence_length: configured_limits.max_sequence_length,
+        load_deadline_ms: configured_limits.load_deadline_ms,
     }
 }
 

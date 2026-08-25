@@ -115,8 +115,8 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 16;
-const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 32 * 1024 * 1024;
+const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 32;
+const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
@@ -456,6 +456,21 @@ struct PublicationPointerMemoV1 {
 }
 
 #[derive(Clone)]
+struct UndecodedActivePublicationExpectationV1 {
+    generation_id: String,
+    generation_file: String,
+    state_digest: String,
+}
+
+impl UndecodedActivePublicationExpectationV1 {
+    fn matches(&self, pointer: &DurablePublicationPointerV1) -> bool {
+        self.generation_id == pointer.generation_id
+            && self.generation_file == pointer.generation_file
+            && self.state_digest == pointer.state_digest
+    }
+}
+
+#[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
     active_encoded_bytes: Arc<AtomicU64>,
@@ -465,6 +480,7 @@ struct DaemonCodeIndexPublicationStoreV1 {
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
     pointer_memo: Arc<Mutex<Option<PublicationPointerMemoV1>>>,
+    undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,7 +532,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
             pointer_memo: Arc::new(Mutex::new(None)),
+            undecoded_active_expectation: None,
         })
+    }
+
+    fn for_undecoded_active_rebuild(&self, pointer: &DurablePublicationPointerV1) -> Self {
+        let mut publication = self.clone();
+        publication.undecoded_active_expectation = Some(UndecodedActivePublicationExpectationV1 {
+            generation_id: pointer.generation_id.clone(),
+            generation_file: pointer.generation_file.clone(),
+            state_digest: pointer.state_digest.clone(),
+        });
+        publication
     }
 
     fn retained_history(&self) -> Self {
@@ -1162,6 +1189,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         &self,
         _scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        if self.undecoded_active_expectation.is_some() {
+            return Ok(None);
+        }
         Ok(self
             .load_active_shared()?
             .map(|generation| generation.as_ref().clone()))
@@ -1180,14 +1210,34 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
-        let _ = self.load_active_shared()?;
+        let prior_pointer = if let Some(expected) = self.undecoded_active_expectation.as_ref() {
+            if expected_active_generation.is_some() {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            let pointer = self
+                .read_publication_pointer()?
+                .ok_or(CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
+            if !expected.matches(&pointer) {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            Some(pointer)
+        } else {
+            let _ = self.load_active_shared()?;
+            self.read_publication_pointer()?
+        };
         let state = self.cache.lock_state()?;
-        if state
+        let cached_active = state
             .active
             .as_ref()
-            .map(|current| &current.manifest().generation_id)
-            != expected_active_generation
-        {
+            .map(|current| &current.manifest().generation_id);
+        let cache_matches = self.undecoded_active_expectation.as_ref().map_or(
+            cached_active == expected_active_generation,
+            |expected| {
+                cached_active
+                    .is_none_or(|generation| generation.as_str() == expected.generation_id.as_str())
+            },
+        );
+        if !cache_matches {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
         if self.disposition == CodeIndexPublicationDispositionV1::RetainedHistory
@@ -1268,7 +1318,6 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
 
-        let prior_pointer = self.read_publication_pointer()?;
         let exact_git_evidence = self.exact_git_evidence(&generation)?;
         let mut generation_index = prior_pointer
             .as_ref()
@@ -1371,25 +1420,31 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Ok::<(), CodeIndexPublicationStoreErrorV1>(())
         })?;
         let mut state = self.cache.lock_state()?;
-        if state
-            .active
-            .as_ref()
-            .map(|current| &current.manifest().generation_id)
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        if self.undecoded_active_expectation.is_none() {
+            let cached_active = state
+                .active
+                .as_ref()
+                .map(|current| &current.manifest().generation_id);
+            if cached_active != expected_active_generation {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
         }
         let generation_id = generation.manifest().generation_id.clone();
         state.forget(&generation_id);
         match self.disposition {
             CodeIndexPublicationDispositionV1::Active => {
-                self.active_encoded_bytes
-                    .store(generation_size, Ordering::Release);
                 // The published generation is already decoded and validated in
                 // memory. Bumping the epoch retires any decode that started
                 // against the prior pointer so it cannot install over this one.
                 state.active_epoch = state.active_epoch.wrapping_add(1);
-                state.active = Some(generation);
+                if self.undecoded_active_expectation.is_some() {
+                    self.active_encoded_bytes.store(0, Ordering::Release);
+                    state.active = None;
+                } else {
+                    self.active_encoded_bytes
+                        .store(generation_size, Ordering::Release);
+                    state.active = Some(generation);
+                }
             }
             CodeIndexPublicationDispositionV1::RetainedHistory => {
                 state.decoded.push_back(generation);
@@ -1486,6 +1541,61 @@ impl PendingHintsV1 {
 
     fn take(&mut self) -> Self {
         std::mem::take(self)
+    }
+
+    fn restore(&mut self, pending: Self) {
+        if self.overflow {
+            return;
+        }
+        if pending.overflow {
+            self.overflow();
+            return;
+        }
+        for path in pending.paths {
+            self.path(path);
+            if self.overflow {
+                break;
+            }
+        }
+    }
+}
+
+/// A drained view of the canonical pending-hint authority. Until committed,
+/// every early return, typed failure, cancellation, or unwind merges the exact
+/// drained paths back with hints that arrived during the reconcile pass.
+struct DrainedPendingHintsV1 {
+    authority: Arc<Mutex<PendingHintsV1>>,
+    pending: Option<PendingHintsV1>,
+}
+
+impl DrainedPendingHintsV1 {
+    fn new(authority: Arc<Mutex<PendingHintsV1>>, pending: PendingHintsV1) -> Self {
+        Self {
+            authority,
+            pending: Some(pending),
+        }
+    }
+
+    fn overflow(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.overflow)
+    }
+
+    fn commit(mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for DrainedPendingHintsV1 {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore(pending);
     }
 }
 
@@ -1850,6 +1960,7 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
         CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
     >,
     lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+    hydration: CodeLexicalArtifactReaderV1,
     /// Holds the complete advertised reader ceiling in the process resident-
     /// memory authority while these owners serve.
     _reader_reservation: Arc<ResidentMemoryReservationV1>,
@@ -1869,13 +1980,63 @@ impl ProductionCodeIndexQueryOwnersV1 {
             CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
         >,
         lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+        hydration: CodeLexicalArtifactReaderV1,
         reader_reservation: ResidentMemoryReservationV1,
     ) -> Self {
         Self {
             exact,
             lexical,
+            hydration,
             _reader_reservation: Arc::new(reader_reservation),
         }
+    }
+
+    fn occurrence_by_binding(
+        &self,
+        binding: &tracedecay_query::retrieval::ports::CodeCandidateBindingV1,
+    ) -> Result<
+        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
+        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
+    > {
+        self.hydration
+            .occurrence_by_binding(binding)
+            .map_err(|_| {
+                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
+            })?
+            .map(
+                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
+                    file: occurrence.file,
+                    symbol: occurrence.symbol,
+                    chunk: Some(occurrence.chunk),
+                    path: occurrence.logical_path,
+                    span: occurrence.source_span,
+                },
+            )
+            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
+    }
+
+    fn occurrence_by_chunk(
+        &self,
+        chunk: &tracedecay_domain::CodeSearchChunkId,
+    ) -> Result<
+        tracedecay_query::retrieval::NativeCodeOccurrenceV1,
+        tracedecay_query::retrieval::QueryExecutionContractErrorV1,
+    > {
+        self.hydration
+            .occurrence_by_chunk(chunk)
+            .map_err(|_| {
+                tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable
+            })?
+            .map(
+                |occurrence| tracedecay_query::retrieval::NativeCodeOccurrenceV1 {
+                    file: occurrence.file,
+                    symbol: occurrence.symbol,
+                    chunk: Some(occurrence.chunk),
+                    path: occurrence.logical_path,
+                    span: occurrence.source_span,
+                },
+            )
+            .ok_or(tracedecay_query::retrieval::QueryExecutionContractErrorV1::RecordUnavailable)
     }
 
     pub fn retrieve_lexical(
@@ -2949,6 +3110,12 @@ impl LatestCodeTextGenerationV1 {
     ) -> Result<bool, RetrievalPortError> {
         let store = &self.text_artifact_store;
         if build.is_none() {
+            hotpath::gauge!("query.artifact.build_memory_budget_bytes")
+                .set(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1);
+            hotpath::gauge!("query.artifact.source_batch_pages_max")
+                .set(TEXT_ARTIFACT_BATCH_PAGES_V1);
+            hotpath::gauge!("query.artifact.source_batch_bytes_max")
+                .set(TEXT_ARTIFACT_BATCH_BYTES_V1);
             let generation_id = self.metadata.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
                 // Durable-head reopen: a restart serves the published
@@ -3076,7 +3243,7 @@ impl LatestCodeTextGenerationV1 {
         })?;
         let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
         while remaining > 0 && artifact_build.source_receipt.is_none() {
-            let maximum_batch_pages = remaining.min(TEXT_ARTIFACT_BATCH_PAGES_V1).max(1);
+            let maximum_batch_pages = remaining.clamp(1, TEXT_ARTIFACT_BATCH_PAGES_V1);
             let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
                 maximum_batch_pages,
                 TEXT_ARTIFACT_BATCH_BYTES_V1,
@@ -3367,10 +3534,12 @@ impl LatestCodeTextGenerationV1 {
         }
         let authority = exact_serving_authority()?;
         let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
+        let hydration = reader.clone();
         let lexical = LexicalLane::new(reader);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::artifact(
             exact,
             lexical,
+            hydration,
             reader_reservation,
         ));
         let _ = self.query_owners.set(owners);
@@ -3989,6 +4158,224 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    /// Verify an unchanged retained text generation without decoding the full
+    /// graph-bearing generation.
+    ///
+    /// Graph-off mounts already authenticated the complete sealed bytes while
+    /// opening their lexical page source. For an ordinary source roster, the
+    /// durable freshness witness proves a quiet mount; an explicit hint is
+    /// settled by one authoritative capture. An unchanged capture keeps the
+    /// retained generation, while a changed ordinary source is rebuilt from
+    /// that capture under an exact durable-pointer compare-and-swap. This path
+    /// never decodes the graph-bearing active generation. Ignored-source
+    /// rosters still require the complete reconcile path.
+    fn reconcile_retained_text_generation(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        if metadata.manifest().project_id != self.project_id
+            || metadata.snapshot().repository != self.repository_id
+            || metadata.snapshot().worktree.as_ref() != Some(&self.worktree_id)
+        {
+            return Ok(None);
+        }
+        let witness = RestoreFreshnessWitnessV1::load(&self.store_root);
+        if witness.as_ref().is_some_and(|witness| {
+            witness.generation_id != metadata.manifest().generation_id.as_str()
+                || !witness.ignored_source_paths.is_empty()
+        }) || !self.ignored_source_admissions.is_empty()
+        {
+            return Ok(None);
+        }
+        let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        if !resolved.authorizes_reuse_of(&self.identity) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "worktree identity changed under the scheduler".to_owned(),
+            ));
+        }
+        self.identity = resolved;
+        let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let Some(sampled_signature) = self.worktree_stat_signature().ok() else {
+            return Ok(None);
+        };
+        let has_hints = {
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hints.overflow || !hints.paths.is_empty()
+        };
+        if !has_hints && let Some(witness) = witness.as_ref() {
+            if witness.git_metadata_signature != sampled_metadata.stable_signature()
+                || witness.stat_signature != sampled_signature
+            {
+                return Ok(None);
+            }
+            let snapshot_content_identity = metadata.snapshot().content_identity.clone();
+            self.latest_content_identity = Some(snapshot_content_identity.clone());
+            self.mark_reconciled_state(sampled_metadata, Some(sampled_signature));
+            return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+                CodeIndexNoopEvidenceV1 {
+                    snapshot_content_identity,
+                    overflow_reconciled: false,
+                },
+            )));
+        }
+
+        let _worker_memory = self.reserve_worker_memory()?;
+        let capture_epoch = self.epoch.load(Ordering::Acquire);
+        let mut captured =
+            self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
+        let drained_hints = {
+            let mut hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.epoch.load(Ordering::Acquire) != capture_epoch {
+                return Ok(None);
+            }
+            DrainedPendingHintsV1::new(Arc::clone(&self.hints), hints.take())
+        };
+        if captured.snapshot.reference != metadata.snapshot().reference
+            || captured.snapshot.source_revision != metadata.snapshot().source_revision
+            || captured.snapshot.content_identity != metadata.snapshot().content_identity
+        {
+            if witness.is_none() {
+                // Without the durable ignored-source roster witness, an
+                // unequal capture cannot distinguish a real edit from a file
+                // the sealed generation intentionally excluded. Fall back to
+                // the complete authority for that changed-source case. An
+                // equal authoritative capture is sufficient to verify the
+                // retained text generation without decoding it.
+                return Ok(None);
+            }
+            let pointer = self
+                .publication
+                .read_publication_pointer()
+                .map_err(CodeIndexProductionErrorV1::Publication)?
+                .ok_or_else(|| {
+                    CodeIndexSchedulerErrorV1::PublicationConflict(
+                        "the retained text generation has no active durable publication".to_owned(),
+                    )
+                })?;
+            if pointer.generation_id != metadata.manifest().generation_id.as_str()
+                || pointer.snapshot_content_identity
+                    != metadata.snapshot().content_identity.as_str()
+            {
+                return Err(CodeIndexSchedulerErrorV1::PublicationConflict(
+                    "the retained text generation was superseded before rebuild".to_owned(),
+                ));
+            }
+            let publication = self.publication.for_undecoded_active_rebuild(&pointer);
+            let mut owner = open_production_code_index_owner_v1(
+                self.production_config.clone(),
+                publication,
+                DaemonProjectionSinkV1,
+            )
+            .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
+            .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
+            let control = DaemonCodeIndexControlV1::new(
+                Arc::clone(&self.epoch),
+                Arc::clone(&self.shutting_down),
+            );
+            let snapshot_content_identity = captured.snapshot.content_identity.clone();
+            let reextracted_files = captured.changed_paths.len();
+            let generation = owner.build_and_publish(
+                CodeIndexBuildRequestV1 {
+                    snapshot: captured.snapshot,
+                    captured_files: captured.captured_files,
+                    changed_files: captured.changed_paths,
+                    invalidations: BTreeSet::new(),
+                    repository_parse_identity: captured.repository_parse_identity,
+                    ignored_source_admissions: Vec::new(),
+                    sealed_at: now_micros(),
+                    target_projection_key: projection_key()?,
+                },
+                &control,
+            )?;
+            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+            self.latest_content_identity = Some(snapshot_content_identity);
+            self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
+            let repository_parse_identity_digest =
+                canonical_sha256(generation.repository_parse_identity())
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+            RestoreFreshnessWitnessV1 {
+                generation_id: generation.manifest().generation_id.as_str().to_owned(),
+                git_metadata_signature: sampled_metadata.stable_signature(),
+                stat_signature: sampled_signature,
+                repository_parse_identity_digest: repository_parse_identity_digest
+                    .as_str()
+                    .to_owned(),
+                ignored_source_admissions_digest: generation
+                    .ignored_source_admissions_digest()
+                    .as_str()
+                    .to_owned(),
+                ignored_source_paths: Vec::new(),
+            }
+            .persist(&self.store_root);
+            let changes = &generation.projection().request().changes;
+            let lane_digest = canonical_sha256(&(
+                generation.snapshot().content_identity.clone(),
+                generation
+                    .chunks()
+                    .chunks()
+                    .iter()
+                    .map(|chunk| (&chunk.id, &chunk.content_digest))
+                    .collect::<Vec<_>>(),
+                generation.edges(),
+            ))
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+            let outcome = CodeIndexReconcileOutcomeV1::Published(CodeIndexPublishEvidenceV1 {
+                generation_id: generation.manifest().generation_id.clone(),
+                repository_id: self.repository_id.clone(),
+                snapshot_content_identity: generation.snapshot().content_identity.clone(),
+                _lane_digest: lane_digest,
+                _file_occurrence_ids: generation
+                    .snapshot()
+                    .files
+                    .iter()
+                    .map(|file| file.file_occurrence_id.clone())
+                    .collect(),
+                reextracted_files,
+                changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
+                reused_chunks: changes.reused.len(),
+                overflow_reconciled: drained_hints.overflow(),
+            });
+            drained_hints.commit();
+            return Ok(Some(outcome));
+        }
+        drop(std::mem::take(&mut captured.captured_files));
+        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+        let snapshot_content_identity = captured.snapshot.content_identity;
+        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
+        if let Some(witness) = witness {
+            RestoreFreshnessWitnessV1 {
+                generation_id: witness.generation_id,
+                git_metadata_signature: sampled_metadata.stable_signature(),
+                stat_signature: sampled_signature,
+                repository_parse_identity_digest: witness.repository_parse_identity_digest,
+                ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
+                ignored_source_paths: witness.ignored_source_paths,
+            }
+            .persist(&self.store_root);
+        }
+        let outcome = CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+            snapshot_content_identity,
+            overflow_reconciled: drained_hints.overflow(),
+        });
+        drained_hints.commit();
+        Ok(Some(outcome))
+    }
+
     /// Load a complete identity-valid generation for stale serving.
     ///
     /// This does not claim freshness: a cancelled refresh or live ref switch
@@ -4338,13 +4725,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         metadata: identity::GitMetadataFingerprintV1,
         signature: Option<String>,
     ) {
+        self.mark_reconciled_state(metadata, signature);
+        self.persist_freshness_witness();
+    }
+
+    fn mark_reconciled_state(
+        &mut self,
+        metadata: identity::GitMetadataFingerprintV1,
+        signature: Option<String>,
+    ) {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
         self.freshness_unknown = false;
         self.last_reconciled_at = Instant::now();
         self.last_reconciled_at_micros = Some(now_micros().0);
         self.verified_against_source = true;
-        self.persist_freshness_witness();
     }
 
     /// Record the restore-time freshness witness for the current active
@@ -4433,12 +4828,25 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         admission: GenerationDecodeAdmissionV1,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
-        let latest = self.latest_complete_ready_for_query_with(admission)?;
-        if latest.is_none() {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        if self.freshness_unknown
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+        {
+            self.request_background_reconcile();
             return Ok(None);
         }
         match self.worktree_stat_signature() {
-            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => Ok(latest),
+            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
+                // The exact-source stat fence is stronger than the elapsed
+                // tier-2 arm. Refresh only the monotonic admission clock: no
+                // reconcile receipt or wall timestamp is fabricated, and a
+                // clean status census cannot turn into a full capture loop.
+                self.last_reconciled_at = Instant::now();
+                Ok(self.latest_complete_with(admission))
+            }
             _ => {
                 self.request_background_reconcile();
                 Ok(None)
@@ -4554,12 +4962,23 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&self.git_metadata)
-            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
             self.request_background_reconcile();
             return true;
         }
-        false
+        if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+            return false;
+        }
+        if self
+            .worktree_stat_signature()
+            .is_ok_and(|signature| self.last_stat_signature.as_ref() == Some(&signature))
+        {
+            self.last_reconciled_at = Instant::now();
+            self.last_reconciled_at_micros = Some(now_micros().0);
+            return false;
+        }
+        self.request_background_reconcile();
+        true
     }
 
     /// The exact identity this scheduler is currently bound to.
@@ -4899,6 +5318,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         control: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
+        self.capture_authoritative_snapshot_with_active_generation_reuse(control, true)
+    }
+
+    fn capture_authoritative_snapshot_without_active_generation_reuse(
+        &self,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
+        self.capture_authoritative_snapshot_with_active_generation_reuse(control, false)
+    }
+
+    fn capture_authoritative_snapshot_with_active_generation_reuse(
+        &self,
+        control: Option<&dyn CodeIndexExecutionControlV1>,
+        allow_active_generation_reuse: bool,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -4915,7 +5349,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if self.ignored_source_admissions.is_empty()
+        if allow_active_generation_reuse
+            && self.ignored_source_admissions.is_empty()
             && classification.changes().is_empty()
             && let (Some(reference), Some(revision), Some(tree)) = (
                 self.identity.head_ref(),

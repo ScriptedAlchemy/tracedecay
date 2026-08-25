@@ -39,7 +39,8 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{
-    CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
+    CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
     registry::{UniqueMountedWorktree, latest_matches_scope_identity, unique_mounted_for_scope},
 };
 use tracedecay_query::code_search;
@@ -376,6 +377,76 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         Ok(latest)
     }
+
+    async fn resolve_text_serving_generation(
+        &self,
+        request: &RequestContext,
+        requested: &CodeGenerationId,
+        page: &tracedecay_application::PageRequest,
+        authority: &tracedecay_query::retrieval::QueryAuthorityV1,
+        routing: &PreparedQueryRoutingBindingsV1,
+    ) -> Result<LatestCodeTextGenerationV1, CallableCodeCursorError> {
+        let wait = remaining_generation_resolution_wait(request)
+            .ok_or(CallableCodeCursorError::Unavailable)?;
+        let resolution = async {
+            if let Some(cursor) = page.cursor.as_ref() {
+                let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
+                let scope = request.scope().clone();
+                route_authenticated_prepared_query_cursor(
+                    authority,
+                    routing,
+                    cursor.as_str(),
+                    current_utc_micros()?,
+                    expected_generation,
+                    |generation| async move {
+                        if let Some(latest) = self
+                            .latest_text_serving_for_scope(&scope)
+                            .await
+                            .filter(|latest| {
+                                latest.metadata().manifest().generation_id == generation
+                            })
+                        {
+                            return Ok::<_, code_search::CodeIndexSearchUnavailableReasonV1>(Some(
+                                latest,
+                            ));
+                        }
+                        self.generation_for(&scope, &generation)
+                            .await
+                            .map(|latest| latest.map(|latest| latest.text_generation_handle()))
+                    },
+                )?
+                .await
+                .map_err(|_| CallableCodeCursorError::Unavailable)?
+                .ok_or(CallableCodeCursorError::Unavailable)
+            } else if is_unpinned_latest(requested) {
+                self.latest_text_fresh_for_scope(request.scope())
+                    .await
+                    .ok_or(CallableCodeCursorError::Unavailable)
+            } else if let Some(latest) = self
+                .latest_text_serving_for_scope(request.scope())
+                .await
+                .filter(|latest| latest.metadata().manifest().generation_id == *requested)
+            {
+                Ok(latest)
+            } else {
+                self.generation_for(request.scope(), requested)
+                    .await
+                    .map_err(|_| CallableCodeCursorError::Unavailable)?
+                    .map(|latest| latest.text_generation_handle())
+                    .ok_or(CallableCodeCursorError::Unavailable)
+            }
+        };
+        let latest = tokio::time::timeout(wait, resolution)
+            .await
+            .map_err(|_| CallableCodeCursorError::Unavailable)??;
+        if !matches!(
+            request.admission_at(current_utc_micros()?),
+            RequestAdmission::Admitted
+        ) {
+            return Err(CallableCodeCursorError::Unavailable);
+        }
+        Ok(latest)
+    }
 }
 
 fn typed<T>(value: impl Into<String>) -> Result<T, String>
@@ -474,6 +545,41 @@ fn base_request(
             ))
             .map_err(|error| error.to_string())?,
             captured_at: generation.manifest().seal.sealed_at,
+        },
+        profile_id: profile.profile_id.clone(),
+        budget: profile.retrieval_budget,
+    })
+}
+
+fn text_base_request(
+    context: &RetrievalPortContext<'_>,
+    latest: &LatestCodeTextGenerationV1,
+    temporal_mode: TemporalModeV1,
+    profile: &tracedecay_domain::FusionProfile,
+) -> Result<RetrievalRequest, String> {
+    let manifest = latest.metadata().manifest();
+    let snapshot = latest.metadata().snapshot();
+    Ok(RetrievalRequest {
+        principal: typed::<PrincipalId>(context.request.actor().to_string())?,
+        scope: RetrievalScope {
+            privacy_domain: manifest.privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: snapshot.repository.clone(),
+                worktree: snapshot.worktree.clone(),
+                reference: snapshot.reference.clone(),
+            },
+        },
+        temporal_mode,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(manifest.snapshot_digest.as_str())
+                .map_err(|error| error.to_string())?,
+            authorization_revision: AuthorizationRevision::new(format!(
+                "authorization.grant.{}",
+                context.request.grant().revision
+            ))
+            .map_err(|error| error.to_string())?,
+            captured_at: manifest.seal.sealed_at,
         },
         profile_id: profile.profile_id.clone(),
         budget: profile.retrieval_budget,
@@ -996,6 +1102,42 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
     }
 }
 
+struct TextArtifactNativeRecordReadPortV1 {
+    generation: CodeGenerationId,
+    owners: std::sync::Arc<ProductionCodeIndexQueryOwnersV1>,
+}
+
+impl NativeRecordReadPortV1 for TextArtifactNativeRecordReadPortV1 {
+    fn generation(&self) -> &CodeGenerationId {
+        &self.generation
+    }
+
+    fn occurrence(
+        &self,
+        binding: &CodeCandidateBindingV1,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
+        if &binding.occurrence.generation != self.generation() {
+            return Err(QueryExecutionContractErrorV1::GenerationMismatch);
+        }
+        self.owners.occurrence_by_binding(binding)
+    }
+
+    fn occurrence_by_chunk(
+        &self,
+        chunk_id: &CodeSearchChunkId,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
+        self.owners.occurrence_by_chunk(chunk_id)
+    }
+
+    fn symbol(
+        &self,
+        _symbol: &SymbolOccurrenceId,
+        _file: &FileOccurrenceId,
+    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
+        Err(QueryExecutionContractErrorV1::RecordUnavailable)
+    }
+}
+
 fn application_occurrence(record: NativeCodeOccurrenceV1) -> CodeOccurrenceRecord {
     CodeOccurrenceRecord {
         file: record.file,
@@ -1110,6 +1252,36 @@ struct PreparedCallableQueryV1 {
     query: PreparedQueryV1,
 }
 
+struct PreparedTextCallableQueryV1 {
+    latest: LatestCodeTextGenerationV1,
+    query: PreparedQueryV1,
+}
+
+trait PreparedCallableQueryStateV1 {
+    fn generation(&self) -> &CodeGenerationId;
+    fn query(&self) -> &PreparedQueryV1;
+}
+
+impl PreparedCallableQueryStateV1 for PreparedCallableQueryV1 {
+    fn generation(&self) -> &CodeGenerationId {
+        &self.latest.generation.manifest().generation_id
+    }
+
+    fn query(&self) -> &PreparedQueryV1 {
+        &self.query
+    }
+}
+
+impl PreparedCallableQueryStateV1 for PreparedTextCallableQueryV1 {
+    fn generation(&self) -> &CodeGenerationId {
+        &self.latest.metadata().manifest().generation_id
+    }
+
+    fn query(&self) -> &PreparedQueryV1 {
+        &self.query
+    }
+}
+
 macro_rules! prepare_callable_query_or_return {
     ($registry:expr, $context:expr, $request:expr, $operation:expr, $binding:expr) => {{
         let Ok(query_binding_digest) = canonical_sha256(&$binding) else {
@@ -1117,6 +1289,34 @@ macro_rules! prepare_callable_query_or_return {
         };
         match $registry
             .prepare_callable_query(
+                &$context,
+                &$request.scope.generation,
+                &$request.meta.page,
+                $request.meta.temporal,
+                $operation,
+                query_binding_digest.clone(),
+            )
+            .await
+        {
+            Ok(prepared) => (prepared, query_binding_digest),
+            Err(error) => {
+                return rejected_cursor(
+                    query_finished_at(),
+                    $request.scope.generation.clone(),
+                    error,
+                );
+            }
+        }
+    }};
+}
+
+macro_rules! prepare_text_callable_query_or_return {
+    ($registry:expr, $context:expr, $request:expr, $operation:expr, $binding:expr) => {{
+        let Ok(query_binding_digest) = canonical_sha256(&$binding) else {
+            return unavailable(query_finished_at());
+        };
+        match $registry
+            .prepare_text_callable_query(
                 &$context,
                 &$request.scope.generation,
                 &$request.meta.page,
@@ -1198,6 +1398,45 @@ impl CodeIndexSchedulerRegistryV1 {
         )?;
         Ok(PreparedCallableQueryV1 { latest, query })
     }
+
+    async fn prepare_text_callable_query(
+        &self,
+        context: &RetrievalPortContext<'_>,
+        generation: &CodeGenerationId,
+        page: &tracedecay_application::PageRequest,
+        temporal: TemporalModeV1,
+        operation: &'static str,
+        query_binding_digest: ManifestDigest,
+    ) -> Result<PreparedTextCallableQueryV1, CallableCodeCursorError> {
+        let authority = self
+            .query_authority_for_scope(context.request.scope())
+            .await
+            .ok_or(CallableCodeCursorError::Unavailable)?;
+        let routing = prepared_routing_bindings(
+            context,
+            temporal,
+            operation,
+            query_binding_digest,
+            page.page_size,
+        )?;
+        let latest = self
+            .resolve_text_serving_generation(
+                context.request,
+                generation,
+                page,
+                authority.as_ref(),
+                &routing,
+            )
+            .await?;
+        let base = text_base_request(context, &latest, temporal, authority.profile())
+            .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        let query = PreparedQueryV1::prepare(
+            authority,
+            base,
+            page.cursor.as_ref().map(OpaqueCursor::as_str),
+        )?;
+        Ok(PreparedTextCallableQueryV1 { latest, query })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1270,7 +1509,7 @@ fn finish_generation_page<T: serde::Serialize>(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_query_with_coverage<T: serde::Serialize>(
-    prepared: &PreparedCallableQueryV1,
+    prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
@@ -1279,7 +1518,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     coverage: tracedecay_domain::RetrieverCoverage,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let finished_at = query_finished_at();
-    let generation = prepared.latest.generation.manifest().generation_id.clone();
+    let generation = prepared.generation().clone();
     let bindings = PreparedQueryBindingsV1::new(
         operation,
         context.request.scope().scope_digest.clone(),
@@ -1288,7 +1527,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     );
     let pagination = bindings.and_then(|bindings| {
         prepared
-            .query
+            .query()
             .paginate(&bindings, page.items, requested_page.page_size, finished_at)
     });
     match pagination {
@@ -1426,7 +1665,7 @@ fn terminal_lane_evidence<T>(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_native_lane_page<T, N>(
-    prepared: &PreparedCallableQueryV1,
+    prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
@@ -1495,7 +1734,7 @@ fn mark_lane_partial<T>(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_native_lane_query<T, N>(
-    prepared: &PreparedCallableQueryV1,
+    prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
@@ -1533,11 +1772,8 @@ where
         }
         NativeLaneOutcomeV1::Unavailable(reason) => {
             let omission = retrieval_failure_omission(&reason);
-            let evidence = terminal_lane_evidence(
-                finished_at,
-                prepared.latest.generation.manifest().generation_id.clone(),
-                omission,
-            );
+            let evidence =
+                terminal_lane_evidence(finished_at, prepared.generation().clone(), omission);
             match reason {
                 RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
                     RetrievalPortOutcome::Failed(evidence)
@@ -1549,18 +1785,18 @@ where
         }
         NativeLaneOutcomeV1::Denied => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
             finished_at,
-            prepared.latest.generation.manifest().generation_id.clone(),
+            prepared.generation().clone(),
             OmissionReason::Unavailable,
         )),
         NativeLaneOutcomeV1::Stale(_) => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
             finished_at,
-            prepared.latest.generation.manifest().generation_id.clone(),
+            prepared.generation().clone(),
             OmissionReason::Stale,
         )),
         NativeLaneOutcomeV1::BudgetExceeded(usage) => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
-                prepared.latest.generation.manifest().generation_id.clone(),
+                prepared.generation().clone(),
                 OmissionReason::Budget,
             );
             evidence.budget = application_budget_usage(usage);
@@ -1569,7 +1805,7 @@ where
         NativeLaneOutcomeV1::TimedOut(usage) => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
-                prepared.latest.generation.manifest().generation_id.clone(),
+                prepared.generation().clone(),
                 OmissionReason::TimedOut,
             );
             evidence.budget = application_budget_usage(usage);
@@ -1578,7 +1814,7 @@ where
         NativeLaneOutcomeV1::Cancelled => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
-                prepared.latest.generation.manifest().generation_id.clone(),
+                prepared.generation().clone(),
                 OmissionReason::Cancelled,
             );
             evidence.cancellation = Some(CancellationObservation {
@@ -1610,7 +1846,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let (prepared, query_binding_digest) = prepare_callable_query_or_return!(
+            let (prepared, query_binding_digest) = prepare_text_callable_query_or_return!(
                 self,
                 context,
                 request,
@@ -1625,7 +1861,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let latest = &prepared.latest;
-            let served_generation = latest.generation.manifest().generation_id.clone();
+            let served_generation = latest.metadata().manifest().generation_id.clone();
             let finished_at = query_finished_at();
             let base = prepared.query.request();
             let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
@@ -1651,7 +1887,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
                 return unavailable(finished_at);
             };
-            let records = LatestCompleteNativeRecordReadPortV1 { latest };
+            let records = TextArtifactNativeRecordReadPortV1 {
+                generation: served_generation.clone(),
+                owners: std::sync::Arc::clone(&owners),
+            };
             let Ok(native_context) =
                 AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
             else {
@@ -1688,7 +1927,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let (prepared, query_binding_digest) = prepare_callable_query_or_return!(
+            let (prepared, query_binding_digest) = prepare_text_callable_query_or_return!(
                 self,
                 context,
                 request,
@@ -1705,7 +1944,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let latest = &prepared.latest;
-            let served_generation = latest.generation.manifest().generation_id.clone();
+            let served_generation = latest.metadata().manifest().generation_id.clone();
             let finished_at = query_finished_at();
             let base = prepared.query.request();
             let whole_terms = request
@@ -1754,7 +1993,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
                 return unavailable(finished_at);
             };
-            let records = LatestCompleteNativeRecordReadPortV1 { latest };
+            let records = TextArtifactNativeRecordReadPortV1 {
+                generation: served_generation.clone(),
+                owners: std::sync::Arc::clone(&owners),
+            };
             let Ok(native_context) =
                 AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
             else {

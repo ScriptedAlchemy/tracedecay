@@ -67,7 +67,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         project_root: PathBuf,
         #[arg(long)]
-        candidate: PathBuf,
+        profile: String,
     },
     /// Run the native evaluator in the owning daemon and write only its
     /// independently validated qualification evidence.
@@ -143,8 +143,8 @@ fn main() -> ExitCode {
         },
         Command::EvaluateAndPublish {
             project_root,
-            candidate,
-        } => evaluate_and_publish(project_root, candidate),
+            profile,
+        } => evaluate_and_publish(project_root, profile),
         Command::QualifyNative {
             project_root,
             candidate,
@@ -163,11 +163,7 @@ fn validate_requested_workload(
     )
 }
 
-fn evaluate_and_publish(project_root: PathBuf, candidate_path: PathBuf) -> ExitCode {
-    let candidate = match read_semantic_candidate(&candidate_path) {
-        Ok(candidate) => candidate,
-        Err(error) => return invalid("evaluate_and_publish", error),
-    };
+fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -187,7 +183,7 @@ fn evaluate_and_publish(project_root: PathBuf, candidate_path: PathBuf) -> ExitC
         };
         match client
             .evaluate_and_publish_semantic_profile_until(
-                candidate,
+                &evaluated_profile_id,
                 SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
             )
             .await
@@ -424,6 +420,37 @@ mod tests {
                 && candidate == *"candidate.json"
                 && output == *"qualification.json"
         ));
+    }
+
+    #[test]
+    fn evaluate_and_publish_accepts_only_a_daemon_owned_profile_selection() {
+        let cli = Cli::try_parse_from([
+            "tracedecay-search-eval",
+            "evaluate-and-publish",
+            "--project-root",
+            "project",
+            "--profile",
+            "hybrid-conservative",
+        ])
+        .expect("evaluate-and-publish profile arguments parse");
+
+        assert!(matches!(
+            cli.command,
+            Command::EvaluateAndPublish {
+                project_root,
+                profile,
+            } if project_root == *"project" && profile == "hybrid-conservative"
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "tracedecay-search-eval",
+                "evaluate-and-publish",
+                "--candidate",
+                "caller-authored.json",
+            ])
+            .is_err(),
+            "the publishing route must not accept caller-authored candidate JSON"
+        );
     }
 
     #[test]
