@@ -371,6 +371,9 @@ function isCurrentOrNewerCodeIndexProgress(
   incoming: CodeIndexBuildProgressV1,
   rendered: CodeIndexBuildProgressV1,
 ): boolean {
+  if (incoming.daemon_incarnation !== rendered.daemon_incarnation) {
+    return incoming.daemon_incarnation > rendered.daemon_incarnation;
+  }
   if (incoming.producer_incarnation !== rendered.producer_incarnation) {
     return incoming.producer_incarnation > rendered.producer_incarnation;
   }

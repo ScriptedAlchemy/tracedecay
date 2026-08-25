@@ -95,7 +95,8 @@ describe('ObservatoryPage store telemetry', () => {
             progress: {
               ...firstProgress,
               generation_id: 'generation.catchup.02',
-              producer_incarnation: 2,
+              daemon_incarnation: 2,
+              producer_incarnation: 1,
               progress_epoch: 0,
               last_progress_micros: SAMPLE_CURRENT_MICROS - 1,
               completed_files: 1,
@@ -137,7 +138,8 @@ describe('ObservatoryPage store telemetry', () => {
             ...beforeRestartWorktree,
             progress: {
               ...beforeRestartProgress,
-              producer_incarnation: 2,
+              daemon_incarnation: 2,
+              producer_incarnation: 1,
               progress_epoch: 0,
               last_progress_micros: SAMPLE_CURRENT_MICROS - 1,
               completed_files: 1,
@@ -159,6 +161,59 @@ describe('ObservatoryPage store telemetry', () => {
       },
     };
     const progressResponses = [beforeRestartWithEpoch, afterRestart, beforeRestartWithEpoch];
+    let progressResponse = 0;
+    stubTelemetry(
+      telemetryPayload(),
+      emptyStorageFindingsPayload(),
+      () => progressResponses[Math.min(progressResponse++, progressResponses.length - 1)]!,
+    );
+    renderObservatory();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+  });
+
+  it('accepts a same-daemon remounted producer and rejects its retired predecessor', async () => {
+    vi.useFakeTimers();
+    const retired = codeIndexFreshnessEnvelope();
+    const retiredWorktree = retired.payload.worktrees[0]!;
+    const retiredProgress = retiredWorktree.progress;
+    const retiredWithEpoch = {
+      ...retired,
+      payload: {
+        ...retired.payload,
+        worktrees: [
+          {
+            ...retiredWorktree,
+            progress: { ...retiredProgress, progress_epoch: 100 },
+          },
+        ],
+      },
+    };
+    const remounted = {
+      ...retired,
+      payload: {
+        ...retired.payload,
+        worktrees: [
+          {
+            ...retiredWorktree,
+            progress: {
+              ...retiredProgress,
+              producer_incarnation: 2,
+              progress_epoch: 2,
+              completed_files: 1,
+            },
+          },
+        ],
+      },
+    };
+    const progressResponses = [retiredWithEpoch, remounted, retiredWithEpoch];
     let progressResponse = 0;
     stubTelemetry(
       telemetryPayload(),
@@ -563,6 +618,7 @@ function codeIndexFreshnessEnvelope() {
           staleness_state: 'indexing',
           progress: {
             generation_id: 'generation.catchup.01',
+            daemon_incarnation: 1,
             producer_incarnation: 1,
             progress_epoch: 1,
             sealed_source_digest: 'sha256:sealed-source-catchup',

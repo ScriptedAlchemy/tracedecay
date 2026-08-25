@@ -185,7 +185,8 @@ describe('Code index freshness', () => {
             generation_id: 'generation.catchup.02',
             // The daemon restarted before this generation began, so its
             // in-memory progress epoch is lower than the rendered generation.
-            producer_incarnation: 2,
+            daemon_incarnation: 2,
+            producer_incarnation: 1,
             progress_epoch: 0,
             last_progress_micros: NOW_MICROS - 1,
             completed_files: 1,
@@ -238,7 +239,8 @@ describe('Code index freshness', () => {
           staleness_state: 'indexing',
           progress: {
             ...progress(),
-            producer_incarnation: 2,
+            daemon_incarnation: 2,
+            producer_incarnation: 1,
             progress_epoch: 0,
             last_progress_micros: NOW_MICROS - 1,
             completed_files: 1,
@@ -252,6 +254,57 @@ describe('Code index freshness', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(beforeRestart), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(afterRestart), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(beforeRestart), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.getByText('1 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+  });
+
+  it('accepts a same-daemon remounted producer and rejects its retired predecessor', async () => {
+    vi.useFakeTimers();
+    const retired = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: { ...progress(), progress_epoch: 100 },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const remounted = envelope('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            producer_incarnation: 2,
+            progress_epoch: 2,
+            completed_files: 1,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(retired), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(remounted), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(retired), { status: 200 }));
     vi.stubGlobal('fetch', fetch);
     renderWith();
 
@@ -380,6 +433,7 @@ function worktree() {
 function progress() {
   return {
     generation_id: 'generation.catchup.01',
+    daemon_incarnation: 1,
     producer_incarnation: 1,
     progress_epoch: 1,
     sealed_source_digest: 'sha256:sealed-source-catchup',
