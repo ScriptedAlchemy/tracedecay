@@ -309,15 +309,15 @@ fn bake_build_identity() {
     );
 }
 
-/// Bakes the root package's version into `TRACEDECAY_PRODUCT_VERSION`.
+/// Bakes the workspace product version into `TRACEDECAY_PRODUCT_VERSION`.
 ///
 /// `env!("CARGO_PKG_VERSION")` is resolved per compiled crate, so inside this
 /// library it is this crate's own version rather than the version of the
 /// `tracedecay` product a user installed. Everything this crate stamps into a
 /// place a host can see — plugin manifests, plugin cache paths, staleness
 /// warnings, provenance headers — is compared against that product version, so
-/// it is read here from the one place that authors it: the root package's
-/// `version` in the workspace-root `Cargo.toml`.
+/// it is read here from the one place that authors it:
+/// `[workspace.package].version` in the workspace-root `Cargo.toml`.
 ///
 /// An unresolvable root manifest is fatal on purpose. Falling back to this
 /// crate's `CARGO_PKG_VERSION` is exactly the silent mismatch this exists to
@@ -331,9 +331,9 @@ fn bake_product_version() {
     println!("cargo::rerun-if-changed=src/product_version/root_manifest.rs");
     let Some(version) = root_manifest::resolve(&repo_root) else {
         panic!(
-            "{} must declare the `{}` package's version; it is the product version this crate stamps",
+            "{} must declare a literal version in {}; it is the product version this crate stamps",
             manifest_path.display(),
-            root_manifest::ROOT_PACKAGE_NAME,
+            root_manifest::PRODUCT_VERSION_TABLE,
         );
     };
     println!("cargo::rustc-env=TRACEDECAY_PRODUCT_VERSION={version}");
