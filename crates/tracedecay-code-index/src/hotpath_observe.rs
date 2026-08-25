@@ -320,21 +320,26 @@ pub(crate) fn record_seal_bytes(bytes: u64) {
     }
 }
 
-pub(crate) struct TtfqStart(#[cfg(feature = "hotpath")] Instant);
+/// Start of one production-owner generation build. The matching observation
+/// ends only after the immutable generation has been published and is
+/// queryable through that owner; daemon scheduling/wake latency is measured
+/// separately by the reconcile cadence receipt.
+pub(crate) struct BuildToQueryableStart(#[cfg(feature = "hotpath")] Instant);
 
 #[inline(always)]
-pub(crate) fn start_ttfq() -> TtfqStart {
-    TtfqStart(
+pub(crate) fn start_build_to_queryable() -> BuildToQueryableStart {
+    BuildToQueryableStart(
         #[cfg(feature = "hotpath")]
         Instant::now(),
     )
 }
 
 #[inline(always)]
-pub(crate) fn record_ttfq(started: TtfqStart) {
+pub(crate) fn record_build_to_queryable(started: BuildToQueryableStart) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_index_ttfq_micros").set(started.0.elapsed().as_micros() as f64);
+        hotpath::gauge!("code_index_build_to_queryable_micros")
+            .set(started.0.elapsed().as_micros() as f64);
     }
     #[cfg(not(feature = "hotpath"))]
     {

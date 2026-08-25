@@ -1270,7 +1270,7 @@ where
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let started = crate::hotpath_observe::start_ttfq();
+        let started = crate::hotpath_observe::start_build_to_queryable();
         crate::hotpath_observe::record_generation_state("building");
         crate::hotpath_observe::record_rebuild_state("unknown");
         Self::checkpoint(control)?;
@@ -1469,7 +1469,7 @@ where
         self.publication
             .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
         crate::hotpath_observe::record_generation_state("queryable");
-        crate::hotpath_observe::record_ttfq(started);
+        crate::hotpath_observe::record_build_to_queryable(started);
         Ok(candidate)
     }
 
