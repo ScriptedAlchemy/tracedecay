@@ -4827,7 +4827,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        self.capture_admitted_candidate(registry, logical_path, control, explicitly_admitted)
+        self.capture_admitted_candidate(
+            registry,
+            logical_path,
+            control,
+            None,
+            explicitly_admitted,
+        )
     }
 
     fn ignored_admission_paths(&self) -> BTreeSet<&str> {
@@ -4842,6 +4848,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         registry: &StaticLanguageRegistry,
         logical_path: &str,
         control: Option<&dyn CodeIndexExecutionControlV1>,
+        progress: Option<&git_tree_capture::CaptureProgressV1>,
         explicitly_admitted: bool,
     ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
         if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
@@ -4861,9 +4868,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_dependencies::read_bounded_snapshot_source(&absolute, control)?
         };
         ignored_dependencies::checkpoint_if_present(control)?;
-        self.capture_candidate_bytes(registry, logical_path, &raw_bytes)
+        self.capture_candidate_bytes_with_progress(registry, logical_path, &raw_bytes, progress)
     }
 
+    #[hotpath::measure(label = "code_index.capture.authoritative_snapshot")]
     fn capture_authoritative_snapshot(
         &self,
         control: Option<&dyn CodeIndexExecutionControlV1>,
@@ -4955,6 +4963,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // so the captured snapshot is byte-identical to the sequential sweep.
         let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
+        let progress = git_tree_capture::CaptureProgressV1::new();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
@@ -4969,6 +4978,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             &registry,
                             logical_path,
                             control,
+                            Some(&progress),
                             admitted_paths.contains(logical_path.as_str()),
                         )
                     })
