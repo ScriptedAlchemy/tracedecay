@@ -346,7 +346,7 @@ pub(super) fn code_index_branch_diff_executor(
                 }
             };
             let generations = match schedulers
-                .generations_for_revisions(
+                .bounded_generations_for_revisions(
                     &scope,
                     &request.base_reference,
                     &request.base_revision,
@@ -354,6 +354,11 @@ pub(super) fn code_index_branch_diff_executor(
                     &request.head_reference,
                     &request.head_revision,
                     &request.head_tree,
+                    code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
+                        maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
+                        maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
+                        maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
+                    },
                     control.clone(),
                 )
                 .await

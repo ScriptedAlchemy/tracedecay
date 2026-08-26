@@ -9440,9 +9440,9 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
-/// A retained text generation remains serving when persistent graph replay
-/// fails. The full graph owner stays absent while ordinary refresh remains
-/// pending, so exact/lexical availability never implies graph availability.
+/// A retained text generation reaches exact/lexical readiness when persistent
+/// graph replay is permanently refused. The full graph owner stays absent, so
+/// text availability never implies graph availability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -9549,20 +9549,19 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .pending_wake_micros_for_scope(&scope)
-            .await
-            .is_some_and(|pending| pending != 0)
+    let text = loop {
+        if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
+            && text.query_owners_are_warm()
         {
-            break;
+            break text;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "failed graph replay did not restore its pending retry arrival"
+            "permanently refused graph replay withheld exact and lexical readiness"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    assert!(text.production_query_owners().is_ok());
 
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
@@ -10993,7 +10992,19 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
 /// waking the worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retryable_activation_failure_retries_the_sealed_generation_without_resealing() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let sources = (0..512)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::scoped_code_index_store_root(
@@ -11048,6 +11059,37 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         .await
         .expect("mount retained generation");
 
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (text_owner_before_retry, owner_epoch_before_retry, progress_before_retry) = loop {
+        let text = registry.latest_text_serving_for_scope(&scope).await;
+        let observed = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (Some(text), (owner_epoch, Some(progress))) = (text, observed)
+            && progress.committed_pages > 0
+            && progress.phase
+                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        {
+            break (text, owner_epoch, progress);
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "graph-on text projection never exposed bounded live progress"
+        );
+        tokio::task::yield_now().await;
+    };
+
     // Keep waking the worker while activation stays failing; each pass must
     // hold the sealed artifact instead of rebuilding.
     for _ in 0..5 {
@@ -11059,20 +11101,53 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         1,
         "a retryable activation failure must not seal a duplicate generation"
     );
-    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .latest_text_serving_for_scope(&scope)
-            .await
-            .is_some()
+    let text_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let text_owner_after_retry = loop {
+        if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
+            && text.query_owners_are_warm()
         {
-            break;
+            break text;
         }
         assert!(
             std::time::Instant::now() <= text_deadline,
-            "graph retry backoff withheld the retained text generation"
+            "graph retry backoff withheld exact and lexical readiness"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        text_owner_after_retry.same_text_owner(&text_owner_before_retry),
+        "graph retry must preserve the lightweight text owner"
+    );
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            progress.owner_epoch, owner_epoch_before_retry,
+            "graph activation must not replace the text progress authority"
+        );
+        let progress = progress
+            .snapshot()
+            .expect("ready text progress remains visible during graph retry");
+        assert_eq!(progress.generation_id, progress_before_retry.generation_id);
+        assert_eq!(
+            progress.daemon_incarnation,
+            progress_before_retry.daemon_incarnation
+        );
+        assert_eq!(
+            progress.producer_incarnation,
+            progress_before_retry.producer_incarnation
+        );
+        assert!(progress.progress_epoch > progress_before_retry.progress_epoch);
+        assert!(progress.committed_pages >= progress_before_retry.committed_pages);
+        assert_eq!(
+            progress.phase,
+            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        );
     }
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,

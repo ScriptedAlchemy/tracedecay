@@ -155,6 +155,14 @@ pub struct DurableCodeTextArtifactDescriptorV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct DurableGenerationCardinalityV1 {
+    pub file_count: u64,
+    pub chunk_count: u64,
+    pub symbol_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DurableGenerationIndexEntryV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
@@ -166,6 +174,8 @@ pub struct DurableGenerationIndexEntryV1 {
     pub source_reference: Option<String>,
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardinality: Option<DurableGenerationCardinalityV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_artifact: Option<DurableCodeTextArtifactDescriptorV1>,
 }
@@ -4449,6 +4459,7 @@ mod tests {
             source_reference: exact.then(|| format!("refs/heads/branch-{sequence}")),
             source_revision: exact.then(|| format!("{sequence:040x}")),
             source_tree: exact.then(|| format!("{:040x}", sequence + 1)),
+            cardinality: None,
             text_artifact: None,
         }
     }
@@ -4642,6 +4653,7 @@ mod tests {
             source_reference: None,
             source_revision: None,
             source_tree: None,
+            cardinality: None,
             text_artifact: None,
         };
         let generation_index = vec![active_entry];

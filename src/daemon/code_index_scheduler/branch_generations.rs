@@ -1,6 +1,6 @@
 //! Exact Git-revision reads over immutable sealed code-index generations.
 
-use std::sync::{Arc, TryLockError};
+use std::sync::Arc;
 
 use tracedecay_domain::{GitOidV1, RefId};
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
@@ -38,6 +38,31 @@ impl BranchGenerationReadControlV1 {
 pub(in crate::daemon) struct BranchGenerationPairV1 {
     pub(in crate::daemon) base: LatestCompleteCodeIndexV1,
     pub(in crate::daemon) head: LatestCompleteCodeIndexV1,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::daemon) struct BranchGenerationCardinalityBoundsV1 {
+    pub(in crate::daemon) maximum_files: usize,
+    pub(in crate::daemon) maximum_chunks: usize,
+    pub(in crate::daemon) maximum_symbols: usize,
+}
+
+impl BranchGenerationCardinalityBoundsV1 {
+    fn admits(
+        self,
+        entry: &crate::retention::code_index_generations::DurableGenerationIndexEntryV1,
+    ) -> bool {
+        let Some(cardinality) = entry.cardinality.as_ref() else {
+            // Older persisted entries did not carry the authenticated summary.
+            // They remain readable through the ordinary decode-and-validate path.
+            return true;
+        };
+        usize::try_from(cardinality.file_count).is_ok_and(|count| count <= self.maximum_files)
+            && usize::try_from(cardinality.chunk_count)
+                .is_ok_and(|count| count <= self.maximum_chunks)
+            && usize::try_from(cardinality.symbol_count)
+                .is_ok_and(|count| count <= self.maximum_symbols)
+    }
 }
 
 /// Which half of a requested exact revision pair the durable index could not
@@ -85,6 +110,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         head_reference: &RefId,
         head_revision: &GitOidV1,
         head_tree: &GitOidV1,
+        bounds: Option<BranchGenerationCardinalityBoundsV1>,
         control: &BranchGenerationReadControlV1,
     ) -> Result<ExactGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
         if let Some(reason) = control.termination() {
@@ -129,6 +155,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
         } else {
             find(head_reference, head_revision, head_tree)
         };
+        if bounds.is_some_and(|bounds| {
+            base_entry
+                .iter()
+                .chain(head_entry.iter())
+                .any(|entry| !bounds.admits(entry))
+        }) {
+            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+        }
         if let Some(reason) = control.termination() {
             return Err(reason);
         }
@@ -147,7 +181,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 // generation back rather than failing a read the object database
                 // can still answer.
                 let Some(generation) = self
-                    .load_generation(&generation_id)
+                    .load_indexed_generation_shared(&generation_id, entry)
                     .map_err(Self::exact_read_error)?
                 else {
                     return Ok(None);
@@ -205,14 +239,67 @@ impl CodeIndexSchedulerRegistryV1 {
         head_tree: &GitOidV1,
         control: BranchGenerationReadControlV1,
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
-        let scheduler = {
+        self.generations_for_revisions_with_bounds(
+            scope,
+            base_reference,
+            base_revision,
+            base_tree,
+            head_reference,
+            head_revision,
+            head_tree,
+            None,
+            control,
+        )
+        .await
+    }
+
+    pub(in crate::daemon) async fn bounded_generations_for_revisions(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        base_reference: &RefId,
+        base_revision: &GitOidV1,
+        base_tree: &GitOidV1,
+        head_reference: &RefId,
+        head_revision: &GitOidV1,
+        head_tree: &GitOidV1,
+        bounds: BranchGenerationCardinalityBoundsV1,
+        control: BranchGenerationReadControlV1,
+    ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
+        self.generations_for_revisions_with_bounds(
+            scope,
+            base_reference,
+            base_revision,
+            base_tree,
+            head_reference,
+            head_revision,
+            head_tree,
+            Some(bounds),
+            control,
+        )
+        .await
+    }
+
+    async fn generations_for_revisions_with_bounds(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        base_reference: &RefId,
+        base_revision: &GitOidV1,
+        base_tree: &GitOidV1,
+        head_reference: &RefId,
+        head_revision: &GitOidV1,
+        head_tree: &GitOidV1,
+        bounds: Option<BranchGenerationCardinalityBoundsV1>,
+        control: BranchGenerationReadControlV1,
+    ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
+        let (scheduler, historical_generation_owner) = {
             let mounted = self.mounted.lock().await;
-            Arc::clone(
-                &unique_mounted_for_scope(&mounted, scope)
-                    .unique()
-                    .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
-                    .1
-                    .scheduler,
+            let worktree = unique_mounted_for_scope(&mounted, scope)
+                .unique()
+                .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+                .1;
+            (
+                Arc::clone(&worktree.scheduler),
+                worktree.historical_generation_owner.clone(),
             )
         };
         let base_reference = base_reference.clone();
@@ -224,15 +311,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let scope = scope.clone();
         let terminal_control = control.clone();
         let task = tokio::task::spawn_blocking(move || {
-            let mut scheduler = match scheduler.try_lock() {
-                Ok(scheduler) => scheduler,
-                Err(TryLockError::WouldBlock) => {
-                    return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
-                }
-                Err(TryLockError::Poisoned(_)) => {
-                    return Err(CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-            };
             let exact_source = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
                 Ok::<_, CodeIndexSearchUnavailableReasonV1>(
                     super::git_tree_capture::ExactGitTreeSourceV1 {
@@ -247,13 +325,14 @@ impl CodeIndexSchedulerRegistryV1 {
             let same_revision = base_reference == head_reference
                 && base_revision == head_revision
                 && base_tree == head_tree;
-            let revisions = scheduler.publication.revisions(
+            let revisions = historical_generation_owner.publication.revisions(
                 &base_reference,
                 &base_revision,
                 &base_tree,
                 &head_reference,
                 &head_revision,
                 &head_tree,
+                bounds,
                 &control,
             )?;
             let (base, head) = match revisions {
@@ -266,6 +345,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 // working repository could no longer capture into a hard failure
                 // of a read the index could have answered.
                 ExactGenerationPairV1::Missing(missing) => {
+                    let mut scheduler = match scheduler.try_lock() {
+                        Ok(scheduler) => scheduler,
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+                        }
+                        Err(std::sync::TryLockError::Poisoned(_)) => {
+                            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+                        }
+                    };
                     if missing.base {
                         scheduler.publish_exact_git_tree_generation(
                             &exact_source(&base_reference, &base_revision, &base_tree)?,
@@ -278,13 +366,15 @@ impl CodeIndexSchedulerRegistryV1 {
                             &control,
                         )?;
                     }
-                    match scheduler.publication.revisions(
+                    drop(scheduler);
+                    match historical_generation_owner.publication.revisions(
                         &base_reference,
                         &base_revision,
                         &base_tree,
                         &head_reference,
                         &head_revision,
                         &head_tree,
+                        bounds,
                         &control,
                     )? {
                         ExactGenerationPairV1::Sealed(base, head) => (base, head),
@@ -296,8 +386,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 }
             };
-            let base = scheduler.bind_latest_complete(base);
-            let head = scheduler.bind_latest_complete(head);
+            let base = historical_generation_owner.bind_complete(base);
+            let head = historical_generation_owner.bind_complete(head);
             if !super::registry::latest_matches_scope_identity(&base, &scope)
                 || !super::registry::latest_matches_scope_identity(&head, &scope)
             {
@@ -418,6 +508,7 @@ mod tests {
         let large_tree =
             GitOidV1::new(git(project.path(), &["rev-parse", "HEAD^{tree}"])).expect("large tree");
         scheduler.reconcile_now().expect("publish large generation");
+        let large_generation = scheduler.latest_complete().expect("large generation");
         drop(scheduler);
         let generations_root = scoped_store.join("code-generations-v1");
         for index in 0..512 {
@@ -556,20 +647,51 @@ mod tests {
                     && base.content_digest != head.content_digest
         ));
 
-        let large_pair = settled_pair(
-            &registry,
-            &scope,
-            (&reference, &large_revision, &large_tree),
-            (&reference, &large_revision, &large_tree),
-            &control,
+        // A sealed exact generation is immutable publication evidence, not
+        // activation-owned state. Prove the read remains available while the
+        // active-generation decode barrier is occupied by background warming.
+        let scheduler = registry
+            .scheduler_handle(&canonical_project)
+            .await
+            .expect("mounted scheduler handle");
+        let active_decode = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hold_active_decode();
+        let admission_started = std::time::Instant::now();
+        let large_admission = tokio::time::timeout(
             read_timeout,
+            registry.bounded_generations_for_revisions(
+                &scope,
+                &reference,
+                &large_revision,
+                &large_tree,
+                &reference,
+                &large_revision,
+                &large_tree,
+                BranchGenerationCardinalityBoundsV1 {
+                    maximum_files: 1_024,
+                    maximum_chunks: 4_096,
+                    maximum_symbols: 1_024,
+                },
+                control.clone(),
+            ),
         )
         .await
-        .expect("large exact generation");
+        .expect("bounded exact-generation admission");
+        assert!(matches!(
+            large_admission,
+            Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
+        ));
+        assert!(
+            admission_started.elapsed() < std::time::Duration::from_secs(1),
+            "authenticated cardinality admission must not read sealed bytes"
+        );
+        drop(active_decode);
         let started = std::time::Instant::now();
         let outcome = bounded_diff(
-            large_pair.base.generation(),
-            large_pair.head.generation(),
+            large_generation.generation(),
+            large_generation.generation(),
             None,
             None,
             &control,
@@ -590,8 +712,8 @@ mod tests {
         cancellation.cancel(tracedecay_application::clock::now_micros());
         assert_eq!(
             bounded_diff(
-                large_pair.base.generation(),
-                large_pair.head.generation(),
+                large_generation.generation(),
+                large_generation.generation(),
                 None,
                 None,
                 &BranchGenerationReadControlV1 {
@@ -606,8 +728,8 @@ mod tests {
                 .expect("expired deadline");
         assert_eq!(
             bounded_diff(
-                large_pair.base.generation(),
-                large_pair.head.generation(),
+                large_generation.generation(),
+                large_generation.generation(),
                 None,
                 None,
                 &BranchGenerationReadControlV1 {

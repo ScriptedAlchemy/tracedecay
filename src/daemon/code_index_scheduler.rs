@@ -91,12 +91,13 @@ use crate::{
         ports::RetrievalPortError,
     },
     retention::code_index_generations::{
-        DurableCodeTextArtifactDescriptorV1, DurableGenerationIndexEntryV1,
-        DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
-        MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-        acquire_code_generation_store_lock, attach_verified_text_artifact_under_lock,
-        code_text_artifact_path, code_text_artifacts_root, durable_generation_index_digest,
-        retain_bounded_generation_index, withdraw_verified_text_artifact_under_lock,
+        DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,
+        DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+        DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_code_generation_store_lock,
+        attach_verified_text_artifact_under_lock, code_text_artifact_path,
+        code_text_artifacts_root, durable_generation_index_digest, retain_bounded_generation_index,
+        withdraw_verified_text_artifact_under_lock,
     },
 };
 
@@ -656,6 +657,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
         durable_generation_index_digest(entries, truncated).map_err(Self::unavailable)
     }
 
+    fn generation_cardinality(
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<DurableGenerationCardinalityV1, CodeIndexPublicationStoreErrorV1> {
+        Ok(DurableGenerationCardinalityV1 {
+            file_count: u64::try_from(generation.snapshot().files.len())
+                .map_err(Self::unavailable)?,
+            chunk_count: u64::try_from(generation.chunks().chunks().len())
+                .map_err(Self::unavailable)?,
+            symbol_count: u64::try_from(generation.symbols().symbols.len())
+                .map_err(Self::unavailable)?,
+        })
+    }
+
     fn validate_generation_file(value: &str) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let path = Path::new(value);
         if value.is_empty()
@@ -892,9 +906,32 @@ impl DaemonCodeIndexPublicationStoreV1 {
         else {
             return Ok(None);
         };
+        self.load_indexed_generation_shared(generation_id, entry)
+    }
+
+    /// Decode one exact indexed generation under its identity-keyed barrier.
+    ///
+    /// Unlike [`Self::load_generation`], this does not join the active
+    /// activation barrier merely because the indexed identity is currently
+    /// active. Exact Git reads are immutable and independently bounded, so a
+    /// concurrent activation may duplicate this decode but may not make PR or
+    /// branch tools unavailable. An already-decoded active generation is still
+    /// reused immediately.
+    fn load_indexed_generation_shared(
+        &self,
+        generation_id: &CodeGenerationId,
+        entry: &DurableGenerationIndexEntryV1,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let subject = DecodeSubjectV1::Generation(generation_id.clone());
         let lease = loop {
             let mut state = self.cache.lock_state()?;
+            if let Some(active) = state
+                .active
+                .as_ref()
+                .filter(|active| active.manifest().generation_id == *generation_id)
+            {
+                return Ok(Some(Arc::clone(active)));
+            }
             if let Some(cached) = state.cached(generation_id) {
                 return Ok(Some(cached));
             }
@@ -992,6 +1029,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.cache.note_decode();
         let generation =
             CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::corruption)?;
+        if let Some(cardinality) = entry.cardinality.as_ref()
+            && Self::generation_cardinality(&generation)? != *cardinality
+        {
+            return Err(Self::corruption(
+                "durable code-generation cardinality does not match its sealed generation",
+            ));
+        }
         if generation.manifest().generation_id != *generation_id
             || generation.snapshot().content_identity.as_str() != entry.snapshot_content_identity
             || generation.manifest().seal.sealed_at.0 != entry.sealed_at_micros
@@ -1348,6 +1392,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .as_ref()
                 .map(|(_, revision, _)| revision.clone()),
             source_tree: exact_git_evidence.map(|(_, _, tree)| tree),
+            cardinality: Some(Self::generation_cardinality(&generation)?),
             text_artifact: None,
         });
         generation_index.sort_by(|left, right| {
@@ -3780,6 +3825,65 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
         Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
+/// Immutable authority for historical-generation reads and their detached
+/// query derivations.
+///
+/// The mounted registry retains this separately from the mutable scheduler so
+/// already-sealed Git revisions remain readable while reconcile owns the
+/// scheduler mutex. Its generation-local caches never replace the active
+/// generation's text, progress, record-index, or graph owners.
+#[derive(Clone)]
+pub(super) struct HistoricalCodeIndexGenerationOwnerV1 {
+    publication: DaemonCodeIndexPublicationStoreV1,
+    store_root: PathBuf,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
+    project_id: ProjectId,
+    worktree_id: WorktreeId,
+    shutting_down: Arc<AtomicBool>,
+    progress_daemon_incarnation: u64,
+    progress_producer_incarnation: u64,
+}
+
+impl HistoricalCodeIndexGenerationOwnerV1 {
+    fn bind_complete(
+        &self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> LatestCompleteCodeIndexV1 {
+        let generation_id = generation.manifest().generation_id.clone();
+        let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
+        let text_progress_owner_epoch = progress_slot.replace_generation(generation_id);
+        let metadata = Arc::new(
+            VerifiedSealedTextGenerationMetadataV1::from_published_generation(&generation),
+        );
+        LatestCompleteCodeIndexV1 {
+            generation,
+            text: LatestCodeTextGenerationV1 {
+                metadata,
+                query_owners: Arc::new(OnceLock::new()),
+                text_projection_build: Arc::new(Mutex::new(None)),
+                text_projection_failed: Arc::new(AtomicBool::new(false)),
+                text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
+                text_progress_state: Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new())),
+                text_progress_slot: Arc::new(RwLock::new(progress_slot)),
+                text_progress_owner_epoch,
+                text_progress_daemon_incarnation: self.progress_daemon_incarnation,
+                text_progress_producer_incarnation: self.progress_producer_incarnation,
+                text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
+                    &self.store_root,
+                    &self.publication,
+                    &self.resident_memory,
+                    &self.project_id,
+                    &self.worktree_id,
+                ),
+                preopened_source: Arc::new(Mutex::new(None)),
+                publication_binding: None,
+            },
+            record_index: Arc::new(OnceLock::new()),
+            graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+        }
+    }
+}
+
 impl CodeIndexWorktreeSchedulerV1 {
     pub fn open(
         project_id: ProjectId,
@@ -3916,6 +4020,19 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub(super) fn build_progress_slot(&self) -> CodeIndexBuildProgressSlotV1 {
         Arc::clone(&self.build_progress)
+    }
+
+    pub(super) fn historical_generation_owner(&self) -> HistoricalCodeIndexGenerationOwnerV1 {
+        HistoricalCodeIndexGenerationOwnerV1 {
+            publication: self.publication.clone(),
+            store_root: self.store_root.clone(),
+            resident_memory: Arc::clone(&self.resident_memory),
+            project_id: self.project_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            shutting_down: Arc::clone(&self.shutting_down),
+            progress_daemon_incarnation: self.progress_daemon_incarnation,
+            progress_producer_incarnation: self.progress_producer_incarnation,
+        }
     }
 
     /// Reserve the installed worker plan on the canonical process authority.
@@ -4408,7 +4525,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// An ignored-source roster is revalidated against the live worktree
     /// before seating: a tracked or retargeted admission must not become
     /// serving, and the scheduler must not keep that roster.
-    pub(super) fn servable_retained_generation(&mut self) -> Option<LatestCompleteCodeIndexV1> {
+    pub(super) fn servable_retained_generation(
+        &mut self,
+        retained_text: Option<&LatestCodeTextGenerationV1>,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
@@ -4423,7 +4543,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.ignored_source_admissions.clear();
             return None;
         }
-        Some(self.bind_latest_complete(generation))
+        Some(self.bind_latest_complete(generation, retained_text))
     }
 
     /// Bind exact/lexical serving directly from the canonical active pointer.
@@ -5065,7 +5185,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         .ok()
         .flatten()?;
         self.validate_generation_identity(&generation).ok()?;
-        Some(self.bind_latest_complete(generation))
+        Some(self.bind_latest_complete(generation, None))
     }
 
     /// Bind one decoded generation to this scheduler's per-generation serving
@@ -5073,8 +5193,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn bind_latest_complete(
         &self,
         generation: Arc<CodeIndexPublishedGenerationV1>,
+        retained_text: Option<&LatestCodeTextGenerationV1>,
     ) -> LatestCompleteCodeIndexV1 {
         let generation_id = generation.manifest().generation_id.clone();
+        let retained_text =
+            retained_text.filter(|text| text.metadata().manifest().generation_id == generation_id);
         let mut cached = self
             .query_owners
             .lock()
@@ -5099,33 +5222,63 @@ impl CodeIndexWorktreeSchedulerV1 {
                 progress,
                 progress_epoch,
                 interactive,
-            )) if cached_id == &generation_id => (
-                Arc::clone(owners),
-                Arc::clone(index),
-                Arc::clone(build),
-                Arc::clone(failed),
-                control.clone(),
-                Arc::clone(progress),
-                *progress_epoch,
-                Arc::clone(interactive),
-            ),
+            )) if cached_id == &generation_id
+                && retained_text
+                    .is_none_or(|text| Arc::ptr_eq(build, &text.text_projection_build)) =>
+            {
+                (
+                    Arc::clone(owners),
+                    Arc::clone(index),
+                    Arc::clone(build),
+                    Arc::clone(failed),
+                    control.clone(),
+                    Arc::clone(progress),
+                    *progress_epoch,
+                    Arc::clone(interactive),
+                )
+            }
             _ => {
                 if let Some((_, _, _, _, _, control, _, _, _)) = cached.as_ref() {
                     control.retire();
                 }
-                let owners = Arc::new(OnceLock::new());
-                let index = Arc::new(OnceLock::new());
-                let build = Arc::new(Mutex::new(None));
-                let failed = Arc::new(AtomicBool::new(false));
-                let control = GenerationTextControlV1::new(Arc::clone(&self.shutting_down));
-                let progress = Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new()));
-                let graph_activation = Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending));
-                let progress_epoch = hotpath::measure_block!("query.artifact.progress.publish", {
-                    self.build_progress
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .replace_generation(generation_id.clone())
-                });
+                let same_generation_cache = cached
+                    .as_ref()
+                    .filter(|(cached_id, ..)| cached_id == &generation_id);
+                let index = same_generation_cache.map_or_else(
+                    || Arc::new(OnceLock::new()),
+                    |(_, _, index, ..)| Arc::clone(index),
+                );
+                let graph_activation = same_generation_cache.map_or_else(
+                    || Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
+                    |(_, _, _, _, _, _, _, _, graph_activation)| Arc::clone(graph_activation),
+                );
+                let (owners, build, failed, control, progress, progress_epoch) =
+                    if let Some(text) = retained_text {
+                        (
+                            Arc::clone(&text.query_owners),
+                            Arc::clone(&text.text_projection_build),
+                            Arc::clone(&text.text_projection_failed),
+                            text.text_control.clone(),
+                            Arc::clone(&text.text_progress_state),
+                            text.text_progress_owner_epoch,
+                        )
+                    } else {
+                        let progress_epoch = hotpath::measure_block!(
+                            "query.artifact.progress.publish",
+                            self.build_progress
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .replace_generation(generation_id.clone())
+                        );
+                        (
+                            Arc::new(OnceLock::new()),
+                            Arc::new(Mutex::new(None)),
+                            Arc::new(AtomicBool::new(false)),
+                            GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
+                            Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new())),
+                            progress_epoch,
+                        )
+                    };
                 *cached = Some((
                     generation_id,
                     Arc::clone(&owners),
@@ -5152,9 +5305,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let metadata = Arc::new(
             VerifiedSealedTextGenerationMetadataV1::from_published_generation(&generation),
         );
-        LatestCompleteCodeIndexV1 {
-            generation,
-            text: LatestCodeTextGenerationV1 {
+        let text = retained_text
+            .cloned()
+            .unwrap_or_else(|| LatestCodeTextGenerationV1 {
                 metadata,
                 query_owners,
                 text_projection_build,
@@ -5174,7 +5327,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
                 preopened_source: Arc::new(Mutex::new(None)),
                 publication_binding: None,
-            },
+            });
+        LatestCompleteCodeIndexV1 {
+            generation,
+            text,
             record_index,
             graph_activation,
         }
@@ -5222,50 +5378,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|generation| {
                 generation
                     .filter(|generation| self.validate_generation_identity(generation).is_ok())
-                    .map(|generation| {
-                        let generation_id = generation.manifest().generation_id.clone();
-                        let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
-                        let text_progress_owner_epoch =
-                            progress_slot.replace_generation(generation_id);
-                        let metadata = Arc::new(
-                            VerifiedSealedTextGenerationMetadataV1::from_published_generation(
-                                &generation,
-                            ),
-                        );
-                        LatestCompleteCodeIndexV1 {
-                            generation,
-                            text: LatestCodeTextGenerationV1 {
-                                metadata,
-                                query_owners: Arc::new(OnceLock::new()),
-                                text_projection_build: Arc::new(Mutex::new(None)),
-                                text_projection_failed: Arc::new(AtomicBool::new(false)),
-                                text_control: GenerationTextControlV1::new(Arc::clone(
-                                    &self.shutting_down,
-                                )),
-                                text_progress_state: Arc::new(Mutex::new(
-                                    CodeIndexBuildProgressStateV1::new(),
-                                )),
-                                text_progress_slot: Arc::new(RwLock::new(progress_slot)),
-                                text_progress_owner_epoch,
-                                text_progress_daemon_incarnation: self.progress_daemon_incarnation,
-                                text_progress_producer_incarnation: self
-                                    .progress_producer_incarnation,
-                                text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
-                                    &self.store_root,
-                                    &self.publication,
-                                    &self.resident_memory,
-                                    &self.project_id,
-                                    &self.worktree_id,
-                                ),
-                                preopened_source: Arc::new(Mutex::new(None)),
-                                publication_binding: None,
-                            },
-                            record_index: Arc::new(OnceLock::new()),
-                            graph_activation: Arc::new(RwLock::new(
-                                CodeGraphActivationStateV1::Pending,
-                            )),
-                        }
-                    })
+                    .map(|generation| self.historical_generation_owner().bind_complete(generation))
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }

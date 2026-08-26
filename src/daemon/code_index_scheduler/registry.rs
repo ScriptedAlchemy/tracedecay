@@ -360,6 +360,7 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) semantic_vector_graph_provider:
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    pub(super) historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
@@ -2287,6 +2288,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
+        let historical_generation_owner = opened.historical_generation_owner();
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
@@ -2507,6 +2509,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         continue;
                     }
                 }
+                let text_serving_ready = worker_text_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready);
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
@@ -2519,17 +2526,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 // of reconcile. Stale is truthful; do not mark_reconciled.
                 let mut seat_retry_pending = false;
                 if graph_activation_enabled
+                    && text_serving_ready
                     && serving_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .is_none()
                 {
                     let remount_scheduler = Arc::clone(&scheduler);
+                    let remount_text = worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
                     let remount = tokio::task::spawn_blocking(move || {
                         let mut scheduler = remount_scheduler
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let retained = scheduler.servable_retained_generation()?;
+                        let retained =
+                            scheduler.servable_retained_generation(remount_text.as_ref())?;
                         let replay_binding = scheduler.code_graph_replay_binding(
                             &retained.generation().manifest().generation_id,
                         );
@@ -2627,31 +2640,32 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     continue;
                 }
-                let retained_text_metadata = (!graph_activation_enabled).then(|| {
-                    worker_text_generation
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .as_ref()
-                        .map(|text| text.metadata().clone())
-                });
+                let retained_text_metadata = worker_text_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(|text| text.metadata().clone());
                 let mut result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let mut result = if graph_activation_enabled {
-                        scheduler.activate_or_reconcile()
-                    } else if let Some(metadata) = retained_text_metadata.flatten() {
+                    let mut result = if let Some(metadata) = retained_text_metadata {
                         match scheduler.reconcile_retained_text_generation(&metadata) {
                             Ok(Some(outcome)) => Ok(outcome),
+                            Ok(None) if graph_activation_enabled => {
+                                scheduler.activate_or_reconcile()
+                            }
                             Ok(None) => scheduler.reconcile_now(),
                             Err(error) => Err(error),
                         }
+                    } else if graph_activation_enabled {
+                        scheduler.activate_or_reconcile()
                     } else {
                         scheduler.reconcile_now()
                     };
                     // A terminal outcome may publish a newer complete generation;
                     // swap serving to that after graph activation below.
-                    let mut latest = graph_activation_enabled
+                    let mut latest = (graph_activation_enabled && text_serving_ready)
                         .then(|| {
                             result
                                 .as_ref()
@@ -2675,12 +2689,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     (result, latest, replay_binding)
                 })
                 .await;
-                if !graph_activation_enabled
-                    && matches!(
-                        &result,
-                        Ok((Ok(CodeIndexReconcileOutcomeV1::Published(_)), None, None))
-                    )
-                {
+                if matches!(
+                    &result,
+                    Ok((Ok(CodeIndexReconcileOutcomeV1::Published(_)), None, None))
+                ) {
                     // Publication moved the durable pointer, so the prior text
                     // owner is no longer authoritative even while the new
                     // lightweight handle is opening. Withdraw it first: a
@@ -2899,6 +2911,7 @@ impl CodeIndexSchedulerRegistryV1 {
             query_activation_redundancy: None,
             semantic_vector_graph_provider: None,
             scheduler,
+            historical_generation_owner,
             serving_generation,
             text_generation,
             build_progress,
