@@ -268,9 +268,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                             &owner,
                             scope,
                         ) {
-                            Ok(()) => {
-                                SessionGraphAttachmentStateV1::Attached { owner: Some(owner) }
-                            }
+                            Ok(()) => SessionGraphAttachmentStateV1::Attached {
+                                owner: Some(Box::new(owner)),
+                            },
                             Err(error) => SessionGraphAttachmentStateV1::Detached {
                                 error: error.to_string(),
                             },
@@ -963,10 +963,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+            && let Some(identity) = owner.take_graph_store_identity()
         {
-            if let Some(identity) = owner.take_graph_store_identity() {
-                retain_identity(identity);
-            }
+            retain_identity(identity);
         }
         let mut projects = self
             .project_owners
@@ -980,10 +979,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                     {
                         retain_identity(runtime.graph_store_identity());
                     }
-                    if let Some(sessions) = owners.sessions.take() {
-                        if let Some(identity) = sessions.take_graph_store_identity() {
-                            retain_identity(identity);
-                        }
+                    if let Some(sessions) = owners.sessions.take()
+                        && let Some(identity) = sessions.take_graph_store_identity()
+                    {
+                        retain_identity(identity);
                     }
                 }
                 ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) => {
@@ -998,10 +997,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                             sessions.graph.verified_locator().clone(),
                         ));
                     }
-                    if let Some(sessions) = recovery.candidate_sessions.take() {
-                        if let Some(identity) = sessions.take_graph_store_identity() {
-                            retain_identity(identity);
-                        }
+                    if let Some(sessions) = recovery.candidate_sessions.take()
+                        && let Some(identity) = sessions.take_graph_store_identity()
+                    {
+                        retain_identity(identity);
                     }
                 }
                 ProjectRuntimeOwnerStateV1::Faulted(faulted) => {
@@ -1010,10 +1009,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                     {
                         retain_identity(runtime.graph_store_identity());
                     }
-                    if let Some(sessions) = faulted.retained.sessions.take() {
-                        if let Some(identity) = sessions.take_graph_store_identity() {
-                            retain_identity(identity);
-                        }
+                    if let Some(sessions) = faulted.retained.sessions.take()
+                        && let Some(identity) = sessions.take_graph_store_identity()
+                    {
+                        retain_identity(identity);
                     }
                     if let Some(sessions) = faulted.sessions.take() {
                         retain_identity((

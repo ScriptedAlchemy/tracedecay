@@ -175,8 +175,10 @@ async fn await_mounted_graph_operation(
         loop {
             match database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
-                Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
-                | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable) => {
+                Err(
+                    crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                ) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("memory graph attachment failed: {error:?}"),
