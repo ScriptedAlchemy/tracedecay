@@ -459,6 +459,38 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn one_shot_tool_call_has_total_deadline_while_daemon_stays_connectable() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept tool call");
+        std::future::pending::<()>().await;
+    });
+
+    let error = super::call_tool_with_limits(
+        &socket,
+        &test_handshake_defaults(),
+        "tracedecay_status",
+        json!({}),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(20),
+    )
+    .await
+    .expect_err("a connectable daemon must not defeat the total response deadline");
+    let message = error.to_string();
+    assert!(message.contains("tracedecay_status"), "{message}");
+    assert!(message.contains("20ms response deadline"), "{message}");
+    assert!(
+        message.contains("cancelled") && message.contains("not retried"),
+        "{message}"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn proxied_request_uses_shared_liveness_boundary_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
@@ -495,6 +527,68 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
     );
     server.abort();
     let _ = server.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn proxied_mcp_request_has_total_deadline_while_daemon_stays_connectable() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept proxied request");
+        std::future::pending::<()>().await;
+    });
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "tracedecay_context", "arguments": {"query": "deadline"}}
+    })
+    .to_string();
+
+    let error = super::send_daemon_request_line_with_limits(
+        &socket,
+        &test_handshake_defaults(),
+        &request,
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(20),
+    )
+    .await
+    .expect_err("the MCP proxy must bound a connectable but stalled daemon");
+    let message = error.to_string();
+    assert!(message.contains("tracedecay_context"), "{message}");
+    assert!(message.contains("20ms response deadline"), "{message}");
+    assert!(
+        message.contains("cancelled") && message.contains("not retried"),
+        "{message}"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[test]
+fn daemon_tool_deadlines_keep_hook_and_metadata_calls_fast() {
+    assert_eq!(
+        super::daemon_tool_execution_deadline(Some("tracedecay_status")),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::daemon_tool_execution_deadline(Some("tracedecay_runtime")),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::daemon_tool_execution_deadline(Some("tracedecay_files")),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::daemon_tool_execution_deadline(Some("tracedecay_hook_runtime")),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::daemon_tool_execution_deadline(Some("tracedecay_context")),
+        std::time::Duration::from_secs(30)
+    );
 }
 
 #[cfg(unix)]
@@ -1145,14 +1239,23 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     let mut direct_tool_task = tokio::spawn(async move {
         daemon_round_trip(direct_tool_engine, &direct_tool_handshake, direct_tool).await
     });
-    let direct_tool_before_warmup = tokio::time::timeout(
-        super::CONTENDED_PROJECT_OPEN_GRACE + tokio::time::Duration::from_millis(250),
+    let direct_tool_responses = tokio::time::timeout(
+        super::CONTENDED_PROJECT_OPEN_GRACE + tokio::time::Duration::from_millis(750),
         &mut direct_tool_task,
     )
-    .await;
+    .await
+    .expect("same-route tool call must return a bounded warming response")
+    .expect("direct tool client task");
+    let direct_tool_response = direct_tool_responses
+        .iter()
+        .find(|response| response["id"] == json!(3))
+        .expect("direct tool response");
+    let direct_tool_error = direct_tool_response["error"]["message"]
+        .as_str()
+        .expect("warming error message");
     assert!(
-        direct_tool_before_warmup.is_err(),
-        "a same-route tool call must wait for initialize warmup"
+        direct_tool_error.contains("warming in the background"),
+        "{direct_tool_error}"
     );
 
     release_writer.send(()).expect("signal writer gate release");
@@ -1163,19 +1266,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     if tools_list_within_bound.is_err() {
         let _ = tools_list_task.await;
     }
-    let direct_tool_responses = tokio::time::timeout(PHASE_TIMEOUT, &mut direct_tool_task)
-        .await
-        .expect("same-route tool call timed out after warmup")
-        .expect("direct tool client task");
-    let direct_tool_response = direct_tool_responses
-        .iter()
-        .find(|response| response["id"] == json!(3))
-        .expect("direct tool response");
-    assert!(
-        direct_tool_response.get("result").is_some(),
-        "{direct_tool_response}"
-    );
-
     let initialize_responses = initialize_within_bound
         .expect("initialize must not wait for project writer gate")
         .expect("initialize client task");

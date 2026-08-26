@@ -343,6 +343,12 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
             "{} {event} hook subcommand must be {subcommand}",
             hooks_path.display()
         );
+        assert_eq!(
+            hook.get("timeout").and_then(Value::as_u64),
+            (*event == "SubagentStart").then_some(5),
+            "{} {event} must only set the bounded SubagentStart outer timeout",
+            hooks_path.display()
+        );
     }
 }
 

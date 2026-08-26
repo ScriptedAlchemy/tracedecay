@@ -2,6 +2,9 @@
 //!
 //! Claude and Codex share the common hook JSON shape.
 
+use std::future::Future;
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
@@ -13,7 +16,8 @@ use super::post_tool_use::{
 };
 use super::steering::{
     append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
-    cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
+    cursor_index_signals_for_root, cursor_index_signals_for_root_result, index_status_line,
+    session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
 use super::{
@@ -200,6 +204,19 @@ const CLAUDE_SUBAGENT_START_CONTEXT: &str = "graph before grep; tools may be def
 ToolSearch select:tracedecay_context,tracedecay_grep,tracedecay_callers; route literal->grep, \
 symbol->search, concept->context";
 
+/// The outer Claude plugin guard is five seconds. Keep the internal budget
+/// below two seconds so a saturated-but-connectable daemon cannot delay child
+/// startup and the process still has time to tear down cleanly.
+const CLAUDE_SUBAGENT_START_BUDGET: Duration = Duration::from_millis(1_500);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClaudeSubagentStartContextOutcome {
+    Ready(String),
+    NoProject,
+    Unavailable,
+    TimedOut,
+}
+
 /// Claude Code `SubagentStart` hook handler.
 ///
 /// Mirrors [`hook_codex_subagent_start`](super::codex::hook_codex_subagent_start)
@@ -209,31 +226,84 @@ symbol->search, concept->context";
 /// nothing to steer toward). Analytics are fire-and-forget like `SessionStart`.
 pub async fn hook_claude_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = claude_project_root_from_event_with_identity(&event).await;
+    let started = Instant::now();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    // Subagent startup is not allowed to open the global registry directly.
+    // Resolve a bounded local workspace boundary and let the one daemon status
+    // request map global-only aliases under the same deadline.
+    let root = claude_subagent_project_root(&parsed);
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, "SubagentStart", &event);
-    if let Some(context) = claude_subagent_start_context(&event).await {
-        println!(
+    let remaining = CLAUDE_SUBAGENT_START_BUDGET.saturating_sub(started.elapsed());
+    let outcome = match root.as_deref() {
+        Some(_) if remaining.is_zero() => ClaudeSubagentStartContextOutcome::TimedOut,
+        Some(root) => {
+            bounded_claude_subagent_start_context(
+                cursor_index_signals_for_root_result(root),
+                remaining,
+            )
+            .await
+        }
+        None => ClaudeSubagentStartContextOutcome::NoProject,
+    };
+    match outcome {
+        ClaudeSubagentStartContextOutcome::Ready(context) => println!(
             "{}",
             codex_additional_context_json("SubagentStart", &context)
-        );
-    } else {
-        println!("{}", serde_json::json!({}));
+        ),
+        ClaudeSubagentStartContextOutcome::NoProject => {
+            println!("{}", serde_json::json!({}));
+        }
+        ClaudeSubagentStartContextOutcome::Unavailable => {
+            eprintln!(
+                "[tracedecay] Claude SubagentStart failed open: \
+                 stage=daemon_status outcome=unavailable elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            println!("{}", serde_json::json!({}));
+        }
+        ClaudeSubagentStartContextOutcome::TimedOut => {
+            eprintln!(
+                "[tracedecay] Claude SubagentStart failed open: \
+                 stage=daemon_status outcome=timeout elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            println!("{}", serde_json::json!({}));
+        }
     }
     0
 }
 
-/// Builds the compact `SubagentStart` `additionalContext` for a Claude event, or
-/// `None` when root detection fails (no project to steer toward). The status
-/// line is resolved the same registry-aware way as `SessionStart` so a
-/// global-store-only project still steers correctly.
-async fn claude_subagent_start_context(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let root = claude_session_project_root(&parsed).await?;
-    let (staleness, _) = cursor_index_signals_for_root(&root).await;
-    let mut context = index_status_line(true, staleness.as_deref());
-    context.push_str(CLAUDE_SUBAGENT_START_CONTEXT);
-    Some(context)
+fn claude_subagent_project_root(parsed: &Value) -> Option<std::path::PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    if let Some(root) = super::nearest_project_like_root(&cwd) {
+        return Some(root);
+    }
+    let root = crate::config::discover_project_root(&cwd)?;
+    let is_ambient_root = root.parent().is_none()
+        || ["HOME", "USERPROFILE"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .any(|home| std::path::Path::new(&home) == root);
+    (!is_ambient_root).then_some(root)
+}
+
+async fn bounded_claude_subagent_start_context<F>(
+    status: F,
+    budget: Duration,
+) -> ClaudeSubagentStartContextOutcome
+where
+    F: Future<Output = crate::errors::Result<(Option<String>, Option<u64>)>>,
+{
+    match tokio::time::timeout(budget, status).await {
+        Ok(Ok((staleness, _))) => {
+            let mut context = index_status_line(true, staleness.as_deref());
+            context.push_str(CLAUDE_SUBAGENT_START_CONTEXT);
+            ClaudeSubagentStartContextOutcome::Ready(context)
+        }
+        Ok(Err(_)) => ClaudeSubagentStartContextOutcome::Unavailable,
+        Err(_) => ClaudeSubagentStartContextOutcome::TimedOut,
+    }
 }
 
 fn claude_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
@@ -790,6 +860,55 @@ mod tests {
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("literal->grep"));
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("symbol->search"));
         assert!(CLAUDE_SUBAGENT_START_CONTEXT.contains("concept->context"));
+        assert!(CLAUDE_SUBAGENT_START_BUDGET < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn subagent_start_context_times_out_fail_open() {
+        let status = std::future::pending::<crate::errors::Result<(Option<String>, Option<u64>)>>();
+        let outcome =
+            bounded_claude_subagent_start_context(status, Duration::from_millis(10)).await;
+
+        assert_eq!(outcome, ClaudeSubagentStartContextOutcome::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn subagent_start_context_treats_daemon_errors_as_unavailable() {
+        let status = std::future::ready(Err(crate::errors::TraceDecayError::Config {
+            message: "daemon unavailable".to_string(),
+        }));
+        let outcome = bounded_claude_subagent_start_context(status, Duration::from_secs(1)).await;
+
+        assert_eq!(outcome, ClaudeSubagentStartContextOutcome::Unavailable);
+    }
+
+    #[test]
+    fn subagent_root_returns_immediately_for_malformed_or_non_project_events() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let outside = tempfile::tempdir().unwrap();
+
+        assert!(claude_subagent_project_root(&Value::Null).is_none());
+        assert!(
+            claude_subagent_project_root(
+                &serde_json::json!({ "cwd": outside.path().to_string_lossy() })
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn subagent_root_resolves_nearest_local_enrollment_marker() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        touch_marker_graph_db(&root);
+        let nested = root.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let resolved =
+            claude_subagent_project_root(&serde_json::json!({ "cwd": nested.to_string_lossy() }));
+
+        assert_eq!(resolved, Some(root));
     }
 
     fn touch_marker_graph_db(project_root: &std::path::Path) -> std::path::PathBuf {
@@ -853,6 +972,13 @@ mod tests {
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
         let event = serde_json::json!({ "cwd": nested.to_string_lossy() });
+        assert_eq!(
+            claude_subagent_project_root(&event)
+                .as_deref()
+                .map(|path| std::fs::canonicalize(path).unwrap()),
+            Some(project_root.clone()),
+            "SubagentStart must route a Git workspace without opening the global registry"
+        );
         let resolved = claude_session_project_root(&event).await;
         assert_eq!(
             resolved

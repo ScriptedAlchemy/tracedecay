@@ -70,6 +70,43 @@ pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
     }
 }
 
+fn request_tool_name(request: &JsonRpcRequest) -> Option<&str> {
+    matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall)
+        .then(|| request.params.as_ref()?.get("name")?.as_str())
+        .flatten()
+}
+
+async fn await_mcp_request_with_deadline<F>(
+    request_id: Option<Value>,
+    request_label: &str,
+    deadline: Duration,
+    response: F,
+) -> Option<JsonRpcResponse>
+where
+    F: Future<Output = Option<JsonRpcResponse>>,
+{
+    match tokio::time::timeout(deadline, response).await {
+        Ok(response) => response,
+        Err(_) => {
+            eprintln!(
+                "[tracedecay] MCP request failed open: stage=tool_execution \
+                 request={request_label} outcome=timeout elapsed_ms={}",
+                deadline.as_millis()
+            );
+            request_id.map(|id| {
+                JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!(
+                        "TraceDecay request '{request_label}' exceeded its {}ms execution deadline and was cancelled; the outcome may be unknown for mutating tools, so inspect state before retrying",
+                        deadline.as_millis()
+                    ),
+                )
+            })
+        }
+    }
+}
+
 /// The steering instructions advertised from the `initialize` handshake of a
 /// healthy server.
 pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
@@ -2202,12 +2239,23 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        Box::pin(self.handle_request_with_timings_and_implicit_project(
+                        let tool_name = request_tool_name(&request);
+                        let request_label =
+                            tool_name.unwrap_or(request.method.as_str()).to_string();
+                        let deadline = crate::daemon::daemon_tool_execution_deadline(tool_name);
+                        let request_id = request.id.clone();
+                        let response = self.handle_request_with_timings_and_implicit_project(
                             &request,
                             timings_override.unwrap_or_else(|| self.timings_enabled()),
                             &mut route_cache,
                             connection_route.implicit_project_path(),
-                        ))
+                        );
+                        await_mcp_request_with_deadline(
+                            request_id,
+                            &request_label,
+                            deadline,
+                            response,
+                        )
                         .await
                     }
                     Err(e) => Some(JsonRpcResponse::error(
@@ -3475,6 +3523,60 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod request_deadline_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_mcp_request_returns_error_and_cancels_handler() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handler_cancelled = Arc::clone(&cancelled);
+        let response = await_mcp_request_with_deadline(
+            Some(json!(17)),
+            "tracedecay_context",
+            Duration::from_millis(10),
+            async move {
+                let _drop_signal = DropSignal(handler_cancelled);
+                std::future::pending::<Option<JsonRpcResponse>>().await
+            },
+        )
+        .await
+        .expect("request with an id must receive a timeout response");
+
+        let error = response.error.expect("timeout must be a JSON-RPC error");
+        assert!(
+            error.message.contains("tracedecay_context"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("10ms execution deadline"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("cancelled"), "{}", error.message);
+        assert!(
+            error.message.contains("outcome may be unknown"),
+            "{}",
+            error.message
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+    }
+}
+
 /// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
 /// tests. The pure-logic banner tests need no server; the server tests build
 /// a real indexed `TraceDecay` over a temp git repo, mirroring the

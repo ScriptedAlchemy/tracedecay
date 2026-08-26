@@ -44,6 +44,32 @@ const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const DAEMON_FAST_TOOL_EXECUTION_DEADLINE: Duration = Duration::from_secs(5);
+const DAEMON_DEFAULT_TOOL_EXECUTION_DEADLINE: Duration = Duration::from_secs(30);
+const DAEMON_CLIENT_RESPONSE_GRACE: Duration = Duration::from_secs(4);
+
+pub(crate) fn daemon_tool_execution_deadline(tool_name: Option<&str>) -> Duration {
+    match tool_name {
+        Some(
+            "tracedecay_status"
+            | "tracedecay_runtime"
+            | "tracedecay_files"
+            | "tracedecay_hook_runtime",
+        )
+        | None => DAEMON_FAST_TOOL_EXECUTION_DEADLINE,
+        Some(_) => DAEMON_DEFAULT_TOOL_EXECUTION_DEADLINE,
+    }
+}
+
+fn daemon_tool_response_deadline(tool_name: Option<&str>) -> Duration {
+    daemon_tool_execution_deadline(tool_name) + DAEMON_CLIENT_RESPONSE_GRACE
+}
+
+fn daemon_request_tool_name(request: &JsonRpcRequest) -> Option<&str> {
+    (request.method == "tools/call")
+        .then(|| request.params.as_ref()?.get("name")?.as_str())
+        .flatten()
+}
 
 fn coordinated_dashboard_automation_writer(
     administration: StoreAdministration,
@@ -82,6 +108,11 @@ const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 /// client is told to retry. The open itself keeps running in the background.
 #[cfg(unix)]
 const CONTENDED_PROJECT_OPEN_GRACE: Duration = Duration::from_millis(500);
+/// Upper bound for an otherwise uncontended direct project open. Opening may
+/// include recovery or initialization work, so it must continue detached
+/// without holding a one-shot client connection indefinitely.
+#[cfg(unix)]
+const DIRECT_PROJECT_OPEN_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
 pub(crate) struct DaemonLifecycle {
@@ -1313,6 +1344,26 @@ async fn send_daemon_request_line_with_liveness_poll(
     line: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Vec<String>> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
+    let response_deadline =
+        daemon_tool_response_deadline(request.as_ref().and_then(daemon_request_tool_name));
+    send_daemon_request_line_with_limits(
+        socket_path,
+        handshake,
+        line,
+        liveness_poll_interval,
+        response_deadline,
+    )
+    .await
+}
+
+async fn send_daemon_request_line_with_limits(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    liveness_poll_interval: Duration,
+    response_deadline: Duration,
+) -> Result<Vec<String>> {
     let (connection, stream) = connect_to_current_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
 
@@ -1329,41 +1380,51 @@ async fn send_daemon_request_line_with_liveness_poll(
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
         .as_ref()
-        .map(|request| request.method.as_str())
+        .and_then(daemon_request_tool_name)
+        .or_else(|| request.as_ref().map(|request| request.method.as_str()))
         .unwrap_or("daemon request");
-    let mut responses = Vec::new();
-    let mut matched_response = request_id.is_none();
-    while let Some(response_line) = next_daemon_response_line(
-        &mut lines,
-        &connection,
-        request_label,
-        liveness_poll_interval,
-    )
-    .await?
-    {
-        if response_line.trim().is_empty() {
-            continue;
+    let response = tokio::time::timeout(response_deadline, async {
+        let mut responses = Vec::new();
+        let mut matched_response = request_id.is_none();
+        while let Some(response_line) = next_daemon_response_line(
+            &mut lines,
+            &connection,
+            request_label,
+            liveness_poll_interval,
+        )
+        .await?
+        {
+            if response_line.trim().is_empty() {
+                continue;
+            }
+            let is_matching_response = request_id.as_ref().is_some_and(|id| {
+                serde_json::from_str::<serde_json::Value>(&response_line)
+                    .ok()
+                    .and_then(|value| value.get("id").cloned())
+                    .as_ref()
+                    == Some(id)
+            });
+            responses.push(format!("{response_line}\n"));
+            if is_matching_response {
+                matched_response = true;
+                break;
+            }
         }
-        let is_matching_response = request_id.as_ref().is_some_and(|id| {
-            serde_json::from_str::<serde_json::Value>(&response_line)
-                .ok()
-                .and_then(|value| value.get("id").cloned())
-                .as_ref()
-                == Some(id)
-        });
-        responses.push(format!("{response_line}\n"));
-        if is_matching_response {
-            matched_response = true;
-            break;
+        if !matched_response {
+            return Err(TraceDecayError::Config {
+                message: "daemon closed the connection after the request was sent but before returning a matching response; the outcome is unknown and the request was not retried"
+                    .to_string(),
+            });
         }
-    }
-    if !matched_response {
-        return Err(TraceDecayError::Config {
-            message: "daemon closed the connection after the request was sent but before returning a matching response; the outcome is unknown and the request was not retried"
-                .to_string(),
-        });
-    }
-    Ok(responses)
+        Ok(responses)
+    })
+    .await;
+    response.map_err(|_| TraceDecayError::Config {
+        message: format!(
+            "daemon request '{request_label}' exceeded its {}ms response deadline after it was sent; the request was cancelled and was not retried",
+            response_deadline.as_millis()
+        ),
+    })?
 }
 
 /// Extracts the daemon's advertised version from a proxied `initialize`
@@ -1511,6 +1572,25 @@ async fn call_tool_with_liveness_poll(
     arguments: serde_json::Value,
     liveness_poll_interval: Duration,
 ) -> Result<serde_json::Value> {
+    call_tool_with_limits(
+        socket_path,
+        handshake,
+        tool_name,
+        arguments,
+        liveness_poll_interval,
+        daemon_tool_response_deadline(Some(tool_name)),
+    )
+    .await
+}
+
+async fn call_tool_with_limits(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    liveness_poll_interval: Duration,
+    response_deadline: Duration,
+) -> Result<serde_json::Value> {
     let (connection, stream) = connect_to_current_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
@@ -1533,30 +1613,43 @@ async fn call_tool_with_liveness_poll(
     writer.shutdown().await?;
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    loop {
-        let line =
-            next_daemon_response_line(&mut lines, &connection, tool_name, liveness_poll_interval)
-                .await?;
-        let Some(line) = line else {
-            return Err(TraceDecayError::Config {
-                message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
-                    .to_string(),
+    let response = tokio::time::timeout(response_deadline, async {
+        loop {
+            let line = next_daemon_response_line(
+                &mut lines,
+                &connection,
+                tool_name,
+                liveness_poll_interval,
+            )
+            .await?;
+            let Some(line) = line else {
+                return Err(TraceDecayError::Config {
+                    message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
+                        .to_string(),
+                });
+            };
+            let value: serde_json::Value = serde_json::from_str(&line)?;
+            if value.get("id") != Some(&id) {
+                continue;
+            }
+            let response: JsonRpcResponse = serde_json::from_value(value)?;
+            if let Some(error) = response.error {
+                return Err(TraceDecayError::Config {
+                    message: format!("daemon tool call failed: {}", error.message),
+                });
+            }
+            return response.result.ok_or_else(|| TraceDecayError::Config {
+                message: "daemon tool call response did not include a result".to_string(),
             });
-        };
-        let value: serde_json::Value = serde_json::from_str(&line)?;
-        if value.get("id") != Some(&id) {
-            continue;
         }
-        let response: JsonRpcResponse = serde_json::from_value(value)?;
-        if let Some(error) = response.error {
-            return Err(TraceDecayError::Config {
-                message: format!("daemon tool call failed: {}", error.message),
-            });
-        }
-        return response.result.ok_or_else(|| TraceDecayError::Config {
-            message: "daemon tool call response did not include a result".to_string(),
-        });
-    }
+    })
+    .await;
+    response.map_err(|_| TraceDecayError::Config {
+        message: format!(
+            "daemon tool '{tool_name}' exceeded its {}ms response deadline after it was sent; the request was cancelled and was not retried",
+            response_deadline.as_millis()
+        ),
+    })?
 }
 
 pub async fn call_default_tool(
@@ -2326,13 +2419,13 @@ impl DaemonEngine {
     async fn spawn_direct_project_server_open(
         &self,
         handshake: DaemonHandshake,
-    ) -> Result<(JoinHandle<Result<Arc<crate::mcp::McpServer>>>, bool)> {
+    ) -> Result<JoinHandle<Result<Arc<crate::mcp::McpServer>>>> {
         let (_, route) = Self::project_route(&handshake)?;
         let gate = project_open_gate(&self.project_open_gates, &route).await;
         let engine = self.clone();
-        let (singleflight, joins_existing_open) = match Arc::clone(&gate).try_lock_owned() {
-            Ok(singleflight) => (Some(singleflight), false),
-            Err(_) => (None, true),
+        let singleflight = match Arc::clone(&gate).try_lock_owned() {
+            Ok(singleflight) => Some(singleflight),
+            Err(_) => None,
         };
         let task = tokio::spawn(async move {
             let Some(activity) = engine.lifecycle.try_enter() else {
@@ -2368,7 +2461,7 @@ impl DaemonEngine {
             }
             result
         });
-        Ok((task, joins_existing_open))
+        Ok(task)
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -2946,20 +3039,20 @@ async fn serve_broker_socket_client(
         }
     }
     let server = if let Some(project_path) = handshake.project_path.as_ref() {
-        // Queuing behind an unrelated writer can take that writer's whole
-        // operation, so answer with a retry hint rather than holding the
-        // client. An uncontended open is this client's own work and must run
-        // to completion, otherwise one-shot callers never get a result.
+        // Project open may queue behind an unrelated writer, join a same-route
+        // warm-up already queued there, or perform lengthy recovery/indexing.
+        // Bound every case and leave the open detached so one-shot clients
+        // receive a retryable warming response instead of waiting forever.
         let writer_contended = engine.store_administration.writer_is_busy();
-        let (mut project_open, joins_existing_open) = engine
+        let mut project_open = engine
             .spawn_direct_project_server_open(handshake.clone())
             .await?;
-        let contended = writer_contended && !joins_existing_open;
-        let opened = if contended {
-            tokio::time::timeout(CONTENDED_PROJECT_OPEN_GRACE, &mut project_open).await
+        let deadline = if writer_contended {
+            CONTENDED_PROJECT_OPEN_GRACE
         } else {
-            Ok((&mut project_open).await)
+            DIRECT_PROJECT_OPEN_DEADLINE
         };
+        let opened = tokio::time::timeout(deadline, &mut project_open).await;
         let server = match opened {
             Ok(Ok(Ok(server))) => server,
             Ok(Ok(Err(error))) => {
