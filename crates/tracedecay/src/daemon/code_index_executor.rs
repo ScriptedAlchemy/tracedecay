@@ -360,7 +360,12 @@ pub(super) fn code_index_text_search_display_binding(
 
     let anchor = candidate.candidate.anchor_id.as_str();
     if let Some(symbol) = anchor.strip_prefix("code-symbol:") {
-        if occurrence.symbol.as_ref().map(|value| value.as_str()) != Some(symbol) {
+        if occurrence
+            .symbol
+            .as_ref()
+            .map(tracedecay_domain::SymbolOccurrenceId::as_str)
+            != Some(symbol)
+        {
             return Err(HydrationUnavailableV1::Invalid);
         }
     } else if anchor.strip_prefix("code-chunk:") != Some(chunk_id.as_str()) {
