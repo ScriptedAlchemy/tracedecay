@@ -4367,20 +4367,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             hints.overflow || !hints.paths.is_empty()
         };
-        if !has_hints && let Some(witness) = witness.as_ref() {
-            if witness.git_metadata_signature == sampled_metadata.stable_signature()
-                && witness.stat_signature == sampled_signature
-            {
-                let snapshot_content_identity = metadata.snapshot().content_identity.clone();
-                self.latest_content_identity = Some(snapshot_content_identity.clone());
-                self.mark_reconciled_state(sampled_metadata, Some(sampled_signature));
-                return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
-                    CodeIndexNoopEvidenceV1 {
-                        snapshot_content_identity,
-                        overflow_reconciled: false,
-                    },
-                )));
-            }
+        if !has_hints
+            && let Some(witness) = witness.as_ref()
+            && witness.git_metadata_signature == sampled_metadata.stable_signature()
+            && witness.stat_signature == sampled_signature
+        {
+            let snapshot_content_identity = metadata.snapshot().content_identity.clone();
+            self.latest_content_identity = Some(snapshot_content_identity.clone());
+            self.mark_reconciled_state(sampled_metadata, Some(sampled_signature));
+            return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+                CodeIndexNoopEvidenceV1 {
+                    snapshot_content_identity,
+                    overflow_reconciled: false,
+                },
+            )));
         }
 
         let _worker_memory = self.reserve_worker_memory()?;
