@@ -709,8 +709,12 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     let response: Value = serde_json::from_str(&line).expect("response json");
     assert_eq!(response["id"], json!(7));
     assert_eq!(
-        response["error"]["message"], "projectless LCM dispatch requires storage_scope=user",
-        "projectless handshake should return the stable current contract"
+        response["error"]["message"],
+        "projectless retained dispatch requires an explicit user scope",
+        "projectless handshake should return the stable current contract. The message \
+         names no parameter because the admission check reads `storage_scope` on the \
+         retained path and `memory_scope` otherwise, so naming only one would be wrong \
+         for half the callers it rejects."
     );
 
     server_task
