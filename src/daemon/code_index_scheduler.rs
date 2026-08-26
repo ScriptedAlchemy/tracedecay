@@ -345,6 +345,8 @@ struct DecodedGenerationCacheV1 {
     /// Sealed-bytes decodes actually performed by this process. Test probe for
     /// "the serving path did not re-decode".
     decodes: AtomicU64,
+    #[cfg(test)]
+    active_waiters: AtomicUsize,
 }
 
 impl DecodedGenerationCacheV1 {
@@ -449,6 +451,13 @@ impl Drop for HeldActiveDecodeV1 {
     }
 }
 
+#[cfg(test)]
+impl HeldActiveDecodeV1 {
+    pub(super) fn waiter_count(&self) -> usize {
+        self.cache.active_waiters.load(Ordering::Acquire)
+    }
+}
+
 /// Last validated publication pointer, reused when the on-disk file is unchanged.
 struct PublicationPointerMemoV1 {
     mtime: Option<SystemTime>,
@@ -473,7 +482,7 @@ impl UndecodedActivePublicationExpectationV1 {
 }
 
 #[derive(Clone)]
-struct DaemonCodeIndexPublicationStoreV1 {
+pub(super) struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
     active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
@@ -1112,11 +1121,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if state.is_in_flight(&DecodeSubjectV1::Active) {
                 // Another caller already owns this O(store) decode. Park on it
                 // rather than starting a second sweep over the same bytes.
-                let _parked = self
+                #[cfg(test)]
+                self.cache.active_waiters.fetch_add(1, Ordering::AcqRel);
+                let parked = self
                     .cache
                     .ready
                     .wait(state)
-                    .map_err(|_| DecodedGenerationCacheV1::poisoned())?;
+                    .map_err(|_| DecodedGenerationCacheV1::poisoned());
+                #[cfg(test)]
+                self.cache.active_waiters.fetch_sub(1, Ordering::AcqRel);
+                let _parked = parked?;
                 continue;
             }
             let epoch = state.active_epoch;
@@ -4519,17 +4533,22 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(Some(outcome))
     }
 
-    /// Load a complete identity-valid generation for stale serving.
-    ///
-    /// This does not claim freshness: a cancelled refresh or live ref switch
-    /// leaves the worktree ahead of the sealed generation, and that split is a
-    /// truthful stale serving state. Worktree identity must still resolve so a
-    /// missing Git authority stays unverified rather than a stale answer.
-    /// An ignored-source roster is revalidated against the live worktree
-    /// before seating: a tracked or retargeted admission must not become
-    /// serving, and the scheduler must not keep that roster.
-    pub(super) fn servable_retained_generation(
+    /// Clone the immutable publication decoder so an optional graph replay can
+    /// read and authenticate the O(store) sealed generation without occupying
+    /// the mutable scheduler mutex. The decoded generation is not servable
+    /// until [`Self::servable_decoded_retained_generation`] revalidates and
+    /// binds it under the scheduler authority.
+    pub(super) fn active_generation_decoder(&self) -> Option<DaemonCodeIndexPublicationStoreV1> {
+        (!self.shutting_down.load(Ordering::Acquire)).then(|| self.publication.clone())
+    }
+
+    /// Validate and bind a generation decoded through the detached immutable
+    /// publication authority. Identity and ignored-source roster checks remain
+    /// serialized with reconciliation; only sealed-byte I/O happens outside
+    /// the scheduler mutex.
+    pub(super) fn servable_decoded_retained_generation(
         &mut self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
         retained_text: Option<&LatestCodeTextGenerationV1>,
     ) -> Option<LatestCompleteCodeIndexV1> {
         if self.shutting_down.load(Ordering::Acquire) {
@@ -4539,7 +4558,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !resolved.authorizes_reuse_of(&self.identity) {
             return None;
         }
-        let generation = self.publication.load_active_shared().ok().flatten()?;
         self.validate_generation_identity(&generation).ok()?;
         self.adopt_ignored_source_roster(&generation);
         if !self.ignored_source_roster_matches_generation(&generation) {

@@ -11344,10 +11344,6 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             latest.generation.manifest().generation_id.clone(),
         )
     };
-    // Change the worktree before mounting. Text reconciliation must publish
-    // this source even while native graph activation of the retained seal is
-    // retrying.
-    fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
     let generation_files = |scoped_store: &Path| -> usize {
         std::fs::read_dir(scoped_store.join("code-generations-v1")).map_or(0, |entries| {
             entries
@@ -11405,6 +11401,21 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         );
         tokio::task::yield_now().await;
     };
+    assert_eq!(
+        text_owner_before_retry.metadata().manifest().generation_id,
+        sealed_generation_id,
+        "the pre-edit observation must own the retained generation"
+    );
+    assert_eq!(
+        progress_before_retry.generation_id,
+        sealed_generation_id.as_str(),
+        "the pre-edit progress must belong to the retained generation"
+    );
+
+    // Change the worktree only after the retained text owner is observably
+    // advancing. The retry journey must replace that exact owner with the new
+    // source generation while native graph activation keeps failing.
+    fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
 
     // Keep waking the worker while activation stays failing. The graph owner
     // remains unavailable, but source refresh must not be held behind it.
@@ -11558,6 +11569,20 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
     )
     .await
     .expect("graph activation did not reach the deterministic hold point");
+    assert!(
+        !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
+        "optional graph activation must not keep source reconciliation in progress"
+    );
+    let (_, text_is_current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("ready text generation remains queryable during graph activation");
+    assert!(
+        text_is_current,
+        "slow graph activation must not mark reconciled exact and lexical serving stale"
+    );
     let observed_generation_id = registry.latest_generation_id(fixture.path()).await;
     let text_ready = registry
         .latest_text_serving_for_scope(&scope)
@@ -11574,6 +11599,113 @@ async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() 
         text_ready,
         "slow graph activation started before the changed generation became exact/lexical ready"
     );
+    registry.shutdown().await;
+}
+
+/// Decoding the immutable sealed generation for optional graph activation may
+/// take tens of seconds on a cold large repository. That decode must not hold
+/// the mutable scheduler mutex: exact/lexical freshness still needs its cheap
+/// witness check while graph preparation is parked or reading the seal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_decode_does_not_block_text_freshness() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree identity"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount text-only retained generation");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if registry
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+                .is_some_and(|(text, current)| text.query_owners_are_warm() && current)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("text generation did not become ready and current");
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+    assert!(
+        !registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                super::CodeGraphActivationPolicyV1::Enabled,
+            )
+            .await
+            .expect("enable graph activation on the retained owner"),
+        "same-root policy update must retain the mounted owner"
+    );
+    assert!(registry.notify_hook_overflow(fixture.path()).await);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if held_decode.waiter_count() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("graph preparation did not park on the held decode barrier");
+    assert!(
+        !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
+        "the source pass must finish before the optional graph decode"
+    );
+    let (_, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("ready text remains queryable during graph decode");
+    assert!(
+        current,
+        "optional graph decode must not block the exact/lexical freshness witness"
+    );
+
+    drop(held_decode);
     registry.shutdown().await;
 }
 

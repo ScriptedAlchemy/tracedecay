@@ -2476,11 +2476,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     .clone();
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
-                let mut result = tokio::task::spawn_blocking(move || {
+                let source_result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let mut result = if let Some(metadata) = retained_text_metadata {
+                    if let Some(metadata) = retained_text_metadata {
                         match scheduler.reconcile_retained_text_generation(&metadata) {
                             Ok(Some(outcome)) => Ok(outcome),
                             Ok(None) if graph_activation_enabled => {
@@ -2493,36 +2493,67 @@ impl CodeIndexSchedulerRegistryV1 {
                         scheduler.activate_or_reconcile()
                     } else {
                         scheduler.reconcile_now()
-                    };
-                    // A publication must first reopen and finish its own
-                    // lightweight text owner. Only a Noop proves that the
-                    // retained Ready text owner and active durable pointer name
-                    // the same generation, after which graph activation may
-                    // safely load the full generation without delaying text.
-                    let reconciled_current_text =
-                        matches!(&result, Ok(CodeIndexReconcileOutcomeV1::Noop(_)));
-                    let mut latest = (graph_activation_enabled
-                        && text_serving_ready
-                        && !graph_activation_deferred
-                        && reconciled_current_text)
-                        .then(|| scheduler.servable_retained_generation(retained_text.as_ref()))
-                        .flatten();
-                    let replay_binding = latest.as_ref().map(|latest| {
-                        scheduler.code_graph_replay_binding(
-                            &latest.generation().manifest().generation_id,
-                        )
-                    });
-                    let replay_binding = match replay_binding.transpose() {
-                        Ok(binding) => binding,
-                        Err(error) => {
-                            result = Err(error);
-                            latest = None;
-                            None
-                        }
-                    };
-                    (result, latest, replay_binding)
+                    }
                 })
                 .await;
+                // A publication must first reopen and finish its own
+                // lightweight text owner. Only a Noop proves that the retained
+                // Ready text owner and active durable pointer name the same
+                // generation. At that point source reconciliation is complete:
+                // release its public freshness guard before the optional
+                // O(store) full decode and native graph activation begin.
+                let prepare_graph = graph_activation_enabled
+                    && text_serving_ready
+                    && !graph_activation_deferred
+                    && matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_))));
+                if prepare_graph {
+                    drop(_reconcile_pass);
+                }
+                let mut result = match source_result {
+                    Ok(mut outcome) if prepare_graph => {
+                        let graph_scheduler = Arc::clone(&worker_scheduler);
+                        let graph_text = retained_text.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            let decoder = graph_scheduler
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .active_generation_decoder();
+                            let generation = decoder
+                                .and_then(|decoder| decoder.load_active_shared().ok().flatten());
+                            let latest = generation.and_then(|generation| {
+                                graph_scheduler
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .servable_decoded_retained_generation(
+                                        generation,
+                                        graph_text.as_ref(),
+                                    )
+                            });
+                            let replay_binding = latest.as_ref().map(|latest| {
+                                graph_scheduler
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .code_graph_replay_binding(
+                                        &latest.generation().manifest().generation_id,
+                                    )
+                            });
+                            replay_binding.transpose().map(|binding| (latest, binding))
+                        })
+                        .await
+                        {
+                            Ok(Ok((latest, replay_binding))) => {
+                                Ok((outcome, latest, replay_binding))
+                            }
+                            Ok(Err(error)) => {
+                                outcome = Err(error);
+                                Ok((outcome, None, None))
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(outcome) => Ok((outcome, None, None)),
+                    Err(error) => Err(error),
+                };
                 if matches!(
                     &result,
                     Ok((Ok(CodeIndexReconcileOutcomeV1::Published(_)), None, None))
