@@ -484,8 +484,62 @@ for package in metadata["packages"]:
         print(f'{package["name"]}\t{package["version"]}')
 PY
 
-packages="$work/packages"
+# `tracedecay-agent-hosts` stamps the product version, and that value now lives
+# in `[workspace.package]` at the workspace root — two directories above each
+# crate. The sibling symlinks below already reproduce the `crates/<name>` shape
+# a build script sees in the repository; this reproduces the workspace root
+# that sits above it, so the battery resolves the same version the repository
+# build does instead of failing closed on a missing manifest. `exclude` keeps
+# every extracted tree a standalone build rather than a member of this stub.
+package_root="$work/packages"
+packages="$package_root/crates"
 mkdir -p -- "$packages"
+product_version=$(python3 - "$repo/Cargo.toml" <<'PY'
+import sys
+
+# Same rule the build script applies: the one literal `version` inside
+# `[workspace.package]`. An inherited or absent value is not a product version.
+in_table = False
+value = None
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_table = line == "[workspace.package]"
+            continue
+        if in_table and line.startswith("version"):
+            _, _, raw = line.partition("=")
+            raw = raw.strip()
+            if raw.startswith('"') and raw.endswith('"'):
+                value = raw[1:-1]
+print(value or "")
+PY
+)
+[[ -n "$product_version" ]] ||
+  die "$repo/Cargo.toml must declare a literal version in [workspace.package]"
+cat >"$package_root/Cargo.toml" <<TOML
+[workspace]
+members = []
+exclude = ["crates"]
+
+[workspace.package]
+version = "$product_version"
+TOML
+
+# Twenty-five `include_str!`/`include_bytes!` sites across `tracedecay-agent-hosts`
+# and `tracedecay-usecases` embed repository-root assets — `plugin/`, `tests/`,
+# `dashboard/hermes-wrapper/` and `benchmark_data/` — that `cargo package` cannot carry into an archive
+# because they sit outside the package directory. The repository build resolves
+# them two directories above `crates/<name>`, so the stub root has to present
+# the same trees. They are linked from the staged copy rather than the live
+# checkout so the battery reads exactly what was packaged.
+for root_asset in plugin tests dashboard benchmark_data; do
+  [[ -e "$staged/$root_asset" ]] ||
+    die "staged workspace is missing the root asset tree $root_asset"
+  ln -sfn -- "$staged/$root_asset" "$package_root/$root_asset"
+done
 declare -A package_dirs=()
 while IFS=$'\t' read -r name version; do
   archive="$target_directory/package/$name-$version.crate"
