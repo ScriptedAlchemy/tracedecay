@@ -10,8 +10,8 @@ use crate::state::{
 };
 
 use super::{
-    CheckedDigestWriter, GraphGenerationManifest, GraphGenerationRelation, checked_canonical_bytes,
-    physical_namespace_projection_map, recovered_entity_ref, write_frame,
+    CheckedDigestWriter, CheckedVecWriter, GraphGenerationManifest, GraphGenerationRelation,
+    physical_namespace_projection_map, recovered_entity_ref, write_canonical_frame,
 };
 
 pub(crate) fn recovered_generation_digest_from_database(
@@ -21,64 +21,49 @@ pub(crate) fn recovered_generation_digest_from_database(
 ) -> Result<String, GraphDbError> {
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
-    for (tag, value) in [
-        (
-            "format",
-            checked_canonical_bytes(
-                "tracedecay.graph-generation.v1",
-                check,
-                "recovered generation format",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "projection",
-            checked_canonical_bytes(
-                &manifest.projection,
-                check,
-                "recovered generation projection",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "generation",
-            checked_canonical_bytes(
-                &manifest.generation,
-                check,
-                "recovered generation identity",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "source_generation",
-            checked_canonical_bytes(
-                &manifest.source_generation,
-                check,
-                "recovered source generation",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "watermark",
-            checked_canonical_bytes(
-                &manifest.watermark,
-                check,
-                "recovered generation watermark",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "dependencies",
-            checked_canonical_bytes(
-                &manifest.dependencies,
-                check,
-                "recovered generation dependencies",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-    ] {
-        write_frame(&mut writer, tag, &value?)?;
-    }
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "format",
+        "tracedecay.graph-generation.v1",
+        "recovered generation format",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "projection",
+        &manifest.projection,
+        "recovered generation projection",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "generation",
+        &manifest.generation,
+        "recovered generation identity",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "source_generation",
+        &manifest.source_generation,
+        "recovered source generation",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "watermark",
+        &manifest.watermark,
+        "recovered generation watermark",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "dependencies",
+        &manifest.dependencies,
+        "recovered generation dependencies",
+    )?;
 
     let physical_namespace = manifest.physical_namespace()?;
     for (_, node) in projection_entity_nodes_sorted_checked(
@@ -89,13 +74,13 @@ pub(crate) fn recovered_generation_digest_from_database(
     )? {
         check()?;
         let entity = load_entity_by_node(database, node)?.entity;
-        let bytes = checked_canonical_bytes(
+        write_canonical_frame(
+            &mut writer,
+            &mut canonical,
+            "entity",
             &entity,
-            check,
             "recovered generation entity",
-            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )?;
-        write_frame(&mut writer, "entity", &bytes)?;
     }
 
     let namespace_projection = physical_namespace_projection_map(manifest)?;
@@ -116,13 +101,13 @@ pub(crate) fn recovered_generation_digest_from_database(
             stored.relation.kind,
             stored.relation.properties,
         )?;
-        let bytes = checked_canonical_bytes(
+        write_canonical_frame(
+            &mut writer,
+            &mut canonical,
+            "relation",
             &relation,
-            check,
             "recovered generation relation",
-            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )?;
-        write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
     Ok(encode_lowercase_hex(&digest.finalize()))

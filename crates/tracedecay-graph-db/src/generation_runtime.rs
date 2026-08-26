@@ -1340,7 +1340,8 @@ mod tests {
     use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
     use crate::generation::{
-        manifest_canonicalizations, recovered_generation_enumerations,
+        canonical_buffer_allocation_growths, manifest_canonicalizations,
+        recovered_generation_enumerations, reset_canonical_buffer_allocation_growths,
         reset_manifest_canonicalizations, reset_recovered_generation_enumerations,
     };
     use crate::projection::{
@@ -1497,11 +1498,17 @@ mod tests {
 
         let sealed = sealed_digest(&manifest);
         reset_recovered_generation_enumerations();
+        reset_canonical_buffer_allocation_growths();
         database
             .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
             .unwrap();
 
         assert_eq!(recovered_generation_enumerations(), 1);
+        let allocation_growths = canonical_buffer_allocation_growths();
+        assert!(
+            allocation_growths <= 8,
+            "5,000 stored rows caused {allocation_growths} canonical-buffer allocation growths"
+        );
         owner.close().unwrap();
     }
 

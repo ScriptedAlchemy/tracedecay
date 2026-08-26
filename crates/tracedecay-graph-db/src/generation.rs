@@ -682,6 +682,8 @@ thread_local! {
         const { std::cell::Cell::new(0) };
     static MANIFEST_CANONICALIZATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static CANONICAL_BUFFER_ALLOCATION_GROWTHS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -702,6 +704,16 @@ pub(crate) fn reset_manifest_canonicalizations() {
 #[cfg(test)]
 pub(crate) fn manifest_canonicalizations() -> usize {
     MANIFEST_CANONICALIZATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_canonical_buffer_allocation_growths() {
+    CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn canonical_buffer_allocation_growths() -> usize {
+    CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(std::cell::Cell::get)
 }
 
 fn physical_namespace_projection_map(
@@ -769,81 +781,66 @@ fn recovered_generation_digest(
     } = manifest;
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
-    for (tag, value) in [
-        (
-            "format",
-            checked_canonical_bytes(
-                "tracedecay.graph-generation.v1",
-                check,
-                "recovered generation format",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "projection",
-            checked_canonical_bytes(
-                projection,
-                check,
-                "recovered generation projection",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "generation",
-            checked_canonical_bytes(
-                generation,
-                check,
-                "recovered generation identity",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "source_generation",
-            checked_canonical_bytes(
-                source_generation,
-                check,
-                "recovered source generation",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "watermark",
-            checked_canonical_bytes(
-                watermark,
-                check,
-                "recovered generation watermark",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-        (
-            "dependencies",
-            checked_canonical_bytes(
-                dependencies,
-                check,
-                "recovered generation dependencies",
-                MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-            ),
-        ),
-    ] {
-        write_frame(&mut writer, tag, &value?)?;
-    }
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "format",
+        "tracedecay.graph-generation.v1",
+        "recovered generation format",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "projection",
+        projection,
+        "recovered generation projection",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "generation",
+        generation,
+        "recovered generation identity",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "source_generation",
+        source_generation,
+        "recovered source generation",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "watermark",
+        watermark,
+        "recovered generation watermark",
+    )?;
+    write_canonical_frame(
+        &mut writer,
+        &mut canonical,
+        "dependencies",
+        dependencies,
+        "recovered generation dependencies",
+    )?;
     for entity in entities {
-        let bytes = checked_canonical_bytes(
+        write_canonical_frame(
+            &mut writer,
+            &mut canonical,
+            "entity",
             entity,
-            check,
             "recovered generation entity",
-            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )?;
-        write_frame(&mut writer, "entity", &bytes)?;
     }
     for relation in relations {
-        let bytes = checked_canonical_bytes(
+        write_canonical_frame(
+            &mut writer,
+            &mut canonical,
+            "relation",
             relation,
-            check,
             "recovered generation relation",
-            MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
         )?;
-        write_frame(&mut writer, "relation", &bytes)?;
     }
     writer.finish()?;
     Ok(encode_lowercase_hex(&digest.finalize()))
@@ -862,6 +859,17 @@ fn write_frame(
     write_digest_bytes(writer, tag.as_bytes())?;
     write_digest_bytes(writer, &byte_len.to_be_bytes())?;
     write_digest_bytes(writer, bytes)
+}
+
+fn write_canonical_frame<T: Serialize + ?Sized>(
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    tag: &str,
+    value: &T,
+    subject: &str,
+) -> Result<(), GraphDbError> {
+    let bytes = canonical.encode(value, subject)?;
+    write_frame(writer, tag, bytes)
 }
 
 fn write_digest_bytes(
@@ -967,6 +975,26 @@ impl<'a> CheckedVecWriter<'a> {
         Ok(self.bytes)
     }
 
+    fn encode<T: Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+        subject: &str,
+    ) -> Result<&[u8], GraphDbError> {
+        self.bytes.clear();
+        self.bytes_since_check = 0;
+        self.failure = None;
+        (self.check)()?;
+        let encoded = serde_json::to_writer(&mut *self, value);
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        (self.check)()?;
+        encoded.map_err(|error| {
+            GraphDbError::invalid(format!("failed to encode {subject}: {error}"))
+        })?;
+        Ok(&self.bytes)
+    }
+
     #[cfg(test)]
     fn allocation_growths(&self) -> usize {
         self.allocation_growths
@@ -1016,6 +1044,9 @@ impl Write for CheckedVecWriter<'_> {
             #[cfg(test)]
             if self.bytes.capacity() != capacity_before_reserve {
                 self.allocation_growths += 1;
+                CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(|count| {
+                    count.set(count.get().saturating_add(1));
+                });
             }
         }
         let length = u64::try_from(bytes.len())
@@ -1059,10 +1090,20 @@ fn checked_canonical_bytes<T: Serialize + ?Sized>(
 
 #[cfg(test)]
 mod checked_vec_writer_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use sha2::{Digest, Sha256};
     use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
-    use super::{CheckedVecWriter, GraphDbError, checked_canonical_bytes};
+    use super::{
+        CheckedVecWriter, GraphDbError, GraphGenerationManifest,
+        canonical_buffer_allocation_growths, checked_canonical_bytes, recovered_generation_digest,
+        reset_canonical_buffer_allocation_growths,
+    };
+    use crate::{
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphWatermark, SourceGeneration,
+    };
 
     #[test]
     fn many_tiny_serde_writes_use_bounded_amortized_growth() {
@@ -1116,5 +1157,44 @@ mod checked_vec_writer_tests {
         assert!(error.to_string().contains("canonical graph replay exceeds"));
         assert!(writer.bytes.len() <= max_bytes);
         assert!(writer.bytes.capacity() <= max_bytes);
+    }
+
+    #[test]
+    fn recovered_digest_reuses_canonical_buffer_across_manifest_rows() {
+        let manifest = GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("allocation-probe").unwrap(),
+                GraphProjectionId::new("manifest").unwrap(),
+            ),
+            GraphGenerationId::new("generation-allocation-probe").unwrap(),
+            SourceGeneration::new("source-allocation-probe").unwrap(),
+            GraphWatermark::new("watermark-allocation-probe").unwrap(),
+            vec![],
+            (0..4_096)
+                .map(|index| {
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            vec![],
+        )
+        .unwrap();
+
+        reset_canonical_buffer_allocation_growths();
+        let digest = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
+        let allocation_growths = canonical_buffer_allocation_growths();
+        assert_eq!(
+            digest,
+            "786f46a4a0f263e5c67927f2a196ce95bd7071733478fb94560c5736dce44f9f"
+        );
+
+        assert!(
+            allocation_growths <= 8,
+            "4,096 manifest rows caused {allocation_growths} canonical-buffer allocation growths"
+        );
     }
 }
