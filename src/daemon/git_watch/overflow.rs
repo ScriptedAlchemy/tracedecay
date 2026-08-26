@@ -194,7 +194,7 @@ pub(super) async fn cover_overflowed_repositories(watcher: &GitWatcher) {
                     // IdentityMismatch mean the scheduler is not serving this
                     // root — coverage stays typed on the roster, and the next
                     // real handshake re-resolves identity.
-                    let _ = schedulers.request_for_root(&identity);
+                    let _ = schedulers.request_for_root(&identity).await;
                 }
                 log_daemon_event(
                     "git_watch_backstop",

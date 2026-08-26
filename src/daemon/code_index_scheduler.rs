@@ -5100,12 +5100,15 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// must answer `false` and wake nothing: the ladder suppressing work is the
     /// common case, and waking the worker on every read would turn each query
     /// into a rebuild trigger — exactly the coupling this change removes.
-    pub(super) fn request_fresh_for_query_background(&mut self) -> bool {
+    /// Decide whether the cheap Git/stat ladder requires an authoritative
+    /// reconcile, without posting a worker wake. Callers that own a separate
+    /// cadence authority use this split form so they can record the arrival
+    /// before making the worker runnable.
+    pub(super) fn freshness_probe_requires_reconcile(&mut self) -> bool {
         if !self.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&self.git_metadata)
         {
-            self.request_background_reconcile();
             return true;
         }
         if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
@@ -5117,6 +5120,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             self.last_reconciled_at = Instant::now();
             self.last_reconciled_at_micros = Some(now_micros().0);
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn request_fresh_for_query_background(&mut self) -> bool {
+        if !self.freshness_probe_requires_reconcile() {
             return false;
         }
         self.request_background_reconcile();

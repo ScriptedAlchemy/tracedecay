@@ -4613,6 +4613,116 @@ async fn mounted_core_query_worktree_with_one_permit(
     .await
 }
 
+/// A healthy Git-watcher backstop is a freshness probe, not evidence that the
+/// checkout changed. When the exact stat signature still matches, routing that
+/// probe must leave both the source-hint authority and worker queue empty.
+#[tokio::test]
+async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), fixture.path());
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off retained generation");
+
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let settled = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler.verified_against_source() && scheduler.pending_hint_count() == Some(0)
+        };
+        if settled
+            && !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= settled_deadline,
+            "retained graph-off owner never established initial freshness"
+        );
+        tokio::task::yield_now().await;
+    }
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "settled fixture starts without source-change evidence"
+    );
+
+    let identity = tracedecay_runtime_core::git_discovery::GitRepositoryIdentity {
+        worktree_root: canonical_root.clone(),
+        git_dir: canonical_root.join(".git"),
+        common_dir: canonical_root.join(".git"),
+    };
+    assert_eq!(
+        registry.request_for_root(&identity).await,
+        super::GitStateChangeRequestV1::Accepted
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "an unchanged watcher probe must not fabricate overflow evidence"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "an unchanged watcher probe must not queue a capture pass"
+    );
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
 async fn mounted_core_query_worktree_in(
     registry: CodeIndexSchedulerRegistryV1,
     fixture: &GitFixture,
