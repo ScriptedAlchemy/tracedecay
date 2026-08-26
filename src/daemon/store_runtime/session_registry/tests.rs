@@ -1242,6 +1242,70 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupt_session_relation_graph_preserves_relational_session_database() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.session-relation-corrupt").expect("project id");
+
+    let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("first session runtime registry");
+    let first_database = first_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("initial project session database");
+    let graph_path = first_database.db_path().with_extension("grafeo");
+    drop(first_database);
+    first_registry.cancel_terminal_tasks();
+    first_registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("first terminal tasks shut down");
+    first_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("first session relation graph closes");
+    drop(first_registry);
+
+    std::fs::write(&graph_path, b"corrupt session relation graph")
+        .expect("corrupt session relation graph file");
+
+    let reopened_registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("reopened session runtime registry");
+    let reopened = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reopened_registry.project_sessions(project_id.clone(), [project_root]),
+    )
+    .await
+    .expect("relational session open must not wait for relation graph recovery")
+    .expect("relational session database remains available");
+    assert!(
+        reopened.session_relation_graph_identity().is_err(),
+        "corrupt relation graph must remain unavailable rather than fabricating readiness"
+    );
+    drop(reopened);
+    reopened_registry.cancel_terminal_tasks();
+    reopened_registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("detached session relation graph task shuts down");
+    reopened_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("detached relational session owner shuts down cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_only_project_graph_reuses_daemon_publication_without_write_authority() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary

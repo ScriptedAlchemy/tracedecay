@@ -259,7 +259,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: &ProjectId,
     ) -> Result<()> {
-        let Some(mut replacement) = self.reserve_project_session_replacement(project_id)? else {
+        let Some(mut replacement) = self.reserve_project_session_replacement(project_id).await?
+        else {
             return Ok(());
         };
 

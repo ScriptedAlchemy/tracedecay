@@ -31,7 +31,7 @@ use tracedecay_store::{
     SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
 };
 
-use super::{DaemonSessionRuntimeRegistryV1, Result, SessionGraphOwnerV1, session_registry_error};
+use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -1510,24 +1510,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 return Ok(true);
             }
         }
-    }
-
-    pub(super) async fn retain_session_relation_graph_owner(
-        &self,
-        shard_id: StoreShardIdV1,
-    ) -> Result<SessionGraphOwnerV1> {
-        let (graph, store_target) = graph_attachment::open_session_relation_owner(
-            &self.registry,
-            &self.graph_registry,
-            &self.graph_lifecycle_cancelled,
-            self.incarnation,
-            shard_id,
-        )
-        .await?;
-        Ok(SessionGraphOwnerV1 {
-            graph,
-            store_target,
-        })
     }
 }
 

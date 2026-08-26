@@ -108,7 +108,7 @@ async fn open_session_relation_owner_with_cancellation(
     // cooperative workers; cancellation remains visible inside the native
     // load through the exact registration authority.
     let graph = tokio::task::spawn_blocking(move || {
-        hotpath::measure_block!("daemon.store.memory_graph.open", {
+        hotpath::measure_block!("daemon.store.session_relation_graph.open", {
             graph_registry.resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
                 operation: registration,
                 authority_attachment: Box::new(store_attachment),

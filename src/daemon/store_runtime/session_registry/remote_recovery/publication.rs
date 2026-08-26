@@ -40,32 +40,7 @@ impl RemoteRecoveryPublicationContextV1 {
         owner: &RegisteredSessionOwnerV1,
         project_id: &ProjectId,
     ) -> Result<RegisteredGlobalDbLeaseV1> {
-        let database = owner.database.issue_lease().map_err(|error| {
-            session_registry_error(
-                "issue remote recovery project session client",
-                format!("{error:?}"),
-            )
-        })?;
-        let graph = owner.relation_graph.graph.issue_lease().map_err(|error| {
-            session_registry_error(
-                "issue remote recovery session relation graph client",
-                error.to_string(),
-            )
-        })?;
-        database
-            .bind_session_relation_graph(
-                SessionRelationScope::project_sessions(project_id.clone()),
-                graph,
-                owner.relation_graph.graph.binding().clone(),
-                owner.relation_graph.graph.verified_locator().clone(),
-            )
-            .map_err(|_| {
-                session_registry_error(
-                    "bind remote recovery session relation graph client",
-                    "issued graph client did not match the exact project owner".to_owned(),
-                )
-            })?;
-        Ok(database)
+        owner.issue_lease(SessionRelationScope::project_sessions(project_id.clone()))
     }
 
     async fn restore_replacement_ready(
@@ -123,6 +98,9 @@ impl RemoteRecoveryPublicationContextV1 {
         project_id: &ProjectId,
         destination: &Path,
     ) -> Result<ProjectSessionReplacementVacancyV1> {
+        self.project_owners
+            .wait_for_session_graph(project_id)
+            .await?;
         let Some(replacement) = self
             .project_owners
             .reserve_session_replacement(project_id)?
@@ -316,6 +294,7 @@ impl RemoteRecoveryPublicationContextV1 {
         .await?;
         let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
         let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?;
+        let graph_open_task_key = format!("{shard_id:?}");
         let (graph, store_target) =
             super::super::code_graph::graph_attachment::open_session_relation_owner(
                 &self.registry,
@@ -325,13 +304,14 @@ impl RemoteRecoveryPublicationContextV1 {
                 shard_id,
             )
             .await?;
-        Ok(RegisteredSessionOwnerV1 {
+        Ok(RegisteredSessionOwnerV1::with_attached_graph(
             database,
-            relation_graph: SessionGraphOwnerV1 {
+            SessionGraphOwnerV1 {
                 graph,
                 store_target,
             },
-        })
+            graph_open_task_key,
+        ))
     }
 
     async fn activate_candidate(
@@ -759,6 +739,7 @@ mod tests {
 
         let mut replacement = registry
             .reserve_project_session_replacement(&project_id)
+            .await
             .expect("reserve prior session owner")
             .expect("mounted session owner");
         let graph_target = replacement
