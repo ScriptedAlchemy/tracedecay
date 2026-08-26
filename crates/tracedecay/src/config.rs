@@ -51,7 +51,7 @@ pub const CONFIG_FILENAME: &str = "config.json";
 pub use tracedecay_runtime_core::config::{
     DB_FILENAME, TRACEDECAY_DIR, USER_DATA_DIR_ENV, active_data_dir_name, db_filename,
     discover_project_root, get_project_db_path, get_tracedecay_dir, has_project_database,
-    user_data_dir,
+    is_ambient_project_root, user_data_dir,
 };
 
 /// Atomic project-scoped semantic runtime selection.

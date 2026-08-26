@@ -5,11 +5,11 @@ use super::*;
 use crate::daemon::code_index_scheduler::LatestCompleteCodeIndexV1;
 use crate::daemon::project_composition::ProductionProjectComposition;
 
-async fn open_project(
+async fn open_project_composition(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     instance: &str,
-) -> Result<(ProductionProjectComposition, LatestCompleteCodeIndexV1)> {
+) -> Result<ProductionProjectComposition> {
     let resources = harness
         .resources
         .as_ref()
@@ -33,7 +33,7 @@ async fn open_project(
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
-    let composition = resources
+    resources
         .store_administration
         .with_writer(|| async {
             production_project_server(
@@ -52,7 +52,21 @@ async fn open_project(
             )
             .await
         })
-        .await?;
+        .await
+}
+
+async fn open_project(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    instance: &str,
+) -> Result<(ProductionProjectComposition, LatestCompleteCodeIndexV1)> {
+    let resources = harness
+        .resources
+        .as_ref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "production harness is shut down".to_owned(),
+        })?;
+    let composition = open_project_composition(harness, project, instance).await?;
     let code_search_scope = {
         let graph = composition.server.cg().await;
         let target = graph.configuration_runtime().configuration_target();
@@ -70,6 +84,49 @@ async fn open_project(
     Ok((composition, latest))
 }
 
+async fn seed_project_sessions_pending_convergence(
+    profile_root: &Path,
+    project_root: &Path,
+    project_id: &tracedecay_domain::ProjectId,
+) {
+    let identity = crate::daemon::profile_identity::load_or_create(profile_root)
+        .expect("durable harness profile identity");
+    crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())
+        .expect("target project enrollment");
+    let sessions_path =
+        crate::storage::profile_sharded_data_root(profile_root, project_id.as_str())
+            .join(crate::storage::SESSIONS_DB_FILENAME);
+    std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
+        .expect("session database directory");
+    crate::daemon::store_runtime::register_registered_schema_installer();
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &sessions_path,
+        "seed production project-open convergence fixture",
+    )
+    .expect("project sessions fixture database authority");
+    let (database, _) = crate::db::Database::publish_registered_test_runtime_for_profile_identity(
+        &sessions_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+        crate::db::TestRuntimeProfileIdentityV1::new(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+        ),
+        crate::db::TestDatabaseRuntimeScope::ProjectSessions {
+            project_id: project_id.clone(),
+        },
+    )
+    .await
+    .expect("seed complete registered project sessions schema");
+    database
+        .execute_write_batch(
+            "remove production project-open convergence checkpoint",
+            "DELETE FROM authority_audit_checkpoints",
+        )
+        .await
+        .expect("remove durable convergence checkpoint");
+}
+
 fn assert_generation_contains_probe(latest: &LatestCompleteCodeIndexV1, probe: &str) {
     let symbols = &latest.generation().symbols().symbols;
     assert!(
@@ -80,6 +137,81 @@ fn assert_generation_contains_probe(latest: &LatestCompleteCodeIndexV1, probe: &
         symbols.iter().any(|symbol| symbol.simple_name == probe),
         "the latest-complete generation must contain the unique project symbol {probe}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_full_publication_precedes_registered_schema_convergence() {
+    let isolation = TempDir::new().expect("production harness isolation");
+    let bootstrap_project = isolation.path().join("bootstrap-project");
+    let target_project = isolation.path().join("target-project");
+    for (project, probe) in [
+        (&bootstrap_project, "bootstrap_probe"),
+        (&target_project, "target_probe"),
+    ] {
+        std::fs::create_dir_all(project.join("src")).expect("project source root");
+        std::fs::write(
+            project.join("src/lib.rs"),
+            format!("pub fn {probe}() -> usize {{ 1 }}\n"),
+        )
+        .expect("project source");
+        git(project, &["init", "-q"]);
+        git(project, &["add", "."]);
+        git(project, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        git(project, &["commit", "-qm", "seed project"]);
+    }
+
+    let harness = ProductionProjectCompositionHarnessV1::open_with_session_maintenance_for_test(
+        isolation.path(),
+        std::iter::once(bootstrap_project),
+    )
+    .await
+    .expect("production harness authority");
+    let target_project_id =
+        tracedecay_domain::ProjectId::new("project.schema-convergence-full-publication")
+            .expect("typed target project identity");
+    seed_project_sessions_pending_convergence(
+        harness.profile_root(),
+        &target_project,
+        &target_project_id,
+    )
+    .await;
+
+    let resources = harness
+        .resources
+        .as_ref()
+        .expect("production harness resources");
+    let registry = resources
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let mut project_open = Box::pin(open_project_composition(
+        &harness,
+        &target_project,
+        "foreground-convergence",
+    ));
+    let composition = tokio::select! {
+        result = &mut project_open => result.expect("target project full publication"),
+        () = convergence_gate.wait_until_blocked() => {
+            panic!("historical schema convergence entered before full project publication")
+        }
+    };
+    drop(project_open);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        convergence_gate.wait_until_blocked(),
+    )
+    .await
+    .expect("historical convergence starts after full project publication");
+    convergence_gate.release();
+    drop(composition);
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

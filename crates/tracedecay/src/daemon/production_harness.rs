@@ -88,8 +88,14 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self> {
         let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
-        Self::open_with_live_profile_root(isolation_root, project_roots, live_profile_root, None)
-            .await
+        Self::open_with_live_profile_root(
+            isolation_root,
+            project_roots,
+            live_profile_root,
+            None,
+            false,
+        )
+        .await
     }
 
     pub async fn open_with_scope_prefix(
@@ -103,6 +109,7 @@ impl ProductionProjectCompositionHarnessV1 {
             project_roots,
             live_profile_root,
             Some(scope_prefix.into()),
+            false,
         )
         .await
     }
@@ -112,6 +119,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
         live_profile_root: Option<PathBuf>,
         scope_prefix: Option<String>,
+        long_lived_session_maintenance_for_test: bool,
     ) -> Result<Self> {
         std::fs::create_dir_all(isolation_root.as_ref()).map_err(|error| {
             TraceDecayError::Config {
@@ -197,6 +205,14 @@ impl ProductionProjectCompositionHarnessV1 {
         )?;
         let store_administration =
             StoreAdministration::default().with_profile_identity(profile_identity.clone());
+        #[cfg(test)]
+        if long_lived_session_maintenance_for_test {
+            store_administration
+                .install_long_lived_session_runtime_registry_for_test()
+                .await?;
+        }
+        #[cfg(not(test))]
+        let _ = long_lived_session_maintenance_for_test;
         let invocation = DaemonInvocationState::default();
         invocation.configure_github_read_only_credentials(&profile_identity);
         let profile_sessions = store_administration
@@ -315,8 +331,17 @@ impl ProductionProjectCompositionHarnessV1 {
             project_roots,
             Some(live_profile_root),
             None,
+            false,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn open_with_session_maintenance_for_test(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self> {
+        Self::open_with_live_profile_root(isolation_root, project_roots, None, None, true).await
     }
 
     pub fn isolation_root(&self) -> &Path {

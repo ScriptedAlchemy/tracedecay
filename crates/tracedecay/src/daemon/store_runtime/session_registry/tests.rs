@@ -666,6 +666,49 @@ async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_project_open_defers_historical_convergence_until_full_publication() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-foreground-admission").await;
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let foreground = registry
+        .begin_foreground_project_open()
+        .expect("foreground project-open admission");
+
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions publish for foreground open");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            convergence_gate.wait_until_blocked(),
+        )
+        .await
+        .is_err(),
+        "historical convergence must not enter its writer lane before full publication"
+    );
+    database
+        .begin_write_transaction()
+        .await
+        .expect("foreground project-open writer is not queued behind convergence")
+        .rollback()
+        .await
+        .expect("foreground project-open writer probe rolls back");
+
+    drop(foreground);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        convergence_gate.wait_until_blocked(),
+    )
+    .await
+    .expect("historical convergence starts after full publication");
+    convergence_gate.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_project_attaches_schedule_one_historical_convergence() {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-deduplication").await;
@@ -953,9 +996,21 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     .expect("manifest");
     let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
-    let published = project_database
-        .issue_memory_graph_runtime_operation()
-        .expect("project graph publication operation")
+    let publication_operation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match project_database.issue_memory_graph_runtime_operation() {
+                Ok(operation) => break operation,
+                Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+                | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("project graph attachment failed: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("project graph attachment becomes available");
+    let published = publication_operation
         .runtime()
         .publish_verified_manifest(
             &manifest,
@@ -1117,6 +1172,246 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         primary_authority.canonical_path(),
         project_database.database_path().with_extension("grafeo")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.derived-graph-corrupt").expect("project id");
+    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        .expect("project enrollment");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        23,
+        "corrupt derived graph project open",
+    )
+    .expect("daemon database scope");
+    let project_store_root = profile_root.join("projects/project.derived-graph-corrupt");
+    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    std::fs::create_dir_all(database_path.parent().expect("database parent"))
+        .expect("database directory");
+
+    let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("first session runtime registry");
+    first_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("register project authority");
+    let authority = DatabaseAuthority::for_runtime(
+        &database_path,
+        "seed project store before derived graph corruption",
+    )
+    .expect("project database authority");
+    let first_database = first_registry
+        .project_graph(
+            &project_root,
+            project_id.clone(),
+            database_path.clone(),
+            authority,
+            DatabaseAccessMode::ReadWrite,
+        )
+        .await
+        .expect("initial project graph publication");
+    let graph_path = first_database.database_path().with_extension("grafeo");
+    drop(first_database);
+    first_registry.cancel_terminal_tasks();
+    first_registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("first terminal tasks shut down");
+    first_registry.cancel_memory_graph_reconciliation_tasks();
+    first_registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("first reconciliation shuts down");
+    first_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("first graph runtime closes");
+    drop(first_registry);
+
+    std::fs::write(&graph_path, b"corrupt derived graph").expect("corrupt derived graph file");
+
+    let reopened_registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("reopened session runtime registry");
+    reopened_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("restore project authority");
+    let reopened_authority = DatabaseAuthority::for_runtime(
+        &database_path,
+        "reopen project store with corrupt derived graph",
+    )
+    .expect("reopened project database authority");
+    let reopened = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reopened_registry.project_graph(
+            &project_root,
+            project_id.clone(),
+            database_path.clone(),
+            reopened_authority,
+            DatabaseAccessMode::ReadWrite,
+        ),
+    )
+    .await
+    .expect("relational project open must not wait for derived graph recovery")
+    .expect("relational project open remains available");
+    assert_eq!(reopened.database_path(), database_path);
+    assert!(matches!(
+        reopened.issue_memory_graph_runtime_operation(),
+        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+            | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
+    ));
+    drop(reopened);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reopened_registry.retire_project_memory_graph(&project_id),
+    )
+    .await
+    .expect("relational owner retirement must not wait for derived graph recovery")
+    .expect("detached relational owner retires cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupt_session_relation_graph_preserves_relational_session_database() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.session-relation-corrupt").expect("project id");
+
+    let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("first session runtime registry");
+    let first_database = first_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("initial project session database");
+    let graph_path = first_database.db_path().with_extension("grafeo");
+    drop(first_database);
+    first_registry.cancel_terminal_tasks();
+    first_registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("first terminal tasks shut down");
+    first_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("first session relation graph closes");
+    drop(first_registry);
+
+    std::fs::write(&graph_path, b"corrupt session relation graph")
+        .expect("corrupt session relation graph file");
+
+    let reopened_registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("reopened session runtime registry");
+    let reopened = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reopened_registry.project_sessions(project_id.clone(), [project_root]),
+    )
+    .await
+    .expect("relational session open must not wait for relation graph recovery")
+    .expect("relational session database remains available");
+    assert!(
+        reopened.session_relation_graph_identity().is_err(),
+        "corrupt relation graph must remain unavailable rather than fabricating readiness"
+    );
+    drop(reopened);
+    reopened_registry.cancel_terminal_tasks();
+    reopened_registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("detached session relation graph task shuts down");
+    reopened_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("detached relational session owner shuts down cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_session_relation_graph_reaches_the_published_relational_lease() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.session-relation-late-bind").expect("project id");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+
+    let sessions = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("relational sessions publish before graph restore");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while sessions.session_relation_graph_identity().is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the published relational lease observes its late graph attachment");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_project_memory_graph_reaches_the_published_session_lease() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.memory-relation-late-bind").expect("project id");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+
+    let sessions = registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("relational sessions publish before memory graph restore");
+    registry
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("project memory database publishes before graph restore");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while sessions.project_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the published session lease observes its late project graph attachment");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

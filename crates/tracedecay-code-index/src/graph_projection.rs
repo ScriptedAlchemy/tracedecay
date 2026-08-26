@@ -58,7 +58,7 @@ const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
 const CHUNK_SYMBOL_EDGE_KIND: &str = "CodeChunkDescribesSymbol";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v4";
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v5";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {

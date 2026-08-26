@@ -1,16 +1,25 @@
+use std::time::Duration;
+
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 
-pub(super) fn bound_graph_runtime(
+pub(super) async fn await_bound_graph_runtime(
     database: &Database,
     operation: &'static str,
 ) -> Result<VerifiedGraphRuntimeWeakProxyV1> {
-    database
-        .memory_graph_runtime()
-        .ok_or_else(|| TraceDecayError::Database {
-            operation: operation.to_owned(),
-            message: "project memory database has no verified graph runtime".to_owned(),
-        })
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(runtime) = database.memory_graph_runtime() {
+                break runtime;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| TraceDecayError::Database {
+        operation: operation.to_owned(),
+        message: "project memory database did not publish its verified graph runtime".to_owned(),
+    })
 }

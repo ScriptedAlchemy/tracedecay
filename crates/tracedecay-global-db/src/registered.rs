@@ -31,6 +31,7 @@ pub use delivery_settlement::{
 /// paths retain only [`RegisteredGlobalDbLeaseV1`].
 pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
+    project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -41,6 +42,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
 #[derive(Clone)]
 pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
+    project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -72,7 +74,10 @@ impl RegisteredGlobalDbOwnerV1 {
         registered.rearm_queued_projection_retries().await?;
         super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
         drop(registered);
-        Ok(Self { database })
+        Ok(Self {
+            database,
+            project_graph: Arc::new(OnceLock::new()),
+        })
     }
 
     /// Returns the resumable convergence plan for an already admitted schema
@@ -89,7 +94,10 @@ impl RegisteredGlobalDbOwnerV1 {
         registered.rearm_queued_projection_retries().await?;
         drop(registered);
         Ok((
-            Self { database },
+            Self {
+                database,
+                project_graph: Arc::new(OnceLock::new()),
+            },
             super::schema_stages::RegisteredSchemaConvergence::for_existing_client(),
         ))
     }
@@ -99,14 +107,20 @@ impl RegisteredGlobalDbOwnerV1 {
     /// only that issuance.
     pub fn issue_lease(&self) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerErrorV1> {
         Ok(RegisteredGlobalDbLeaseV1::from_database(
-            RegisteredGlobalDb::from_database(self.database.issue_lease()?),
+            RegisteredGlobalDb::from_database_with_project_graph(
+                self.database.issue_lease()?,
+                Arc::clone(&self.project_graph),
+            ),
         ))
     }
 
     /// Issues a mode-reduced client that can never regain write authority.
     pub fn issue_read_only_lease(&self) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerErrorV1> {
         Ok(RegisteredGlobalDbLeaseV1::from_database(
-            RegisteredGlobalDb::from_database(self.database.issue_read_only_lease()?),
+            RegisteredGlobalDb::from_database_with_project_graph(
+                self.database.issue_read_only_lease()?,
+                Arc::clone(&self.project_graph),
+            ),
         ))
     }
 
@@ -116,6 +130,7 @@ impl RegisteredGlobalDbOwnerV1 {
     pub fn weak_lease_issuer(&self) -> RegisteredGlobalDbWeakLeaseIssuerV1 {
         RegisteredGlobalDbWeakLeaseIssuerV1 {
             database: self.database.weak_lease_issuer(),
+            project_graph: Arc::clone(&self.project_graph),
         }
     }
 
@@ -144,7 +159,10 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
         &self,
     ) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerWeakLeaseIssuerErrorV1> {
         Ok(RegisteredGlobalDbLeaseV1::from_database(
-            RegisteredGlobalDb::from_database(self.database.issue_lease()?),
+            RegisteredGlobalDb::from_database_with_project_graph(
+                self.database.issue_lease()?,
+                Arc::clone(&self.project_graph),
+            ),
         ))
     }
 
@@ -209,7 +227,7 @@ impl RegisteredGlobalDbLeaseV1 {
 
 pub struct RegisteredGlobalDb {
     database: Database,
-    project_graph: OnceLock<VerifiedGraphRuntimeWeakProxyV1>,
+    project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: OnceLock<(
         crate::session_temporal::relations::SessionRelationScope,
         tracedecay_graph_db::GraphDbLeaseV1,
@@ -551,9 +569,16 @@ impl RegisteredGlobalDb {
     }
 
     fn from_database(database: Database) -> Self {
+        Self::from_database_with_project_graph(database, Arc::new(OnceLock::new()))
+    }
+
+    fn from_database_with_project_graph(
+        database: Database,
+        project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
+    ) -> Self {
         Self {
             database,
-            project_graph: OnceLock::new(),
+            project_graph,
             session_relation_graph: OnceLock::new(),
         }
     }

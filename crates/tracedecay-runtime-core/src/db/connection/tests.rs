@@ -1455,9 +1455,11 @@ async fn read_write_owner_can_issue_independent_read_only_clients_without_escala
 
     let read_write = owner.issue_lease().unwrap();
     let read_only = owner.issue_read_only_lease().unwrap();
+    let weak_read_only = owner.weak_lease_issuer().issue_read_only_lease().unwrap();
     let read_only_clone = read_only.clone();
     assert!(read_write.is_writable());
     assert!(!read_only.is_writable());
+    assert!(!weak_read_only.is_writable());
     assert!(!read_only_clone.is_writable());
     assert!(Arc::ptr_eq(&read_write.inner, &read_only.inner));
     assert!(read_only.write_authority().is_err());
@@ -1494,7 +1496,7 @@ async fn read_write_owner_can_issue_independent_read_only_clients_without_escala
     assert!(refusal.blockers().iter().any(|blocker| matches!(
         blocker,
         crate::store_runtime::registry::StoreRuntimeRetirementBlocker::ClientLeases {
-            count: 2,
+            count: 3,
             ..
         }
     )));

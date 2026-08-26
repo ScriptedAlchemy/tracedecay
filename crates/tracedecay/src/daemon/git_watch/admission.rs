@@ -36,6 +36,16 @@ impl GitWatcher {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return GitWatcherAdmission::ShuttingDown;
         }
+        if crate::config::is_ambient_project_root(project_root) {
+            log_daemon_event(
+                "git_watch_skipped",
+                &[
+                    ("project", project_root.display().to_string()),
+                    ("reason", "ambient_root".to_string()),
+                ],
+            );
+            return GitWatcherAdmission::NotRepository;
+        }
         let resolution =
             resolve_watch_identity(project_root.to_path_buf(), self.inner.cancellation.clone())
                 .await;

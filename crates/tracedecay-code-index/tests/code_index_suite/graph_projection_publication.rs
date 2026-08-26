@@ -250,30 +250,29 @@ fn sealed_generation_replay_rebuilds_identical_import_manifest_and_digest() {
 }
 
 #[test]
-fn projector_v4_changes_generation_identity_without_a_v3_alias() {
-    assert_eq!(CODE_GRAPH_PROJECTOR_REVISION, "code-graph-projector.v4");
+fn current_projector_changes_generation_identity_without_a_v4_alias() {
     let generation = published_import_generation();
-    let v4 = current_projector_revision();
-    let v3 = GraphProjectorRevision::try_from("code-graph-projector.v3".to_owned())
+    let current = current_projector_revision();
+    let v4 = GraphProjectorRevision::try_from("code-graph-projector.v4".to_owned())
         .expect("prior projector revision remains valid data");
+    let current_identity = code_graph_generation_id(&generation.manifest().generation_id, &current)
+        .expect("current graph generation identity");
     let v4_identity = code_graph_generation_id(&generation.manifest().generation_id, &v4)
         .expect("v4 graph generation identity");
-    let v3_identity = code_graph_generation_id(&generation.manifest().generation_id, &v3)
-        .expect("v3 graph generation identity");
-    assert_ne!(v4_identity, v3_identity);
+    assert_ne!(current_identity, v4_identity);
+
+    let current_manifest = projection_manifest(&generation, &current);
+    assert_eq!(current_manifest.generation, current_identity);
+    let _store = verified_store(current_manifest, &generation);
 
     let v4_manifest = projection_manifest(&generation, &v4);
     assert_eq!(v4_manifest.generation, v4_identity);
-    let _store = verified_store(v4_manifest, &generation);
-
-    let v3_manifest = projection_manifest(&generation, &v3);
-    assert_eq!(v3_manifest.generation, v3_identity);
-    let v3_snapshot = VerifiedGraphSnapshot::memory(v3_manifest, Arc::new(NeverCancelled))
+    let v4_snapshot = VerifiedGraphSnapshot::memory(v4_manifest, Arc::new(NeverCancelled))
         .expect("prior graph snapshot is structurally valid");
     let error = CodeGraphProjectionStore::from_verified_snapshot(
-        v3_snapshot,
+        v4_snapshot,
         generation.manifest().generation_id.clone(),
     )
-    .expect_err("a v3 graph snapshot cannot serve the v4 generation authority");
+    .expect_err("a v4 graph snapshot cannot serve the current generation authority");
     assert_eq!(error, CodeGraphProjectionError::GenerationMismatch);
 }

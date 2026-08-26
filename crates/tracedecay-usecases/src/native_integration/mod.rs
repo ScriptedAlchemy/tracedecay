@@ -11,7 +11,7 @@ pub use authorization::{
 };
 pub use gix_adapter::GixNativeIntegrationAdapter;
 pub use status_broadcast::NativeIntegrationStatusBroadcastV1;
-pub use topology::ExactPairNativeIntegrationTopology;
+pub use topology::{ExactPairNativeIntegrationTopology, NativeIntegrationGraphRuntimeProviderV1};
 pub use transaction::{
     NativeApplyEffectV1, NativeIntegrationAuthorizationOutcomeV1,
     NativeIntegrationAuthorizationPort, NativeIntegrationMechanics, NativeIntegrationProbeV1,

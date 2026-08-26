@@ -177,10 +177,16 @@ async fn latest(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
-    registry
-        .latest_complete_fresh(project_root)
-        .await
-        .expect("fresh serving generation")
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+                break latest;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fresh serving generation")
 }
 
 async fn wait_for_reconciling(registry: &CodeIndexSchedulerRegistryV1, expected: u64) {
