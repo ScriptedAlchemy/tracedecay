@@ -122,7 +122,13 @@ pub(super) enum JsonlFrameAdmission {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     },
-    NonDurable(ObservationCoverageReason),
+    NonDurable {
+        reason: ObservationCoverageReason,
+        /// The verdict was reached without decoding the frame. Kept because
+        /// the cost of a skipped frame is not the skip: it is whether the
+        /// frame was parsed first.
+        before_decode: bool,
+    },
     NeedsPreparation,
 }
 
@@ -138,7 +144,32 @@ impl JsonlFrameAdmission {
     }
 
     pub(super) fn non_durable(reason: ObservationCoverageReason) -> Self {
-        Self::NonDurable(reason)
+        Self::NonDurable {
+            reason,
+            before_decode: false,
+        }
+    }
+
+    /// A frame refused without ever being decoded.
+    ///
+    /// A normalizer may only answer this when the reason is a property the
+    /// frame's bytes cannot change. Codex scope is the one such reason today:
+    /// it belongs to the session cwd, and only a `session_meta` or
+    /// `turn_context` line can move that cwd, so a frame that provably names
+    /// neither inherits a verdict that is already settled.
+    ///
+    /// Deciding this early is not reason-preserving, and deliberately so. A
+    /// frame that is *also* malformed would have been covered as
+    /// `MalformedFrame` had it been decoded; refused early it is covered as
+    /// `OutOfScope`. That is the intended reading — a rollout this scope does
+    /// not own is not this pass's to report structural health on — and it is
+    /// what makes the skipped decode observable in production state rather
+    /// than only in a counter.
+    pub(super) fn non_durable_before_decode(reason: ObservationCoverageReason) -> Self {
+        Self::NonDurable {
+            reason,
+            before_decode: true,
+        }
     }
 
     pub(super) const fn needs_preparation() -> Self {
@@ -153,6 +184,10 @@ pub(super) struct JsonlObservationAdmissionProgress {
     pub frames_decoded: u64,
     pub frames_accepted: u64,
     pub frames_skipped: u64,
+    /// Of `frames_skipped`, how many were refused from their raw bytes before
+    /// being decoded. The aggregate cannot separate a skip that cost a decode
+    /// and two structural walks from one that cost a tokenize.
+    pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
@@ -1964,12 +1999,19 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
                                 }
                             }
                         }
-                        JsonlFrameAdmission::NonDurable(reason) => {
+                        JsonlFrameAdmission::NonDurable {
+                            reason,
+                            before_decode,
+                        } => {
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
                             crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                            if before_decode {
+                                progress.frames_rejected_before_decode =
+                                    progress.frames_rejected_before_decode.saturating_add(1);
+                            }
                         }
                         JsonlFrameAdmission::NeedsPreparation => {
                             return Err(TranscriptIngestError::InvalidFrameState {
@@ -2053,7 +2095,7 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         let mut frame_state = frame_start_state.clone();
         let cached_prepared = frame.prepared.get().cloned();
         let mut admission = match cached_prepared {
-            Some(Err(error)) => JsonlFrameAdmission::NonDurable(preparation_failure_reason(error)),
+            Some(Err(error)) => JsonlFrameAdmission::non_durable(preparation_failure_reason(error)),
             prepared => normalize(
                 &mut frame_state,
                 &frame.bytes,
@@ -2080,7 +2122,7 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
                     Some(prepared),
                     frame.hints,
                 )?,
-                Err(error) => JsonlFrameAdmission::NonDurable(preparation_failure_reason(error)),
+                Err(error) => JsonlFrameAdmission::non_durable(preparation_failure_reason(error)),
             };
         }
         state = frame_state;
@@ -2089,7 +2131,10 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
                 parsed_record,
                 native_record_id,
             } => (parsed_record, native_record_id),
-            JsonlFrameAdmission::NonDurable(reason) => {
+            JsonlFrameAdmission::NonDurable {
+                reason,
+                before_decode,
+            } => {
                 flush_pending(
                     &active,
                     PendingAdmissionWindow {
@@ -2111,6 +2156,10 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
                     .await?;
                 crate::runtime::pipeline_metrics::record_frame_skipped(reason);
                 progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                if before_decode {
+                    progress.frames_rejected_before_decode =
+                        progress.frames_rejected_before_decode.saturating_add(1);
+                }
                 continue;
             }
             JsonlFrameAdmission::NeedsPreparation => {
@@ -2228,6 +2277,7 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         progress.frames_decoded,
         progress.frames_accepted,
         progress.frames_skipped,
+        progress.frames_rejected_before_decode,
         progress.frames_refused,
         progress.frames_persisted,
     );
