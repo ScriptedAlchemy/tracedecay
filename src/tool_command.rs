@@ -13,7 +13,7 @@
 //! - `--dry-run` — parse and validate the arguments, print the resolved
 //!   arguments object as pretty JSON, and exit without dispatching the tool.
 //! - `--project <path>` — project root to target. Defaults to the nearest
-//!   initialised project walking up from cwd (falling back to cwd). We use
+//!   initialised project walking up from cwd. We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
 //!   that filters files within the project.
 //! - `--args <json|file|->` — escape hatch. Treats the value as the entire
@@ -32,7 +32,7 @@
 //! can be referenced by more than one field in a single invocation.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -133,15 +133,21 @@ struct DaemonToolDispatch {
 
 impl DaemonToolDispatch {
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
-        // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
-        // --project wins; otherwise walk up from cwd to the nearest initialised
-        // project so the command works from subdirectories.
+        // An explicit --project wins. Otherwise only route to a nearest
+        // initialised ancestor. Keeping an unscoped invocation projectless is
+        // important: falling back to cwd can turn a broad directory such as
+        // the user profile into an accidental project handshake.
         let explicitly_targeted = explicit_project.is_some();
-        let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
+        let project_path = match explicit_project {
+            Some(path) => Some(tracedecay::config::resolve_path(Some(path))),
+            None => std::env::current_dir()
+                .ok()
+                .and_then(|cwd| implicit_tool_project_path(&cwd)),
+        };
         let allow_init = explicitly_targeted && FIRST_TOUCH_STORE_TOOLS.contains(&tool_name);
 
         Self {
-            project_path: Some(project_path),
+            project_path,
             allow_init,
         }
     }
@@ -154,6 +160,10 @@ impl DaemonToolDispatch {
         let handshake = self.handshake()?;
         call_default_tool(&handshake, tool_name, tool_args).await
     }
+}
+
+fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
+    tracedecay::config::discover_project_root(cwd)
 }
 
 async fn dispatch_daemon_tool(

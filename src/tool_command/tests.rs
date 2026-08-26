@@ -257,6 +257,21 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
     );
 
     assert!(dispatch.allow_init);
+    assert_eq!(dispatch.project_path, Some(PathBuf::from("/tmp/project")));
+}
+
+#[test]
+fn implicit_tool_dispatch_stays_projectless_without_initialized_ancestor() {
+    let root = std::env::temp_dir().join(format!(
+        "tracedecay-projectless-tool-dispatch-{}",
+        std::process::id()
+    ));
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert_eq!(implicit_tool_project_path(&nested), None);
+
+    std::fs::remove_dir_all(root).ok();
 }
 
 // --- Validation gate and corrective-error contract ---
