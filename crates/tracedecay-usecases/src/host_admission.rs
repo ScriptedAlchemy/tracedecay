@@ -482,28 +482,15 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         ))
     }
 
-    fn replace_parse_offset<'a>(
-        &'a self,
-        scope: &'a ObservationScopeV1,
-        path: &'a str,
-        expected: ParseOffset,
-        next: ParseOffset,
-    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(HostAdmissionFacade::replace_parse_offset(
-            self, scope, path, expected, next,
-        ))
-    }
-
-    fn replace_parse_offset_pair<'a>(
-        &'a self,
-        scope: &'a ObservationScopeV1,
-        first: (&'a str, ParseOffset, ParseOffset),
-        second: (&'a str, ParseOffset, ParseOffset),
-    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(HostAdmissionFacade::replace_parse_offset_pair(
-            self, scope, first, second,
-        ))
-    }
+    // `replace_parse_offset` / `replace_parse_offset_pair` are intentionally
+    // not overridden here: `HostAdmissionFacade` has no inherent
+    // implementation of either (no production caller needs versioned
+    // parse-offset replacement yet), so the trait's own default — returning
+    // `registered_authority_unavailable()` — is exactly what this façade
+    // provides. A prior override here called `HostAdmissionFacade::` with
+    // the same method name and arguments, which resolves back to this exact
+    // trait impl (there is no inherent method to shadow it), so every call
+    // recursed until the stack overflowed.
 
     fn enqueue_discovery_paths<'a>(
         &'a self,
