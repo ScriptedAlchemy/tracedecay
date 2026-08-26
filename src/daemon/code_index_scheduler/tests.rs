@@ -9976,9 +9976,9 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
         .await
         .expect("mount retained generation");
 
-    // Hold the scheduler after the worker dequeues the mount arrival. This
-    // makes the attempted activation observable through the existing pending
-    // arrival: zero while the attempt owns it, restored after the failure.
+    // Hold the scheduler after the worker enters the reconcile pass. The
+    // canonical in-progress authority proves the worker owns admission while
+    // the lock keeps the fallible retained activation from completing.
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -10006,12 +10006,15 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+        if registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await
+        {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "worker did not dequeue the retained activation"
+            "worker did not enter the retained activation pass"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -11299,13 +11302,11 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
     registry.shutdown().await;
 }
 
-/// A retryable graph-activation failure of an already-sealed complete
-/// generation must retry activation of that exact immutable artifact with
-/// backoff. It must not fall through into reconcile and seal a duplicate
-/// generation, even when the worktree has changed and overflow hints keep
-/// waking the worker.
+/// A retryable graph-activation failure may delay only native graph serving.
+/// Exact and lexical refresh must still publish a changed worktree generation
+/// while activation retries remain isolated to the immutable graph artifact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retryable_activation_failure_retries_the_sealed_generation_without_resealing() {
+async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     let sources = (0..512)
         .map(|index| {
             (
@@ -11343,8 +11344,9 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
             latest.generation.manifest().generation_id.clone(),
         )
     };
-    // Change the worktree so a reconcile pass would seal a brand-new
-    // generation if the worker fell through after the activation failure.
+    // Change the worktree before mounting. Text reconciliation must publish
+    // this source even while native graph activation of the retained seal is
+    // retrying.
     fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
     let generation_files = |scoped_store: &Path| -> usize {
         std::fs::read_dir(scoped_store.join("code-generations-v1")).map_or(0, |entries| {
@@ -11404,33 +11406,37 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         tokio::task::yield_now().await;
     };
 
-    // Keep waking the worker while activation stays failing; each pass must
-    // hold the sealed artifact instead of rebuilding.
+    // Keep waking the worker while activation stays failing. The graph owner
+    // remains unavailable, but source refresh must not be held behind it.
     for _ in 0..5 {
         let _ = registry.notify_hook_overflow(fixture.path()).await;
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
-    assert_eq!(
-        generation_files(&scoped_store),
-        1,
-        "a retryable activation failure must not seal a duplicate generation"
-    );
     let text_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let text_owner_after_retry = loop {
-        if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
+    let (text_owner_after_refresh, refreshed_generation_id) = loop {
+        let generation_id = registry.latest_generation_id(fixture.path()).await;
+        if let (Some(text), Some(generation_id)) = (
+            registry.latest_text_serving_for_scope(&scope).await,
+            generation_id,
+        ) && generation_id != sealed_generation_id
             && text.query_owners_are_warm()
         {
-            break text;
+            break (text, generation_id);
         }
         assert!(
             std::time::Instant::now() <= text_deadline,
-            "graph retry backoff withheld exact and lexical readiness"
+            "graph retry backoff withheld the changed exact and lexical generation"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert!(
-        text_owner_after_retry.same_text_owner(&text_owner_before_retry),
-        "graph retry must preserve the lightweight text owner"
+        !text_owner_after_refresh.same_text_owner(&text_owner_before_retry),
+        "the changed generation must replace the retained text owner"
+    );
+    assert_eq!(
+        generation_files(&scoped_store),
+        2,
+        "source refresh must publish exactly one changed generation"
     );
     {
         let scheduler = scheduler
@@ -11440,34 +11446,20 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         let progress = progress
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(
-            progress.owner_epoch, owner_epoch_before_retry,
-            "graph activation must not replace the text progress authority"
+        assert!(
+            progress.owner_epoch > owner_epoch_before_retry,
+            "the changed generation must advance text progress authority"
         );
         let progress = progress
             .snapshot()
-            .expect("ready text progress remains visible during graph retry");
-        assert_eq!(progress.generation_id, progress_before_retry.generation_id);
-        assert_eq!(
-            progress.daemon_incarnation,
-            progress_before_retry.daemon_incarnation
-        );
-        assert_eq!(
-            progress.producer_incarnation,
-            progress_before_retry.producer_incarnation
-        );
-        assert!(progress.progress_epoch > progress_before_retry.progress_epoch);
-        assert!(progress.committed_pages >= progress_before_retry.committed_pages);
+            .expect("changed text progress remains visible during graph retry");
+        assert_eq!(progress.generation_id, refreshed_generation_id.as_str());
+        assert_ne!(progress.generation_id, progress_before_retry.generation_id);
         assert_eq!(
             progress.phase,
             crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
         );
     }
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(sealed_generation_id),
-        "exact and lexical serving remains authoritative during graph retry"
-    );
     assert!(
         registry
             .latest_complete_serving_for_scope(&scope)
@@ -11476,15 +11468,17 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         "retryable graph activation must not expose an unactivated graph owner"
     );
 
-    // Clearing the injected failure lets the scheduled backoff retry activate
-    // the exact sealed artifact and resume ordinary refresh.
+    // Clearing the injected failure lets the scheduled backoff activate the
+    // changed generation without resealing it.
     super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, 0);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if registry
             .latest_complete_serving_for_scope(&scope)
             .await
-            .is_some()
+            .is_some_and(|latest| {
+                latest.generation().manifest().generation_id == refreshed_generation_id
+            })
         {
             break;
         }

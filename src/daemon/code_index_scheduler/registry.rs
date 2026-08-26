@@ -2629,17 +2629,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 }
-                if seat_retry_pending {
-                    // Rebuilding here would seal a duplicate of an artifact
-                    // that only failed to activate. Restore the arrival so the
-                    // next pass measures this wake's full queue wait, then let
-                    // the scheduled retry wake re-attempt activation.
-                    Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
-                    if worker_shutting_down.load(Ordering::Acquire) {
-                        return;
-                    }
-                    continue;
-                }
+                // A retryable native-graph failure defers only graph
+                // activation. The retained text authority can still prove an
+                // unchanged source without resealing, or publish one changed
+                // generation from an authoritative capture. Suppress the
+                // complete-generation load below until the scheduled graph
+                // retry so graph backoff cannot stall exact and lexical
+                // freshness or trigger another activation attempt here.
+                let graph_activation_deferred = seat_retry_pending;
                 let retained_text_metadata = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2665,7 +2662,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     };
                     // A terminal outcome may publish a newer complete generation;
                     // swap serving to that after graph activation below.
-                    let mut latest = (graph_activation_enabled && text_serving_ready)
+                    let mut latest = (graph_activation_enabled
+                        && text_serving_ready
+                        && !graph_activation_deferred)
                         .then(|| {
                             result
                                 .as_ref()
