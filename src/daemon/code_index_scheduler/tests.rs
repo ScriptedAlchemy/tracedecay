@@ -10362,6 +10362,58 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     registry.shutdown().await;
 }
 
+/// A benign Git metadata rewrite after a clean graph-off seal must trigger one
+/// authoritative text-only capture, not fall through to the graph-bearing
+/// reconcile path. The captured source identity is unchanged, so the retained
+/// generation becomes current without decoding its full sealed payload.
+#[test]
+fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let seeded = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed retained generation"))
+    };
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let metadata = reopened
+        .servable_retained_text_generation()
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let outcome = reopened
+        .reconcile_retained_text_generation(&metadata)
+        .expect("graph-off retained reconcile")
+        .expect("stale witness must be verified by text-only capture");
+    let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
+        panic!("metadata-only Git change must not publish a generation");
+    };
+    assert_eq!(
+        evidence.snapshot_content_identity, seeded.snapshot_content_identity,
+        "authoritative capture proves the sealed source identity is unchanged"
+    );
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "graph-off freshness verification must not decode the full generation"
+    );
+    assert!(
+        reopened.verified_against_source(),
+        "successful text-only capture establishes current source truth"
+    );
+}
+
 /// A graph-off changed-source rebuild must use the same canonical worker-memory
 /// admission as the complete reconcile path. A denial occurs before capture,
 /// leaves the durable pointer and hint authority intact, and releases its RAII
