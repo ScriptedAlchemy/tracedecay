@@ -105,6 +105,17 @@ pub(crate) fn strip_heading_block(contents: &str, marker: &str) -> Option<String
     Some(splice_out(contents, start, end))
 }
 
+/// Records the write intent a completed prompt-rules write just produced, so
+/// the receipt transaction's rollback-consistency check can recognize the
+/// write as its own instead of reporting a stale preview.
+fn record_prompt_rules_write_intent(path: &Path, contents: &str) -> Result<()> {
+    let metadata =
+        super::capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to capture metadata for {}: {error}", path.display()),
+        })?;
+    super::persist_host_config_write_intent(path, contents.as_bytes(), Some(&metadata))
+}
+
 /// Writes `stripped` user content plus a fresh managed `block` to `path` and
 /// reports the refresh.
 pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Result<()> {
@@ -115,9 +126,10 @@ pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Resul
     }
     new_contents.push_str(block);
     new_contents.push('\n');
-    std::fs::write(path, new_contents).map_err(|e| TraceDecayError::Config {
+    std::fs::write(path, &new_contents).map_err(|e| TraceDecayError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })?;
+    record_prompt_rules_write_intent(path, &new_contents)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
         path.display()
@@ -155,6 +167,8 @@ pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> 
     write!(f, "\n{block}\n").map_err(|e| TraceDecayError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })?;
+    drop(f);
+    record_prompt_rules_write_intent(path, &format!("{existing}\n{block}\n"))?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
         path.display()
