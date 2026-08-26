@@ -1251,6 +1251,8 @@ pub struct GitHubCiReadOnlyClientV1 {
     target: GitHubCiRepositoryTargetV1,
     credential: GitHubReadOnlyCredentialV1,
     config: GitHubHttpReadConfigV1,
+    rate_limits: Arc<super::rate_gate::GitHubRateLimitTrackerV1>,
+    response_cache: Arc<super::ci_cache::CiResponseCacheV1>,
 }
 
 impl GitHubCiReadOnlyClientV1 {
@@ -1294,10 +1296,17 @@ impl GitHubCiReadOnlyClientV1 {
             target,
             credential,
             config,
+            rate_limits: Arc::new(super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::ci_cache::CiResponseCacheV1::default()),
         })
     }
 
-    fn get(&self, url: &str, permission: GitHubReadPermissionV1) -> HttpResponseV1 {
+    fn get(
+        &self,
+        url: &str,
+        etag: Option<&GitHubReviewEtagV1>,
+        permission: GitHubReadPermissionV1,
+    ) -> HttpResponseV1 {
         let authorization = self.credential.authorization_for_repository(
             &self.target.owner,
             &self.target.repository,
@@ -1314,6 +1323,9 @@ impl GitHubCiReadOnlyClientV1 {
             .header("User-Agent", "tracedecay-github-read");
         if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
             request = request.header("Authorization", authorization.as_str());
+        }
+        if let Some(etag) = etag {
+            request = request.header("If-None-Match", etag.as_str());
         }
         decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
     }
@@ -1490,6 +1502,15 @@ impl GitHubCiReadOnlyClientV1 {
         ) {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Denied });
         }
+        // Conditional-request state is resolved before the blocking read so
+        // the retained body is still in hand when a 304 arrives.
+        let cached = match self.response_cache.get(&url) {
+            super::ci_cache::CiResponseCacheReadOutcomeV1::Hit(cached) => Some(cached),
+            super::ci_cache::CiResponseCacheReadOutcomeV1::Miss
+            | super::ci_cache::CiResponseCacheReadOutcomeV1::Unavailable => None,
+        };
+        let request_etag = cached.as_ref().map(|entry| entry.etag.clone());
+        let cache_url = url.clone();
         let client = self.clone();
         let context_for_read = context.clone();
         Box::pin(async move {
@@ -1504,7 +1525,7 @@ impl GitHubCiReadOnlyClientV1 {
                         GitHubCredentialAuthorizationV1::Denied
                     )
                 {
-                    let response = client.get(&url, permission);
+                    let response = client.get(&url, request_etag.as_ref(), permission);
                     if request_context_admitted(&context_for_read)
                         && !matches!(
                             client.credential.authorization_for_repository(
@@ -1524,17 +1545,67 @@ impl GitHubCiReadOnlyClientV1 {
                 }
             });
             match wait_for_read(context, task).await {
-                Some(HttpResponseV1::Ok { body, .. }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+                Some(HttpResponseV1::Ok {
+                    body,
+                    etag,
+                    rate_limit,
+                    ..
+                }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+                    self.record_rate_limit(rate_limit.as_ref());
+                    match etag.as_ref() {
+                        Some(etag) => {
+                            let _ = self.response_cache.retain(&cache_url, etag, &body);
+                        }
+                        // No validator means the next read cannot be
+                        // conditional, so nothing may stay retained under it.
+                        None => {
+                            let _ = self.response_cache.forget(&cache_url);
+                        }
+                    }
                     GitHubCiTransportOutcomeV1::Response(body)
+                }
+                // A 304 costs no rate-limit quota. The retained body is the
+                // provider's own proof of what the response would have been.
+                Some(HttpResponseV1::NotModified { etag, rate_limit }) => {
+                    self.record_rate_limit(rate_limit.as_ref());
+                    cached.map_or(GitHubCiTransportOutcomeV1::Unavailable, |entry| {
+                        if let Some(etag) = etag.as_ref() {
+                            let _ = self.response_cache.refresh_etag(&cache_url, etag);
+                        }
+                        GitHubCiTransportOutcomeV1::Response(entry.body)
+                    })
                 }
                 Some(HttpResponseV1::RateLimited {
                     checkpoint: Some(limit),
                     ..
-                }) => GitHubCiTransportOutcomeV1::RateLimited(limit),
+                }) => {
+                    self.record_rate_limit(Some(&limit));
+                    GitHubCiTransportOutcomeV1::RateLimited(limit)
+                }
                 Some(HttpResponseV1::Denied) => GitHubCiTransportOutcomeV1::Denied,
                 _ => GitHubCiTransportOutcomeV1::Unavailable,
             }
         })
+    }
+
+    /// Retains one observed quota checkpoint for the pre-flight burst gate.
+    fn record_rate_limit(&self, checkpoint: Option<&GitHubReviewRateLimitCheckpointV1>) {
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+        let _ = self.rate_limits.record(checkpoint);
+    }
+
+    /// Pre-flight verdict for a planned burst of `planned_requests` reads
+    /// against this repository under this credential.
+    ///
+    /// Costs no provider request: the answer comes from the `x-ratelimit-*`
+    /// headers earlier responses already carried.
+    pub(crate) fn admit_request_burst(
+        &self,
+        planned_requests: u32,
+    ) -> super::rate_gate::GitHubRateLimitAdmissionV1 {
+        self.rate_limits.admit(planned_requests, now_micros())
     }
 }
 
@@ -2652,6 +2723,114 @@ mod tests {
         }
     }
 
+    fn ci_fixture_client(address: std::net::SocketAddr) -> GitHubCiReadOnlyClientV1 {
+        GitHubCiReadOnlyClientV1 {
+            agent: ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build()
+                .into(),
+            target: GitHubCiRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: "tracedecay".to_owned(),
+            },
+            credential: GitHubReadOnlyCredentialV1::anonymous(),
+            config: GitHubHttpReadConfigV1 {
+                rest_base_uri: format!("http://{address}"),
+                graphql_uri: format!("http://{address}/graphql"),
+                ..GitHubHttpReadConfigV1::default()
+            },
+            rate_limits: Arc::new(super::super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::super::ci_cache::CiResponseCacheV1::default()),
+        }
+    }
+
+    /// A repeated CI poll must send `If-None-Match` and reuse the retained body
+    /// when the provider answers `304`. The assertion is on the bytes and the
+    /// request headers, never on elapsed time.
+    #[tokio::test]
+    async fn an_unchanged_ci_read_reuses_the_cached_body_on_a_304() {
+        const CI_ETAG_V1: &str = "W/\"ci-fixture-etag\"";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = serde_json::to_vec(&json!({"id": 91, "status": "completed"})).unwrap();
+        let served = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let (first_headers, _) = read_http_request_with_headers(&mut first);
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: {CI_ETAG_V1}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            )
+            .unwrap();
+            first.write_all(&served).unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let (second_headers, _) = read_http_request_with_headers(&mut second);
+            write!(
+                second,
+                "HTTP/1.1 304 Not Modified\r\nETag: {CI_ETAG_V1}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            drop(second);
+            (first_headers, second_headers)
+        });
+
+        let client = ci_fixture_client(address);
+        let request_scope = scope("ci-etag");
+        let request_context = context(&request_scope);
+
+        let first = client.read_workflow_run(&request_context, 91).await;
+        let second = client.read_workflow_run(&request_context, 91).await;
+        let (first_headers, second_headers) = server.join().unwrap();
+
+        assert_eq!(
+            first,
+            GitHubCiTransportOutcomeV1::Response(body.clone()),
+            "the first read must return the provider body"
+        );
+        assert!(
+            !first_headers.to_ascii_lowercase().contains("if-none-match"),
+            "the first read has no validator to send"
+        );
+        assert_eq!(
+            second,
+            GitHubCiTransportOutcomeV1::Response(body),
+            "a 304 must reuse the retained body instead of reporting nothing"
+        );
+        assert!(
+            second_headers
+                .to_ascii_lowercase()
+                .contains("if-none-match:"),
+            "a repeated read must send the retained validator"
+        );
+    }
+
+    /// A `304` for which nothing is retained can never be turned into a body.
+    #[tokio::test]
+    async fn a_304_without_a_retained_body_is_unavailable_not_empty() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let client = ci_fixture_client(address);
+        let request_scope = scope("ci-etag-cold");
+        let outcome = client.read_workflow_run(&context(&request_scope), 92).await;
+        server.join().unwrap();
+
+        assert_eq!(outcome, GitHubCiTransportOutcomeV1::Unavailable);
+    }
+
     #[tokio::test]
     async fn cancelled_ci_read_makes_no_network_request() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2673,6 +2852,8 @@ mod tests {
                 graphql_uri: format!("http://{address}/graphql"),
                 ..GitHubHttpReadConfigV1::default()
             },
+            rate_limits: Arc::new(super::super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::super::ci_cache::CiResponseCacheV1::default()),
         };
         let request_scope = scope("cancelled-ci");
         let cancelled = context(&request_scope).with_cancellation(
