@@ -14,6 +14,7 @@ use crate::lease::{
 };
 use crate::limits::{
     MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+    MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
 };
 use crate::projection::graph_properties_live_bytes;
 use crate::recovery::{
@@ -186,6 +187,8 @@ impl GraphDb {
             return Ok(GenerationStageOutcome::Reseated(commit));
         }
         let pages = generation_stage_pages(manifest)?;
+        let adopt_legacy_partial =
+            self.has_exact_legacy_stage_prefix(manifest, expected, &context, pages.first())?;
         #[cfg(feature = "hotpath")]
         {
             let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
@@ -207,6 +210,7 @@ impl GraphDb {
                 &context,
                 index.checked_sub(1).and_then(|prior| pages.get(prior)),
                 page,
+                adopt_legacy_partial && index == 0,
                 check,
             )?;
             // This is the exact cancellation boundary: the page transaction
@@ -259,6 +263,7 @@ impl GraphDb {
         context: &GenerationStageContext,
         predecessor: Option<&GenerationStagePage>,
         page: &GenerationStagePage,
+        adopt_legacy_partial: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         let (idempotency_key, input_digest) =
@@ -295,14 +300,21 @@ impl GraphDb {
                     if prior.input_digest != prior_input {
                         return Err(GraphDbError::Conflict);
                     }
-                } else if latest_projection(
+                } else if let Some(existing) = latest_projection(
                     database,
                     &context.physical_namespace,
                     &manifest.projection.projection,
-                )?
-                .is_some()
-                {
-                    return Err(GraphDbError::Conflict);
+                )? {
+                    // A finalized generation always carries its dependency
+                    // digest. Only an exact unfinished legacy stage may let
+                    // the wider first page replace its old prefix.
+                    let exact_incomplete_legacy = adopt_legacy_partial
+                        && existing.commit.source_generation == manifest.source_generation
+                        && existing.commit.watermark == manifest.watermark
+                        && existing.commit.generation_dependency_digest.is_none();
+                    if !exact_incomplete_legacy {
+                        return Err(GraphDbError::Conflict);
+                    }
                 }
                 let (batch, endpoint_namespaces) =
                     prepare_generation_stage_batch(manifest, context, page, check)?;
@@ -327,6 +339,45 @@ impl GraphDb {
             },
             |_database, commit, ()| Ok(commit),
         )
+    }
+
+    fn has_exact_legacy_stage_prefix(
+        &self,
+        manifest: &GraphGenerationManifest,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        native_first: Option<&GenerationStagePage>,
+    ) -> Result<bool, GraphDbError> {
+        let legacy_first = first_generation_stage_page_with_limits(
+            manifest,
+            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+        )?;
+        let Some(legacy_first) = legacy_first.as_ref() else {
+            return Ok(false);
+        };
+        if native_first == Some(legacy_first) {
+            return Ok(false);
+        }
+        // The legacy receipt binds the exact manifest identity, recovered
+        // digest, page range, and live-byte count. Its presence is the durable
+        // proof that replacing the obsolete prefix does not adopt foreign rows.
+        let (legacy_key, legacy_input) =
+            generation_stage_page_receipt(manifest, expected, legacy_first)?;
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let Some(existing) =
+            crate::state::publication(database, &context.physical_namespace, &legacy_key)?
+        else {
+            return Ok(false);
+        };
+        if existing.input_digest != legacy_input
+            || existing.commit.source_generation != manifest.source_generation
+            || existing.commit.watermark != manifest.watermark
+        {
+            return Err(GraphDbError::Conflict);
+        }
+        Ok(true)
     }
 
     fn finalize_staged_generation(
@@ -1090,20 +1141,70 @@ fn typed_entity_ref(
 fn generation_stage_pages(
     manifest: &GraphGenerationManifest,
 ) -> Result<Vec<GenerationStagePage>, GraphDbError> {
+    generation_stage_pages_with_limits(
+        manifest,
+        MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+        MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
+    )
+}
+
+fn generation_stage_pages_with_limits(
+    manifest: &GraphGenerationManifest,
+    maximum_mutations: usize,
+    maximum_live_bytes: usize,
+) -> Result<Vec<GenerationStagePage>, GraphDbError> {
     let mut pages = Vec::new();
-    append_generation_stage_pages(
+    append_generation_stage_pages_with_limits(
         &mut pages,
         GenerationStagePageKind::Entities,
         manifest.entities.len(),
         |index| generation_entity_live_bytes(&manifest.entities[index]),
+        maximum_mutations,
+        maximum_live_bytes,
     )?;
-    append_generation_stage_pages(
+    append_generation_stage_pages_with_limits(
         &mut pages,
         GenerationStagePageKind::Relations,
         manifest.relations.len(),
         |index| generation_relation_live_bytes(&manifest.relations[index]),
+        maximum_mutations,
+        maximum_live_bytes,
     )?;
     Ok(pages)
+}
+
+fn first_generation_stage_page_with_limits(
+    manifest: &GraphGenerationManifest,
+    maximum_mutations: usize,
+    maximum_live_bytes: usize,
+) -> Result<Option<GenerationStagePage>, GraphDbError> {
+    let mut pages = Vec::with_capacity(2);
+    if manifest.entities.is_empty() {
+        append_generation_stage_pages_with_limits(
+            &mut pages,
+            GenerationStagePageKind::Relations,
+            manifest
+                .relations
+                .len()
+                .min(maximum_mutations.saturating_add(1)),
+            |index| generation_relation_live_bytes(&manifest.relations[index]),
+            maximum_mutations,
+            maximum_live_bytes,
+        )?;
+    } else {
+        append_generation_stage_pages_with_limits(
+            &mut pages,
+            GenerationStagePageKind::Entities,
+            manifest
+                .entities
+                .len()
+                .min(maximum_mutations.saturating_add(1)),
+            |index| generation_entity_live_bytes(&manifest.entities[index]),
+            maximum_mutations,
+            maximum_live_bytes,
+        )?;
+    }
+    Ok(pages.into_iter().next())
 }
 
 fn generation_entity_live_bytes(entity: &crate::GraphEntity) -> Result<usize, GraphDbError> {
@@ -1148,26 +1249,28 @@ fn stage_live_bytes_exhausted() -> GraphDbError {
     )
 }
 
-fn append_generation_stage_pages(
+fn append_generation_stage_pages_with_limits(
     pages: &mut Vec<GenerationStagePage>,
     kind: GenerationStagePageKind,
     count: usize,
     property_bytes: impl Fn(usize) -> Result<usize, GraphDbError>,
+    maximum_mutations: usize,
+    maximum_live_bytes: usize,
 ) -> Result<(), GraphDbError> {
     let mut start = 0usize;
     let mut live_bytes = 0usize;
     for index in 0..count {
         let next_bytes = property_bytes(index)?;
-        if next_bytes > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES {
+        if next_bytes > maximum_live_bytes {
             return Err(GraphDbError::budget_exhausted_count(
                 GraphBudgetKind::Write,
-                MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
+                maximum_live_bytes,
             ));
         }
-        let page_is_full = index - start == MAX_NATIVE_GENERATION_STAGE_MUTATIONS;
+        let page_is_full = index - start == maximum_mutations;
         let bytes_would_overflow = live_bytes
             .checked_add(next_bytes)
-            .is_none_or(|bytes| bytes > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES);
+            .is_none_or(|bytes| bytes > maximum_live_bytes);
         if index > start && (page_is_full || bytes_would_overflow) {
             pages.push(GenerationStagePage {
                 ordinal: pages.len(),
@@ -1179,10 +1282,7 @@ fn append_generation_stage_pages(
             live_bytes = 0;
         }
         live_bytes = live_bytes.checked_add(next_bytes).ok_or_else(|| {
-            GraphDbError::budget_exhausted_count(
-                GraphBudgetKind::Write,
-                MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
-            )
+            GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, maximum_live_bytes)
         })?;
     }
     if start < count {
@@ -1931,11 +2031,13 @@ mod tests {
     #[test]
     fn generation_stage_page_planner_bounds_mutations_and_live_property_bytes() {
         let mut pages = Vec::new();
-        super::append_generation_stage_pages(
+        super::append_generation_stage_pages_with_limits(
             &mut pages,
             super::GenerationStagePageKind::Entities,
             17,
             |_| Ok(8 * 1024 * 1024),
+            MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+            MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
         )
         .unwrap();
 
@@ -2055,6 +2157,102 @@ mod tests {
             "partial resume, boundary yield, and re-seat must perform one reopen"
         );
         second_owner.close().unwrap();
+    }
+
+    #[test]
+    fn wider_native_stage_adopts_an_exact_legacy_partial_receipt() {
+        let mut manifest = large_manifest("legacy-page-resume");
+        manifest.entities.extend((5_000..9_000).map(|index| {
+            GraphEntity::new(
+                GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                BTreeSet::new(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        }));
+        let sealed = sealed_digest(&manifest);
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        let legacy_pages = super::generation_stage_pages_with_limits(
+            &manifest,
+            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            crate::MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(legacy_pages.len(), 3);
+        assert_eq!(legacy_pages[0].range, 0..4_096);
+        assert_eq!(legacy_pages[1].range, 4_096..8_192);
+        assert_eq!(
+            super::first_generation_stage_page_with_limits(
+                &manifest,
+                MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+                crate::MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+            )
+            .unwrap(),
+            Some(legacy_pages[0].clone()),
+            "the bounded compatibility probe must reproduce the legacy first receipt"
+        );
+        let context = super::GenerationStageContext {
+            locator: GenerationLocator::new(
+                manifest.projection.clone(),
+                manifest.generation.clone(),
+            ),
+            physical_namespace: manifest.physical_namespace().unwrap(),
+            dependency_namespaces: database.require_exact_dependencies(&manifest).unwrap(),
+            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+        };
+        for (index, legacy_page) in legacy_pages.iter().take(2).enumerate() {
+            database
+                .apply_generation_stage_page_with_context(
+                    &manifest,
+                    &sealed,
+                    &context,
+                    index
+                        .checked_sub(1)
+                        .and_then(|prior| legacy_pages.get(prior)),
+                    legacy_page,
+                    false,
+                    &|| Ok(()),
+                )
+                .unwrap();
+        }
+
+        let mut divergent = manifest.clone();
+        divergent.source_generation = SourceGeneration::new("source-divergent").unwrap();
+        let divergent_sealed = sealed_digest(&divergent);
+        reset_batch_canonicalizations();
+        assert!(
+            matches!(
+                database.apply_generation_unverified_with_digest_observed(
+                    &divergent,
+                    &divergent_sealed,
+                    &|| Ok(()),
+                ),
+                Err(GraphDbError::Conflict)
+            ),
+            "a legacy prefix may be replaced only by its exact source authority"
+        );
+        assert_eq!(
+            batch_canonicalizations(),
+            0,
+            "a divergent legacy migration must fail before writing"
+        );
+
+        reset_batch_canonicalizations();
+        let outcome = database
+            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .expect("an exact legacy partial stage must migrate to the wider page layout");
+        assert!(outcome.was_applied());
+        assert_eq!(
+            batch_canonicalizations(),
+            2,
+            "migration must write one wide data page and one final metadata bind"
+        );
+        let (_, recovered) = database
+            .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
+            .unwrap();
+        assert_eq!(recovered, sealed);
+        owner.close().unwrap();
     }
 
     #[test]
