@@ -1571,6 +1571,10 @@ struct PendingHintsV1 {
 }
 
 impl PendingHintsV1 {
+    fn count(&self) -> Option<u64> {
+        (!self.overflow).then(|| u64::try_from(self.paths.len()).unwrap_or(u64::MAX))
+    }
+
     fn path(&mut self, path: PathBuf) {
         if self.paths.len() >= MAX_PENDING_HINTS {
             self.paths.clear();
@@ -5139,19 +5143,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.verified_against_source
     }
 
-    /// Whether the last execution-owned source observation is older than the
-    /// configured freshness window. This only inspects scheduler state; it does
-    /// not reopen Git, scan the worktree, enqueue a wake, or mutate a watermark.
-    pub(super) fn freshness_window_elapsed(&self) -> bool {
-        self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
-    }
-
     pub(super) fn pending_hint_count(&self) -> Option<u64> {
         let hints = self
             .hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (!hints.overflow).then(|| u64::try_from(hints.paths.len()).unwrap_or(u64::MAX))
+        hints.count()
     }
 
     #[cfg(test)]

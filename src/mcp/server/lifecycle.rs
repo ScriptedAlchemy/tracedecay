@@ -522,7 +522,9 @@ impl McpServer {
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(&cg),
             project_root: cg.project_root().to_path_buf(),
+            mode: super::BackgroundRefreshModeV1::ForceReconcile,
             reconcile_sink: self.code_index_reconcile_sink.clone(),
+            freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
         match refresh(request).await {
             Ok(Some(fresh)) => {
@@ -698,7 +700,9 @@ impl McpServer {
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(cg),
             project_root: cg.project_root().to_path_buf(),
+            mode: super::BackgroundRefreshModeV1::FreshnessProbe,
             reconcile_sink: self.code_index_reconcile_sink.clone(),
+            freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;

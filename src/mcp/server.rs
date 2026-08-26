@@ -122,6 +122,13 @@ pub(crate) type CodeIndexHookSink =
 pub(crate) type CodeIndexReconcileSink =
     Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
+/// Non-blocking bridge for ordinary reads to run the scheduler's cheap
+/// Git/stat freshness ladder. A successful future means the mounted scheduler
+/// inspected or already owns the freshness remedy; it does not imply that a
+/// reconcile was necessary.
+pub(crate) type CodeIndexFreshnessProbeSink =
+    Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
+
 /// Type-erased bridge from a tool handler to the daemon-owned code-index
 /// generation authority. The daemon constructs this from its cloneable
 /// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
@@ -306,6 +313,7 @@ pub struct McpServer {
     /// scheduler queue. `None` for direct servers with no scheduler registry.
     code_index_hook_sink: Option<CodeIndexHookSink>,
     code_index_reconcile_sink: Option<CodeIndexReconcileSink>,
+    code_index_freshness_probe_sink: Option<CodeIndexFreshnessProbeSink>,
     /// Daemon-owned bridge to the code-index generation authority, the single
     /// mint for `file.daemon.<digest>` file identity and the generation every
     /// diagnostic producer must publish under. `None` for direct servers.
@@ -743,6 +751,7 @@ impl McpServer {
             background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
+            code_index_freshness_probe_sink,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
@@ -991,6 +1000,7 @@ impl McpServer {
             background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
+            code_index_freshness_probe_sink,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,

@@ -3396,6 +3396,47 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Run the bounded Git/stat freshness ladder for an ordinary read without
+    /// manufacturing an overflow. Only a proven source change posts a query
+    /// admission wake; a matching stat signature refreshes the scheduler's
+    /// cadence watermark and returns without traversal.
+    pub(in crate::daemon) async fn probe_freshness(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let (scheduler, wake, pending_wake, reconcile_in_progress) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
+            )
+        };
+        if pending_wake.has_pending_arrival() || reconcile_in_progress.load(Ordering::Acquire) != 0
+        {
+            return true;
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scheduler.request_fresh_for_query_background() {
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Mounted scope identity plus the currently serving generation for one
     /// project. Daemon authorities that must retain this scope's code-graph
     /// runtime (semantic vectors, generation retention) resolve through this
@@ -3517,7 +3558,14 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
-        let (scheduler, reconcile_in_progress, serving_generation, text_generation, build_progress) = {
+        let (
+            scheduler,
+            reconcile_in_progress,
+            serving_generation,
+            text_generation,
+            build_progress,
+            hints,
+        ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&canonical_root)?;
             (
@@ -3526,6 +3574,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.build_progress),
+                Arc::clone(&worktree.hints),
             )
         };
         tokio::task::spawn_blocking(move || {
@@ -3567,26 +3616,43 @@ impl CodeIndexSchedulerRegistryV1 {
                     } else {
                         dashboard_text_freshness_identity(text.as_ref())
                     };
+                    let hook_hint_count = hints
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .count();
+                    let ready = latest.is_some() || text_ready;
+                    let stale = hook_hint_count != Some(0);
                     return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         last_reconcile_micros: None,
                         staleness_state: Some(
-                            if latest.is_some() || text_ready {
+                            if refreshing && ready {
                                 "refreshing"
+                            } else if stale && ready {
+                                "stale"
+                            } else if ready {
+                                "fresh"
                             } else {
                                 "indexing"
                             }
                             .to_owned(),
                         ),
-                        hook_hint_count: None,
-                        coverage: "partial_refresh_in_progress".to_owned(),
+                        hook_hint_count,
+                        coverage: if refreshing {
+                            "partial_refresh_in_progress"
+                        } else if hook_hint_count.is_some() {
+                            "complete"
+                        } else {
+                            "partial_hook_hint_overflow"
+                        }
+                        .to_owned(),
                         progress,
                         ..identity
                     };
                 }
             };
             let verified = scheduler.verified_against_source();
-            let stale = !verified || scheduler.freshness_window_elapsed();
+            let stale = !verified;
             let latest = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

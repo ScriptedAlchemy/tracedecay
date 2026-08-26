@@ -1,12 +1,57 @@
 use super::writer_test_support::init_indexed_repo;
 use super::{
-    BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer, McpServerConstructionContext,
+    BackgroundRefreshModeV1, BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer,
+    McpServerConstructionContext,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[tokio::test]
+async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() {
+    let (cg, dir, _authority) = init_indexed_repo().await;
+    let forced = Arc::new(AtomicUsize::new(0));
+    let probed = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink: super::CodeIndexReconcileSink = {
+        let forced = Arc::clone(&forced);
+        Arc::new(move |_root| {
+            let forced = Arc::clone(&forced);
+            Box::pin(async move {
+                forced.fetch_add(1, Ordering::AcqRel);
+                true
+            })
+        })
+    };
+    let freshness_probe_sink: super::CodeIndexFreshnessProbeSink = {
+        let probed = Arc::clone(&probed);
+        Arc::new(move |_root| {
+            let probed = Arc::clone(&probed);
+            Box::pin(async move {
+                probed.fetch_add(1, Ordering::AcqRel);
+                true
+            })
+        })
+    };
+
+    super::hook_writes::execute_background_refresh_direct(BackgroundRefreshRequest {
+        graph: Arc::new(cg),
+        project_root: dir.path().to_path_buf(),
+        mode: BackgroundRefreshModeV1::FreshnessProbe,
+        reconcile_sink: Some(reconcile_sink),
+        freshness_probe_sink: Some(freshness_probe_sink),
+    })
+    .await
+    .expect("read freshness probe");
+
+    assert_eq!(probed.load(Ordering::Acquire), 1);
+    assert_eq!(
+        forced.load(Ordering::Acquire),
+        0,
+        "an ordinary read must never enter the force-overflow authority"
+    );
+}
 
 #[tokio::test]
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {

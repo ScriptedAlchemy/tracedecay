@@ -292,6 +292,18 @@ pub(super) fn code_index_reconcile_sink(
     sink
 }
 
+/// MCP-facing ordinary-read freshness probe. Unlike the explicit reconcile
+/// sink, this runs only the scheduler's bounded Git/stat ladder and creates an
+/// overflow wake solely when that evidence proves a reconcile is required.
+pub(super) fn code_index_freshness_probe_sink(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+) -> crate::mcp::server::CodeIndexFreshnessProbeSink {
+    Arc::new(move |root: PathBuf| {
+        let schedulers = schedulers.clone();
+        Box::pin(async move { schedulers.probe_freshness(&root).await })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;

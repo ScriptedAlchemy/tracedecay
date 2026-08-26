@@ -5520,6 +5520,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
@@ -5561,10 +5562,105 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     let projected_progress = projected.progress.expect("projected progress snapshot");
     assert_eq!(projected_progress.generation_id, expected.generation_id);
     assert!(projected_progress.progress_epoch >= expected.progress_epoch);
+    assert_eq!(
+        projected.staleness_state.as_deref(),
+        Some("fresh"),
+        "an unrelated scheduler-mutex holder is not a source refresh"
+    );
+    assert_eq!(projected.coverage, "complete");
+    assert_eq!(projected.hook_hint_count, Some(0));
     let _ = release_tx.send(());
     scheduler_holder
         .await
         .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    {
+        let mounted = registry.mounted.lock().await;
+        let scheduler = &mounted.get(&canonical).expect("mounted worktree").scheduler;
+        scheduler
+            .lock()
+            .expect("scheduler")
+            .policy
+            .staleness_threshold = Duration::ZERO;
+    }
+    let receipts_before = registry.event_to_ready_receipts().len();
+
+    assert!(registry.probe_freshness(fixture.path()).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mounted = registry.mounted.lock().await;
+    let scheduler = mounted.get(&canonical).expect("mounted worktree");
+    assert_eq!(
+        scheduler
+            .scheduler
+            .lock()
+            .expect("scheduler")
+            .pending_hint_count(),
+        Some(0),
+        "matching Git/stat evidence must not become an overflow hint"
+    );
+    assert_eq!(
+        registry.event_to_ready_receipts().len(),
+        receipts_before,
+        "a suppressed probe must not fabricate a reconcile receipt"
+    );
+    drop(mounted);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical)
+            .expect("mounted worktree")
+            .scheduler
+            .lock()
+            .expect("scheduler")
+            .policy
+            .staleness_threshold = Duration::ZERO;
+    }
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(projected.coverage, "complete");
     registry.shutdown().await;
 }
 
@@ -8110,6 +8206,26 @@ async fn wait_for_initial_generation(
     })
     .await
     .expect("initial generation published")
+}
+
+async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let ready = registry
+                .dashboard_freshness(path)
+                .await
+                .is_some_and(|freshness| {
+                    freshness.staleness_state.as_deref() == Some("fresh")
+                        && freshness.coverage == "complete"
+                });
+            if ready {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dashboard reaches fresh complete state");
 }
 
 /// Wait until the mounted worktree publishes a generation distinct from `previous`.
