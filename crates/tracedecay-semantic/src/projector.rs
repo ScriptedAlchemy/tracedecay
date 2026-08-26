@@ -910,3 +910,96 @@ pub fn vector_output_digest(
     tracedecay_domain::semantic_vector_output_digest(projection_key, chunk_id, chunk_digest, values)
         .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))
 }
+
+#[cfg(test)]
+mod encoder_group_tests {
+    use super::*;
+    use tracedecay_domain::{
+        BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+        FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision,
+        SensitivityDecision, SensitivityLevelV1, SourceSpan,
+    };
+
+    const BATCH_SIZE: usize = 32;
+    const BATCH_BYTES: usize = 32 * 512 * 4;
+
+    fn chunk(file: &str, ordinal: u32) -> CodeSearchChunkV1 {
+        let text = "fn fixture() {}";
+        let start_byte = u64::from(ordinal).saturating_mul(1024);
+        CodeSearchChunkV1 {
+            id: CodeSearchChunkId::new(format!("grouping.chunk.{file}.{ordinal}"))
+                .expect("chunk fixture"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: CodeGenerationId::new("grouping.generation".to_owned())
+                    .expect("generation fixture"),
+                file_occurrence_id: FileOccurrenceId::new(format!("{file}.rs"))
+                    .expect("file fixture"),
+                symbol_occurrence_id: None,
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte,
+                    end_byte: start_byte.saturating_add(text.len() as u64),
+                },
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                ordinal,
+            },
+            content_digest: ContentDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("content fixture"),
+            language_descriptor_revision: LanguageDescriptorRevision::new("rust.v1")
+                .expect("language fixture"),
+            chunker_revision: ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("sanitizer fixture"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: PolicyRevisionId::new("policy.v1").expect("policy fixture"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new(text).expect("sanitized fixture"),
+        }
+    }
+
+    fn group_sizes(chunks: &[CodeSearchChunkV1]) -> Vec<usize> {
+        let changes = chunks
+            .iter()
+            .map(|chunk| ChangedCodeChunkV1 {
+                chunk_id: chunk.id.clone(),
+                prior_digest: None,
+                current_digest: Some(chunk.content_digest.clone()),
+            })
+            .collect::<Vec<_>>();
+        let by_id = chunks
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk))
+            .collect::<BTreeMap<_, _>>();
+
+        canonical_encoder_groups(&changes, &by_id, BATCH_SIZE, BATCH_BYTES, |chunk_id| {
+            SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone())
+        })
+        .expect("fixture groups")
+        .iter()
+        .map(|group| group.changes.len())
+        .collect()
+    }
+
+    #[test]
+    fn multi_chunk_files_keep_distinct_encoder_groups() {
+        let chunks = (0..6u32)
+            .flat_map(|file| (0..5u32).map(move |ordinal| chunk(&format!("multi{file}"), ordinal)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(group_sizes(&chunks), vec![5, 5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn singleton_runs_coalesce_around_multi_chunk_files() {
+        let mut chunks = (0..40u32)
+            .map(|file| chunk(&format!("single{file:03}"), 0))
+            .collect::<Vec<_>>();
+        assert_eq!(group_sizes(&chunks), vec![32, 8]);
+
+        chunks.push(chunk("pair", 0));
+        chunks.push(chunk("pair", 1));
+        assert_eq!(group_sizes(&chunks), vec![2, 32, 8]);
+    }
+}
