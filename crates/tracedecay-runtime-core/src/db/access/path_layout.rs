@@ -46,19 +46,18 @@ pub(super) fn database_lock_root(database_path: &Path, fallback_parent: &Path) -
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    let data_root = if parent.file_name().is_some_and(|name| name == "branches") {
-        parent.parent()?
-    } else if parent
+    let staged_session_snapshot = parent
         .file_name()
         .is_some_and(|name| name == ".consolidation-input")
         && database_path
             .file_name()
-            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db")
-    {
-        parent.parent()?
-    } else {
-        parent
-    };
+            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db");
+    let data_root =
+        if staged_session_snapshot || parent.file_name().is_some_and(|name| name == "branches") {
+            parent.parent()?
+        } else {
+            parent
+        };
     let projects_root = data_root.parent()?;
     if projects_root
         .file_name()

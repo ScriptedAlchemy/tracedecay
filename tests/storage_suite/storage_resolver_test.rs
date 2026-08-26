@@ -1902,9 +1902,7 @@ async fn linked_worktree_exact_registry_alias_ignores_duplicate_shared_legacy_ma
                 store_kind: "code_project".to_string(),
                 storage_mode: "profile_sharded".to_string(),
                 store_relpath: format!("projects/{project_id}"),
-                manifest_relpath: Some(format!(
-                    "projects/{project_id}/{STORE_MANIFEST_FILENAME}"
-                )),
+                manifest_relpath: Some(format!("projects/{project_id}/{STORE_MANIFEST_FILENAME}")),
                 last_verified_at: None,
                 last_write_at: None,
             })
@@ -2033,7 +2031,12 @@ async fn linked_worktree_exact_manifest_overrides_canonical_exact_registry_alias
 
     let canonical = TraceDecay::init(&project).await.unwrap();
     canonical.index_all().await.unwrap();
-    let canonical_project_id = canonical.store_layout().identity.project_id.clone().unwrap();
+    let canonical_project_id = canonical
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .unwrap();
     canonical.close();
 
     git(
