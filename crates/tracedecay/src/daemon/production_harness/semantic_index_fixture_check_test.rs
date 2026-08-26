@@ -30,12 +30,21 @@ use super::semantic_availability_journey_test::{
 };
 use super::*;
 
+/// The workspace root above `crates/tracedecay`. The semantic fixtures and the
+/// shared model cache this check reads are workspace-level, not package-level.
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above crates/tracedecay")
+}
+
 /// Distinctive symbol from `tests/fixtures/semantic_index/src/inventory.rs`.
 const PROBE_SYMBOL: &str = "reserve_inventory_for_checkout";
 
 fn model_cache_dir() -> PathBuf {
     std::env::var_os("TRACEDECAY_FASTEMBED_MODEL_CACHE").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fastembed-model-cache"),
+        || workspace_root().join("target/fastembed-model-cache"),
         PathBuf::from,
     )
 }
@@ -98,8 +107,7 @@ fn copy_fixture_tree(source: &Path, destination: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
-    let fixture_source =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic_index");
+    let fixture_source = workspace_root().join("tests/fixtures/semantic_index");
     let cache = model_cache_dir();
     let catalog = crate::semantic_code::production_fastembed_catalog();
     let model = catalog

@@ -796,7 +796,7 @@ pub(super) fn workload_identity() -> WorkloadIdentity {
         .map(|(path, _)| {
             (
                 *path,
-                fs::read(repository_root().join(path))
+                fs::read(package_root().join(path))
                     .unwrap_or_else(|error| panic!("read benchmark harness {path}: {error}")),
             )
         })
@@ -950,8 +950,20 @@ pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
     !output.is_empty()
 }
 
-pub(super) fn repository_root() -> &'static Path {
+/// The product package directory. `HARNESS_SOURCES` records paths relative to
+/// the package (`src/sessions/...`), which is a different anchor from the
+/// workspace-level fixtures and benchmark data below.
+pub(super) fn package_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+pub(super) fn repository_root() -> &'static Path {
+    // The product package sits at `crates/tracedecay`; the fixtures, benchmark
+    // data, and git metadata this module reads all live at the workspace root.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above crates/tracedecay")
 }
 
 fn git_output(args: &[&str]) -> String {

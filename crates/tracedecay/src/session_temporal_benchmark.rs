@@ -1380,7 +1380,13 @@ fn sha256_file(path: &Path) -> BenchResult<String> {
 }
 
 fn repository_root() -> PathBuf {
+    // The product package sits at `crates/tracedecay`; this benchmark reads git
+    // metadata and fixtures that live at the workspace root above it.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above crates/tracedecay")
+        .to_owned()
 }
 
 fn current_commit(root: &Path) -> BenchResult<String> {

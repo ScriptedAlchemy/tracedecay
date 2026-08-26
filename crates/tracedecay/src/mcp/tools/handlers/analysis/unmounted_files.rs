@@ -473,7 +473,11 @@ mod tests {
     #[test]
     #[ignore = "walks the entire working tree; run explicitly for a dogfooding pass"]
     fn this_repository_has_no_unmounted_rust_files() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Audits this repository, which is the workspace root above the package.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root above crates/tracedecay");
         let audit = audit_project(root).expect("audit");
         for ecosystem in &audit.ecosystems {
             println!(

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -384,7 +384,7 @@ fn fixture_measurement(host: &str) -> HookHostFixtureMeasurement {
 }
 
 fn repository_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    super::artifact::repository_root().join(relative)
 }
 
 fn canonical_json(value: &Value) -> Value {
