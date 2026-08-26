@@ -107,6 +107,15 @@ impl RegisteredSessionOwnerV1 {
         let SessionGraphAttachmentStateV1::Attached { owner: Some(owner) } = &*state else {
             return Ok(database);
         };
+        Self::bind_relation_graph(&database, owner, scope)?;
+        Ok(database)
+    }
+
+    fn bind_relation_graph(
+        database: &RegisteredGlobalDbLeaseV1,
+        owner: &SessionGraphOwnerV1,
+        scope: SessionRelationScope,
+    ) -> Result<()> {
         let graph = owner.graph.issue_lease().map_err(|error| {
             session_registry_error(
                 "issue registered session relation graph client",
@@ -127,7 +136,7 @@ impl RegisteredSessionOwnerV1 {
                         .to_owned(),
                 )
             })?;
-        Ok(database)
+        Ok(())
     }
 
     fn graph_unavailable_reason(&self) -> String {
@@ -414,6 +423,46 @@ impl ProjectRuntimeOwnerRegistryV1 {
         );
         Ok(())
     }
+}
+
+fn bind_ready_project_memory_graph(
+    owners: &ProjectRuntimeOwnerRegistryV1,
+    project_id: &ProjectId,
+) -> Result<bool> {
+    let (memory, sessions) = {
+        let entries = owners.lock().map_err(|_| {
+            session_registry_error(
+                "bind ready project memory graph",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+            return Ok(false);
+        };
+        let (Some(memory), Some(sessions)) = (owners.memory.as_ref(), owners.sessions.as_ref())
+        else {
+            return Ok(false);
+        };
+        (
+            memory.issue_database_lease()?,
+            sessions.database.issue_lease().map_err(|error| {
+                session_registry_error(
+                    "issue project session client for graph binding",
+                    format!("{error:?}"),
+                )
+            })?,
+        )
+    };
+    let Some(graph) = memory.memory_graph_runtime() else {
+        return Ok(false);
+    };
+    sessions.bind_project_graph_runtime(graph).map_err(|_| {
+        session_registry_error(
+            "bind ready project memory graph",
+            "verified project graph runtime does not match the project session shard".to_owned(),
+        )
+    })?;
+    Ok(true)
 }
 
 /// The only state which may temporarily separate the exact paired Store

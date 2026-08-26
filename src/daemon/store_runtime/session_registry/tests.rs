@@ -1306,6 +1306,72 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_session_relation_graph_reaches_the_published_relational_lease() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.session-relation-late-bind").expect("project id");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+
+    let sessions = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("relational sessions publish before graph restore");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while sessions.session_relation_graph_identity().is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the published relational lease observes its late graph attachment");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_project_memory_graph_reaches_the_published_session_lease() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.memory-relation-late-bind").expect("project id");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+
+    let sessions = registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("relational sessions publish before memory graph restore");
+    registry
+        .project_memory(project_id, [project_root])
+        .await
+        .expect("project memory database publishes before graph restore");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while sessions.project_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the published session lease observes its late project graph attachment");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_only_project_graph_reuses_daemon_publication_without_write_authority() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary

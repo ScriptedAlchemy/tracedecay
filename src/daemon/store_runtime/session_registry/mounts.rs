@@ -13,7 +13,7 @@ use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
-use tracedecay_store::{ProjectId, StoreShardIdV1};
+use tracedecay_store::{ProjectId, StoreShardIdV1, StoreShardScopeV1};
 
 use super::remote_recovery::{
     DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
@@ -27,9 +27,9 @@ use super::{
     RegisteredSchemaConvergenceMaintenance, RegisteredSessionOwnerV1, RemoteNodeStoreOwnerV1,
     Result, RetainedHookTasks, SessionGraphAttachmentStateV1, SessionGraphOwnerV1,
     StoreRuntimeClientLease, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry,
-    StoreRuntimeResolver, open_runtime, open_runtime_with_presence,
-    register_registered_schema_installer, registry_open_error, runtime_incarnation,
-    session_registry_error,
+    StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
+    open_runtime_with_presence, register_registered_schema_installer, registry_open_error,
+    runtime_incarnation, session_registry_error,
 };
 use crate::errors::TraceDecayError;
 
@@ -219,7 +219,14 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         database: RegisteredGlobalDbOwnerV1,
         shard_id: StoreShardIdV1,
-    ) -> RegisteredSessionOwnerV1 {
+        scope: SessionRelationScope,
+    ) -> Result<(RegisteredSessionOwnerV1, RegisteredGlobalDbLeaseV1)> {
+        let published_lease = database.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue published session database client",
+                format!("{error:?}"),
+            )
+        })?;
         let relation_graph = Arc::new(std::sync::Mutex::new(
             SessionGraphAttachmentStateV1::Warming,
         ));
@@ -227,6 +234,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let task_relation_graph = Arc::clone(&relation_graph);
         let graph_settled = Arc::new(tokio::sync::Notify::new());
         let task_graph_settled = Arc::clone(&graph_settled);
+        let task_published_lease = published_lease.clone();
         let registry = self.registry.clone();
         let graph_registry = self.graph_registry.clone();
         let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
@@ -246,12 +254,24 @@ impl DaemonSessionRuntimeRegistryV1 {
                     )
                     .await;
                 let state = match opened {
-                    Ok((graph, store_target)) => SessionGraphAttachmentStateV1::Attached {
-                        owner: Some(SessionGraphOwnerV1 {
+                    Ok((graph, store_target)) => {
+                        let owner = SessionGraphOwnerV1 {
                             graph,
                             store_target,
-                        }),
-                    },
+                        };
+                        match RegisteredSessionOwnerV1::bind_relation_graph(
+                            &task_published_lease,
+                            &owner,
+                            scope,
+                        ) {
+                            Ok(()) => {
+                                SessionGraphAttachmentStateV1::Attached { owner: Some(owner) }
+                            }
+                            Err(error) => SessionGraphAttachmentStateV1::Detached {
+                                error: error.to_string(),
+                            },
+                        }
+                    }
                     Err(error) => SessionGraphAttachmentStateV1::Detached {
                         error: error.to_string(),
                     },
@@ -271,12 +291,15 @@ impl DaemonSessionRuntimeRegistryV1 {
                 };
             graph_settled.notify_waiters();
         }
-        RegisteredSessionOwnerV1 {
-            database,
-            relation_graph,
-            graph_settled,
-            graph_open_task_key,
-        }
+        Ok((
+            RegisteredSessionOwnerV1 {
+                database,
+                relation_graph,
+                graph_settled,
+                graph_open_task_key,
+            },
+            published_lease,
+        ))
     }
 
     pub(crate) async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
@@ -399,9 +422,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount profile session store")
             .await?;
-        let database = self.publish_session_owner(database, shard_id);
-        let lease = self.issue_session_owner_lease(
-            &database,
+        let (database, lease) = self.publish_session_owner(
+            database,
+            shard_id,
             SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
         )?;
         *self
@@ -439,6 +462,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
         let incarnation = self.incarnation;
         let task_shard_id = shard_id.clone();
+        let task_project_id = match &task_shard_id.scope {
+            StoreShardScopeV1::Project { project_id } => Some(project_id.clone()),
+            _ => None,
+        };
+        let project_owners = self.project_owners.clone();
         let retained = self.retained_hook_tasks.retain(
             "memory-graph-open",
             &graph_open_task_key,
@@ -503,6 +531,16 @@ impl DaemonSessionRuntimeRegistryV1 {
                 *task_graph
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+                if let Some(project_id) = task_project_id
+                    && let Err(error) =
+                        bind_ready_project_memory_graph(&project_owners, &project_id)
+                {
+                    tracing::error!(
+                        project_id = %project_id,
+                        error = %error,
+                        "background project memory graph could not bind to project sessions"
+                    );
+                }
             },
         );
         if !retained {
@@ -1127,9 +1165,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
-        let database = self.publish_session_owner(database, shard_id);
-        let lease = self.issue_session_owner_lease(
-            &database,
+        let (database, lease) = self.publish_session_owner(
+            database,
+            shard_id,
             SessionRelationScope::project_sessions(project_id.clone()),
         )?;
         let replay_issuer = database.database.weak_lease_issuer();
@@ -1154,6 +1192,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 format!("publish={error}; replay cleanup={cleanup:?}"),
             ));
         }
+        bind_ready_project_memory_graph(&self.project_owners, &project_id)?;
         let recoveries = self
             .remote_recovery_authorities
             .lock()
@@ -1271,6 +1310,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
         admission.publish_memory(owner)?;
+        bind_ready_project_memory_graph(&self.project_owners, &project_id)?;
         Ok(database)
     }
 
