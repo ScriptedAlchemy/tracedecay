@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn default_validation_uses_byte_pinned_activation_workload() {
         let summary = validate_requested_workload(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
                 .expect("workspace root above crates/tracedecay"),
