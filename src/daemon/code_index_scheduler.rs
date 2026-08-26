@@ -4948,14 +4948,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if self.freshness_unknown
-            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
-                .differs_from(&self.git_metadata)
-        {
-            self.request_background_reconcile();
-            return Ok(None);
-        }
-        if self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold {
+        if self.freshness_probe_requires_reconcile() {
             self.request_background_reconcile();
             return Ok(None);
         }

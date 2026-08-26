@@ -5674,9 +5674,15 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("repeat ready check")
             .is_none()
     );
-    assert!(
-        restarted.epoch.load(std::sync::atomic::Ordering::Acquire) > first_wake_epoch,
-        "an earlier failed wake cannot strand a retained overflow marker"
+    assert_eq!(
+        restarted.epoch.load(std::sync::atomic::Ordering::Acquire),
+        first_wake_epoch,
+        "a repeated read wake must not cancel in-flight generation work"
+    );
+    assert_eq!(
+        restarted.pending_hint_count(),
+        None,
+        "the retained overflow marker remains pending for the refreshed wake"
     );
 
     let outcome = restarted.reconcile_now().expect("background truth");
@@ -5687,6 +5693,36 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("ready check")
             .is_some(),
         "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
+}
+
+#[test]
+fn unchanged_ready_query_refreshes_its_stat_witness_without_reconcile() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let published = published(scheduler.reconcile_now().expect("initial publish"));
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+
+    let ready = scheduler
+        .latest_complete_ready_for_query()
+        .expect("unchanged ready query");
+
+    assert_eq!(
+        ready
+            .as_ref()
+            .map(|latest| &latest.generation.manifest().generation_id),
+        Some(&published.generation_id),
+        "elapsed time alone must not make an unchanged generation unavailable"
+    );
+    assert_eq!(
+        scheduler.pending_hint_count(),
+        Some(0),
+        "a matching Git/stat witness must not enqueue authoritative capture"
     );
 }
 
