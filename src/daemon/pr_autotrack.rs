@@ -1104,7 +1104,7 @@ async fn tick(
     };
     for record in db.code_projects_seen_within(window, cap).await {
         let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() {
+        if !root.is_dir() || crate::config::is_ambient_project_root(&root) {
             continue;
         }
         let cfg = crate::config::load_sync_config(&root);

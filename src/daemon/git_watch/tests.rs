@@ -281,6 +281,17 @@ async fn disabled_watcher_never_registers() {
 }
 
 #[tokio::test]
+async fn ambient_user_profile_root_is_never_watched() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    let watcher = GitWatcher::new(fast_watch_config());
+
+    watcher.ensure_watching(&home).await;
+
+    assert!(watcher.health_report().await.is_empty());
+}
+
+#[tokio::test]
 async fn shutdown_cancels_and_joins_watcher_tasks() {
     let repo = temp_repo();
     let profile = tempfile::tempdir().unwrap();

@@ -339,6 +339,16 @@ impl GitWatcher {
         let canonical = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
+        if crate::config::is_ambient_project_root(&canonical) {
+            log_daemon_event(
+                "git_watch_skipped",
+                &[
+                    ("project", canonical.display().to_string()),
+                    ("reason", "ambient_root".to_string()),
+                ],
+            );
+            return;
+        }
 
         let mut projects = self.inner.projects.lock().await;
         if projects.contains_key(&canonical) {
