@@ -115,40 +115,76 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    #[cfg(test)]
     pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
         database: crate::db::DatabaseOwnerV1,
     ) -> Result<RetainedVerifiedGraphRuntimeV1> {
+        Self::retain_memory_graph_runtime_for_task(
+            self.identity.clone(),
+            self.registry.clone(),
+            self.graph_registry.clone(),
+            Arc::clone(&self.graph_lifecycle_cancelled),
+            self.incarnation,
+            shard_id,
+            database,
+            tracedecay_usecases::observation::ObservationCancellation::default(),
+        )
+        .await
+        .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn retain_memory_graph_runtime_for_task(
+        identity: super::super::LocalProfileIdentityAuthorityV1,
+        registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
+        graph_registry: tracedecay_graph_db::GraphDbRegistry,
+        graph_lifecycle_cancelled: Arc<AtomicBool>,
+        incarnation: tracedecay_store::StoreIncarnationV1,
+        shard_id: StoreShardIdV1,
+        database: crate::db::DatabaseOwnerV1,
+        cancellation: tracedecay_usecases::observation::ObservationCancellation,
+    ) -> std::result::Result<RetainedVerifiedGraphRuntimeV1, MemoryGraphRuntimeOpenFailureV1> {
         if !matches!(
             &shard_id.scope,
             StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory
-        ) || shard_id.brain_id != *self.identity.brain_id()
-            || shard_id.profile_id != *self.identity.profile_id()
+        ) || shard_id.brain_id != *identity.brain_id()
+            || shard_id.profile_id != *identity.profile_id()
         {
-            return Err(session_registry_error(
-                "retain verified memory graph authority",
-                "memory graph scope does not match the active profile authority".to_owned(),
-            ));
+            return Err(MemoryGraphRuntimeOpenFailureV1 {
+                database,
+                error: session_registry_error(
+                    "retain verified memory graph authority",
+                    "memory graph scope does not match the active profile authority".to_owned(),
+                ),
+            });
         }
         if database.registered_binding().shard_id != shard_id {
-            return Err(session_registry_error(
-                "retain verified memory graph authority",
-                "memory graph shard does not match the retained relational runtime".to_owned(),
-            ));
+            return Err(MemoryGraphRuntimeOpenFailureV1 {
+                database,
+                error: session_registry_error(
+                    "retain verified memory graph authority",
+                    "memory graph shard does not match the retained relational runtime".to_owned(),
+                ),
+            });
         }
         let relational_binding = database.registered_binding().clone();
         let relational_verified_locator = database.registered_verified_locator().clone();
-        let (graph, store_target) = super::graph_attachment::open_session_relation_owner(
-            &self.registry,
-            &self.graph_registry,
-            &self.graph_lifecycle_cancelled,
-            self.incarnation,
+        let opened = super::graph_attachment::open_session_relation_owner_for_task(
+            &registry,
+            &graph_registry,
+            &graph_lifecycle_cancelled,
+            cancellation,
+            incarnation,
             shard_id,
         )
-        .await?;
+        .await;
+        let (graph, store_target) = match opened {
+            Ok(opened) => opened,
+            Err(error) => return Err(MemoryGraphRuntimeOpenFailureV1 { database, error }),
+        };
         Ok(RetainedVerifiedGraphRuntimeV1 {
-            graph_registry: self.graph_registry.clone(),
+            graph_registry,
             database,
             graph,
             store_target: Mutex::new(Some(store_target)),
@@ -157,6 +193,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             operation_admission: Mutex::new(super::MemoryGraphOperationAdmissionV1::Ready),
             publication_gate: Mutex::new(()),
             lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+            registry_lifecycle_cancelled: graph_lifecycle_cancelled,
         })
     }
+}
+
+pub(crate) struct MemoryGraphRuntimeOpenFailureV1 {
+    pub(crate) database: crate::db::DatabaseOwnerV1,
+    pub(crate) error: crate::errors::TraceDecayError,
 }

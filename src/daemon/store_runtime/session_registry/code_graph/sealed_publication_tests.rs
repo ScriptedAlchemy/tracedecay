@@ -72,7 +72,9 @@ fn with_publication_context<T>(
     );
     let probe = GraphPublicationProbeV1 {
         request_cancellation,
-        lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+        lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::new(
+            AtomicBool::new(false),
+        ))),
         deadline_at: Instant::now() + Duration::from_secs(30),
         cancellation: cancellation.clone(),
         deadline: deadline.clone(),

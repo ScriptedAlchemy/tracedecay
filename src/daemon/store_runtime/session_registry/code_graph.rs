@@ -113,7 +113,7 @@ impl GraphCancellation for MaintenanceGraphCancellationV1 {
 
 struct GraphPublicationProbeV1 {
     request_cancellation: Arc<dyn GraphCancellation>,
-    lifecycle_cancelled: Arc<AtomicBool>,
+    lifecycle_cancellation: Arc<dyn GraphCancellation>,
     deadline_at: Instant,
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
@@ -130,9 +130,7 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
     }
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        if self.request_cancellation.is_cancelled()
-            || self.lifecycle_cancelled.load(Ordering::Acquire)
-        {
+        if self.request_cancellation.is_cancelled() || self.lifecycle_cancellation.is_cancelled() {
             Some(RuntimeInterruptionV1::Cancelled)
         } else if Instant::now() >= self.deadline_at {
             Some(RuntimeInterruptionV1::DeadlineExceeded)
@@ -152,6 +150,31 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
     fn requires_isolated_commit(&self) -> bool {
         true
     }
+}
+
+struct CombinedAtomicGraphCancellationV1 {
+    local: Arc<AtomicBool>,
+    registry: Option<Arc<AtomicBool>>,
+}
+
+impl GraphCancellation for CombinedAtomicGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.local.load(Ordering::Acquire)
+            || self
+                .registry
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    }
+}
+
+fn graph_lifecycle_cancellation(
+    local: &Arc<AtomicBool>,
+    registry: Option<&Arc<AtomicBool>>,
+) -> Arc<dyn GraphCancellation> {
+    Arc::new(CombinedAtomicGraphCancellationV1 {
+        local: Arc::clone(local),
+        registry: registry.map(Arc::clone),
+    })
 }
 
 pub(crate) struct RetainedCodeGraphRuntimeV1 {
@@ -189,6 +212,7 @@ pub(crate) struct RetainedVerifiedGraphRuntimeV1 {
     operation_admission: Mutex<MemoryGraphOperationAdmissionV1>,
     publication_gate: Mutex<()>,
     lifecycle_cancelled: Arc<AtomicBool>,
+    registry_lifecycle_cancelled: Arc<AtomicBool>,
 }
 
 enum MemoryGraphOperationAdmissionV1 {
@@ -211,17 +235,6 @@ impl RetainedVerifiedGraphRuntimeV1 {
         self.database.issue_lease().map_err(|error| {
             GraphDbError::unavailable(format!(
                 "memory database owner cannot issue a client: {error:?}"
-            ))
-        })
-    }
-
-    pub(crate) fn issue_database_read_only_lease(
-        &self,
-    ) -> std::result::Result<crate::db::Database, GraphDbError> {
-        self.require_operation_admission()?;
-        self.database.issue_read_only_lease().map_err(|error| {
-            GraphDbError::unavailable(format!(
-                "memory database owner cannot issue a read-only client: {error:?}"
             ))
         })
     }
@@ -300,6 +313,12 @@ impl RetainedVerifiedGraphRuntimeV1 {
         let _publication = self.publication_gate.lock().map_err(|_| {
             GraphDbError::unavailable("verified graph publication gate is poisoned")
         })?;
+        if request_cancelled.load(Ordering::Acquire)
+            || self.lifecycle_cancelled.load(Ordering::Acquire)
+            || self.registry_lifecycle_cancelled.load(Ordering::Acquire)
+        {
+            return Err(GraphDbError::Cancelled);
+        }
         let database = self.issue_database_lease()?;
         let mut storage = database
             .graph_publication_storage()
@@ -321,7 +340,10 @@ impl RetainedVerifiedGraphRuntimeV1 {
         );
         let probe = GraphPublicationProbeV1 {
             request_cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            lifecycle_cancellation: graph_lifecycle_cancellation(
+                &self.lifecycle_cancelled,
+                Some(&self.registry_lifecycle_cancelled),
+            ),
             deadline_at,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -387,7 +409,10 @@ impl RetainedVerifiedGraphRuntimeV1 {
          -> std::result::Result<VerifiedGraphCommit, GraphDbError> {
             let publish_probe = GraphPublicationProbeV1 {
                 request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+                lifecycle_cancellation: graph_lifecycle_cancellation(
+                    &self.lifecycle_cancelled,
+                    Some(&self.registry_lifecycle_cancelled),
+                ),
                 deadline_at,
                 cancellation: publish_cancellation_identity.clone(),
                 deadline: publish_deadline_identity.clone(),
@@ -518,6 +543,11 @@ impl RetainedVerifiedGraphRuntimeV1 {
         projection: &GraphProjectionIdentity,
         read_control: FactReadControl,
     ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if self.lifecycle_cancelled.load(Ordering::Acquire)
+            || self.registry_lifecycle_cancelled.load(Ordering::Acquire)
+        {
+            return Err(GraphDbError::Cancelled);
+        }
         let database = self.issue_database_lease()?;
         let mut storage = database
             .graph_publication_storage()
@@ -543,7 +573,10 @@ impl RetainedVerifiedGraphRuntimeV1 {
             Arc::new(FactReadGraphCancellationV1(read_control));
         let probe = GraphPublicationProbeV1 {
             request_cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            lifecycle_cancellation: graph_lifecycle_cancellation(
+                &self.lifecycle_cancelled,
+                Some(&self.registry_lifecycle_cancelled),
+            ),
             deadline_at,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -721,7 +754,7 @@ impl RetainedCodeGraphRuntimeV1 {
             request_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
                 &request_cancelled,
             ))),
-            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline_at,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -854,7 +887,10 @@ impl RetainedCodeGraphRuntimeV1 {
             );
             let probe = GraphPublicationProbeV1 {
                 request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+                lifecycle_cancellation: graph_lifecycle_cancellation(
+                    &self.lifecycle_cancelled,
+                    None,
+                ),
                 deadline_at,
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
@@ -1160,7 +1196,7 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let probe = GraphPublicationProbeV1 {
             request_cancellation: Arc::clone(&cancellation),
-            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline_at: deadline,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -1348,7 +1384,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
             let probe = GraphPublicationProbeV1 {
                 request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
+                lifecycle_cancellation: graph_lifecycle_cancellation(
+                    &self.graph_lifecycle_cancelled,
+                    None,
+                ),
                 deadline_at,
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
@@ -1434,7 +1473,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
             let probe = GraphPublicationProbeV1 {
                 request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
+                lifecycle_cancellation: graph_lifecycle_cancellation(
+                    &self.graph_lifecycle_cancelled,
+                    None,
+                ),
                 deadline_at,
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),

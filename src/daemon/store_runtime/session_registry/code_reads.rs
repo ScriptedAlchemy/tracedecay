@@ -41,19 +41,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Some(super::ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.memory.as_ref() {
                         let database = match &access {
-                            DatabaseAccessMode::ReadWrite => {
-                                owner.graph_runtime.issue_database_lease()
-                            }
-                            DatabaseAccessMode::ReadOnly => {
-                                owner.graph_runtime.issue_database_read_only_lease()
-                            }
-                        }
-                        .map_err(|error| {
-                            session_registry_error(
-                                "issue retained project graph database client",
-                                error.to_string(),
-                            )
-                        })?;
+                            DatabaseAccessMode::ReadWrite => owner.issue_database_lease(),
+                            DatabaseAccessMode::ReadOnly => owner.issue_database_read_only_lease(),
+                        }?;
                         if !same_canonical_path(database.canonical_database_path(), &database_path)
                         {
                             return Err(session_registry_error(
@@ -448,27 +438,104 @@ impl DaemonSessionRuntimeRegistryV1 {
         {
             return retirement.commit_ready_or_remove();
         }
-        let operation_admission = retirement
-            .memory()?
-            .graph_runtime
-            .reserve_operation_retirement()
-            .map_err(|error| {
-                session_registry_error(
-                    "reserve project memory graph operation admission",
-                    error.to_string(),
+        let graph_open_task_key = retirement.memory()?.graph_open_task_key.clone();
+        self.retained_hook_tasks
+            .retire("memory-graph-open", &graph_open_task_key)
+            .await
+            .map_err(|error| session_registry_error("retire memory graph open task", error))?;
+        let Some(graph_runtime) = retirement.memory()?.graph_runtime() else {
+            let graph_error = retirement.memory()?.graph_error();
+            let target = retirement
+                .memory()?
+                .reserve_database_retirement()
+                .map_err(|error| {
+                    session_registry_error("reserve project memory database retirement", error)
+                })?
+                .into_store_retirement_target()
+                .map_err(|error| {
+                    session_registry_error(
+                        "compose project memory database retirement target",
+                        format!("{error:?}"),
+                    )
+                })?;
+            let mut store_reservation = match self.registry.reserve_retirement_batch(vec![target]) {
+                tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+                    reservation,
+                ) => reservation,
+                tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+                    refusal,
+                ) => {
+                    return Err(session_registry_error(
+                        "reserve detached project memory Store retirement",
+                        format!(
+                            "blockers={:?}; graph_unavailable={}",
+                            refusal.blockers(),
+                            graph_error.unwrap_or_else(|| "warming".to_owned())
+                        ),
+                    ));
+                }
+            };
+            let store = match store_reservation.commit() {
+                Ok(commit) => commit,
+                Err(error) => {
+                    return match store_reservation.cancel() {
+                        Ok(targets) => {
+                            drop(targets);
+                            Err(session_registry_error(
+                                "commit detached project memory Store retirement",
+                                format!("{error:?}"),
+                            ))
+                        }
+                        Err(cancel_error) => {
+                            retirement.commit_fault(
+                                super::ProjectRuntimeRetirementFaultV1::StoreStart(error.clone()),
+                            )?;
+                            Err(session_registry_error(
+                                "commit detached project memory Store retirement",
+                                format!("commit={error:?}; cancel={cancel_error:?}"),
+                            ))
+                        }
+                    };
+                }
+            };
+            let store_closed = store.outcomes().iter().all(|outcome| {
+                matches!(
+                    outcome,
+                    tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
                 )
-            })?;
+            });
+            retirement.commit_without_memory()?;
+            return if store_closed {
+                Ok(())
+            } else {
+                Err(session_registry_error(
+                    "retire detached project memory runtime",
+                    "project memory Store retirement reached a terminal failure".to_owned(),
+                ))
+            };
+        };
+        let operation_admission =
+            graph_runtime
+                .reserve_operation_retirement()
+                .map_err(|error| {
+                    session_registry_error(
+                        "reserve project memory graph operation admission",
+                        error.to_string(),
+                    )
+                })?;
         let reconciliation = retirement
             .memory()?
-            .reconciliation
-            .reserve_retirement()
-            .map_err(|blocker| {
-                session_registry_error(
-                    "reserve project memory reconciliation retirement",
-                    format!("{blocker:?}"),
-                )
-            })?;
-        let graph_target = retirement.memory()?.graph_runtime.graph_retirement_target();
+            .reconciliation_owner()
+            .map(|owner| {
+                owner.reserve_retirement().map_err(|blocker| {
+                    session_registry_error(
+                        "reserve project memory reconciliation retirement",
+                        format!("{blocker:?}"),
+                    )
+                })
+            })
+            .transpose()?;
+        let graph_target = graph_runtime.graph_retirement_target();
         let mut graph_reservation = self
             .graph_registry
             .reserve_retirement_batch(vec![graph_target])
@@ -480,17 +547,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         let store_target = {
             let owner = retirement.memory()?;
-            let database = owner
-                .graph_runtime
-                .reserve_database_retirement()
-                .map_err(|error| {
-                    session_registry_error(
-                        "reserve project memory database retirement",
-                        error.to_string(),
-                    )
-                })?;
-            let graph = owner
-                .graph_runtime
+            let database = owner.reserve_database_retirement().map_err(|error| {
+                session_registry_error("reserve project memory database retirement", error.clone())
+            })?;
+            let graph = graph_runtime
                 .take_store_graph_retirement_target()
                 .map_err(|error| {
                     session_registry_error(
@@ -503,8 +563,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Err(refusal) => {
                     let (error, database, graph) = refusal.into_parts();
                     drop(database);
-                    owner
-                        .graph_runtime
+                    graph_runtime
                         .restore_store_graph_retirement_target(graph)
                         .map_err(|restore_error| {
                             session_registry_error(
@@ -545,9 +604,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                         "Store refusal lost the paired database/graph owner handoff".to_owned(),
                     )
                 })?;
-                retirement
-                    .memory()?
-                    .graph_runtime
+                graph_runtime
                     .restore_store_graph_retirement_target(target.cancel_to_ready_graph_target())
                     .map_err(|error| {
                         session_registry_error(
@@ -561,61 +618,64 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ));
             }
         };
-        let reconciliation = match reconciliation.commit_and_wait().await {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                let mut targets = store_reservation.cancel().map_err(|cancel_error| {
-                    session_registry_error(
-                        "cancel project memory Store retirement after reconciliation start refusal",
-                        format!("{cancel_error:?}"),
-                    )
-                })?;
-                let target = targets.pop().ok_or_else(|| {
-                    session_registry_error(
-                        "recover project memory Store retirement after reconciliation start refusal",
-                        "Store cancellation omitted the exact retirement target".to_owned(),
-                    )
-                })?;
-                if !targets.is_empty() {
-                    return Err(session_registry_error(
-                        "recover project memory Store retirement after reconciliation start refusal",
-                        "Store cancellation returned an unexpected target count".to_owned(),
-                    ));
-                }
-                let target = target.into_database_graph_owner_handoff().map_err(|_| {
-                    session_registry_error(
-                        "recover project memory Store retirement after reconciliation start refusal",
-                        "Store cancellation lost the paired database/graph owner handoff".to_owned(),
-                    )
-                })?;
-                retirement
-                    .memory()?
-                    .graph_runtime
-                    .restore_store_graph_retirement_target(target.cancel_to_ready_graph_target())
-                    .map_err(|restore_error| {
+        if let Some(reconciliation) = reconciliation {
+            let reconciliation = match reconciliation.commit_and_wait().await {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    let mut targets = store_reservation.cancel().map_err(|cancel_error| {
                         session_registry_error(
-                            "restore project memory graph Store target",
-                            restore_error.to_string(),
+                            "cancel project memory Store retirement after reconciliation start refusal",
+                            format!("{cancel_error:?}"),
                         )
                     })?;
+                    let target = targets.pop().ok_or_else(|| {
+                        session_registry_error(
+                            "recover project memory Store retirement after reconciliation start refusal",
+                            "Store cancellation omitted the exact retirement target".to_owned(),
+                        )
+                    })?;
+                    if !targets.is_empty() {
+                        return Err(session_registry_error(
+                            "recover project memory Store retirement after reconciliation start refusal",
+                            "Store cancellation returned an unexpected target count".to_owned(),
+                        ));
+                    }
+                    let target = target.into_database_graph_owner_handoff().map_err(|_| {
+                        session_registry_error(
+                            "recover project memory Store retirement after reconciliation start refusal",
+                            "Store cancellation lost the paired database/graph owner handoff".to_owned(),
+                        )
+                    })?;
+                    graph_runtime
+                        .restore_store_graph_retirement_target(
+                            target.cancel_to_ready_graph_target(),
+                        )
+                        .map_err(|restore_error| {
+                            session_registry_error(
+                                "restore project memory graph Store target",
+                                restore_error.to_string(),
+                            )
+                        })?;
+                    return Err(session_registry_error(
+                        "start project memory reconciliation retirement",
+                        format!("{error:?}"),
+                    ));
+                }
+            };
+            if !matches!(
+                reconciliation,
+                tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
+            ) {
+                operation_admission.commit();
+                retirement.commit_fault(super::ProjectRuntimeRetirementFaultV1::Reconciliation(
+                    reconciliation,
+                ))?;
                 return Err(session_registry_error(
-                    "start project memory reconciliation retirement",
-                    format!("{error:?}"),
+                    "retire project memory reconciliation",
+                    "memory reconciliation reached a terminal failure after admission closed"
+                        .to_owned(),
                 ));
             }
-        };
-        if !matches!(
-            reconciliation,
-            tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
-        ) {
-            operation_admission.commit();
-            retirement.commit_fault(super::ProjectRuntimeRetirementFaultV1::Reconciliation(
-                reconciliation,
-            ))?;
-            return Err(session_registry_error(
-                "retire project memory reconciliation",
-                "memory reconciliation reached a terminal failure after admission closed".to_owned(),
-            ));
         }
         let graph = match graph_reservation.commit(
             Arc::new(tracedecay_graph_db::NeverCancelled),
@@ -661,9 +721,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                             .to_owned(),
                     )
                 })?;
-                retirement
-                    .memory()?
-                    .graph_runtime
+                graph_runtime
                     .restore_store_graph_retirement_target(handoff.cancel_to_ready_graph_target())
                     .map_err(|restore_error| {
                         session_registry_error(

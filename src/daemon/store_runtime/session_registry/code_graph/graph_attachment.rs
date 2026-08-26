@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use tracedecay_graph_db::{
-    GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration,
+    GraphCancellation, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey, StoreRuntimeRegistry,
@@ -22,6 +22,59 @@ pub(in crate::daemon::store_runtime::session_registry) async fn open_session_rel
     lifecycle_cancelled: &Arc<AtomicBool>,
     incarnation: StoreIncarnationV1,
     shard_id: StoreShardIdV1,
+) -> Result<(
+    GraphDbOwnerAttachmentV1,
+    CanonicalGraphStoreOwnerRetirementTargetV1,
+)> {
+    open_session_relation_owner_with_cancellation(
+        registry,
+        graph_registry,
+        incarnation,
+        shard_id,
+        Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+            lifecycle_cancelled,
+        ))),
+        Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+            lifecycle_cancelled,
+        ))),
+    )
+    .await
+}
+
+pub(in crate::daemon::store_runtime::session_registry) async fn open_session_relation_owner_for_task(
+    registry: &StoreRuntimeRegistry,
+    graph_registry: &tracedecay_graph_db::GraphDbRegistry,
+    lifecycle_cancelled: &Arc<AtomicBool>,
+    cancellation: tracedecay_usecases::observation::ObservationCancellation,
+    incarnation: StoreIncarnationV1,
+    shard_id: StoreShardIdV1,
+) -> Result<(
+    GraphDbOwnerAttachmentV1,
+    CanonicalGraphStoreOwnerRetirementTargetV1,
+)> {
+    open_session_relation_owner_with_cancellation(
+        registry,
+        graph_registry,
+        incarnation,
+        shard_id,
+        Arc::new(GraphOpenTaskCancellationV1 {
+            lifecycle: Arc::clone(lifecycle_cancelled),
+            operation: cancellation,
+        }),
+        Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+            lifecycle_cancelled,
+        ))),
+    )
+    .await
+}
+
+async fn open_session_relation_owner_with_cancellation(
+    registry: &StoreRuntimeRegistry,
+    graph_registry: &tracedecay_graph_db::GraphDbRegistry,
+    incarnation: StoreIncarnationV1,
+    shard_id: StoreShardIdV1,
+    cancellation: Arc<dyn GraphCancellation>,
+    lifecycle_cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<(
     GraphDbOwnerAttachmentV1,
     CanonicalGraphStoreOwnerRetirementTargetV1,
@@ -48,19 +101,25 @@ pub(in crate::daemon::store_runtime::session_registry) async fn open_session_rel
                 format!("{failure:?}"),
             )
         })?;
-    let registration = registration(lifecycle_cancelled, operation);
-    // Owner publication consumes the sole Store attachment. Keep that final
-    // transition synchronous: task cancellation cannot otherwise detach the
-    // blocking join while the resolver owns the attachment, stranding the
-    // map's Ready owner without a retryable graph authority.
-    let graph = graph_registry
-        .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
-            operation: registration,
-            authority_attachment: Box::new(store_attachment),
+    let registration = registration(cancellation, lifecycle_cancellation, operation);
+    let graph_registry = graph_registry.clone();
+    // Grafeo SingleFile restore is blocking CPU and allocation work. Retain
+    // the join in the daemon-owned task while moving the resolver off Tokio's
+    // cooperative workers; cancellation remains visible inside the native
+    // load through the exact registration authority.
+    let graph = tokio::task::spawn_blocking(move || {
+        hotpath::measure_block!("daemon.store.memory_graph.open", {
+            graph_registry.resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+                operation: registration,
+                authority_attachment: Box::new(store_attachment),
+            })
         })
-        .map_err(|error| {
-            session_registry_error("open session relation graph owner", error.to_string())
-        })?;
+    })
+    .await
+    .map_err(|error| session_registry_error("join session relation graph open", error.to_string()))?
+    .map_err(|error| {
+        session_registry_error("open session relation graph owner", error.to_string())
+    })?;
     Ok((graph, store_target))
 }
 
@@ -98,17 +157,25 @@ impl super::RetainedVerifiedGraphRuntimeV1 {
 }
 
 fn registration(
-    lifecycle_cancelled: &Arc<AtomicBool>,
+    cancellation: Arc<dyn GraphCancellation>,
+    lifecycle_cancellation: Arc<dyn GraphCancellation>,
     authority: Arc<dyn RetainedGraphStoreLeaseV1>,
 ) -> GraphDbRegistration {
     GraphDbRegistration {
         authority_lease: authority,
-        cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-            lifecycle_cancelled,
-        ))),
-        lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-            lifecycle_cancelled,
-        ))),
+        cancellation,
+        lifecycle_cancellation,
         deadline: Instant::now() + GRAPH_OPEN_DEADLINE,
+    }
+}
+
+struct GraphOpenTaskCancellationV1 {
+    lifecycle: Arc<AtomicBool>,
+    operation: tracedecay_usecases::observation::ObservationCancellation,
+}
+
+impl GraphCancellation for GraphOpenTaskCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.lifecycle.load(std::sync::atomic::Ordering::Acquire) || self.operation.is_cancelled()
     }
 }

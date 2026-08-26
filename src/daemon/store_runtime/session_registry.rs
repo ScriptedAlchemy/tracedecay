@@ -27,7 +27,7 @@ use super::resolver::{
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
-    MemoryGraphReconciliationTaskOwnerV1,
+    DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
@@ -297,8 +297,128 @@ impl ProjectSessionRetirementOwnerV1 {
 }
 
 struct MemoryStoreOwnerV1 {
-    graph_runtime: Arc<code_graph::RetainedVerifiedGraphRuntimeV1>,
-    reconciliation: MemoryGraphReconciliationTaskOwnerV1,
+    database: DatabaseOwnerWeakLeaseIssuerV1,
+    graph: Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    graph_open_task_key: String,
+}
+
+enum MemoryGraphAttachmentStateV1 {
+    Warming {
+        database: Option<DatabaseOwnerV1>,
+    },
+    Attached {
+        runtime: Arc<code_graph::RetainedVerifiedGraphRuntimeV1>,
+        reconciliation: Option<MemoryGraphReconciliationTaskOwnerV1>,
+        error: Option<String>,
+    },
+    Detached {
+        database: DatabaseOwnerV1,
+        error: String,
+    },
+}
+
+impl MemoryStoreOwnerV1 {
+    fn issue_database_lease(&self) -> Result<Database> {
+        self.database.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue retained memory database client",
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    fn issue_database_read_only_lease(&self) -> Result<Database> {
+        self.database.issue_read_only_lease().map_err(|error| {
+            session_registry_error(
+                "issue retained memory read-only database client",
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    fn graph_runtime(&self) -> Option<Arc<code_graph::RetainedVerifiedGraphRuntimeV1>> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { runtime, .. } => Some(Arc::clone(runtime)),
+            MemoryGraphAttachmentStateV1::Warming { .. }
+            | MemoryGraphAttachmentStateV1::Detached { .. } => None,
+        }
+    }
+
+    fn reconciliation_owner(&self) -> Option<MemoryGraphReconciliationTaskOwnerV1> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { reconciliation, .. } => reconciliation.clone(),
+            MemoryGraphAttachmentStateV1::Warming { .. }
+            | MemoryGraphAttachmentStateV1::Detached { .. } => None,
+        }
+    }
+
+    fn reconciliation_owner_and_attachment(
+        &self,
+    ) -> Option<(
+        MemoryGraphReconciliationTaskOwnerV1,
+        Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    )> {
+        self.reconciliation_owner()
+            .map(|owner| (owner, Arc::clone(&self.graph)))
+    }
+
+    fn clear_reconciliation_owner(
+        graph: &StdMutex<MemoryGraphAttachmentStateV1>,
+        retired: &MemoryGraphReconciliationTaskOwnerV1,
+    ) {
+        let mut state = graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let MemoryGraphAttachmentStateV1::Attached { reconciliation, .. } = &mut *state
+            && reconciliation
+                .as_ref()
+                .is_some_and(|owner| owner.same_coordinator(retired))
+        {
+            *reconciliation = None;
+        }
+    }
+
+    fn reserve_database_retirement(
+        &self,
+    ) -> std::result::Result<crate::db::DatabaseOwnerRetirementReservationV1, String> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { runtime, .. } => runtime
+                .reserve_database_retirement()
+                .map_err(|error| error.to_string()),
+            MemoryGraphAttachmentStateV1::Detached { database, .. } => database
+                .reserve_retirement()
+                .map_err(|error| format!("{error:?}")),
+            MemoryGraphAttachmentStateV1::Warming { database } => database
+                .as_ref()
+                .ok_or_else(|| "memory graph attachment is still warming".to_owned())?
+                .reserve_retirement()
+                .map_err(|error| format!("{error:?}")),
+        }
+    }
+
+    fn graph_error(&self) -> Option<String> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { error, .. } => error.clone(),
+            MemoryGraphAttachmentStateV1::Detached { error, .. } => Some(error.clone()),
+            MemoryGraphAttachmentStateV1::Warming { .. } => None,
+        }
+    }
 }
 
 struct RemoteNodeStoreOwnerV1 {
