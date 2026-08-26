@@ -334,7 +334,6 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-jsonrpc = { path = "../tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
@@ -382,7 +381,6 @@ crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-open = "5.3"
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
@@ -402,9 +400,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
 tar = "0.4"
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-xattr = "1"
 
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
 # resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
