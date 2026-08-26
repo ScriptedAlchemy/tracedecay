@@ -54,7 +54,15 @@ def main() -> int:
     arguments = parser.parse_args()
 
     source = arguments.source.resolve()
-    with source.joinpath("Cargo.toml").open("rb") as handle:
+    # The product package moved to `crates/tracedecay`; the repository root is
+    # now a virtual workspace manifest that declares no features at all.
+    # Reading the root here resolved every relocated tree to `legacy-default`,
+    # which silently drops `production` from the release feature set and skips
+    # the production feature-profile check below.
+    package_manifest = source.joinpath("crates", "tracedecay", "Cargo.toml")
+    if not package_manifest.is_file():
+        raise SystemExit(f"missing product package manifest at {package_manifest}")
+    with package_manifest.open("rb") as handle:
         manifest = tomllib.load(handle)
     features = manifest.get("features", {})
     if not isinstance(features, dict):

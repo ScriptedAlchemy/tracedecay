@@ -17,9 +17,12 @@ SPEC.loader.exec_module(MODULE)
 
 def main() -> None:
     repository = SCRIPT.parent.parent
+    # The repository root is a virtual workspace manifest with no `[package]`.
+    # Every member inherits `version.workspace = true`, so the shipped version
+    # is the workspace one.
     package_version = tomllib.loads(
         (repository / "Cargo.toml").read_text(encoding="utf-8")
-    )["package"]["version"]
+    )["workspace"]["package"]["version"]
     registry = json.loads((repository / "server.json").read_text(encoding="utf-8"))
     assert registry["version"] == package_version
     expected_description = (

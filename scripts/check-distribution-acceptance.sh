@@ -338,6 +338,109 @@ cargo build \
   --lib \
   --bins
 
+echo "distribution acceptance: staging the product package tree"
+# `tracedecay` is `crates/tracedecay`, but the assets it ships — the dashboard
+# bundle, host plugins, vendored payloads, benchmark corpora, and the packaged
+# fixtures — are repository-root directories shared with the whole workspace.
+# Cargo packs only what lives inside the package directory, so packaging the
+# checkout as-is yields a `tracedecay` archive with none of them, and the
+# `include` whitelist in `crates/tracedecay/Cargo.toml` silently matches
+# nothing. Stage a copy of the workspace, place exactly those root assets
+# beside the product manifest, and pack from the staged tree. `build.rs`
+# already recognises this shape: a manifest directory with `dashboard` and
+# `plugin` beside it *is* the repository root, and it embeds the prebuilt
+# app-dist rather than rebuilding the frontend.
+staged="$work/staged"
+mkdir -p -- "$staged"
+tar -C "$repo" \
+  --exclude=./target \
+  --exclude=./.git \
+  --exclude=./.codex-worktrees \
+  --exclude=./.claude-worktrees \
+  --exclude='./dashboard/node_modules' \
+  --exclude='./node_modules' \
+  -cf - . | tar -xf - -C "$staged"
+
+staged_product="$staged/crates/tracedecay"
+[[ -f "$staged_product/Cargo.toml" ]] ||
+  die "staged workspace is missing the product manifest at crates/tracedecay"
+
+# Exactly the root entries the product `include` whitelist names. Keep this in
+# sync with `include` in crates/tracedecay/Cargo.toml: a missing asset is a
+# packaging defect, never something to skip past.
+declare -a staged_root_assets=(
+  "CHANGELOG.md"
+  "LICENSE"
+  "README.md"
+  "rust-toolchain.toml"
+  ".cargo/config.toml"
+  "plugin"
+  "vendor"
+  "benchmark_data"
+  "dashboard/app-dist"
+  "dashboard/hermes-wrapper"
+  "tests/fixtures"
+  "scripts/run-session-temporal-benchmark.sh"
+)
+for asset in "${staged_root_assets[@]}"; do
+  [[ -e "$repo/$asset" ]] ||
+    die "product package asset is missing from the source tree: $asset"
+  mkdir -p -- "$staged_product/$(dirname -- "$asset")"
+  cp -a -- "$repo/$asset" "$staged_product/$(dirname -- "$asset")/"
+done
+
+# The manifest reads its readme from the workspace root, which is outside the
+# package. The staged tree carries its own copy, so point at that one; nothing
+# else about the staged manifest may differ, and the feature-wiring comparison
+# below is run against the source manifest to prove it.
+python3 - "$staged_product/Cargo.toml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+old = 'readme = "../../README.md"'
+new = 'readme = "README.md"'
+if text.count(old) != 1:
+    raise SystemExit(
+        "distribution acceptance: staged product manifest does not declare the "
+        f"expected workspace-root readme ({old})"
+    )
+path.write_text(text.replace(old, new), encoding="utf-8")
+PY
+
+# Prove the staged assets are byte-identical to the source tree, so the archive
+# below ships what the repository actually holds.
+python3 - "$repo" "$staged_product" "${staged_root_assets[@]}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+staged = pathlib.Path(sys.argv[2])
+
+
+def digest(root: pathlib.Path) -> str:
+    if root.is_file():
+        return hashlib.sha256(root.read_bytes()).hexdigest()
+    accumulator = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        accumulator.update(str(path.relative_to(root)).encode("utf-8"))
+        accumulator.update(path.read_bytes())
+    return accumulator.hexdigest()
+
+
+for asset in sys.argv[3:]:
+    source, copied = repo / asset, staged / asset
+    if not copied.exists():
+        raise SystemExit(f"distribution acceptance: staged asset is missing: {asset}")
+    if digest(source) != digest(copied):
+        raise SystemExit(
+            f"distribution acceptance: staged asset differs from its source: {asset}"
+        )
+print(f"distribution acceptance: staged {len(sys.argv) - 3} product asset entries")
+PY
+
 echo "distribution acceptance: packaging every workspace crate"
 # Every workspace member is publish = false: releases ship GitHub-release
 # artifacts, never crates.io uploads. Packaging is used here only to produce
@@ -347,7 +450,7 @@ echo "distribution acceptance: packaging every workspace crate"
 # embedded lock — every extracted tree resolves through the [patch.crates-io]
 # path overlay below, and the install step builds from a path, not an archive.
 cargo package \
-  --manifest-path "$repo/Cargo.toml" \
+  --manifest-path "$staged/Cargo.toml" \
   --workspace \
   --allow-dirty \
   --no-verify \
@@ -355,7 +458,7 @@ cargo package \
 
 metadata="$work/metadata.json"
 cargo metadata \
-  --manifest-path "$repo/Cargo.toml" \
+  --manifest-path "$staged/Cargo.toml" \
   --format-version 1 \
   --no-deps >"$metadata"
 
@@ -393,6 +496,14 @@ while IFS=$'\t' read -r name version; do
   [[ -f "$directory/Cargo.toml" ]] ||
     die "package archive did not contain $name-$version/Cargo.toml"
   package_dirs["$name"]=$directory
+  # Extracted archives are named `<name>-<version>`, but in the workspace every
+  # crate sits at `crates/<name>`. Build scripts that reach a sibling crate by
+  # relative path — `tracedecay-agent-hosts/build.rs` shares
+  # `tracedecay/src/version/build_identity.rs` through `#[path]` — resolve
+  # against that unversioned shape. `cargo package` cannot carry a file from
+  # outside the package, so give the battery the same sibling layout the
+  # workspace has rather than a copy that could drift from it.
+  ln -sfn -- "$name-$version" "$packages/$name"
 done <"$package_table"
 
 for required_package in \
@@ -440,7 +551,7 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
 PY
 
 verify_feature_wiring \
-  "$repo/Cargo.toml" \
+  "$repo/crates/tracedecay/Cargo.toml" \
   "$root_package/Cargo.toml" \
   "$repo/crates/tracedecay-code-index/Cargo.toml" \
   "$code_index_package/Cargo.toml" \

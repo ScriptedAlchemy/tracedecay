@@ -8,7 +8,7 @@
 
 mod cli_help_test;
 mod cli_non_interactive_test;
-#[path = "../../../../tests/common/mod.rs"]
+#[path = "../../../tracedecay/tests/common/mod.rs"]
 mod common;
 mod config_test;
 mod gain_test;

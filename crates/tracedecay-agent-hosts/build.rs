@@ -24,7 +24,7 @@ const REPO_ROOT_FROM_CRATE: &str = "../..";
 // pointed at the repository root, not this crate's directory: a crate
 // subdirectory is never its own git worktree top level, so `resolve` would
 // otherwise report an empty identity by design.
-#[path = "../../src/version/build_identity.rs"]
+#[path = "../tracedecay/src/version/build_identity.rs"]
 mod build_identity;
 
 // The product version this crate stamps into host-visible artifacts comes from
@@ -302,22 +302,22 @@ fn bake_build_identity() {
     for path in build_identity::watch_paths(&repo_root) {
         println!("cargo::rerun-if-changed={}", path.display());
     }
-    println!("cargo::rerun-if-changed={REPO_ROOT_FROM_CRATE}/src/version/build_identity.rs");
+    println!("cargo::rerun-if-changed=../tracedecay/src/version/build_identity.rs");
     println!(
         "cargo::rustc-env=TRACEDECAY_GIT_SHA={}",
         identity.sha.as_deref().unwrap_or("unknown")
     );
 }
 
-/// Bakes the root package's version into `TRACEDECAY_PRODUCT_VERSION`.
+/// Bakes the workspace product version into `TRACEDECAY_PRODUCT_VERSION`.
 ///
 /// `env!("CARGO_PKG_VERSION")` is resolved per compiled crate, so inside this
 /// library it is this crate's own version rather than the version of the
 /// `tracedecay` product a user installed. Everything this crate stamps into a
 /// place a host can see — plugin manifests, plugin cache paths, staleness
 /// warnings, provenance headers — is compared against that product version, so
-/// it is read here from the one place that authors it: the root package's
-/// `version` in the workspace-root `Cargo.toml`.
+/// it is read here from the one place that authors it:
+/// `[workspace.package].version` in the workspace-root `Cargo.toml`.
 ///
 /// An unresolvable root manifest is fatal on purpose. Falling back to this
 /// crate's `CARGO_PKG_VERSION` is exactly the silent mismatch this exists to
@@ -331,9 +331,9 @@ fn bake_product_version() {
     println!("cargo::rerun-if-changed=src/product_version/root_manifest.rs");
     let Some(version) = root_manifest::resolve(&repo_root) else {
         panic!(
-            "{} must declare the `{}` package's version; it is the product version this crate stamps",
+            "{} must declare a literal version in {}; it is the product version this crate stamps",
             manifest_path.display(),
-            root_manifest::ROOT_PACKAGE_NAME,
+            root_manifest::PRODUCT_VERSION_TABLE,
         );
     };
     println!("cargo::rustc-env=TRACEDECAY_PRODUCT_VERSION={version}");

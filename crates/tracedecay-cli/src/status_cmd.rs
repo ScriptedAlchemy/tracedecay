@@ -232,7 +232,7 @@ async fn handle_status_command_within(
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),
     })??;
-    let mut config = tracedecay::user_config::UserConfig::load();
+    let mut config = tracedecay_usecases::user_config::UserConfig::load();
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();

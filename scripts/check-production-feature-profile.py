@@ -51,7 +51,12 @@ def main() -> int:
     arguments = parser.parse_args()
     repo = arguments.repo.resolve()
 
-    with repo.joinpath("Cargo.toml").open("rb") as handle:
+    # The product package moved to `crates/tracedecay`; the repository root is
+    # now a virtual workspace manifest that declares no features at all.
+    package_manifest = repo.joinpath("crates", "tracedecay", "Cargo.toml")
+    if not package_manifest.is_file():
+        raise SystemExit(f"missing product package manifest at {package_manifest}")
+    with package_manifest.open("rb") as handle:
         manifest = tomllib.load(handle)
     features = manifest.get("features", {})
     if features.get("default") != ["production"]:

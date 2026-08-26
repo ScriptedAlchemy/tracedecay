@@ -61,7 +61,7 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
 pub(crate) fn try_flush(
-    config: &mut tracedecay::user_config::UserConfig,
+    config: &mut tracedecay_usecases::user_config::UserConfig,
     force: bool,
     upload_enabled: bool,
 ) {
@@ -96,7 +96,7 @@ pub(crate) fn try_flush(
 /// parallel). If `skip_suppression` is false, the warning is suppressed for 15
 /// minutes after it was last shown; if true it is always shown (used for status).
 pub(crate) fn check_for_update(
-    config: &mut tracedecay::user_config::UserConfig,
+    config: &mut tracedecay_usecases::user_config::UserConfig,
     skip_cache: bool,
     skip_suppression: bool,
 ) {
@@ -724,10 +724,10 @@ mod gather_tests {
 
     #[test]
     fn canonical_upload_denial_overrides_stale_legacy_metadata() {
-        let mut config = tracedecay::user_config::UserConfig {
+        let mut config = tracedecay_usecases::user_config::UserConfig {
             upload_enabled: true,
             pending_upload: 42,
-            ..tracedecay::user_config::UserConfig::default()
+            ..tracedecay_usecases::user_config::UserConfig::default()
         };
 
         try_flush(&mut config, true, false);

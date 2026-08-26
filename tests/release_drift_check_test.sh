@@ -11,9 +11,13 @@ write_repo() {
   local path="$GATE_SCRATCH/repo"
   rm -rf "$path"
   mkdir -p "$path"
+  # Mirror the real repository: a virtual workspace manifest that carries the
+  # released version, with no package of its own.
   cat >"$path/Cargo.toml" <<TOML
-[package]
-name = "tracedecay"
+[workspace]
+members = ["crates/tracedecay"]
+
+[workspace.package]
 version = "$version"
 TOML
   printf '%s\n' "$path"

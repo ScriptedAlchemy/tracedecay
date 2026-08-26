@@ -1,6 +1,6 @@
 [package]
 name = "tracedecay-cli"
-version = "0.1.0-beta.37"
+version.workspace = true
 publish = false
 edition.workspace = true
 description = "TraceDecay command-line interface and daemon binary"
@@ -95,7 +95,7 @@ serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
-tracedecay = { path = "../..", version = "0.1.0-beta.37", default-features = false }
+tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false }
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
@@ -124,6 +124,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
 tower = "0.5"
+tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 ureq = { version = "3", features = ["json"] }
