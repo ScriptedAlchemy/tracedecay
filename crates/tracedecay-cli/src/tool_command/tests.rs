@@ -290,6 +290,7 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
     );
 
     assert!(dispatch.allow_init);
+    assert_eq!(dispatch.project_path, Some(PathBuf::from("/tmp/project")));
 }
 
 #[test]
@@ -321,10 +322,12 @@ fn user_memory_scope_dispatch_is_projectless() {
 }
 
 #[test]
-fn filesystem_root_path_is_never_accepted_as_discovered_project() {
-    assert!(is_filesystem_root(std::path::Path::new("/")));
-    assert!(!is_filesystem_root(std::path::Path::new("/tmp/project")));
-    assert!(!is_filesystem_root(std::path::Path::new(".")));
+fn implicit_tool_dispatch_stays_projectless_without_initialized_ancestor() {
+    let root = tempfile::tempdir().expect("projectless tool fixture");
+    let nested = root.path().join("nested");
+    std::fs::create_dir_all(&nested).expect("nested directory");
+
+    assert_eq!(implicit_tool_project_path(&nested), None);
 }
 
 // --- Validation gate and corrective-error contract ---

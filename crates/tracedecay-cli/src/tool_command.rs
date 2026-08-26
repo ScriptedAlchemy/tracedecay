@@ -15,7 +15,7 @@
 //!   JSON, and exit without dispatching the tool. Otherwise it is forwarded as
 //!   the tool's boolean argument.
 //! - `--project <path>` — project root to target. Defaults to the nearest
-//!   initialised project walking up from cwd (falling back to cwd). We use
+//!   initialised project walking up from cwd. We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
 //!   that filters files within the project.
 //! - `--args <json|file|->` — escape hatch. Treats the value as the entire
@@ -41,7 +41,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -447,24 +447,21 @@ impl DaemonToolDispatch {
     }
 
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
-        // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
-        // --project wins; otherwise walk up from cwd to the nearest initialised
-        // project so the command works from subdirectories.
+        // An explicit --project wins. Otherwise only route to the nearest
+        // initialised ancestor. Keeping an unscoped invocation projectless is
+        // important: falling back to cwd can turn a broad directory such as
+        // the user profile into an accidental project handshake.
         let explicitly_targeted = explicit_project.is_some();
-        let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
-        // Never treat the filesystem root as a discovered project fallback.
-        // Callers that need a project must pass --project; otherwise the daemon
-        // serves the profile-scoped projectless route.
-        if !explicitly_targeted && is_filesystem_root(&project_path) {
-            return Self {
-                project_path: None,
-                allow_init: false,
-            };
-        }
+        let project_path = match explicit_project {
+            Some(path) => Some(tracedecay::config::resolve_path(Some(path))),
+            None => std::env::current_dir()
+                .ok()
+                .and_then(|cwd| implicit_tool_project_path(&cwd)),
+        };
         let allow_init = explicitly_targeted && FIRST_TOUCH_STORE_TOOLS.contains(&tool_name);
 
         Self {
-            project_path: Some(project_path),
+            project_path,
             allow_init,
         }
     }
@@ -497,16 +494,8 @@ fn requests_profile_authority(tool_args: &Value) -> bool {
     )
 }
 
-fn is_filesystem_root(path: &Path) -> bool {
-    let mut saw_root = false;
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) => saw_root = true,
-            Component::CurDir => {}
-            Component::ParentDir | Component::Normal(_) => return false,
-        }
-    }
-    saw_root
+fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
+    tracedecay::config::discover_project_root(cwd)
 }
 
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {

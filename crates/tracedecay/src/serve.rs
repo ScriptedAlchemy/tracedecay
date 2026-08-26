@@ -180,13 +180,15 @@ fn proxy_serve_handshake(
         .is_some();
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
-    let mut project_path = if explicit_path {
+    let mut resolved_path = if explicit_path {
         crate::config::resolve_path(path)
     } else {
         crate::config::resolve_path_with_discovery(None)
     };
 
-    let initialized = TraceDecay::is_initialized(&project_path);
+    let ambient_discovery =
+        !explicit_path && crate::config::is_ambient_project_root(&resolved_path);
+    let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
     // in-memory snapshot; missing authority disables implicit auto-init rather
     // than reading legacy `config.json` from the client process.
@@ -196,23 +198,29 @@ fn proxy_serve_handshake(
     // unindexed git worktree would surrender routing to MCP initialize roots
     // (or the daemon's own cwd) instead of initializing the client's cwd. This
     // mirrors the same default fallback in `resolve_daemon_initialize_route`.
-    let auto_init_root = (!initialized
-        && crate::config::cached_sync_config(&project_path).map_or_else(
+    let auto_init_root = (!ambient_discovery
+        && !initialized
+        && crate::config::cached_sync_config(&resolved_path).map_or_else(
             |_| crate::config::SyncConfig::default().auto_init,
             |config| config.auto_init,
         ))
-    .then(|| crate::worktree::git_worktree_root(&project_path))
-    .flatten();
+    .then(|| crate::worktree::git_worktree_root(&resolved_path))
+    .flatten()
+    .filter(|root| !crate::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
-        project_path.clone_from(root);
+        resolved_path.clone_from(root);
     }
 
-    let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
+    let project_path = (!ambient_discovery).then_some(resolved_path);
+    let scope_prefix = project_path
+        .as_deref()
+        .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
     let telemetry_timings = timings
-        || crate::config::cached_telemetry_config(&project_path)
-            .is_ok_and(|telemetry| telemetry.timings);
+        || project_path.as_deref().is_some_and(|path| {
+            crate::config::cached_telemetry_config(path).is_ok_and(|telemetry| telemetry.timings)
+        });
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
-        Some(project_path),
+        project_path,
         scope_prefix,
         telemetry_timings,
         auto_init_root.is_some(),
@@ -222,8 +230,8 @@ fn proxy_serve_handshake(
     // any incidental process-cwd discovery (for example Cursor launching the
     // MCP process from $HOME). Ordinary discovery-mode clients retain cwd
     // precedence when cwd resolved or can be auto-initialized.
-    handshake.allow_initialize_root_routing =
-        unexpanded_template_path || (!explicit_path && !initialized && auto_init_root.is_none());
+    handshake.allow_initialize_root_routing = unexpanded_template_path
+        || (!explicit_path && (!initialized || ambient_discovery) && auto_init_root.is_none());
     Ok(handshake)
 }
 

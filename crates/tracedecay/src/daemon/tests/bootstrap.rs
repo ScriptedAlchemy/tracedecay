@@ -204,6 +204,22 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
     );
 }
 
+#[test]
+fn daemon_project_route_rejects_the_user_profile_root() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let handshake = DaemonHandshake {
+        project_path: Some(home),
+        ..test_handshake_defaults()
+    };
+
+    let error = DaemonEngine::project_route(&handshake)
+        .expect_err("ambient home route must fail before project open");
+
+    assert!(error.to_string().contains("ambient user/filesystem root"));
+}
+
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
 /// is enrolled — a `.git/` repository identity marker plus a materialized
 /// profile store — without touching the profile registry. This is the on-disk

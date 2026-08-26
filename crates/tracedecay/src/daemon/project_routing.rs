@@ -55,6 +55,14 @@ pub(super) fn project_route_for_handshake(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.clone());
+    if crate::config::is_ambient_project_root(&canonical_project_path) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",
+                canonical_project_path.display()
+            ),
+        });
+    }
     let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
     Ok((canonical_project_path, route))
 }

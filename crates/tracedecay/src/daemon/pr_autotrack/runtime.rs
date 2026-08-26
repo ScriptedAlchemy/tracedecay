@@ -109,7 +109,7 @@ async fn tick(
             return;
         }
         let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() {
+        if !root.is_dir() || crate::config::is_ambient_project_root(&root) {
             continue;
         }
         // A poll loop has no right to turn an arbitrary project path into
