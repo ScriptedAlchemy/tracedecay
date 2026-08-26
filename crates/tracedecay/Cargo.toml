@@ -586,3 +586,17 @@ required-features = ["test-helpers"]
 name = "windows_durable_behavior"
 path = "tests/windows_durable_behavior.rs"
 required-features = ["test-helpers"]
+
+# Both reach the shared `tests/common` harness, which builds the host-admission
+# fixture runtime. The other integration targets stay ungated on purpose so a
+# default-feature `cargo test -p tracedecay` still runs everything that does not
+# need the fixture surface.
+[[test]]
+name = "graph_suite"
+path = "tests/graph_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "transcript_ingest_suite"
+path = "tests/transcript_ingest_suite/main.rs"
+required-features = ["test-helpers"]
