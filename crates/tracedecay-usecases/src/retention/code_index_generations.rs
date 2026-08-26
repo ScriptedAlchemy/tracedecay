@@ -311,6 +311,7 @@ pub fn attach_verified_text_artifact_under_lock(
         ));
     }
     validate_durable_generation_index(&pointer)?;
+    let attached_generation_id = descriptor.generation_id.clone();
     let entry = pointer
         .generation_index
         .iter_mut()
@@ -337,6 +338,13 @@ pub fn attach_verified_text_artifact_under_lock(
         }
         None => entry.text_artifact = Some(descriptor),
     }
+    let active_generation_id = pointer.generation_id.clone();
+    let removed = retain_bounded_generation_index_with_text_head(
+        &mut pointer.generation_index,
+        &active_generation_id,
+        Some(attached_generation_id.as_str()),
+    );
+    pointer.generation_index_truncated |= removed > 0;
     pointer.generation_index_digest = Some(durable_generation_index_digest(
         &pointer.generation_index,
         pointer.generation_index_truncated,
@@ -4715,6 +4723,73 @@ mod tests {
                 .generation_index[0]
                 .text_artifact,
             Some(descriptor)
+        );
+    }
+
+    #[test]
+    fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound() {
+        let (store, generations) = fixture_store(2);
+        let prior = &generations[0];
+        let active = &generations[1];
+        let mut pointer = read_active_pointer(store.path()).expect("active pointer");
+        let prior_artifact =
+            text_artifact(&prior.id, 31, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2);
+        pointer.generation_index.insert(
+            0,
+            DurableGenerationIndexEntryV1 {
+                generation_id: prior.id.as_str().to_owned(),
+                snapshot_content_identity: "snapshot.prior".to_owned(),
+                sealed_at_micros: 0,
+                size_bytes: prior.size_bytes,
+                generation_file: prior.file.clone(),
+                state_digest: prior.state_digest.clone(),
+                source_reference: None,
+                source_revision: None,
+                source_tree: None,
+                cardinality: None,
+                text_artifact: Some(prior_artifact),
+            },
+        );
+        pointer.generation_index_digest = Some(
+            durable_generation_index_digest(
+                &pointer.generation_index,
+                pointer.generation_index_truncated,
+            )
+            .expect("prior index digest"),
+        );
+        std::fs::write(
+            store.path().join(ACTIVE_POINTER_FILE),
+            serde_json::to_vec(&pointer).expect("serialize prior pointer"),
+        )
+        .expect("write prior pointer");
+
+        let descriptor = text_artifact(&active.id, 32, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2);
+        let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: active.file.clone(),
+            digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
+            size_bytes: active.size_bytes,
+        };
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+
+        let updated = attach_verified_text_artifact_under_lock(
+            &lock,
+            &pointer,
+            &sealed_identity,
+            descriptor.clone(),
+        )
+        .expect("attach active text artifact under byte pressure");
+        drop(lock);
+
+        assert!(updated.generation_index_truncated);
+        assert_eq!(updated.generation_index.len(), 1);
+        assert_eq!(
+            updated.generation_index[0].generation_id,
+            active.id.as_str()
+        );
+        assert_eq!(updated.generation_index[0].text_artifact, Some(descriptor));
+        assert_eq!(
+            read_active_pointer(store.path()).expect("durable pointer"),
+            updated
         );
     }
 
