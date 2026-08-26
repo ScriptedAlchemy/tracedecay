@@ -12,6 +12,9 @@ use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, VerifiedTraversalResult,
     VerifiedTraversalVisit,
 };
+use crate::limits::{
+    MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+};
 use crate::projection::graph_properties_live_bytes;
 use crate::recovery::{
     checkpoint_recovered_database, is_database_fault, open_recovered_database,
@@ -27,9 +30,8 @@ use crate::state::{
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphMutation,
-    GraphNamespace, GraphRelationRef, GraphTraversalDirection, GraphWriteBatch,
-    MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-    TraversalRequest, mutation,
+    GraphNamespace, GraphRelationRef, GraphTraversalDirection, GraphWriteBatch, TraversalRequest,
+    mutation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1142,7 +1144,7 @@ fn generation_relation_live_bytes(
 fn stage_live_bytes_exhausted() -> GraphDbError {
     GraphDbError::budget_exhausted_count(
         GraphBudgetKind::Write,
-        MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+        MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
     )
 }
 
@@ -1156,16 +1158,16 @@ fn append_generation_stage_pages(
     let mut live_bytes = 0usize;
     for index in 0..count {
         let next_bytes = property_bytes(index)?;
-        if next_bytes > MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES {
+        if next_bytes > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES {
             return Err(GraphDbError::budget_exhausted_count(
                 GraphBudgetKind::Write,
-                MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+                MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
             ));
         }
-        let page_is_full = index - start == MAX_VERIFIED_GENERATION_BATCH_MUTATIONS;
+        let page_is_full = index - start == MAX_NATIVE_GENERATION_STAGE_MUTATIONS;
         let bytes_would_overflow = live_bytes
             .checked_add(next_bytes)
-            .is_none_or(|bytes| bytes > MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES);
+            .is_none_or(|bytes| bytes > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES);
         if index > start && (page_is_full || bytes_would_overflow) {
             pages.push(GenerationStagePage {
                 ordinal: pages.len(),
@@ -1179,7 +1181,7 @@ fn append_generation_stage_pages(
         live_bytes = live_bytes.checked_add(next_bytes).ok_or_else(|| {
             GraphDbError::budget_exhausted_count(
                 GraphBudgetKind::Write,
-                MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+                MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
             )
         })?;
     }
@@ -1244,12 +1246,12 @@ fn prepare_generation_stage_batch(
     page: &GenerationStagePage,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(GraphWriteBatch, mutation::RelationEndpointNamespaces), GraphDbError> {
-    if page.mutation_count() > MAX_VERIFIED_GENERATION_BATCH_MUTATIONS
-        || page.live_bytes() > MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES
+    if page.mutation_count() > MAX_NATIVE_GENERATION_STAGE_MUTATIONS
+        || page.live_bytes() > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES
     {
         return Err(GraphDbError::budget_exhausted_count(
             GraphBudgetKind::Write,
-            MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+            MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
         ));
     }
     let mut endpoint_namespaces = mutation::RelationEndpointNamespaces::new();
@@ -1344,6 +1346,9 @@ mod tests {
         recovered_generation_enumerations, reset_canonical_buffer_allocation_growths,
         reset_manifest_canonicalizations, reset_recovered_generation_enumerations,
     };
+    use crate::limits::{
+        MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
+    };
     use crate::projection::{
         batch_canonicalizations, max_canonical_batch_mutations, reset_batch_canonicalizations,
     };
@@ -1353,8 +1358,7 @@ mod tests {
         GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
         GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphVector,
         GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-        MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-        NeverCancelled, SourceGeneration, VectorMetric,
+        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration, VectorMetric,
     };
 
     use super::{GenerationLocator, GenerationStageOutcome, generation_stage_pages};
@@ -1531,8 +1535,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
-            3,
-            "two bounded row pages plus final metadata bind are hashed once each"
+            2,
+            "one bounded native row page plus final metadata bind are hashed once each"
         );
         (owner, database, manifest)
     }
@@ -1813,8 +1817,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
-            3,
-            "a different generation must stage two bounded pages and its final metadata bind"
+            2,
+            "a different generation must stage one native page and its final metadata bind"
         );
         assert_eq!(commit_b.source_generation.as_str(), "source-b");
         assert_eq!(commit_b.watermark.as_str(), "watermark-b");
@@ -1879,26 +1883,22 @@ mod tests {
     }
 
     #[test]
-    fn generation_stage_pages_bound_mutations_and_live_property_bytes() {
-        let property = "x".repeat(1024 * 1024);
+    fn native_generation_stages_sixty_five_thousand_rows_in_one_durable_page() {
         let manifest = GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
-                GraphNamespace::new("bounded-stage").unwrap(),
-                GraphProjectionId::new("properties").unwrap(),
+                GraphNamespace::new("wide-native-stage").unwrap(),
+                GraphProjectionId::new("entities").unwrap(),
             ),
-            GraphGenerationId::new("generation-bounded").unwrap(),
-            SourceGeneration::new("source-bounded").unwrap(),
-            GraphWatermark::new("watermark-bounded").unwrap(),
+            GraphGenerationId::new("generation-wide-native-stage").unwrap(),
+            SourceGeneration::new("source-wide-native-stage").unwrap(),
+            GraphWatermark::new("watermark-wide-native-stage").unwrap(),
             vec![],
-            (0..33)
+            (0..65_536)
                 .map(|index| {
                     GraphEntity::new(
-                        GraphEntityId::new(format!("entity:{index:02}")).unwrap(),
+                        GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
                         BTreeSet::new(),
-                        BTreeMap::from([(
-                            GraphPropertyName::new("payload").unwrap(),
-                            GraphProperty::String(property.clone()),
-                        )]),
+                        BTreeMap::new(),
                     )
                     .unwrap()
                 })
@@ -1906,23 +1906,53 @@ mod tests {
             vec![],
         )
         .unwrap();
-
         let pages = generation_stage_pages(&manifest).unwrap();
+
+        assert_eq!(
+            pages.len(),
+            1,
+            "native generation staging must avoid a full-graph Grafeo commit scan every 4,096 rows"
+        );
+
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        reset_batch_canonicalizations();
+        database
+            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            2,
+            "one native data page and one metadata bind must be committed"
+        );
+        owner.close().unwrap();
+    }
+
+    #[test]
+    fn generation_stage_page_planner_bounds_mutations_and_live_property_bytes() {
+        let mut pages = Vec::new();
+        super::append_generation_stage_pages(
+            &mut pages,
+            super::GenerationStagePageKind::Entities,
+            17,
+            |_| Ok(8 * 1024 * 1024),
+        )
+        .unwrap();
 
         assert!(
             pages.len() > 1,
             "the property-byte ceiling must split this input"
         );
         assert!(pages.iter().all(|page| {
-            page.mutation_count() <= MAX_VERIFIED_GENERATION_BATCH_MUTATIONS
-                && page.live_bytes() <= MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES
+            page.mutation_count() <= MAX_NATIVE_GENERATION_STAGE_MUTATIONS
+                && page.live_bytes() <= MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES
         }));
         assert_eq!(
             pages
                 .iter()
                 .map(|page| page.mutation_count())
                 .sum::<usize>(),
-            manifest.entities.len() + manifest.relations.len()
+            17
         );
     }
 
@@ -1992,8 +2022,8 @@ mod tests {
         };
         assert_eq!(
             batch_canonicalizations(),
-            2,
-            "the exact first-page receipt must skip rebuilding that page on resume"
+            1,
+            "the exact native-page receipt must skip directly to finalization on resume"
         );
 
         reset_recovered_generation_enumerations();
@@ -2037,13 +2067,13 @@ mod tests {
         let pages = generation_stage_pages(&manifest).unwrap();
         assert_eq!(
             pages.len(),
-            2,
-            "the fixture must stage in exactly two pages"
+            1,
+            "the fixture must stage in exactly one native page"
         );
         let sealed = sealed_digest(&manifest);
         let physical_namespace = manifest.physical_namespace().unwrap();
         let (last_page_key, _) =
-            super::generation_stage_page_receipt(&manifest, &sealed, &pages[1]).unwrap();
+            super::generation_stage_page_receipt(&manifest, &sealed, &pages[0]).unwrap();
         let cancel_before_finalization = || {
             let Ok(database_guard) = database.inner.database.try_read() else {
                 return Ok(());
@@ -2105,7 +2135,7 @@ mod tests {
     #[test]
     fn later_generation_page_creates_its_first_native_vector_index() {
         let vector_property = GraphPropertyName::new("embedding").unwrap();
-        let mut entities = (0..MAX_VERIFIED_GENERATION_BATCH_MUTATIONS)
+        let mut entities = (0..MAX_NATIVE_GENERATION_STAGE_MUTATIONS)
             .map(|index| {
                 GraphEntity::new(
                     GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
