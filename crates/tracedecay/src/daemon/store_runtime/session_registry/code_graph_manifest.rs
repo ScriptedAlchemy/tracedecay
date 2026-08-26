@@ -494,8 +494,6 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             })?;
         if owner.shard_id != binding.project_shard
             || !binding.repositories.contains(&source.repository)
-            || source.projector_revision.as_str()
-                != tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION
         {
             return Err(GraphDbError::Conflict);
         }
@@ -547,6 +545,13 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             GraphNamespace::new(owner.namespace.as_str())?,
             GraphProjectionId::new(owner.projection.as_str())?,
         );
+        // The replay, not the current reader, owns the projector revision at
+        // this boundary. An interrupted historical publication must be able
+        // to reconstruct its exact manifest so the ordered journal can
+        // advance. `GraphGenerationManifest::from_replay` compares the
+        // rebuilt dependency closure and recovered digest with the durable
+        // replay before any rows are served, while current graph readers keep
+        // enforcing the current revision independently.
         tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
             projection,
             generation,

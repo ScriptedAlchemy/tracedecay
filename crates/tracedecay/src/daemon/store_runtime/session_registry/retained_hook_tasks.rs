@@ -92,6 +92,26 @@ impl RetainedHookTasks {
         }
     }
 
+    pub(super) async fn retire(&self, provider: &str, session_id: &str) -> Result<(), String> {
+        let key = format!("{provider}\0{session_id}");
+        let task = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
+            state.tasks.remove(&key)
+        };
+        let Some(task) = task else {
+            return Ok(());
+        };
+        task.cancellation.cancel();
+        match task.handle.await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(format!("retained hook task join failed: {error}")),
+        }
+    }
+
     pub(super) async fn shutdown(&self) -> Result<(), String> {
         let tasks = {
             let mut state = self
@@ -261,5 +281,57 @@ mod tests {
             .await
             .expect("shutdown task remains joinable")
             .expect("retained hook tasks shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn retiring_one_task_cancels_and_joins_only_that_key() {
+        let tasks = Arc::new(RetainedHookTasks::new());
+        let first_started = Arc::new(Notify::new());
+        let first_cancelled = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        let second_cancelled = Arc::new(AtomicBool::new(false));
+        assert!(tasks.retain("memory-graph", "project-1", {
+            let started = Arc::clone(&first_started);
+            let cancelled = Arc::clone(&first_cancelled);
+            let release = Arc::clone(&first_release);
+            move |cancellation| async move {
+                started.notify_one();
+                while !cancellation.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                cancelled.notify_one();
+                release.notified().await;
+            }
+        }));
+        assert!(tasks.retain("memory-graph", "project-2", {
+            let second_cancelled = Arc::clone(&second_cancelled);
+            move |cancellation| async move {
+                while !cancellation.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                second_cancelled.store(true, Ordering::Release);
+            }
+        }));
+        first_started.notified().await;
+
+        let retire = tokio::spawn({
+            let tasks = Arc::clone(&tasks);
+            async move { tasks.retire("memory-graph", "project-1").await }
+        });
+        first_cancelled.notified().await;
+        assert!(!retire.is_finished(), "retirement must join its task");
+        assert!(!second_cancelled.load(Ordering::Acquire));
+
+        first_release.notify_one();
+        retire
+            .await
+            .expect("retirement task remains joinable")
+            .expect("one retained task retires cleanly");
+        assert!(tasks.retain("memory-graph", "project-3", |_| async {}));
+        assert!(!second_cancelled.load(Ordering::Acquire));
+
+        tasks.begin_shutdown();
+        tasks.shutdown().await.expect("remaining tasks shut down");
+        assert!(second_cancelled.load(Ordering::Acquire));
     }
 }

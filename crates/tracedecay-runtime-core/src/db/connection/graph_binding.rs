@@ -97,6 +97,9 @@ impl Database {
         &self,
     ) -> std::result::Result<MemoryGraphRuntimeOperationV1, MemoryGraphRuntimeOperationErrorV1>
     {
+        if !self.is_writable() {
+            return Err(MemoryGraphRuntimeOperationErrorV1::Unbound);
+        }
         let bound = self
             .inner
             .memory_graph_runtime

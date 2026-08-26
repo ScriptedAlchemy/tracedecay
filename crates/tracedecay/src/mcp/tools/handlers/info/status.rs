@@ -148,12 +148,22 @@ pub(crate) async fn handle_status(
     let include_session_ingest = status_arg_flag(&args, "include_session_ingest", true);
     let include_staleness = status_arg_flag(&args, "include_staleness", true);
 
+    let graph_statistics = hotpath::future!(
+        graph_statistics_value(generation_census_reader),
+        label = "mcp.status.generation_census"
+    )
+    .await?;
     let mut output = json!({
         "project_root": cg.project_root(),
-        "graph_statistics": graph_statistics_value(generation_census_reader).await?,
+        "graph_statistics": graph_statistics,
     });
     let code_index_freshness = match code_index_freshness_reader {
-        Some(reader) => match reader(cg.project_root().to_path_buf()).await {
+        Some(reader) => match hotpath::future!(
+            reader(cg.project_root().to_path_buf()),
+            label = "mcp.status.code_index_freshness"
+        )
+        .await
+        {
             Some(freshness) => {
                 let authoritative = freshness.latest_generation_id.is_some()
                     && freshness.coverage == "complete"

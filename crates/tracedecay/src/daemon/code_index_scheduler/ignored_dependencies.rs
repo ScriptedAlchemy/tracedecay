@@ -259,7 +259,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         let sampled_signature = self.worktree_stat_signature().ok();
         self.mark_reconciled(sampled_metadata, sampled_signature);
-        let latest = self.bind_latest_complete(Arc::clone(&generation));
+        let latest = self.bind_latest_complete(Arc::clone(&generation), None);
         let publication = publication_evidence(reextracted_files, &generation)?;
         Ok(CodeIndexIgnoredDependencyBuildV1 {
             outcome: CodeIndexIgnoredDependencyIndexOutcomeV1 {

@@ -109,6 +109,7 @@ fn seed_sealed_generation_store(store_root: &Path, count: usize) {
         source_reference: None,
         source_revision: None,
         source_tree: None,
+        cardinality: None,
         text_artifact: None,
     }];
     let generation_index_digest =

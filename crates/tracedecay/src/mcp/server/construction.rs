@@ -117,6 +117,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
+    pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
@@ -227,6 +228,7 @@ impl McpServerConstructionContext {
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
+            code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -324,6 +326,7 @@ impl McpServerConstructionContext {
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
+            code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -387,6 +390,7 @@ impl McpServerConstructionContext {
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
+            code_index_freshness_probe_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -426,6 +430,14 @@ impl McpServerConstructionContext {
         sink: super::CodeIndexReconcileSink,
     ) -> Self {
         self.code_index_reconcile_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_code_index_freshness_probe_sink(
+        mut self,
+        sink: super::CodeIndexFreshnessProbeSink,
+    ) -> Self {
+        self.code_index_freshness_probe_sink = Some(sink);
         self
     }
 

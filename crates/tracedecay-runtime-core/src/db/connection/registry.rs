@@ -575,12 +575,27 @@ impl DatabaseOwnerWeakLeaseIssuerV1 {
     /// is ready. The lifecycle lock covers both readiness validation and
     /// client-token issuance, so retirement fencing and issuance linearize.
     pub fn issue_lease(&self) -> Result<Database, DatabaseOwnerWeakLeaseIssuerErrorV1> {
+        self.issue_client_lease(None)
+    }
+
+    /// Issues a fresh independently counted read-only client while the exact
+    /// owner remains ready. A writable owner is narrowed for this client; an
+    /// already read-only owner preserves its published access policy.
+    pub fn issue_read_only_lease(&self) -> Result<Database, DatabaseOwnerWeakLeaseIssuerErrorV1> {
+        self.issue_client_lease(Some(DatabaseAccessMode::ReadOnly))
+    }
+
+    fn issue_client_lease(
+        &self,
+        access: Option<DatabaseAccessMode>,
+    ) -> Result<Database, DatabaseOwnerWeakLeaseIssuerErrorV1> {
         let state = self
             .state
             .upgrade()
             .ok_or(DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable)?;
-        DatabaseOwnerV1::issue_client_lease_from_state(&state, state.access).map_err(|error| {
-            match error {
+        let access = access.unwrap_or(state.access);
+        DatabaseOwnerV1::issue_client_lease_from_state(&state, access).map_err(
+            |error| match error {
                 DatabaseOwnerErrorV1::RetirementFenced => {
                     DatabaseOwnerWeakLeaseIssuerErrorV1::Retiring
                 }
@@ -592,8 +607,8 @@ impl DatabaseOwnerWeakLeaseIssuerV1 {
                 | DatabaseOwnerErrorV1::Runtime(_) => {
                     DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable
                 }
-            }
-        })
+            },
+        )
     }
 
     /// Exact non-retaining Store identity selected when this issuer was

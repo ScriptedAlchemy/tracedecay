@@ -72,7 +72,9 @@ fn with_publication_context<T>(
     );
     let probe = GraphPublicationProbeV1 {
         request_cancellation,
-        lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+        lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::new(
+            AtomicBool::new(false),
+        ))),
         deadline_at: Instant::now() + Duration::from_secs(30),
         cancellation: cancellation.clone(),
         deadline: deadline.clone(),
@@ -598,9 +600,12 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     use tracedecay_graph_db::{
-        GraphGenerationManifestProvider, GraphNamespace, SealedGraphStateDigest,
+        GraphGenerationManifest, GraphGenerationManifestProvider, GraphNamespace,
+        SealedGraphStateDigest,
     };
-    use tracedecay_store::{BrainId, GraphNamespaceV1, StoreShardIdV1, UserProfileId};
+    use tracedecay_store::{
+        BrainId, GraphNamespaceV1, GraphPublicationInputDigestV1, StoreShardIdV1, UserProfileId,
+    };
 
     use super::super::code_graph_manifest::DaemonCodeGraphManifestProviderV1;
 
@@ -716,6 +721,44 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
         .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
         .expect("hydration reuses the offered decode without reading the seal");
     assert_eq!(manifest.projection.namespace.as_str(), namespace.as_str());
+
+    // A pending predecessor owns the projector revision recorded in its
+    // durable replay, even after the current reader has advanced. Rebuild that
+    // exact historical manifest and prove the replay digests accept it; this
+    // is what lets an interrupted predecessor finish before the current
+    // publication appends.
+    let legacy_revision = GraphProjectorRevision::try_from("code-graph-projector.v4".to_owned())
+        .expect("persisted predecessor revision");
+    let legacy_source = SealedCodeGenerationReplay {
+        projector_revision: legacy_revision.clone(),
+        ..source.clone()
+    };
+    let legacy_manifest =
+        tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
+            projection,
+            &decoded,
+            &legacy_revision,
+            &|| Ok(()),
+        )
+        .expect("build the predecessor manifest");
+    let legacy_replay = legacy_manifest
+        .relational_sealed_replay(
+            shard,
+            tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+                &generation_id,
+                &legacy_revision,
+            )
+            .expect("predecessor idempotency key"),
+            GraphPublicationInputDigestV1::new(format!("sha256:{}", "c".repeat(64)))
+                .expect("predecessor input digest"),
+            None,
+            legacy_source,
+            &|| Ok(()),
+        )
+        .expect("predecessor relational replay");
+    let reconstructed = GraphGenerationManifest::from_replay(&legacy_replay, &provider, &|| Ok(()))
+        .expect("the exact historical predecessor must hydrate and verify");
+    assert_eq!(reconstructed, *legacy_manifest);
 
     // A different sealed payload must never be answered from this offer.
     let foreign = SealedCodeGenerationReplay {

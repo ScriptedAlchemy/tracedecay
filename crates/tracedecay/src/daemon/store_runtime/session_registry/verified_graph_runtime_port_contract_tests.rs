@@ -75,6 +75,7 @@ impl ContractFixture {
             .project_memory(project_id.clone(), roots.clone())
             .await
             .expect("project graph database");
+        drop(await_mounted_graph_operation(&project_database).await);
         let sessions = self
             .registry
             .project_sessions(project_id.clone(), roots)
@@ -167,6 +168,25 @@ fn mounted_graph_operation(
         .expect("mounted database issues one graph operation")
 }
 
+async fn await_mounted_graph_operation(
+    database: &crate::db::Database,
+) -> crate::db::MemoryGraphRuntimeOperationV1 {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match database.issue_memory_graph_runtime_operation() {
+                Ok(operation) => break operation,
+                Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+                | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("memory graph attachment failed: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("memory graph attachment becomes available")
+}
+
 fn publish_through_database(
     database: &crate::db::Database,
     manifest: &GraphGenerationManifest,
@@ -195,7 +215,7 @@ fn snapshot_through_database(
 }
 
 #[tokio::test]
-async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
+async fn runtime_binding_is_absent_before_bind_and_rebinds_idempotently() {
     let fixture = ContractFixture::new("binding").await;
     let project_id = project_id("binding");
     let (project_database, sessions) = fixture.mount_unbound(&project_id).await;
@@ -208,9 +228,10 @@ async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
         sessions.bind_project_graph_runtime(runtime.clone()).is_ok(),
         "first graph proxy binding"
     );
-    let rejected = sessions
-        .bind_project_graph_runtime(runtime.clone())
-        .expect_err("second graph proxy binding must be rejected");
+    assert!(
+        sessions.bind_project_graph_runtime(runtime.clone()).is_ok(),
+        "binding the exact same graph proxy is idempotent"
+    );
 
     let first = mounted_graph_operation(&project_database);
     let second = mounted_graph_operation(&project_database);
@@ -230,11 +251,6 @@ async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
     assert_eq!(bound.relational_binding(), runtime.relational_binding());
     assert_eq!(
         bound.relational_verified_locator(),
-        runtime.relational_verified_locator()
-    );
-    assert_eq!(rejected.relational_binding(), runtime.relational_binding());
-    assert_eq!(
-        rejected.relational_verified_locator(),
         runtime.relational_verified_locator()
     );
 }
@@ -271,7 +287,7 @@ async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() 
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile = mounted_graph_operation(&profile_database);
+    let profile = await_mounted_graph_operation(&profile_database).await;
     assert_ne!(
         first.runtime().relational_binding(),
         profile.runtime().relational_binding()
@@ -482,6 +498,10 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
     let first_manifest = manifest(&first_projection, "retire-first", "1");
     let second_manifest = manifest(&second_projection, "retire-second", "1");
     let first_shard = first_database.registered_binding().shard_id.clone();
+    let first_proxy = first_database
+        .memory_graph_runtime()
+        .expect("first graph runtime proxy");
+    drop(first_database);
 
     fixture
         .registry
@@ -489,7 +509,7 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
         .await
         .expect("retire exact first-shard reconciliation owner");
     assert!(matches!(
-        reconcile_through_database(&first_database, &first_manifest, key("retire-first")),
+        reconcile_through_trait(&first_proxy, &first_manifest, key("retire-first")),
         Err(GraphDbError::Cancelled)
     ));
     reconcile_through_database(&second_database, &second_manifest, key("retire-second"))
@@ -497,14 +517,20 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
 
     fixture
         .registry
+        .retire_project_memory_graph(&first_id)
+        .await
+        .expect("retire the exact first project memory owner");
+    fixture
+        .registry
         .drop_project_runtime_caches(&first_id)
         .await;
-    drop((first_database, first_sessions));
+    drop(first_sessions);
     let remounted = fixture
         .registry
         .project_memory(first_id.clone(), fixture.project_roots(&first_id))
         .await
         .expect("same project remounts with a fresh lifecycle");
+    drop(await_mounted_graph_operation(&remounted).await);
     reconcile_through_database(&remounted, &first_manifest, key("retire-first-remounted"))
         .expect("remounted reconciliation lifecycle is fresh");
 }
@@ -538,6 +564,11 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
 #[tokio::test]
 async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_graph() {
     let fixture = ContractFixture::new("session-relation-close-retry").await;
+    let session_sync = Arc::new(crate::daemon::session_sync::DaemonSessionSyncService::default());
+    fixture
+        .registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
     let project_id = project_id("session-relation-close-retry");
     let (_project_database, external_old_sessions) = fixture.mount_unbound(&project_id).await;
     let old_binding = external_old_sessions.binding().clone();
@@ -549,7 +580,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .expect_err("external old session facade must refuse graph close");
     match refusal {
         TraceDecayError::Database { operation, message } => {
-            assert_eq!(operation, "close graph runtime");
+            assert_eq!(operation, "reserve project session graph retirement");
             assert!(
                 message.contains("graph database conflict"),
                 "unexpected close refusal: {message}"
@@ -636,6 +667,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .project_memory(project_id.clone(), [project_root.clone()])
         .await
         .expect("project memory database");
+    drop(await_mounted_graph_operation(&project_database).await);
     let project_projection = projection("verified-restart-project");
     let project_manifest = manifest(&project_projection, "verified-restart-project", "1");
     let project_snapshot = publish_through_database(
@@ -652,6 +684,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .profile_memory()
         .await
         .expect("profile memory database");
+    drop(await_mounted_graph_operation(&profile_database).await);
     let profile_projection = projection("verified-restart-profile");
     let profile_manifest = manifest(&profile_projection, "verified-restart-profile", "1");
     let profile_snapshot = publish_through_database(
@@ -675,6 +708,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .project_memory(project_id.clone(), [project_root])
         .await
         .expect("restarted project memory database");
+    drop(await_mounted_graph_operation(&restarted_project_database).await);
     let recovered_project =
         snapshot_through_database(&restarted_project_database, &project_projection)
             .expect("recover project verified head")
@@ -685,6 +719,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .profile_memory()
         .await
         .expect("restarted profile memory database");
+    drop(await_mounted_graph_operation(&restarted_profile_database).await);
     let recovered_profile =
         snapshot_through_database(&restarted_profile_database, &profile_projection)
             .expect("recover profile verified head")
@@ -903,18 +938,24 @@ async fn registry_drop_cancels_retained_trait_runtime_operations() {
     let projection = projection("lifecycle-cancellation");
     let manifest = manifest(&projection, "lifecycle-cancellation", "1");
     let operation = mounted_graph_operation(&database);
+    let lifecycle_cancelled = Arc::clone(&fixture.registry.graph_lifecycle_cancelled);
 
     drop(fixture);
+    assert!(
+        lifecycle_cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "registry drop must cancel the shared graph lifecycle"
+    );
 
-    assert!(matches!(
-        publish_through_trait(
-            operation.runtime(),
-            &manifest,
-            key("lifecycle-cancellation"),
-            false,
-        ),
-        Err(GraphDbError::Cancelled)
-    ));
+    let publication = publish_through_trait(
+        operation.runtime(),
+        &manifest,
+        key("lifecycle-cancellation"),
+        false,
+    );
+    assert!(
+        matches!(publication, Err(GraphDbError::Cancelled)),
+        "unexpected post-drop publication outcome: {publication:?}"
+    );
     assert!(matches!(
         reconcile_through_trait(
             operation.runtime(),

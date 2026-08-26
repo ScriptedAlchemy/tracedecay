@@ -494,18 +494,17 @@ fn corrupt_import_relation_identity_and_properties_are_refused() {
 }
 
 #[test]
-fn projector_v4_is_accepted_and_v3_is_a_generation_mismatch() {
-    assert_eq!(CODE_GRAPH_PROJECTOR_REVISION, "code-graph-projector.v4");
+fn current_projector_is_accepted_and_v4_is_a_generation_mismatch() {
     let (files, imports) = two_import_fixture();
     let reader = import_reader(&files, &imports);
     assert_eq!(reader.generation(), &generation());
 
-    let v3 = import_manifest(&files, &imports, "code-graph-projector.v3");
-    let snapshot = VerifiedGraphSnapshot::memory(v3, Arc::new(NeverCancelled))
+    let v4 = import_manifest(&files, &imports, "code-graph-projector.v4");
+    let snapshot = VerifiedGraphSnapshot::memory(v4, Arc::new(NeverCancelled))
         .expect("open legacy-revision snapshot");
     assert_eq!(
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, generation())
-            .expect_err("v3 snapshot must not satisfy the v4 reader"),
+            .expect_err("v4 snapshot must not satisfy the current reader"),
         CodeGraphProjectionError::GenerationMismatch
     );
 }

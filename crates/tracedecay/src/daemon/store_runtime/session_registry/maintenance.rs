@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 #[cfg(test)]
@@ -48,6 +48,7 @@ fn lock_registered_schema_convergence_statuses(
 
 pub(super) struct RegisteredSchemaConvergenceMaintenance {
     accepting: AtomicBool,
+    foreground_project_opens: Arc<ForegroundProjectOpenState>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
     #[cfg(test)]
@@ -56,10 +57,57 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
 }
 
+#[derive(Default)]
+struct ForegroundProjectOpenState {
+    active: AtomicUsize,
+    settled: tokio::sync::Notify,
+}
+
+pub(crate) struct ForegroundProjectOpenAdmission {
+    state: Arc<ForegroundProjectOpenState>,
+}
+
+impl Drop for ForegroundProjectOpenAdmission {
+    fn drop(&mut self) {
+        if self.state.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.state.settled.notify_waiters();
+        }
+    }
+}
+
+impl ForegroundProjectOpenState {
+    fn admit(self: &Arc<Self>) -> Result<ForegroundProjectOpenAdmission> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .map_err(|_| {
+                session_registry_error(
+                    "admit foreground project open",
+                    "foreground project-open admission counter exhausted".to_owned(),
+                )
+            })?;
+        Ok(ForegroundProjectOpenAdmission {
+            state: Arc::clone(self),
+        })
+    }
+
+    async fn wait_until_settled(&self) {
+        loop {
+            let settled = self.settled.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
 impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn new() -> Self {
         Self {
             accepting: AtomicBool::new(true),
+            foreground_project_opens: Arc::new(ForegroundProjectOpenState::default()),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -67,6 +115,10 @@ impl RegisteredSchemaConvergenceMaintenance {
             #[cfg(test)]
             gate: StdMutex::new(None),
         }
+    }
+
+    fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
+        self.foreground_project_opens.admit()
     }
 
     #[cfg(test)]
@@ -115,8 +167,10 @@ impl RegisteredSchemaConvergenceMaintenance {
             .expect("registered schema convergence test gate lock remains healthy")
             .clone();
         let statuses = Arc::clone(&self.statuses);
+        let foreground_project_opens = Arc::clone(&self.foreground_project_opens);
         let task_shard_id = shard_id.clone();
         let task = tokio::spawn(async move {
+            foreground_project_opens.wait_until_settled().await;
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.block().await;
@@ -259,19 +313,19 @@ impl RegisteredSchemaConvergenceTestGateState {
 }
 
 #[cfg(test)]
-pub(super) struct RegisteredSchemaConvergenceTestGate {
+pub(crate) struct RegisteredSchemaConvergenceTestGate {
     state: Arc<RegisteredSchemaConvergenceTestGateState>,
 }
 
 #[cfg(test)]
 impl RegisteredSchemaConvergenceTestGate {
-    pub(super) async fn wait_until_blocked(&self) {
+    pub(crate) async fn wait_until_blocked(&self) {
         while !self.state.started.load(Ordering::Acquire) {
             self.state.started_notify.notified().await;
         }
     }
 
-    pub(super) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.state.release.add_permits(1);
     }
 }
@@ -311,6 +365,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    pub(crate) fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
+        self.registered_schema_convergence
+            .begin_foreground_project_open()
+    }
+
     #[cfg(test)]
     pub(crate) fn registered_schema_convergence_status(
         &self,
@@ -320,7 +379,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[cfg(test)]
-    pub(super) fn block_registered_schema_convergence_for_test(
+    pub(crate) fn block_registered_schema_convergence_for_test(
         &self,
     ) -> RegisteredSchemaConvergenceTestGate {
         self.registered_schema_convergence.install_gate()
