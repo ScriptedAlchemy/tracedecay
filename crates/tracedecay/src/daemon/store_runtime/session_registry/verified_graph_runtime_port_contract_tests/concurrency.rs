@@ -3,8 +3,8 @@ use std::sync::{Arc, Barrier};
 use tracedecay_graph_db::{GraphDbError, GraphGenerationManifest, VerifiedGraphSnapshot};
 
 use super::{
-    ContractFixture, key, manifest, project_id, projection, reconcile_through_trait,
-    snapshot_through_trait,
+    ContractFixture, await_mounted_graph_operation, key, manifest, project_id, projection,
+    reconcile_through_trait, snapshot_through_trait,
 };
 
 fn reconcile_pair(
@@ -94,6 +94,7 @@ async fn project_and_profile_ports_serialize_exact_replay_and_changed_input_conf
         .profile_memory()
         .await
         .expect("profile memory database");
+    drop(await_mounted_graph_operation(&profile_database).await);
     assert_concurrent_replay_and_conflict(project_database, "project");
     assert_concurrent_replay_and_conflict(profile_database, "profile");
 }

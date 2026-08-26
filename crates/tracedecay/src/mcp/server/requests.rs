@@ -33,6 +33,14 @@ struct RoutedToolCall {
     selected_server: Option<Arc<McpServer>>,
 }
 
+struct ToolActivityPublishRunning(Arc<AtomicBool>);
+
+impl Drop for ToolActivityPublishRunning {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 struct ToolTokenAccounting {
     raw_file_tokens: u64,
     response_tokens: u64,
@@ -862,7 +870,7 @@ impl McpServer {
             .entry(tool_name.to_string())
             .or_insert(0) += 1;
         if publish_activity {
-            self.publish_tool_call_activity(tool_name, cg).await;
+            self.publish_tool_call_activity(tool_name, cg);
         }
     }
 
@@ -1208,22 +1216,38 @@ impl McpServer {
         }
     }
 
-    async fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
+    fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
         if !tracedecay_usecases::event_lane::enabled(self.session_db.as_deref()) {
             return;
         }
-        let Some(activity_db) = self.session_db.as_deref() else {
+        if self
+            .tool_activity_publish_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let Some(activity_db) = self.session_db.clone() else {
+            self.tool_activity_publish_running
+                .store(false, Ordering::Release);
             return;
         };
-        tracedecay_usecases::event_lane::publish(
-            activity_db,
-            tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall,
-            cg.project_root(),
-            cg.store_layout().identity.project_id.as_deref(),
-            1,
-            Some(tool_name),
-        )
-        .await;
+        let running = ToolActivityPublishRunning(Arc::clone(&self.tool_activity_publish_running));
+        let project_root = cg.project_root().to_path_buf();
+        let project_id = cg.store_layout().identity.project_id.clone();
+        let tool_name = tool_name.to_owned();
+        self.spawn_background_task(async move {
+            let _running = running;
+            tracedecay_usecases::event_lane::publish(
+                &activity_db,
+                tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall,
+                &project_root,
+                project_id.as_deref(),
+                1,
+                Some(&tool_name),
+            )
+            .await;
+        });
     }
 
     fn message_search_worker_is_unavailable(&self, tool_name: &str, arguments: &Value) -> bool {
@@ -1639,5 +1663,86 @@ mod git_read_control_tests {
             );
         }
         assert!(is_controlled_read_tool("tracedecay_search"));
+    }
+}
+
+#[cfg(test)]
+mod activity_dispatch_tests {
+    use super::*;
+
+    /// Optional activity persistence must never serialize a foreground tool
+    /// read behind the project-session writer. The write remains daemon-owned
+    /// and durable once that writer becomes available.
+    #[tokio::test]
+    async fn tool_dispatch_does_not_wait_for_activity_persistence() {
+        let (cg, _dir, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered test server");
+        let (graph, live_branch) = server.reopen_if_branch_drifted_memoized().await;
+        let activity_db = server
+            .session_db
+            .as_deref()
+            .expect("registered project-session activity authority");
+        let project_id = activity_db
+            .binding()
+            .shard_id
+            .scope
+            .project_id()
+            .expect("project-scoped activity store")
+            .as_str()
+            .to_owned();
+        assert_eq!(
+            graph.store_layout().identity.project_id.as_deref(),
+            Some(project_id.as_str()),
+            "the graph and registered activity authority must name the same project",
+        );
+        let blocked_writer = activity_db
+            .begin_write_transaction()
+            .await
+            .expect("hold activity writer");
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            server.begin_tool_dispatch("tracedecay_status", &graph, &live_branch, false, true),
+        )
+        .await
+        .expect("foreground dispatch must not wait for optional activity persistence");
+
+        blocked_writer
+            .commit()
+            .await
+            .expect("release activity writer");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while server.tool_activity_publish_running.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached activity persistence must settle after writer release");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let observed =
+                    tracedecay_usecases::event_lane::replay_after(activity_db, &project_id, None)
+                        .await
+                        .is_some_and(|replay| {
+                            replay.records.iter().any(|record| {
+                                record.pulse.family
+                                    == tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall
+                                    && record.pulse.detail.is_none()
+                            })
+                        });
+                if observed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached activity persistence must complete after writer release");
+
+        server.shutdown().await;
     }
 }

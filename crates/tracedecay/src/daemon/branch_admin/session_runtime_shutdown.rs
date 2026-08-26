@@ -37,6 +37,36 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
 }
 
 impl StoreAdministration {
+    #[cfg(test)]
+    pub(in crate::daemon) async fn install_long_lived_session_runtime_registry_for_test(
+        &self,
+    ) -> Result<()> {
+        let identity = self.profile_identity()?.clone();
+        let profile_root = authority::canonical_identity_path(identity.profile_root())?;
+        let registry = Arc::new(
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(
+                identity.clone(),
+                true,
+            )
+            .await?,
+        );
+        let cell = {
+            let mut registries = self.session_runtime_registries.lock().await;
+            Arc::clone(
+                &registries
+                    .entry(profile_root)
+                    .or_insert_with(|| SessionRuntimeRegistryEntryV1 {
+                        identity,
+                        registry: Arc::new(tokio::sync::OnceCell::new()),
+                    })
+                    .registry,
+            )
+        };
+        cell.set(registry).map_err(|_| TraceDecayError::Config {
+            message: "test session runtime registry was already initialized".to_owned(),
+        })
+    }
+
     pub(in crate::daemon) async fn session_runtime_registry(
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>

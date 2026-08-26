@@ -1015,7 +1015,7 @@ async fn request_freshness_for_repository(
                 }
             }
         };
-        match code_index_schedulers.request_for_root(&identity) {
+        match code_index_schedulers.request_for_root(&identity).await {
             GitStateChangeRequestV1::Accepted => {
                 accepted = true;
                 log_daemon_event(
@@ -1023,7 +1023,9 @@ async fn request_freshness_for_repository(
                     &[("project", project_root.display().to_string())],
                 );
             }
-            GitStateChangeRequestV1::Busy | GitStateChangeRequestV1::IdentityMismatch => {
+            GitStateChangeRequestV1::Busy
+            | GitStateChangeRequestV1::WorkerUnavailable
+            | GitStateChangeRequestV1::IdentityMismatch => {
                 retry.insert(project_root);
             }
             GitStateChangeRequestV1::Unmounted => {

@@ -27,7 +27,7 @@ use super::resolver::{
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
-    MemoryGraphReconciliationTaskOwnerV1,
+    DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
@@ -64,9 +64,149 @@ struct SessionGraphOwnerV1 {
     store_target: CanonicalGraphStoreOwnerRetirementTargetV1,
 }
 
+enum SessionGraphAttachmentStateV1 {
+    Warming,
+    Attached { owner: Option<SessionGraphOwnerV1> },
+    Detached { error: String },
+}
+
 struct RegisteredSessionOwnerV1 {
     database: RegisteredGlobalDbOwnerV1,
-    relation_graph: SessionGraphOwnerV1,
+    relation_graph: Arc<StdMutex<SessionGraphAttachmentStateV1>>,
+    graph_settled: Arc<tokio::sync::Notify>,
+    graph_open_task_key: String,
+}
+
+impl RegisteredSessionOwnerV1 {
+    fn with_attached_graph(
+        database: RegisteredGlobalDbOwnerV1,
+        relation_graph: SessionGraphOwnerV1,
+        graph_open_task_key: String,
+    ) -> Self {
+        Self {
+            database,
+            relation_graph: Arc::new(StdMutex::new(SessionGraphAttachmentStateV1::Attached {
+                owner: Some(relation_graph),
+            })),
+            graph_settled: Arc::new(tokio::sync::Notify::new()),
+            graph_open_task_key,
+        }
+    }
+
+    fn issue_lease(&self, scope: SessionRelationScope) -> Result<RegisteredGlobalDbLeaseV1> {
+        let database = self.database.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue registered session database client",
+                format!("{error:?}"),
+            )
+        })?;
+        let state = self
+            .relation_graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let SessionGraphAttachmentStateV1::Attached { owner: Some(owner) } = &*state else {
+            return Ok(database);
+        };
+        Self::bind_relation_graph(&database, owner, scope)?;
+        Ok(database)
+    }
+
+    fn bind_relation_graph(
+        database: &RegisteredGlobalDbLeaseV1,
+        owner: &SessionGraphOwnerV1,
+        scope: SessionRelationScope,
+    ) -> Result<()> {
+        let graph = owner.graph.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue registered session relation graph client",
+                error.to_string(),
+            )
+        })?;
+        database
+            .bind_session_relation_graph(
+                scope,
+                graph,
+                owner.graph.binding().clone(),
+                owner.graph.verified_locator().clone(),
+            )
+            .map_err(|_| {
+                session_registry_error(
+                    "bind issued registered session relation graph",
+                    "issued graph client did not match the exact registered session owner"
+                        .to_owned(),
+                )
+            })?;
+        Ok(())
+    }
+
+    fn graph_unavailable_reason(&self) -> String {
+        let state = self
+            .relation_graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            SessionGraphAttachmentStateV1::Warming => {
+                "Project session relation graph is warming".to_owned()
+            }
+            SessionGraphAttachmentStateV1::Detached { error } => {
+                format!("Project session relation graph is unavailable: {error}")
+            }
+            SessionGraphAttachmentStateV1::Attached { owner: None } => {
+                "Project session relation graph is reserved for retirement".to_owned()
+            }
+            SessionGraphAttachmentStateV1::Attached { owner: Some(_) } => {
+                "Project session relation graph attachment changed during retirement admission"
+                    .to_owned()
+            }
+        }
+    }
+
+    fn into_retirement(self) -> std::result::Result<ProjectSessionRetirementOwnerV1, Self> {
+        let relation_graph = {
+            let mut state = self
+                .relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                SessionGraphAttachmentStateV1::Attached { owner } => owner.take(),
+                SessionGraphAttachmentStateV1::Warming
+                | SessionGraphAttachmentStateV1::Detached { .. } => None,
+            }
+        };
+        let Some(relation_graph) = relation_graph else {
+            return Err(self);
+        };
+        let SessionGraphOwnerV1 {
+            graph,
+            store_target,
+        } = relation_graph;
+        Ok(ProjectSessionRetirementOwnerV1 {
+            database: self.database,
+            graph,
+            store_target: Some(store_target),
+            graph_open_task_key: self.graph_open_task_key,
+        })
+    }
+
+    fn take_graph_store_identity(
+        &self,
+    ) -> Option<(
+        tracedecay_store::StoreRuntimeBindingV1,
+        tracedecay_store::VerifiedStoreLocatorV1,
+    )> {
+        let mut state = self
+            .relation_graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let SessionGraphAttachmentStateV1::Attached { owner } = &mut *state else {
+            return None;
+        };
+        let owner = owner.take()?;
+        Some((
+            owner.graph.binding().clone(),
+            owner.graph.verified_locator().clone(),
+        ))
+    }
 }
 
 /// A canonical project owner map may be passed to recovery orchestration, but
@@ -104,6 +244,44 @@ impl ProjectRuntimeOwnerRegistryV1 {
             .collect())
     }
 
+    async fn wait_for_session_graph(&self, project_id: &ProjectId) -> Result<()> {
+        let (relation_graph, graph_settled) = {
+            let entries = self.lock().map_err(|_| {
+                session_registry_error(
+                    "await project session relation graph",
+                    "project runtime owner map lock is poisoned".to_owned(),
+                )
+            })?;
+            let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+                return Err(TraceDecayError::project_route(
+                    "project_runtime_replacing_sessions",
+                    true,
+                    "Project session runtime is not accepting graph settlement",
+                ));
+            };
+            let Some(owner) = owners.sessions.as_ref() else {
+                return Ok(());
+            };
+            (
+                Arc::clone(&owner.relation_graph),
+                Arc::clone(&owner.graph_settled),
+            )
+        };
+        loop {
+            let notified = graph_settled.notified();
+            let warming = matches!(
+                &*relation_graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                SessionGraphAttachmentStateV1::Warming
+            );
+            if !warming {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+
     fn reserve_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -132,6 +310,22 @@ impl ProjectRuntimeOwnerRegistryV1 {
             );
             return Ok(None);
         };
+        let sessions = match ProjectSessionRetirementOwnerV1::from_ready(sessions) {
+            Ok(sessions) => sessions,
+            Err(sessions) => {
+                let reason = sessions.graph_unavailable_reason();
+                owners.sessions = Some(sessions);
+                entries.insert(
+                    project_id.clone(),
+                    ProjectRuntimeOwnerStateV1::Ready(owners),
+                );
+                return Err(TraceDecayError::project_route(
+                    "project_session_graph_warming",
+                    true,
+                    reason,
+                ));
+            }
+        };
         entries.insert(
             project_id.clone(),
             ProjectRuntimeOwnerStateV1::ReplacingSessions,
@@ -139,7 +333,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
         Ok(Some(ProjectSessionReplacementReservationV1 {
             owners: self.clone(),
             project_id: project_id.clone(),
-            sessions: Some(ProjectSessionRetirementOwnerV1::from_ready(sessions)),
+            sessions: Some(sessions),
             memory: owners.memory,
             recovery_proof: None,
             armed: true,
@@ -231,29 +425,60 @@ impl ProjectRuntimeOwnerRegistryV1 {
     }
 }
 
+fn bind_ready_project_memory_graph(
+    owners: &ProjectRuntimeOwnerRegistryV1,
+    project_id: &ProjectId,
+) -> Result<bool> {
+    let (memory, sessions) = {
+        let entries = owners.lock().map_err(|_| {
+            session_registry_error(
+                "bind ready project memory graph",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+            return Ok(false);
+        };
+        let (Some(memory), Some(sessions)) = (owners.memory.as_ref(), owners.sessions.as_ref())
+        else {
+            return Ok(false);
+        };
+        (
+            memory.issue_database_lease()?,
+            sessions.database.issue_lease().map_err(|error| {
+                session_registry_error(
+                    "issue project session client for graph binding",
+                    format!("{error:?}"),
+                )
+            })?,
+        )
+    };
+    let Some(graph) = memory.memory_graph_runtime() else {
+        return Ok(false);
+    };
+    sessions.bind_project_graph_runtime(graph).map_err(|_| {
+        session_registry_error(
+            "bind ready project memory graph",
+            "verified project graph runtime does not match the project session shard".to_owned(),
+        )
+    })?;
+    Ok(true)
+}
+
 /// The only state which may temporarily separate the exact paired Store
 /// target from its Ready graph owner. It never reaches the canonical map.
 struct ProjectSessionRetirementOwnerV1 {
     database: RegisteredGlobalDbOwnerV1,
     graph: GraphDbOwnerAttachmentV1,
     store_target: Option<CanonicalGraphStoreOwnerRetirementTargetV1>,
+    graph_open_task_key: String,
 }
 
 impl ProjectSessionRetirementOwnerV1 {
-    fn from_ready(owner: RegisteredSessionOwnerV1) -> Self {
-        let RegisteredSessionOwnerV1 {
-            database,
-            relation_graph,
-        } = owner;
-        let SessionGraphOwnerV1 {
-            graph,
-            store_target,
-        } = relation_graph;
-        Self {
-            database,
-            graph,
-            store_target: Some(store_target),
-        }
+    fn from_ready(
+        owner: RegisteredSessionOwnerV1,
+    ) -> std::result::Result<Self, RegisteredSessionOwnerV1> {
+        owner.into_retirement()
     }
 
     fn into_ready(self) -> Result<RegisteredSessionOwnerV1> {
@@ -265,10 +490,14 @@ impl ProjectSessionRetirementOwnerV1 {
         })?;
         Ok(RegisteredSessionOwnerV1 {
             database: self.database,
-            relation_graph: SessionGraphOwnerV1 {
-                graph: self.graph,
-                store_target,
-            },
+            relation_graph: Arc::new(StdMutex::new(SessionGraphAttachmentStateV1::Attached {
+                owner: Some(SessionGraphOwnerV1 {
+                    graph: self.graph,
+                    store_target,
+                }),
+            })),
+            graph_settled: Arc::new(tokio::sync::Notify::new()),
+            graph_open_task_key: self.graph_open_task_key,
         })
     }
 
@@ -297,8 +526,128 @@ impl ProjectSessionRetirementOwnerV1 {
 }
 
 struct MemoryStoreOwnerV1 {
-    graph_runtime: Arc<code_graph::RetainedVerifiedGraphRuntimeV1>,
-    reconciliation: MemoryGraphReconciliationTaskOwnerV1,
+    database: DatabaseOwnerWeakLeaseIssuerV1,
+    graph: Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    graph_open_task_key: String,
+}
+
+enum MemoryGraphAttachmentStateV1 {
+    Warming {
+        database: Option<DatabaseOwnerV1>,
+    },
+    Attached {
+        runtime: Arc<code_graph::RetainedVerifiedGraphRuntimeV1>,
+        reconciliation: Option<MemoryGraphReconciliationTaskOwnerV1>,
+        error: Option<String>,
+    },
+    Detached {
+        database: DatabaseOwnerV1,
+        error: String,
+    },
+}
+
+impl MemoryStoreOwnerV1 {
+    fn issue_database_lease(&self) -> Result<Database> {
+        self.database.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue retained memory database client",
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    fn issue_database_read_only_lease(&self) -> Result<Database> {
+        self.database.issue_read_only_lease().map_err(|error| {
+            session_registry_error(
+                "issue retained memory read-only database client",
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    fn graph_runtime(&self) -> Option<Arc<code_graph::RetainedVerifiedGraphRuntimeV1>> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { runtime, .. } => Some(Arc::clone(runtime)),
+            MemoryGraphAttachmentStateV1::Warming { .. }
+            | MemoryGraphAttachmentStateV1::Detached { .. } => None,
+        }
+    }
+
+    fn reconciliation_owner(&self) -> Option<MemoryGraphReconciliationTaskOwnerV1> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { reconciliation, .. } => reconciliation.clone(),
+            MemoryGraphAttachmentStateV1::Warming { .. }
+            | MemoryGraphAttachmentStateV1::Detached { .. } => None,
+        }
+    }
+
+    fn reconciliation_owner_and_attachment(
+        &self,
+    ) -> Option<(
+        MemoryGraphReconciliationTaskOwnerV1,
+        Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    )> {
+        self.reconciliation_owner()
+            .map(|owner| (owner, Arc::clone(&self.graph)))
+    }
+
+    fn clear_reconciliation_owner(
+        graph: &StdMutex<MemoryGraphAttachmentStateV1>,
+        retired: &MemoryGraphReconciliationTaskOwnerV1,
+    ) {
+        let mut state = graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let MemoryGraphAttachmentStateV1::Attached { reconciliation, .. } = &mut *state
+            && reconciliation
+                .as_ref()
+                .is_some_and(|owner| owner.same_coordinator(retired))
+        {
+            *reconciliation = None;
+        }
+    }
+
+    fn reserve_database_retirement(
+        &self,
+    ) -> std::result::Result<crate::db::DatabaseOwnerRetirementReservationV1, String> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { runtime, .. } => runtime
+                .reserve_database_retirement()
+                .map_err(|error| error.to_string()),
+            MemoryGraphAttachmentStateV1::Detached { database, .. } => database
+                .reserve_retirement()
+                .map_err(|error| format!("{error:?}")),
+            MemoryGraphAttachmentStateV1::Warming { database } => database
+                .as_ref()
+                .ok_or_else(|| "memory graph attachment is still warming".to_owned())?
+                .reserve_retirement()
+                .map_err(|error| format!("{error:?}")),
+        }
+    }
+
+    fn graph_error(&self) -> Option<String> {
+        let state = self
+            .graph
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            MemoryGraphAttachmentStateV1::Attached { error, .. } => error.clone(),
+            MemoryGraphAttachmentStateV1::Detached { error, .. } => Some(error.clone()),
+            MemoryGraphAttachmentStateV1::Warming { .. } => None,
+        }
+    }
 }
 
 struct RemoteNodeStoreOwnerV1 {
@@ -1172,12 +1521,14 @@ impl ProjectSessionReplacementReservationV1 {
             database,
             graph,
             store_target,
+            graph_open_task_key,
         } = session;
         let Some(store_target) = store_target else {
             self.sessions = Some(ProjectSessionRetirementOwnerV1 {
                 database,
                 graph,
                 store_target: None,
+                graph_open_task_key,
             });
             return Err(session_registry_error(
                 "retain recovered project session candidate",
@@ -1194,13 +1545,14 @@ impl ProjectSessionReplacementReservationV1 {
             self.project_id.clone(),
             ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
                 sessions: None,
-                candidate_sessions: Some(RegisteredSessionOwnerV1 {
+                candidate_sessions: Some(RegisteredSessionOwnerV1::with_attached_graph(
                     database,
-                    relation_graph: SessionGraphOwnerV1 {
+                    SessionGraphOwnerV1 {
                         graph,
                         store_target,
                     },
-                }),
+                    graph_open_task_key,
+                )),
                 memory: self.memory.take(),
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
             }),
@@ -1510,35 +1862,9 @@ impl ProjectSessionCandidateActivationV1 {
                 "project session candidate activation terminal proof is invalid".to_owned(),
             ));
         }
-        let database = candidate.database.issue_lease().map_err(|error| {
-            session_registry_error(
-                "issue recovered project session database client",
-                format!("{error:?}"),
-            )
-        })?;
-        let graph = candidate
-            .relation_graph
-            .graph
-            .issue_lease()
-            .map_err(|error| {
-                session_registry_error(
-                    "issue recovered project relation graph client",
-                    error.to_string(),
-                )
-            })?;
-        database
-            .bind_session_relation_graph(
-                SessionRelationScope::project_sessions(self.project_id.clone()),
-                graph,
-                candidate.relation_graph.graph.binding().clone(),
-                candidate.relation_graph.graph.verified_locator().clone(),
-            )
-            .map_err(|_| {
-                session_registry_error(
-                    "bind recovered project relation graph client",
-                    "issued graph client did not match the exact recovered candidate".to_owned(),
-                )
-            })?;
+        let database = candidate.issue_lease(SessionRelationScope::project_sessions(
+            self.project_id.clone(),
+        ))?;
         Ok((
             database,
             candidate.database.weak_lease_issuer(),
@@ -1756,6 +2082,26 @@ impl ProjectSessionRecoveryReservationV1 {
                 "project session recovery map fence disappeared".to_owned(),
             ));
         }
+        let candidate = match ProjectSessionRetirementOwnerV1::from_ready(candidate) {
+            Ok(candidate) => candidate,
+            Err(candidate) => {
+                entries.insert(
+                    self.project_id.clone(),
+                    ProjectRuntimeOwnerStateV1::Recovering,
+                );
+                drop(entries);
+                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
+                    sessions,
+                    candidate_sessions: Some(candidate),
+                    memory,
+                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
+                });
+                return Err(session_registry_error(
+                    "retire recovered project session candidate",
+                    "recovered candidate relation graph is not attached".to_owned(),
+                ));
+            }
+        };
         entries.insert(
             self.project_id.clone(),
             ProjectRuntimeOwnerStateV1::ReplacingSessions,
@@ -1765,7 +2111,7 @@ impl ProjectSessionRecoveryReservationV1 {
         Ok(ProjectSessionReplacementReservationV1 {
             owners: self.owners.clone(),
             project_id: self.project_id.clone(),
-            sessions: Some(ProjectSessionRetirementOwnerV1::from_ready(candidate)),
+            sessions: Some(candidate),
             memory,
             recovery_proof: Some(proof),
             armed: true,
@@ -2358,10 +2704,16 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "Project runtime is not accepting retirement admission",
             ));
         };
-        let sessions = owners
-            .sessions
-            .take()
-            .map(ProjectSessionRetirementOwnerV1::from_ready);
+        let sessions = match owners.sessions.take() {
+            Some(owner) => match ProjectSessionRetirementOwnerV1::from_ready(owner) {
+                Ok(sessions) => Some(sessions),
+                Err(owner) => {
+                    owners.sessions = Some(owner);
+                    None
+                }
+            },
+            None => None,
+        };
         entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Retiring);
         Ok(Some(ProjectRuntimeOwnerRetirementReservationV1 {
             owners: self.project_owners.clone(),
@@ -2372,10 +2724,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         }))
     }
 
-    fn reserve_project_session_replacement(
+    async fn reserve_project_session_replacement(
         &self,
         project_id: &ProjectId,
     ) -> Result<Option<ProjectSessionReplacementReservationV1>> {
+        self.project_owners
+            .wait_for_session_graph(project_id)
+            .await?;
         self.project_owners.reserve_session_replacement(project_id)
     }
 }

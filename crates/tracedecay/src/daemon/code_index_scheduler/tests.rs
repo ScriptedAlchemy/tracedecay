@@ -4615,6 +4615,116 @@ async fn mounted_core_query_worktree_with_one_permit(
     .await
 }
 
+/// A healthy Git-watcher backstop is a freshness probe, not evidence that the
+/// checkout changed. When the exact stat signature still matches, routing that
+/// probe must leave both the source-hint authority and worker queue empty.
+#[tokio::test]
+async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), fixture.path());
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off retained generation");
+
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let settled = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scheduler.verified_against_source() && scheduler.pending_hint_count() == Some(0)
+        };
+        if settled
+            && !registry
+                .reconcile_in_progress_for_test(fixture.path())
+                .await
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= settled_deadline,
+            "retained graph-off owner never established initial freshness"
+        );
+        tokio::task::yield_now().await;
+    }
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "settled fixture starts without source-change evidence"
+    );
+
+    let identity = tracedecay_runtime_core::git_discovery::GitRepositoryIdentity {
+        worktree_root: canonical_root.clone(),
+        git_dir: canonical_root.join(".git"),
+        common_dir: canonical_root.join(".git"),
+    };
+    assert_eq!(
+        registry.request_for_root(&identity).await,
+        super::GitStateChangeRequestV1::Accepted
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        Some(0),
+        "an unchanged watcher probe must not fabricate overflow evidence"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "an unchanged watcher probe must not queue a capture pass"
+    );
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
 async fn mounted_core_query_worktree_in(
     registry: CodeIndexSchedulerRegistryV1,
     fixture: &GitFixture,
@@ -5412,6 +5522,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
@@ -5453,10 +5564,105 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     let projected_progress = projected.progress.expect("projected progress snapshot");
     assert_eq!(projected_progress.generation_id, expected.generation_id);
     assert!(projected_progress.progress_epoch >= expected.progress_epoch);
+    assert_eq!(
+        projected.staleness_state.as_deref(),
+        Some("fresh"),
+        "an unrelated scheduler-mutex holder is not a source refresh"
+    );
+    assert_eq!(projected.coverage, "complete");
+    assert_eq!(projected.hook_hint_count, Some(0));
     let _ = release_tx.send(());
     scheduler_holder
         .await
         .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    {
+        let mounted = registry.mounted.lock().await;
+        let scheduler = &mounted.get(&canonical).expect("mounted worktree").scheduler;
+        scheduler
+            .lock()
+            .expect("scheduler")
+            .policy
+            .staleness_threshold = Duration::ZERO;
+    }
+    let receipts_before = registry.event_to_ready_receipts().len();
+
+    assert!(registry.probe_freshness(fixture.path()).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mounted = registry.mounted.lock().await;
+    let scheduler = mounted.get(&canonical).expect("mounted worktree");
+    assert_eq!(
+        scheduler
+            .scheduler
+            .lock()
+            .expect("scheduler")
+            .pending_hint_count(),
+        Some(0),
+        "matching Git/stat evidence must not become an overflow hint"
+    );
+    assert_eq!(
+        registry.event_to_ready_receipts().len(),
+        receipts_before,
+        "a suppressed probe must not fabricate a reconcile receipt"
+    );
+    drop(mounted);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&canonical)
+            .expect("mounted worktree")
+            .scheduler
+            .lock()
+            .expect("scheduler")
+            .policy
+            .staleness_threshold = Duration::ZERO;
+    }
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(projected.coverage, "complete");
     registry.shutdown().await;
 }
 
@@ -5566,9 +5772,15 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("repeat ready check")
             .is_none()
     );
-    assert!(
-        restarted.epoch.load(std::sync::atomic::Ordering::Acquire) > first_wake_epoch,
-        "an earlier failed wake cannot strand a retained overflow marker"
+    assert_eq!(
+        restarted.epoch.load(std::sync::atomic::Ordering::Acquire),
+        first_wake_epoch,
+        "a repeated read wake must not cancel in-flight generation work"
+    );
+    assert_eq!(
+        restarted.pending_hint_count(),
+        None,
+        "the retained overflow marker remains pending for the refreshed wake"
     );
 
     let outcome = restarted.reconcile_now().expect("background truth");
@@ -5579,6 +5791,36 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("ready check")
             .is_some(),
         "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
+}
+
+#[test]
+fn unchanged_ready_query_refreshes_its_stat_witness_without_reconcile() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let published = published(scheduler.reconcile_now().expect("initial publish"));
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+
+    let ready = scheduler
+        .latest_complete_ready_for_query()
+        .expect("unchanged ready query");
+
+    assert_eq!(
+        ready
+            .as_ref()
+            .map(|latest| &latest.generation.manifest().generation_id),
+        Some(&published.generation_id),
+        "elapsed time alone must not make an unchanged generation unavailable"
+    );
+    assert_eq!(
+        scheduler.pending_hint_count(),
+        Some(0),
+        "a matching Git/stat witness must not enqueue authoritative capture"
     );
 }
 
@@ -7968,6 +8210,26 @@ async fn wait_for_initial_generation(
     .expect("initial generation published")
 }
 
+async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let ready = registry
+                .dashboard_freshness(path)
+                .await
+                .is_some_and(|freshness| {
+                    freshness.staleness_state.as_deref() == Some("fresh")
+                        && freshness.coverage == "complete"
+                });
+            if ready {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dashboard reaches fresh complete state");
+}
+
 /// Wait until the mounted worktree publishes a generation distinct from `previous`.
 async fn wait_for_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
@@ -9442,9 +9704,9 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
-/// A retained text generation remains serving when persistent graph replay
-/// fails. The full graph owner stays absent while ordinary refresh remains
-/// pending, so exact/lexical availability never implies graph availability.
+/// A retained text generation reaches exact/lexical readiness when persistent
+/// graph replay is permanently refused. The full graph owner stays absent, so
+/// text availability never implies graph availability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -9551,20 +9813,19 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .pending_wake_micros_for_scope(&scope)
-            .await
-            .is_some_and(|pending| pending != 0)
+    let text = loop {
+        if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
+            && text.query_owners_are_warm()
         {
-            break;
+            break text;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "failed graph replay did not restore its pending retry arrival"
+            "permanently refused graph replay withheld exact and lexical readiness"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    assert!(text.production_query_owners().is_ok());
 
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
@@ -9717,9 +9978,9 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
         .await
         .expect("mount retained generation");
 
-    // Hold the scheduler after the worker dequeues the mount arrival. This
-    // makes the attempted activation observable through the existing pending
-    // arrival: zero while the attempt owns it, restored after the failure.
+    // Hold the scheduler after the worker enters the reconcile pass. The
+    // canonical in-progress authority proves the worker owns admission while
+    // the lock keeps the fallible retained activation from completing.
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -9747,12 +10008,15 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+        if registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await
+        {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "worker did not dequeue the retained activation"
+            "worker did not enter the retained activation pass"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -10363,6 +10627,58 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "artifact-backed lexical hydration returns the canonical source path"
     );
     registry.shutdown().await;
+}
+
+/// A benign Git metadata rewrite after a clean graph-off seal must trigger one
+/// authoritative text-only capture, not fall through to the graph-bearing
+/// reconcile path. The captured source identity is unchanged, so the retained
+/// generation becomes current without decoding its full sealed payload.
+#[test]
+fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let seeded = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed retained generation"))
+    };
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let metadata = reopened
+        .servable_retained_text_generation()
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let outcome = reopened
+        .reconcile_retained_text_generation(&metadata)
+        .expect("graph-off retained reconcile")
+        .expect("stale witness must be verified by text-only capture");
+    let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
+        panic!("metadata-only Git change must not publish a generation");
+    };
+    assert_eq!(
+        evidence.snapshot_content_identity, seeded.snapshot_content_identity,
+        "authoritative capture proves the sealed source identity is unchanged"
+    );
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "graph-off freshness verification must not decode the full generation"
+    );
+    assert!(
+        reopened.verified_against_source(),
+        "successful text-only capture establishes current source truth"
+    );
 }
 
 /// A graph-off changed-source rebuild must use the same canonical worker-memory
@@ -10988,14 +11304,24 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
     registry.shutdown().await;
 }
 
-/// A retryable graph-activation failure of an already-sealed complete
-/// generation must retry activation of that exact immutable artifact with
-/// backoff. It must not fall through into reconcile and seal a duplicate
-/// generation, even when the worktree has changed and overflow hints keep
-/// waking the worker.
+/// A retryable graph-activation failure may delay only native graph serving.
+/// Exact and lexical refresh must still publish a changed worktree generation
+/// while activation retries remain isolated to the immutable graph artifact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retryable_activation_failure_retries_the_sealed_generation_without_resealing() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
+async fn retryable_graph_activation_does_not_block_changed_text_generation() {
+    let sources = (0..512)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::scoped_code_index_store_root(
@@ -11020,9 +11346,6 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
             latest.generation.manifest().generation_id.clone(),
         )
     };
-    // Change the worktree so a reconcile pass would seal a brand-new
-    // generation if the worker fell through after the activation failure.
-    fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
     let generation_files = |scoped_store: &Path| -> usize {
         std::fs::read_dir(scoped_store.join("code-generations-v1")).map_or(0, |entries| {
             entries
@@ -11050,37 +11373,106 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         .await
         .expect("mount retained generation");
 
-    // Keep waking the worker while activation stays failing; each pass must
-    // hold the sealed artifact instead of rebuilding.
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (text_owner_before_retry, owner_epoch_before_retry, progress_before_retry) = loop {
+        let text = registry.latest_text_serving_for_scope(&scope).await;
+        let observed = {
+            let scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = scheduler.build_progress_slot();
+            let progress = progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (progress.owner_epoch, progress.snapshot())
+        };
+        if let (Some(text), (owner_epoch, Some(progress))) = (text, observed)
+            && progress.committed_pages > 0
+            && progress.phase
+                != crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        {
+            break (text, owner_epoch, progress);
+        }
+        assert!(
+            std::time::Instant::now() <= progress_deadline,
+            "graph-on text projection never exposed bounded live progress"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(
+        text_owner_before_retry.metadata().manifest().generation_id,
+        sealed_generation_id,
+        "the pre-edit observation must own the retained generation"
+    );
+    assert_eq!(
+        progress_before_retry.generation_id,
+        sealed_generation_id.as_str(),
+        "the pre-edit progress must belong to the retained generation"
+    );
+
+    // Change the worktree only after the retained text owner is observably
+    // advancing. The retry journey must replace that exact owner with the new
+    // source generation while native graph activation keeps failing.
+    fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
+
+    // Keep waking the worker while activation stays failing. The graph owner
+    // remains unavailable, but source refresh must not be held behind it.
     for _ in 0..5 {
         let _ = registry.notify_hook_overflow(fixture.path()).await;
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
-    assert_eq!(
-        generation_files(&scoped_store),
-        1,
-        "a retryable activation failure must not seal a duplicate generation"
-    );
-    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .latest_text_serving_for_scope(&scope)
-            .await
-            .is_some()
+    let text_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (text_owner_after_refresh, refreshed_generation_id) = loop {
+        let generation_id = registry.latest_generation_id(fixture.path()).await;
+        if let (Some(text), Some(generation_id)) = (
+            registry.latest_text_serving_for_scope(&scope).await,
+            generation_id,
+        ) && generation_id != sealed_generation_id
+            && text.query_owners_are_warm()
         {
-            break;
+            break (text, generation_id);
         }
         assert!(
             std::time::Instant::now() <= text_deadline,
-            "graph retry backoff withheld the retained text generation"
+            "graph retry backoff withheld the changed exact and lexical generation"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(sealed_generation_id),
-        "exact and lexical serving remains authoritative during graph retry"
+    };
+    assert!(
+        !text_owner_after_refresh.same_text_owner(&text_owner_before_retry),
+        "the changed generation must replace the retained text owner"
     );
+    assert_eq!(
+        generation_files(&scoped_store),
+        2,
+        "source refresh must publish exactly one changed generation"
+    );
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            progress.owner_epoch > owner_epoch_before_retry,
+            "the changed generation must advance text progress authority"
+        );
+        let progress = progress
+            .snapshot()
+            .expect("changed text progress remains visible during graph retry");
+        assert_eq!(progress.generation_id, refreshed_generation_id.as_str());
+        assert_ne!(progress.generation_id, progress_before_retry.generation_id);
+        assert_eq!(
+            progress.phase,
+            crate::dashboard::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        );
+    }
     assert!(
         registry
             .latest_complete_serving_for_scope(&scope)
@@ -11089,15 +11481,17 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         "retryable graph activation must not expose an unactivated graph owner"
     );
 
-    // Clearing the injected failure lets the scheduled backoff retry activate
-    // the exact sealed artifact and resume ordinary refresh.
+    // Clearing the injected failure lets the scheduled backoff activate the
+    // changed generation without resealing it.
     super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, 0);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if registry
             .latest_complete_serving_for_scope(&scope)
             .await
-            .is_some()
+            .is_some_and(|latest| {
+                latest.generation().manifest().generation_id == refreshed_generation_id
+            })
         {
             break;
         }
@@ -11107,6 +11501,213 @@ async fn retryable_activation_failure_retries_the_sealed_generation_without_rese
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    registry.shutdown().await;
+}
+
+/// A graph projection can remain busy for minutes on a large retained
+/// generation. Source reconciliation and the replacement text projection must
+/// finish before that optional graph work starts, so exact and lexical serving
+/// never inherit graph activation latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() {
+    let sources = (0..64)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, sealed_worktree_id, sealed_generation_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot.worktree.clone().expect("seeded worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+            latest.generation.manifest().generation_id.clone(),
+        )
+    };
+    fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
+
+    let activation_gate =
+        super::graph_activation::install_injected_activation_gate(&sealed_worktree_id);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        activation_gate.wait_until_started(),
+    )
+    .await
+    .expect("graph activation did not reach the deterministic hold point");
+    assert!(
+        !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
+        "optional graph activation must not keep source reconciliation in progress"
+    );
+    let (_, text_is_current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("ready text generation remains queryable during graph activation");
+    assert!(
+        text_is_current,
+        "slow graph activation must not mark reconciled exact and lexical serving stale"
+    );
+    let observed_generation_id = registry.latest_generation_id(fixture.path()).await;
+    let text_ready = registry
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .is_some_and(|text| text.query_owners_are_warm());
+    activation_gate.release();
+
+    assert_ne!(
+        observed_generation_id,
+        Some(sealed_generation_id),
+        "slow graph activation started before the changed text generation replaced the retained seal"
+    );
+    assert!(
+        text_ready,
+        "slow graph activation started before the changed generation became exact/lexical ready"
+    );
+    registry.shutdown().await;
+}
+
+/// Decoding the immutable sealed generation for optional graph activation may
+/// take tens of seconds on a cold large repository. That decode must not hold
+/// the mutable scheduler mutex: exact/lexical freshness still needs its cheap
+/// witness check while graph preparation is parked or reading the seal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_decode_does_not_block_text_freshness() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree identity"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount text-only retained generation");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if registry
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+                .is_some_and(|(text, current)| text.query_owners_are_warm() && current)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("text generation did not become ready and current");
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let held_decode = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hold_active_decode();
+    assert!(
+        !registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                super::CodeGraphActivationPolicyV1::Enabled,
+            )
+            .await
+            .expect("enable graph activation on the retained owner"),
+        "same-root policy update must retain the mounted owner"
+    );
+    assert!(registry.notify_hook_overflow(fixture.path()).await);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if held_decode.waiter_count() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("graph preparation did not park on the held decode barrier");
+    assert!(
+        !registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await,
+        "the source pass must finish before the optional graph decode"
+    );
+    let (_, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("ready text remains queryable during graph decode");
+    assert!(
+        current,
+        "optional graph decode must not block the exact/lexical freshness witness"
+    );
+
+    drop(held_decode);
     registry.shutdown().await;
 }
 

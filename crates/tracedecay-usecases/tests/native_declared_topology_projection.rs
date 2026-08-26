@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
@@ -583,6 +583,50 @@ fn declared_stack_without_registered_linked_roots_is_unavailable() {
             .resolve(&declared.request, &cancellation)
             .expect("unavailable declared-stack resolution"),
         NativeIntegrationStackResolutionOutcomeV1::Unavailable
+    );
+}
+
+#[test]
+fn declared_stack_provider_becomes_available_without_reopening_native_owner() {
+    let fixture = NativeGitFixture::new();
+    fixture.advance_feature("late graph feature revision\n");
+    let declared = declared_stack_request(&fixture, "branch-stack-revision.native.late-graph");
+    let runtime = Arc::new(VerifiedSnapshotRuntime::default());
+    let expected_shard = runtime.relational_binding().shard_id.clone();
+    let runtime_authority = Arc::new(RwLock::new(None));
+    let provider_authority = Arc::clone(&runtime_authority);
+    let resolver = ExactPairNativeIntegrationTopology::open_with_graph_runtime_provider(
+        declared.project.clone(),
+        declared.repository.clone(),
+        fixture.root(),
+        expected_shard,
+        Arc::new(move || {
+            provider_authority
+                .read()
+                .expect("late graph authority lock")
+                .clone()
+        }),
+    )
+    .expect("open native owner before graph publication");
+    let cancellation = CancellationSignal::active("cancel.native-declared-topology.late-graph")
+        .expect("cancellation");
+
+    assert_eq!(
+        resolver
+            .resolve(&declared.request, &cancellation)
+            .expect("pre-graph declared-stack resolution"),
+        NativeIntegrationStackResolutionOutcomeV1::Unavailable
+    );
+    *runtime_authority
+        .write()
+        .expect("late graph authority lock") =
+        Some(Arc::clone(&runtime) as Arc<dyn VerifiedGraphRuntimePortV1>);
+
+    expect_declared_stack(
+        resolver
+            .resolve(&declared.request, &cancellation)
+            .expect("late-bound declared-stack resolution"),
+        &declared.revision,
     );
 }
 

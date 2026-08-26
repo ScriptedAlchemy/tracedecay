@@ -13,7 +13,7 @@ use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
-use tracedecay_store::{ProjectId, StoreShardIdV1};
+use tracedecay_store::{ProjectId, StoreShardIdV1, StoreShardScopeV1};
 
 use super::remote_recovery::{
     DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
@@ -21,14 +21,15 @@ use super::remote_recovery::{
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
-    LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, MemoryStoreOwnerV1,
-    ProfileAuthorityPinResult, ProjectRuntimeOwnerAdmissionV1, ProjectRuntimeOwnerStateV1,
-    RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1, RegisteredSchemaConvergenceMaintenance,
-    RegisteredSessionOwnerV1, RemoteNodeStoreOwnerV1, Result, RetainedHookTasks,
+    LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, MemoryGraphAttachmentStateV1,
+    MemoryStoreOwnerV1, ProfileAuthorityPinResult, ProjectRuntimeOwnerAdmissionV1,
+    ProjectRuntimeOwnerStateV1, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1,
+    RegisteredSchemaConvergenceMaintenance, RegisteredSessionOwnerV1, RemoteNodeStoreOwnerV1,
+    Result, RetainedHookTasks, SessionGraphAttachmentStateV1, SessionGraphOwnerV1,
     StoreRuntimeClientLease, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry,
-    StoreRuntimeResolver, open_runtime, open_runtime_with_presence,
-    register_registered_schema_installer, registry_open_error, runtime_incarnation,
-    session_registry_error,
+    StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
+    open_runtime_with_presence, register_registered_schema_installer, registry_open_error,
+    runtime_incarnation, session_registry_error,
 };
 use crate::errors::TraceDecayError;
 
@@ -211,39 +212,94 @@ impl DaemonSessionRuntimeRegistryV1 {
         owner: &RegisteredSessionOwnerV1,
         scope: SessionRelationScope,
     ) -> Result<RegisteredGlobalDbLeaseV1> {
-        self.issue_session_owner_lease_parts(&owner.database, &owner.relation_graph.graph, scope)
+        owner.issue_lease(scope)
     }
 
-    fn issue_session_owner_lease_parts(
+    fn publish_session_owner(
         &self,
-        owner: &RegisteredGlobalDbOwnerV1,
-        graph_owner: &tracedecay_graph_db::GraphDbOwnerAttachmentV1,
+        database: RegisteredGlobalDbOwnerV1,
+        shard_id: StoreShardIdV1,
         scope: SessionRelationScope,
-    ) -> Result<RegisteredGlobalDbLeaseV1> {
-        let database = owner.issue_lease().map_err(|error| {
+    ) -> Result<(RegisteredSessionOwnerV1, RegisteredGlobalDbLeaseV1)> {
+        let published_lease = database.issue_lease().map_err(|error| {
             session_registry_error(
-                "issue registered session database client",
+                "issue published session database client",
                 format!("{error:?}"),
             )
         })?;
-        let graph = graph_owner.issue_lease().map_err(|error| {
-            session_registry_error(
-                "issue registered session relation graph client",
-                error.to_string(),
-            )
-        })?;
-        let graph_binding = graph_owner.binding().clone();
-        let graph_verified_locator = graph_owner.verified_locator().clone();
-        database
-            .bind_session_relation_graph(scope, graph, graph_binding, graph_verified_locator)
-            .map_err(|_| {
-                session_registry_error(
-                    "bind issued registered session relation graph",
-                    "issued graph client did not match the exact registered session owner"
-                        .to_owned(),
-                )
-            })?;
-        Ok(database)
+        let relation_graph = Arc::new(std::sync::Mutex::new(
+            SessionGraphAttachmentStateV1::Warming,
+        ));
+        let graph_open_task_key = format!("{shard_id:?}");
+        let task_relation_graph = Arc::clone(&relation_graph);
+        let graph_settled = Arc::new(tokio::sync::Notify::new());
+        let task_graph_settled = Arc::clone(&graph_settled);
+        let task_published_lease = published_lease.clone();
+        let registry = self.registry.clone();
+        let graph_registry = self.graph_registry.clone();
+        let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
+        let incarnation = self.incarnation;
+        let retained = self.retained_hook_tasks.retain(
+            "session-relation-graph-open",
+            &graph_open_task_key,
+            move |cancellation| async move {
+                let opened =
+                    super::code_graph::graph_attachment::open_session_relation_owner_for_task(
+                        &registry,
+                        &graph_registry,
+                        &graph_lifecycle_cancelled,
+                        cancellation,
+                        incarnation,
+                        shard_id,
+                    )
+                    .await;
+                let state = match opened {
+                    Ok((graph, store_target)) => {
+                        let owner = SessionGraphOwnerV1 {
+                            graph,
+                            store_target,
+                        };
+                        match RegisteredSessionOwnerV1::bind_relation_graph(
+                            &task_published_lease,
+                            &owner,
+                            scope,
+                        ) {
+                            Ok(()) => {
+                                SessionGraphAttachmentStateV1::Attached { owner: Some(owner) }
+                            }
+                            Err(error) => SessionGraphAttachmentStateV1::Detached {
+                                error: error.to_string(),
+                            },
+                        }
+                    }
+                    Err(error) => SessionGraphAttachmentStateV1::Detached {
+                        error: error.to_string(),
+                    },
+                };
+                *task_relation_graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+                task_graph_settled.notify_waiters();
+            },
+        );
+        if !retained {
+            *relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                SessionGraphAttachmentStateV1::Detached {
+                    error: "session relation graph open task admission is closed".to_owned(),
+                };
+            graph_settled.notify_waiters();
+        }
+        Ok((
+            RegisteredSessionOwnerV1 {
+                database,
+                relation_graph,
+                graph_settled,
+                graph_open_task_key,
+            },
+            published_lease,
+        ))
     }
 
     pub(crate) async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
@@ -366,13 +422,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount profile session store")
             .await?;
-        let relation_graph = self.retain_session_relation_graph_owner(shard_id).await?;
-        let database = RegisteredSessionOwnerV1 {
+        let (database, lease) = self.publish_session_owner(
             database,
-            relation_graph,
-        };
-        let lease = self.issue_session_owner_lease(
-            &database,
+            shard_id,
             SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
         )?;
         *self
@@ -395,27 +447,120 @@ impl DaemonSessionRuntimeRegistryV1 {
             )
         })?;
         crate::db::migrations::ensure_schema_current(&database).await?;
-        let graph_runtime = Arc::new(
-            self.retain_memory_graph_runtime(shard_id.clone(), owner)
-                .await?,
-        );
-        let graph_port: Arc<
-            dyn tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1,
-        > = graph_runtime.clone();
-        database.bind_memory_graph_runtime(graph_port)?;
-        super::code_graph::schedule_bound_memory_graph_reconciliation(&database)?;
-        let reconciliation = database
-            .memory_graph_reconciliation_task_owner()
-            .ok_or_else(|| {
-                session_registry_error(
-                    "publish memory runtime owner",
-                    "memory graph reconciliation owner was not installed".to_owned(),
+        let database_issuer = owner.weak_lease_issuer();
+        let graph = Arc::new(std::sync::Mutex::new(
+            MemoryGraphAttachmentStateV1::Warming {
+                database: Some(owner),
+            },
+        ));
+        let graph_open_task_key = format!("{shard_id:?}");
+        let task_graph = Arc::clone(&graph);
+        let task_database = database.clone();
+        let identity = self.identity.clone();
+        let registry = self.registry.clone();
+        let graph_registry = self.graph_registry.clone();
+        let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
+        let incarnation = self.incarnation;
+        let task_shard_id = shard_id.clone();
+        let task_project_id = match &task_shard_id.scope {
+            StoreShardScopeV1::Project { project_id } => Some(project_id.clone()),
+            _ => None,
+        };
+        let project_owners = self.project_owners.clone();
+        let retained = self.retained_hook_tasks.retain(
+            "memory-graph-open",
+            &graph_open_task_key,
+            move |cancellation| async move {
+                let owner = {
+                    let mut state = task_graph
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match &mut *state {
+                        MemoryGraphAttachmentStateV1::Warming { database } => database.take(),
+                        MemoryGraphAttachmentStateV1::Attached { .. }
+                        | MemoryGraphAttachmentStateV1::Detached { .. } => None,
+                    }
+                };
+                let Some(owner) = owner else {
+                    return;
+                };
+                let opened = DaemonSessionRuntimeRegistryV1::retain_memory_graph_runtime_for_task(
+                    identity,
+                    registry,
+                    graph_registry,
+                    graph_lifecycle_cancelled,
+                    incarnation,
+                    task_shard_id,
+                    owner,
+                    cancellation,
                 )
-            })?;
+                .await;
+                let state = match opened {
+                    Ok(runtime) => {
+                        let runtime = Arc::new(runtime);
+                        let graph_port: Arc<
+                            dyn tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1,
+                        > = runtime.clone();
+                        let activation = task_database
+                            .bind_memory_graph_runtime(graph_port)
+                            .and_then(|()| {
+                                super::code_graph::schedule_bound_memory_graph_reconciliation(
+                                    &task_database,
+                                )
+                            });
+                        let reconciliation = activation
+                            .as_ref()
+                            .ok()
+                            .and_then(|()| task_database.memory_graph_reconciliation_task_owner());
+                        let error = activation.err().map(|error| error.to_string()).or_else(|| {
+                            reconciliation.is_none().then(|| {
+                                "memory graph reconciliation owner was not installed".to_owned()
+                            })
+                        });
+                        MemoryGraphAttachmentStateV1::Attached {
+                            runtime,
+                            reconciliation,
+                            error,
+                        }
+                    }
+                    Err(failure) => MemoryGraphAttachmentStateV1::Detached {
+                        database: failure.database,
+                        error: failure.error.to_string(),
+                    },
+                };
+                *task_graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+                if let Some(project_id) = task_project_id
+                    && let Err(error) =
+                        bind_ready_project_memory_graph(&project_owners, &project_id)
+                {
+                    tracing::error!(
+                        project_id = %project_id,
+                        error = %error,
+                        "background project memory graph could not bind to project sessions"
+                    );
+                }
+            },
+        );
+        if !retained {
+            let mut state = graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let MemoryGraphAttachmentStateV1::Warming { database } = &mut *state
+                && let Some(database) = database.take()
+            {
+                *state = MemoryGraphAttachmentStateV1::Detached {
+                    database,
+                    error: "memory graph open task admission is closed".to_owned(),
+                };
+            }
+        }
         Ok((
             MemoryStoreOwnerV1 {
-                graph_runtime,
-                reconciliation,
+                database: database_issuer,
+                graph,
+                graph_open_task_key,
             },
             Arc::new(database),
         ))
@@ -431,16 +576,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             mounted.as_ref().map(|owner| {
-                owner
-                    .graph_runtime
-                    .issue_database_lease()
-                    .map(Arc::new)
-                    .map_err(|error| {
-                        session_registry_error(
-                            "issue profile memory database client",
-                            error.to_string(),
-                        )
-                    })
+                owner.issue_database_lease().map(Arc::new).map_err(|error| {
+                    session_registry_error(
+                        "issue profile memory database client",
+                        error.to_string(),
+                    )
+                })
             })
         };
         if let Some(database) = existing {
@@ -809,8 +950,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+            && let Some(runtime) = owner.graph_runtime()
         {
-            retain_identity(owner.graph_runtime.graph_store_identity());
+            retain_identity(runtime.graph_store_identity());
         }
         if let Some(owner) = self
             .profile_sessions
@@ -818,10 +960,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            retain_identity((
-                owner.relation_graph.graph.binding().clone(),
-                owner.relation_graph.graph.verified_locator().clone(),
-            ));
+            if let Some(identity) = owner.take_graph_store_identity() {
+                retain_identity(identity);
+            }
         }
         let mut projects = self
             .project_owners
@@ -830,19 +971,22 @@ impl DaemonSessionRuntimeRegistryV1 {
         for state in projects.values_mut() {
             match state {
                 ProjectRuntimeOwnerStateV1::Ready(owners) => {
-                    if let Some(memory) = owners.memory.take() {
-                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    if let Some(memory) = owners.memory.take()
+                        && let Some(runtime) = memory.graph_runtime()
+                    {
+                        retain_identity(runtime.graph_store_identity());
                     }
                     if let Some(sessions) = owners.sessions.take() {
-                        retain_identity((
-                            sessions.relation_graph.graph.binding().clone(),
-                            sessions.relation_graph.graph.verified_locator().clone(),
-                        ));
+                        if let Some(identity) = sessions.take_graph_store_identity() {
+                            retain_identity(identity);
+                        }
                     }
                 }
                 ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) => {
-                    if let Some(memory) = recovery.memory.take() {
-                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    if let Some(memory) = recovery.memory.take()
+                        && let Some(runtime) = memory.graph_runtime()
+                    {
+                        retain_identity(runtime.graph_store_identity());
                     }
                     if let Some(sessions) = recovery.sessions.take() {
                         retain_identity((
@@ -851,21 +995,21 @@ impl DaemonSessionRuntimeRegistryV1 {
                         ));
                     }
                     if let Some(sessions) = recovery.candidate_sessions.take() {
-                        retain_identity((
-                            sessions.relation_graph.graph.binding().clone(),
-                            sessions.relation_graph.graph.verified_locator().clone(),
-                        ));
+                        if let Some(identity) = sessions.take_graph_store_identity() {
+                            retain_identity(identity);
+                        }
                     }
                 }
                 ProjectRuntimeOwnerStateV1::Faulted(faulted) => {
-                    if let Some(memory) = faulted.retained.memory.take() {
-                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    if let Some(memory) = faulted.retained.memory.take()
+                        && let Some(runtime) = memory.graph_runtime()
+                    {
+                        retain_identity(runtime.graph_store_identity());
                     }
                     if let Some(sessions) = faulted.retained.sessions.take() {
-                        retain_identity((
-                            sessions.relation_graph.graph.binding().clone(),
-                            sessions.relation_graph.graph.verified_locator().clone(),
-                        ));
+                        if let Some(identity) = sessions.take_graph_store_identity() {
+                            retain_identity(identity);
+                        }
                     }
                     if let Some(sessions) = faulted.sessions.take() {
                         retain_identity((
@@ -1021,13 +1165,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
-        let relation_graph = self.retain_session_relation_graph_owner(shard_id).await?;
-        let database = RegisteredSessionOwnerV1 {
+        let (database, lease) = self.publish_session_owner(
             database,
-            relation_graph,
-        };
-        let lease = self.issue_session_owner_lease(
-            &database,
+            shard_id,
             SessionRelationScope::project_sessions(project_id.clone()),
         )?;
         let replay_issuer = database.database.weak_lease_issuer();
@@ -1052,6 +1192,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 format!("publish={error}; replay cleanup={cleanup:?}"),
             ));
         }
+        bind_ready_project_memory_graph(&self.project_owners, &project_id)?;
         let recoveries = self
             .remote_recovery_authorities
             .lock()
@@ -1099,7 +1240,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.memory.as_ref() {
                         owner
-                            .graph_runtime
                             .issue_database_lease()
                             .map(Arc::new)
                             .map_err(|error| {
@@ -1170,6 +1310,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
         admission.publish_memory(owner)?;
+        bind_ready_project_memory_graph(&self.project_owners, &project_id)?;
         Ok(database)
     }
 
@@ -1197,7 +1338,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.memory.as_ref() {
                         owner
-                            .graph_runtime
                             .issue_database_read_only_lease()
                             .map(Some)
                             .map_err(|error| {

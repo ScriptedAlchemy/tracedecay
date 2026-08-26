@@ -539,6 +539,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes: _retained_bytes,
             retained_reservations: _retained_reservations,
         } = captured;
+        let requested_scope = CodeIndexGenerationScopeV1::for_snapshot(&snapshot);
         // Retained-history generations live inside the active publication
         // pointer, so they need an active generation to ride on. A store with
         // no publication at all has no such anchor — there the mint itself
@@ -549,7 +550,25 @@ impl CodeIndexWorktreeSchedulerV1 {
             .load_active_shared()
             .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
         {
-            Some(_) => self.publication.retained_history(),
+            Some(active) if active.sealed_scope() == requested_scope => {
+                self.publication.retained_history()
+            }
+            Some(_) => {
+                // A retained generation for another ref/worktree cannot adopt
+                // the active generation as its incremental parent. Preserve
+                // that active pointer under the existing exact CAS authority,
+                // but make the production owner build the requested scope from
+                // its immutable Git tree instead of reporting the foreign
+                // active slot as corruption.
+                let pointer = self
+                    .publication
+                    .read_publication_pointer()
+                    .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+                    .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                self.publication
+                    .for_undecoded_active_rebuild(&pointer)
+                    .retained_history()
+            }
             None => self.publication.clone(),
         };
         let mut owner = open_production_code_index_owner_v1(
@@ -586,7 +605,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 _ => CodeIndexSearchUnavailableReasonV1::Internal,
             })?;
-        Ok(self.bind_latest_complete(generation))
+        Ok(self.bind_latest_complete(generation, None))
     }
 }
 

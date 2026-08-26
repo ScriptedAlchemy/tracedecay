@@ -11,7 +11,7 @@ mod runtime;
 mod session_database_admission;
 use code_index_activation::{
     CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
-    code_index_hook_sink, code_index_reconcile_sink,
+    code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
 };
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
@@ -251,6 +251,10 @@ pub(super) async fn production_project_server(
             None,
         ));
     }
+    let foreground_project_open = store_administration
+        .session_runtime_registry()
+        .await?
+        .begin_foreground_project_open()?;
     let capacity_gate = project_open_capacity_gate(project_open_gates).await;
     let capacity_admission = tokio::select! {
         biased;
@@ -410,6 +414,8 @@ pub(super) async fn production_project_server(
         invocation.code_index_schedulers.clone(),
         Arc::clone(&code_index_activation),
     );
+    let code_index_freshness_probe_sink =
+        code_index_freshness_probe_sink(invocation.code_index_schedulers.clone());
     // The daemon mounts the same broker the MCP server and the directly
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode
@@ -496,6 +502,7 @@ pub(super) async fn production_project_server(
     .with_diagnostics_lsp(Arc::clone(&diagnostic_broker))
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
     .with_code_index_reconcile_sink(Arc::clone(&code_index_reconcile_sink))
+    .with_code_index_freshness_probe_sink(Arc::clone(&code_index_freshness_probe_sink))
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
@@ -582,6 +589,7 @@ pub(super) async fn production_project_server(
         hotpath::gauge!("project_servers").inc(1.0);
     }
     if !inserted {
+        drop(foreground_project_open);
         route_registered.store(false, Ordering::Release);
     } else {
         if cancellation.is_cancelled() {
@@ -865,6 +873,7 @@ pub(super) async fn production_project_server(
             .with_diagnostics_lsp(diagnostic_broker)
             .with_code_index_hook_sink(code_index_hook_sink)
             .with_code_index_reconcile_sink(code_index_reconcile_sink)
+            .with_code_index_freshness_probe_sink(code_index_freshness_probe_sink)
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)

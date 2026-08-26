@@ -13,8 +13,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
+            && let Some(reconciliation) = owner.reconciliation_owner()
         {
-            owners.push(owner.reconciliation.clone());
+            owners.push(reconciliation);
         }
         let projects = self
             .project_owners
@@ -34,8 +35,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                 | super::ProjectRuntimeOwnerStateV1::Recovering
                 | super::ProjectRuntimeOwnerStateV1::Retiring => None,
             };
-            if let Some(owner) = memory {
-                owners.push(owner.reconciliation.clone());
+            if let Some(owner) = memory
+                && let Some(reconciliation) = owner.reconciliation_owner()
+            {
+                owners.push(reconciliation);
             }
         }
         owners
@@ -87,20 +90,48 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         shard_id: &StoreShardIdV1,
     ) -> Result<()> {
-        if let tracedecay_store::StoreShardScopeV1::Project { project_id } = &shard_id.scope {
-            return self.retire_project_memory_graph(project_id).await;
-        }
-        let owner = self
-            .profile_memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|owner| owner.reconciliation.clone());
-        let Some(owner) = owner else {
+        let owner = match &shard_id.scope {
+            tracedecay_store::StoreShardScopeV1::Project { project_id } => {
+                let projects = self
+                    .project_owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let memory = match projects.get(project_id) {
+                    Some(super::ProjectRuntimeOwnerStateV1::Ready(project)) => {
+                        project.memory.as_ref()
+                    }
+                    Some(super::ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) => {
+                        recovery.memory.as_ref()
+                    }
+                    Some(super::ProjectRuntimeOwnerStateV1::Faulted(faulted)) => {
+                        faulted.retained.memory.as_ref()
+                    }
+                    Some(
+                        super::ProjectRuntimeOwnerStateV1::Opening
+                        | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
+                        | super::ProjectRuntimeOwnerStateV1::Recovering
+                        | super::ProjectRuntimeOwnerStateV1::Retiring,
+                    )
+                    | None => None,
+                };
+                memory.and_then(super::MemoryStoreOwnerV1::reconciliation_owner_and_attachment)
+            }
+            tracedecay_store::StoreShardScopeV1::ProfileMemory => self
+                .profile_memory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(super::MemoryStoreOwnerV1::reconciliation_owner_and_attachment),
+            _ => None,
+        };
+        let Some((owner, attachment)) = owner else {
             return Ok(());
         };
         match owner.shutdown().await {
-            Ok(MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined) => Ok(()),
+            Ok(MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined) => {
+                super::MemoryStoreOwnerV1::clear_reconciliation_owner(&attachment, &owner);
+                Ok(())
+            }
             Ok(terminal) => Err(session_registry_error(
                 "retire memory graph reconciliation task",
                 format!("terminal state: {terminal:?}"),

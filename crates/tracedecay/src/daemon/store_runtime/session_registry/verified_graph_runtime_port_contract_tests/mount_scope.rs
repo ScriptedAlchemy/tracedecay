@@ -12,7 +12,7 @@ use tracedecay_usecases::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
-use super::{ContractFixture, project_id};
+use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use crate::daemon::profile_identity;
 use crate::errors::TraceDecayError;
 use crate::store::DatabaseFactStore;
@@ -57,9 +57,7 @@ async fn writable_project_and_profile_mounts_bind_exact_relational_authority() {
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile_operation = profile_database
-        .issue_memory_graph_runtime_operation()
-        .expect("profile memory graph operation");
+    let profile_operation = await_mounted_graph_operation(&profile_database).await;
     assert_eq!(
         profile_operation.runtime().relational_binding(),
         profile_database.registered_binding()

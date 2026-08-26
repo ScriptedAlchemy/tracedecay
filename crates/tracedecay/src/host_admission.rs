@@ -149,10 +149,11 @@ impl HostAdmissionTestRuntimeV1 {
                 .session_registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_proxy = verified_graph_test_support::bound_graph_runtime(
+            let graph_proxy = verified_graph_test_support::await_bound_graph_runtime(
                 &project_database,
                 "bind sibling test runtime project graph",
-            )?;
+            )
+            .await?;
             registered
                 .bind_project_graph_runtime(graph_proxy)
                 .map_err(|_| TraceDecayError::Database {
@@ -234,10 +235,11 @@ impl HostAdmissionTestRuntimeV1 {
                 let project_database = session_registry
                     .project_memory(project_id.clone(), [project_root])
                     .await?;
-                let graph_proxy = verified_graph_test_support::bound_graph_runtime(
+                let graph_proxy = verified_graph_test_support::await_bound_graph_runtime(
                     &project_database,
                     "bind test runtime project graph",
-                )?;
+                )
+                .await?;
                 registered
                     .bind_project_graph_runtime(graph_proxy)
                     .map_err(|_| TraceDecayError::Database {
