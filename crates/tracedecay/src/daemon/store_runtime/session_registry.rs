@@ -66,8 +66,12 @@ struct SessionGraphOwnerV1 {
 
 enum SessionGraphAttachmentStateV1 {
     Warming,
-    Attached { owner: Option<SessionGraphOwnerV1> },
-    Detached { error: String },
+    Attached {
+        owner: Option<Box<SessionGraphOwnerV1>>,
+    },
+    Detached {
+        error: String,
+    },
 }
 
 struct RegisteredSessionOwnerV1 {
@@ -86,7 +90,7 @@ impl RegisteredSessionOwnerV1 {
         Self {
             database,
             relation_graph: Arc::new(StdMutex::new(SessionGraphAttachmentStateV1::Attached {
-                owner: Some(relation_graph),
+                owner: Some(Box::new(relation_graph)),
             })),
             graph_settled: Arc::new(tokio::sync::Notify::new()),
             graph_open_task_key,
@@ -179,7 +183,7 @@ impl RegisteredSessionOwnerV1 {
         let SessionGraphOwnerV1 {
             graph,
             store_target,
-        } = relation_graph;
+        } = *relation_graph;
         Ok(ProjectSessionRetirementOwnerV1 {
             database: self.database,
             graph,
@@ -491,10 +495,10 @@ impl ProjectSessionRetirementOwnerV1 {
         Ok(RegisteredSessionOwnerV1 {
             database: self.database,
             relation_graph: Arc::new(StdMutex::new(SessionGraphAttachmentStateV1::Attached {
-                owner: Some(SessionGraphOwnerV1 {
+                owner: Some(Box::new(SessionGraphOwnerV1 {
                     graph: self.graph,
                     store_target,
-                }),
+                })),
             })),
             graph_settled: Arc::new(tokio::sync::Notify::new()),
             graph_open_task_key: self.graph_open_task_key,
