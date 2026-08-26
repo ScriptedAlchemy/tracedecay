@@ -884,6 +884,19 @@ async fn disabled_watcher_never_registers() {
 }
 
 #[tokio::test]
+async fn ambient_user_profile_root_is_never_watched() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    let watcher = GitWatcher::new(fast_watch_config());
+
+    assert_eq!(
+        watcher.ensure_watching(&home).await,
+        GitWatcherAdmission::NotRepository
+    );
+    assert!(watcher.health_report().await.is_empty());
+}
+
+#[tokio::test]
 async fn missing_or_dangling_project_identity_is_rejected() {
     let tmp = tempfile::tempdir().expect("identity fixture");
     let missing = tmp.path().join("missing");

@@ -386,11 +386,10 @@ mod tests {
     #[test]
     fn default_validation_uses_byte_pinned_activation_workload() {
         let summary = validate_requested_workload(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
-                .expect("workspace root above crates/tracedecay")
-                .to_owned(),
+                .expect("workspace root above crates/tracedecay"),
             None,
         )
         .expect("checked-in activation workload validates");
