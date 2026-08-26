@@ -64,6 +64,50 @@ const SEALED_PROJECTION_DEADLINE_CEILING: Duration = Duration::from_mins(15);
 /// across a few reconcile passes rather than blocking forever.
 const MAX_PENDING_REPLAY_COMPLETIONS_V1: usize = 8;
 
+#[derive(Clone, Copy)]
+enum CodeGraphPublicationConflictStageV1 {
+    ActiveReplayPublish,
+    RetiredReplay,
+    PendingCompletionLimit,
+    PendingPredecessorPublish,
+    VerifiedHeadRefreshLimit,
+    ReplayAppend,
+    FinalPublish,
+}
+
+impl CodeGraphPublicationConflictStageV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveReplayPublish => "active_replay_publish",
+            Self::RetiredReplay => "retired_replay",
+            Self::PendingCompletionLimit => "pending_completion_limit",
+            Self::PendingPredecessorPublish => "pending_predecessor_publish",
+            Self::VerifiedHeadRefreshLimit => "verified_head_refresh_limit",
+            Self::ReplayAppend => "replay_append",
+            Self::FinalPublish => "final_publish",
+        }
+    }
+}
+
+fn observe_code_graph_publication<T>(
+    stage: CodeGraphPublicationConflictStageV1,
+    result: std::result::Result<T, GraphDbError>,
+) -> std::result::Result<T, GraphDbError> {
+    result.map_err(|error| {
+        if matches!(error, GraphDbError::Conflict) {
+            let reason = stage.as_str();
+            tracing::warn!(
+                event = "code_graph_publication_conflict",
+                reason,
+                "code graph publication reached a conflicting durable authority"
+            );
+            #[cfg(feature = "hotpath")]
+            hotpath::val!("code_graph.publication.conflict_reason").set(&reason);
+        }
+        error
+    })
+}
+
 fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
     let scaled = sealed_projection_scaled_deadline(sealed_bytes);
     SEALED_PROJECTION_DEADLINE_FLOOR
@@ -951,10 +995,18 @@ impl RetainedCodeGraphRuntimeV1 {
                     );
                 }
                 let _replay_pool_lock = verify_durable_source()?;
-                let publication = publish(&mut storage, &publication_key, Some(manifest))?;
+                let publication = observe_code_graph_publication(
+                    CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
+                    publish(&mut storage, &publication_key, Some(manifest)),
+                )?;
                 return Ok(publication.snapshot);
             }
-            GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
+            GraphPublicationReplayLookupV1::Retired(_) => {
+                return observe_code_graph_publication(
+                    CodeGraphPublicationConflictStageV1::RetiredReplay,
+                    Err(GraphDbError::Conflict),
+                );
+            }
             GraphPublicationReplayLookupV1::Missing => {}
         }
         let replay_pool_lock = verify_durable_source()?;
@@ -1010,10 +1062,16 @@ impl RetainedCodeGraphRuntimeV1 {
                 | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
                 GraphReplayAppendOutcomeV1::PendingReplayConflict { pending } => {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return observe_code_graph_publication(
+                            CodeGraphPublicationConflictStageV1::PendingCompletionLimit,
+                            Err(GraphDbError::Conflict),
+                        );
                     }
                     completed_predecessors += 1;
-                    publish(&mut storage, &pending.publication.key, None)?;
+                    observe_code_graph_publication(
+                        CodeGraphPublicationConflictStageV1::PendingPredecessorPublish,
+                        publish(&mut storage, &pending.publication.key, None),
+                    )?;
                     let prior = storage
                         .verified_head(&relational_projection, &context)
                         .map_err(map_publication_error)?;
@@ -1024,19 +1082,28 @@ impl RetainedCodeGraphRuntimeV1 {
                     // read and this append; the refreshed head is the only
                     // thing that was wrong with the replay.
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return observe_code_graph_publication(
+                            CodeGraphPublicationConflictStageV1::VerifiedHeadRefreshLimit,
+                            Err(GraphDbError::Conflict),
+                        );
                     }
                     completed_predecessors += 1;
                     replay = build_replay(actual)?;
                 }
                 GraphReplayAppendOutcomeV1::Conflict { .. }
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
-                    return Err(GraphDbError::Conflict);
+                    return observe_code_graph_publication(
+                        CodeGraphPublicationConflictStageV1::ReplayAppend,
+                        Err(GraphDbError::Conflict),
+                    );
                 }
             }
         }
         drop(replay_pool_lock);
-        let publication = publish(&mut storage, &replay.key, Some(manifest))?;
+        let publication = observe_code_graph_publication(
+            CodeGraphPublicationConflictStageV1::FinalPublish,
+            publish(&mut storage, &replay.key, Some(manifest)),
+        )?;
         Ok(publication.snapshot)
     }
 
