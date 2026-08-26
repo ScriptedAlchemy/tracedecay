@@ -54,8 +54,14 @@ pub struct ExactPairNativeIntegrationTopology {
     repository_id: RepositoryId,
     repository_root: PathBuf,
     repository: GitRepositoryAuthority,
-    graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+    graph_runtime: Option<(StoreShardIdV1, NativeIntegrationGraphRuntimeProviderV1)>,
 }
+
+/// Late-bound verified graph authority for one retained native-integration
+/// owner. The provider may truthfully return `None` while the graph warms;
+/// callers re-observe it for every declared-stack resolution.
+pub type NativeIntegrationGraphRuntimeProviderV1 =
+    Arc<dyn Fn() -> Option<Arc<dyn VerifiedGraphRuntimePortV1>> + Send + Sync>;
 
 impl ExactPairNativeIntegrationTopology {
     pub fn open(
@@ -63,7 +69,7 @@ impl ExactPairNativeIntegrationTopology {
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
     ) -> Result<Self, NativeIntegrationPortError> {
-        Self::open_with_optional_graph_runtime(
+        Self::open_with_optional_graph_runtime_provider(
             project_id,
             repository_id,
             enrolled_repository_root,
@@ -78,7 +84,26 @@ impl ExactPairNativeIntegrationTopology {
         expected_graph_shard: StoreShardIdV1,
         graph_runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     ) -> Result<Self, NativeIntegrationPortError> {
-        Self::open_with_optional_graph_runtime(
+        let retained_runtime = Arc::clone(&graph_runtime);
+        Self::open_with_optional_graph_runtime_provider(
+            project_id,
+            repository_id,
+            enrolled_repository_root,
+            Some((
+                expected_graph_shard,
+                Arc::new(move || Some(Arc::clone(&retained_runtime))),
+            )),
+        )
+    }
+
+    pub fn open_with_graph_runtime_provider(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        enrolled_repository_root: &Path,
+        expected_graph_shard: StoreShardIdV1,
+        graph_runtime: NativeIntegrationGraphRuntimeProviderV1,
+    ) -> Result<Self, NativeIntegrationPortError> {
+        Self::open_with_optional_graph_runtime_provider(
             project_id,
             repository_id,
             enrolled_repository_root,
@@ -86,28 +111,19 @@ impl ExactPairNativeIntegrationTopology {
         )
     }
 
-    fn open_with_optional_graph_runtime(
+    fn open_with_optional_graph_runtime_provider(
         project_id: ProjectId,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
-        graph_runtime: Option<(StoreShardIdV1, Arc<dyn VerifiedGraphRuntimePortV1>)>,
+        graph_runtime: Option<(StoreShardIdV1, NativeIntegrationGraphRuntimeProviderV1)>,
     ) -> Result<Self, NativeIntegrationPortError> {
         project_id.validate().map_err(domain_error)?;
         repository_id.validate().map_err(domain_error)?;
-        if let Some((expected_shard, runtime)) = &graph_runtime {
-            let binding = runtime.relational_binding();
-            let locator = runtime.relational_verified_locator();
-            let exact_project = matches!(
-                &expected_shard.scope,
-                StoreShardScopeV1::Project { project_id: bound } if bound == &project_id
-            );
-            if !exact_project
-                || &binding.shard_id != expected_shard
-                || locator.shard_id != binding.shard_id
-                || locator.incarnation != binding.incarnation
-            {
-                return Err(NativeIntegrationPortError::Unavailable);
-            }
+        if let Some((expected_shard, provider)) = &graph_runtime
+            && let Some(runtime) = provider()
+            && !verified_graph_runtime_matches(&project_id, expected_shard, runtime.as_ref())
+        {
+            return Err(NativeIntegrationPortError::Unavailable);
         }
         let repository =
             GitRepositoryAuthority::discover(enrolled_repository_root).map_err(native_error)?;
@@ -116,7 +132,7 @@ impl ExactPairNativeIntegrationTopology {
             repository_id,
             repository_root: enrolled_repository_root.to_path_buf(),
             repository,
-            graph_runtime: graph_runtime.map(|(_, runtime)| runtime),
+            graph_runtime,
         })
     }
 
@@ -153,9 +169,15 @@ impl ExactPairNativeIntegrationTopology {
         request: &NativeIntegrationStackResolutionRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError> {
-        let Some(runtime) = &self.graph_runtime else {
+        let Some((expected_shard, provider)) = &self.graph_runtime else {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
         };
+        let Some(runtime) = provider() else {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        };
+        if !verified_graph_runtime_matches(&self.project_id, expected_shard, runtime.as_ref()) {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
         let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
             declared_revision,
             source_node_id,
@@ -386,6 +408,21 @@ impl ExactPairNativeIntegrationTopology {
         }
         Ok(authority)
     }
+}
+
+fn verified_graph_runtime_matches(
+    project_id: &ProjectId,
+    expected_shard: &StoreShardIdV1,
+    runtime: &dyn VerifiedGraphRuntimePortV1,
+) -> bool {
+    let binding = runtime.relational_binding();
+    let locator = runtime.relational_verified_locator();
+    matches!(
+        &expected_shard.scope,
+        StoreShardScopeV1::Project { project_id: bound } if bound == project_id
+    ) && binding.shard_id == *expected_shard
+        && locator.shard_id == binding.shard_id
+        && locator.incarnation == binding.incarnation
 }
 
 fn attached_reference(

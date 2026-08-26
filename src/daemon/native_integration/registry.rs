@@ -32,7 +32,8 @@ use tracedecay_store::{
 };
 use tracedecay_usecases::native_integration::{
     DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
-    GixNativeIntegrationAdapter, NativeIntegrationTransactionCoordinator,
+    GixNativeIntegrationAdapter, NativeIntegrationGraphRuntimeProviderV1,
+    NativeIntegrationTransactionCoordinator,
 };
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::stack_coordinator::{
@@ -387,10 +388,6 @@ impl DaemonNativeIntegrationServiceRegistry {
         let scope_sets = database
             .authorized_scope_set_storage()
             .map_err(|_| NativeIntegrationPortError::Unavailable)?;
-        let graph_runtime = database
-            .project_graph_runtime()
-            .map(|runtime| Arc::new(runtime.clone()) as Arc<dyn VerifiedGraphRuntimePortV1>)
-            .ok_or(NativeIntegrationPortError::Unavailable)?;
         let session_shard = &database.binding().shard_id;
         let StoreShardScopeV1::ProjectSessions {
             project_id: session_project,
@@ -406,6 +403,12 @@ impl DaemonNativeIntegrationServiceRegistry {
             session_shard.profile_id.clone(),
             project_id.clone(),
         );
+        let graph_database = database.clone();
+        let graph_runtime: NativeIntegrationGraphRuntimeProviderV1 = Arc::new(move || {
+            graph_database
+                .project_graph_runtime()
+                .map(|runtime| Arc::new(runtime.clone()) as Arc<dyn VerifiedGraphRuntimePortV1>)
+        });
         self.ensure_with(
             database_path,
             repository_root,
@@ -432,7 +435,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         observed_at: UtcMicros,
         scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
         expected_graph_shard: Option<StoreShardIdV1>,
-        graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+        graph_runtime: Option<NativeIntegrationGraphRuntimeProviderV1>,
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
@@ -477,7 +480,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                 let topology = SharedProjectNativeIntegrationTopology {
                     inner: Arc::new(match (topology_shard, topology_runtime) {
                         (Some(expected_shard), Some(runtime)) => {
-                            ExactPairNativeIntegrationTopology::open_with_graph_runtime(
+                            ExactPairNativeIntegrationTopology::open_with_graph_runtime_provider(
                                 owner_project_id.clone(),
                                 owner_repository_id.clone(),
                                 &native_root,
