@@ -53,6 +53,20 @@
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "timeout": 5,
+            "args": [
+              "hook-claude-subagent-start"
+            ]
+          }
+        ]
+      }
     ]
   }
 }

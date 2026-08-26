@@ -241,17 +241,17 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
     }
 }
 
-/// Opens the index once and reads both session-steering signals.
-pub(super) async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u64>) {
-    let Ok(status) = super::daemon_tool_json(
+/// Result-preserving status lookup for latency-sensitive hooks that must
+/// distinguish an unavailable daemon from a healthy index with no signals.
+pub(super) async fn cursor_index_signals_for_root_result(
+    root: &Path,
+) -> crate::errors::Result<(Option<String>, Option<u64>)> {
+    let status = super::daemon_tool_json(
         Some(root),
         "tracedecay_status",
         serde_json::json!({ "format": "json" }),
     )
-    .await
-    else {
-        return (None, None);
-    };
+    .await?;
     let last = status
         .get("last_updated")
         .and_then(serde_json::Value::as_i64)
@@ -260,7 +260,7 @@ pub(super) async fn cursor_index_signals_for_root(root: &Path) -> (Option<String
     let tokens_saved = status
         .get("tokens_saved")
         .and_then(serde_json::Value::as_u64);
-    (staleness, tokens_saved)
+    Ok((staleness, tokens_saved))
 }
 
 #[cfg(test)]

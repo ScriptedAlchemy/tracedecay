@@ -6,6 +6,7 @@ use super::{
 };
 use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -549,6 +550,18 @@ fn sync_config_env_overrides_bool_and_int() {
         overridden.max_concurrent_syncs,
         super::SyncConfig::default().max_concurrent_syncs
     );
+}
+
+#[test]
+fn implicit_discovery_never_selects_the_user_profile_root() {
+    let _profile = super::PinnedUserDataDir::new();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    fs::write(super::get_project_db_path(&home), b"").expect("ambient project marker");
+    let nested = home.join("unrelated/nested");
+    fs::create_dir_all(&nested).expect("nested directory");
+
+    assert!(super::is_ambient_project_root(&home));
+    assert_eq!(super::discover_project_root(&nested), None);
 }
 
 #[tokio::test]
