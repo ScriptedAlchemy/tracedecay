@@ -666,7 +666,7 @@ async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn foreground_project_open_defers_historical_convergence_until_core_publication() {
+async fn foreground_project_open_defers_historical_convergence_until_full_publication() {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-foreground-admission").await;
     let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
@@ -688,7 +688,7 @@ async fn foreground_project_open_defers_historical_convergence_until_core_public
         )
         .await
         .is_err(),
-        "historical convergence must not enter its writer lane before core publication"
+        "historical convergence must not enter its writer lane before full publication"
     );
     database
         .begin_write_transaction()
@@ -704,7 +704,7 @@ async fn foreground_project_open_defers_historical_convergence_until_core_public
         convergence_gate.wait_until_blocked(),
     )
     .await
-    .expect("historical convergence starts after core publication");
+    .expect("historical convergence starts after full publication");
     convergence_gate.release();
 }
 

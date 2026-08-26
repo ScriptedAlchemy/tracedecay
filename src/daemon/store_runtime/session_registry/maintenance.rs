@@ -313,19 +313,19 @@ impl RegisteredSchemaConvergenceTestGateState {
 }
 
 #[cfg(test)]
-pub(super) struct RegisteredSchemaConvergenceTestGate {
+pub(crate) struct RegisteredSchemaConvergenceTestGate {
     state: Arc<RegisteredSchemaConvergenceTestGateState>,
 }
 
 #[cfg(test)]
 impl RegisteredSchemaConvergenceTestGate {
-    pub(super) async fn wait_until_blocked(&self) {
+    pub(crate) async fn wait_until_blocked(&self) {
         while !self.state.started.load(Ordering::Acquire) {
             self.state.started_notify.notified().await;
         }
     }
 
-    pub(super) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.state.release.add_permits(1);
     }
 }
@@ -379,7 +379,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[cfg(test)]
-    pub(super) fn block_registered_schema_convergence_for_test(
+    pub(crate) fn block_registered_schema_convergence_for_test(
         &self,
     ) -> RegisteredSchemaConvergenceTestGate {
         self.registered_schema_convergence.install_gate()

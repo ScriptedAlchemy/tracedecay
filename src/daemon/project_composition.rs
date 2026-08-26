@@ -644,7 +644,6 @@ pub(super) async fn production_project_server(
                 ),
             ],
         );
-        drop(foreground_project_open);
         let semantic_startup_project = canonical_project_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
