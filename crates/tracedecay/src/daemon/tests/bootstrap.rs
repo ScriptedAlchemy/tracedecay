@@ -206,6 +206,7 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 
 #[test]
 fn daemon_project_route_rejects_the_user_profile_root() {
+    let _env_lock = crate::config::lock_user_data_dir_test_env();
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return;
     };
