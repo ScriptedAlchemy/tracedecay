@@ -1000,8 +1000,10 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         loop {
             match project_database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
-                Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
-                | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable) => {
+                Err(
+                    crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                ) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("project graph attachment failed: {error:?}"),
@@ -1271,8 +1273,8 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     assert_eq!(reopened.database_path(), database_path);
     assert!(matches!(
         reopened.issue_memory_graph_runtime_operation(),
-        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
-            | Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
+        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+            | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
     ));
     drop(reopened);
     tokio::time::timeout(
