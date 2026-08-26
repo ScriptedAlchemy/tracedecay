@@ -3199,6 +3199,32 @@ mod tests {
         tracedecay_runtime_core::config::PinnedUserDataDir::new()
     }
 
+    /// A `home` fixture for tests that drive a real host-native plugin CLI
+    /// (`codex plugin add`/`remove` via [`run_host_cli`]) rather than only
+    /// writing files themselves.
+    ///
+    /// `run_host_cli` launches the host CLI with `HOME` set to exactly this
+    /// path, and at least one first-party `codex` build refuses to create its
+    /// PATH-alias helper binaries once its resolved `codex_home` falls under
+    /// the literal system temp directory (typically `/tmp`) -- a sandboxing
+    /// precaution against a world-writable, shared temp root. A `home` fixture
+    /// placed under the crate's own `target/` directory keeps the same
+    /// per-test isolation `tempfile::tempdir()` gives, without that host
+    /// safeguard misreading a fresh test fixture as an unsafe shared location.
+    fn host_cli_tempdir() -> tempfile::TempDir {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("host-cli-test-homes");
+        std::fs::create_dir_all(&root)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", root.display()));
+        tempfile::Builder::new()
+            .prefix(".tmp")
+            .tempdir_in(&root)
+            .unwrap_or_else(|error| panic!("failed to create host CLI test home: {error}"))
+    }
+
     fn copy_test_bundle(source: &std::path::Path, destination: &std::path::Path) {
         for entry in std::fs::read_dir(source).unwrap() {
             let entry = entry.unwrap();
@@ -4717,8 +4743,11 @@ esac
     #[test]
     fn codex_core_rollback_restores_generated_agent_exports_byte_for_byte() {
         let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
+        let home = host_cli_tempdir();
+        // Same filesystem as `home`: the receipt transaction backs up a
+        // staged artifact by renaming it into `lifecycle`, and rename cannot
+        // cross a filesystem boundary.
+        let lifecycle = host_cli_tempdir();
         let agents_dir = home.path().join(".codex/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         let stale_path = agents_dir.join("tracedecay-legacy.toml");
@@ -4736,6 +4765,21 @@ esac
         std::fs::write(&current_path, current_bytes).unwrap();
         std::fs::write(&user_path, user_bytes).unwrap();
         std::fs::write(&manifest_path, manifest_bytes.as_bytes()).unwrap();
+
+        // Core-component `apply` now drives Codex's own `codex plugin add`,
+        // which requires the plugin to already be registered in Codex's
+        // marketplace. Stage it exactly as the ordinary install path does.
+        let integration = tracedecay::agents::get_integration("codex").unwrap();
+        integration
+            .prepare_non_interactive_install(&tracedecay::agents::InstallContext {
+                home: home.path().to_path_buf(),
+                tracedecay_bin: tracedecay::agents::which_tracedecay()
+                    .unwrap_or_else(|| "tracedecay".to_string()),
+                tool_permissions: tracedecay::agents::expected_tool_perms(),
+                project_root: None,
+                dashboard: true,
+            })
+            .unwrap();
 
         let component_set = canonical_host_component_set(
             "codex",
@@ -5216,7 +5260,12 @@ esac
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("ownership marker conflicts"));
+        assert!(
+            error
+                .to_string()
+                .contains("a non-tracedecay LSP entry runs the tracedecay binary"),
+            "unexpected error: {error}"
+        );
         assert_eq!(
             std::fs::read(&config_path).unwrap(),
             OPENCODE_UNRELATED_CONFIG
@@ -5334,7 +5383,14 @@ esac
         };
 
         let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
+        let home = host_cli_tempdir();
+        // Keep the lifecycle root on the same filesystem as `home`: receipt
+        // transactions back up staged artifacts with an atomic rename.
+        let data_dir = home.path().join(".tracedecay-data");
+        let _data_dir_guard = EnvVarGuard::set(
+            tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+            &data_dir,
+        );
         // The reinstall path renders the canonical Codex component set with
         // the PATH-resolved binary, and the host-native activation probe
         // compares the staged source byte-for-byte against that rendering.
@@ -5351,7 +5407,7 @@ esac
         };
         assert!(matches!(
             integration.prepare_non_interactive_install(&ctx).unwrap(),
-            tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(_)
+            tracedecay::agents::NonInteractiveInstallOutcome::Ready
         ));
         let config_path = home.path().join(".codex/config.toml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -5404,7 +5460,10 @@ esac
         )
         .await;
         assert!(
-            matches!(stale.as_slice(), [(id, Err(error))] if id == "codex" && error.to_string().contains("loaded TraceDecay cache is stale")),
+            matches!(
+                stale.as_slice(),
+                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+            ),
             "{stale:?}"
         );
         std::fs::copy(
@@ -5431,8 +5490,10 @@ esac
     #[tokio::test]
     async fn codex_native_removed_retry_cleans_receipt_owned_source() {
         let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
+        let home = host_cli_tempdir();
+        // Same filesystem as `home`: receipt rollback moves artifacts into
+        // `lifecycle` and requires an atomic rename.
+        let lifecycle = host_cli_tempdir();
         let tracedecay_bin = "new-tracedecay";
         let component_set =
             canonical_host_component_set_with_tracedecay_bin("codex", None, 0, tracedecay_bin)
@@ -5566,7 +5627,12 @@ esac
             )
             .unwrap_err()
             .to_string();
-            assert!(error.contains("host capability is unsupported"));
+            let expected = match operation {
+                HostBundleCliOperation::Install => "host capability is unsupported",
+                HostBundleCliOperation::Update | HostBundleCliOperation::Repair => "cache is stale",
+                HostBundleCliOperation::Uninstall => unreachable!("not exercised by this loop"),
+            };
+            assert!(error.contains(expected), "{operation:?}: {error}");
         }
 
         assert_eq!(
