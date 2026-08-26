@@ -666,6 +666,49 @@ async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_project_open_defers_historical_convergence_until_core_publication() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-foreground-admission").await;
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let foreground = registry
+        .begin_foreground_project_open()
+        .expect("foreground project-open admission");
+
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions publish for foreground open");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            convergence_gate.wait_until_blocked(),
+        )
+        .await
+        .is_err(),
+        "historical convergence must not enter its writer lane before core publication"
+    );
+    database
+        .begin_write_transaction()
+        .await
+        .expect("foreground project-open writer is not queued behind convergence")
+        .rollback()
+        .await
+        .expect("foreground project-open writer probe rolls back");
+
+    drop(foreground);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        convergence_gate.wait_until_blocked(),
+    )
+    .await
+    .expect("historical convergence starts after core publication");
+    convergence_gate.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_project_attaches_schedule_one_historical_convergence() {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-deduplication").await;

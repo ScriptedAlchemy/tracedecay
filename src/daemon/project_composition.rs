@@ -251,6 +251,10 @@ pub(super) async fn production_project_server(
             None,
         ));
     }
+    let foreground_project_open = store_administration
+        .session_runtime_registry()
+        .await?
+        .begin_foreground_project_open()?;
     let capacity_gate = project_open_capacity_gate(project_open_gates).await;
     let capacity_admission = tokio::select! {
         biased;
@@ -582,6 +586,7 @@ pub(super) async fn production_project_server(
         hotpath::gauge!("project_servers").inc(1.0);
     }
     if !inserted {
+        drop(foreground_project_open);
         route_registered.store(false, Ordering::Release);
     } else {
         if cancellation.is_cancelled() {
@@ -636,6 +641,7 @@ pub(super) async fn production_project_server(
                 ),
             ],
         );
+        drop(foreground_project_open);
         let semantic_startup_project = canonical_project_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
