@@ -37,6 +37,60 @@ fn injected_resident_memory_refusals()
 }
 
 #[cfg(test)]
+struct InjectedActivationGateStateV1 {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn injected_activation_gates()
+-> &'static std::sync::Mutex<std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>>
+{
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(super) struct InjectedActivationGateV1 {
+    state: Arc<InjectedActivationGateStateV1>,
+}
+
+#[cfg(test)]
+impl InjectedActivationGateV1 {
+    pub(super) async fn wait_until_started(&self) {
+        self.state.started.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.state.release.notify_one();
+    }
+}
+
+#[cfg(test)]
+impl Drop for InjectedActivationGateV1 {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_injected_activation_gate(
+    worktree_id: &WorktreeId,
+) -> InjectedActivationGateV1 {
+    let state = Arc::new(InjectedActivationGateStateV1 {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    injected_activation_gates()
+        .lock()
+        .expect("injected activation gate map must not be poisoned")
+        .insert(worktree_id.as_str().to_owned(), Arc::clone(&state));
+    InjectedActivationGateV1 { state }
+}
+
+#[cfg(test)]
 pub(super) fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usize) {
     let mut injected = injected_activation_failures()
         .lock()
@@ -80,6 +134,16 @@ fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
         }
         _ => false,
     }
+}
+
+#[cfg(test)]
+fn take_injected_activation_gate(
+    worktree_id: &WorktreeId,
+) -> Option<Arc<InjectedActivationGateStateV1>> {
+    injected_activation_gates()
+        .lock()
+        .expect("injected activation gate map must not be poisoned")
+        .remove(worktree_id.as_str())
 }
 
 #[derive(Clone)]
@@ -187,6 +251,10 @@ impl CodeGraphActivationAuthorityV1 {
             }
             #[cfg(test)]
             Self::Memory { .. } => {
+                if let Some(gate) = take_injected_activation_gate(worktree_id) {
+                    gate.started.notify_one();
+                    gate.release.notified().await;
+                }
                 if has_injected_resident_memory_refusal(worktree_id) {
                     latest.refuse_graph_activation(
                         "code graph activation was refused by the resident-memory policy",

@@ -11491,6 +11491,92 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     registry.shutdown().await;
 }
 
+/// A graph projection can remain busy for minutes on a large retained
+/// generation. Source reconciliation and the replacement text projection must
+/// finish before that optional graph work starts, so exact and lexical serving
+/// never inherit graph activation latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_text_generation_is_ready_before_slow_graph_activation_starts() {
+    let sources = (0..64)
+        .map(|index| {
+            (
+                format!("src/file_{index:04}.rs"),
+                format!("pub fn alpha_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_refs = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&source_refs);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, sealed_worktree_id, sealed_generation_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot.worktree.clone().expect("seeded worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+            latest.generation.manifest().generation_id.clone(),
+        )
+    };
+    fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
+
+    let activation_gate =
+        super::graph_activation::install_injected_activation_gate(&sealed_worktree_id);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        activation_gate.wait_until_started(),
+    )
+    .await
+    .expect("graph activation did not reach the deterministic hold point");
+    let observed_generation_id = registry.latest_generation_id(fixture.path()).await;
+    let text_ready = registry
+        .latest_text_serving_for_scope(&scope)
+        .await
+        .is_some_and(|text| text.query_owners_are_warm());
+    activation_gate.release();
+
+    assert_ne!(
+        observed_generation_id,
+        Some(sealed_generation_id),
+        "slow graph activation started before the changed text generation replaced the retained seal"
+    );
+    assert!(
+        text_ready,
+        "slow graph activation started before the changed generation became exact/lexical ready"
+    );
+    registry.shutdown().await;
+}
+
 /// Busy admission preserves the prior generation and schedules a follow-up wake
 /// so serve-during-refresh cannot leave the index stale indefinitely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
