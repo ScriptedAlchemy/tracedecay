@@ -1008,6 +1008,16 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
         "an out-of-scope frame that was never decoded cannot be reported as malformed"
     );
     assert_eq!(progress.frames_skipped, 3);
+    // The coverage reason proves the decode was skipped; this proves the seam
+    // *reports* it. `session_meta` names itself, so it is still decoded before
+    // it is judged — only the two frames that cannot move the cwd are refused
+    // from the gate, and the split has to say so or a change that moves the
+    // verdict earlier is invisible to production telemetry.
+    assert_eq!(
+        progress.frames_rejected_before_decode, 2,
+        "every frame that cannot move the cwd is refused without a parse, and \
+         the one that can is not"
+    );
     assert_eq!(progress.frames_persisted, 0);
     assert_eq!(spy.capture_count(), 0);
     assert!(spy.inner.observations().is_empty());
@@ -1042,6 +1052,10 @@ async fn in_scope_frames_still_admit_and_keep_the_decode_verdict() {
 
     assert_eq!(spy.inner.observations().len(), 2);
     assert_eq!(progress.frames_persisted, 2);
+    assert_eq!(
+        progress.frames_rejected_before_decode, 0,
+        "nothing in scope may be refused before it is decoded"
+    );
     assert!(hit);
     assert!(
         page.frames

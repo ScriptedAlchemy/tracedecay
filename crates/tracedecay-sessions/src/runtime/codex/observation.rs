@@ -66,6 +66,9 @@ pub struct CodexJsonlAdmissionProgress {
     pub frames_decoded: u64,
     pub frames_accepted: u64,
     pub frames_skipped: u64,
+    /// Of `frames_skipped`, the frames refused from their raw bytes before any
+    /// decode. Every one is a rollout record this scope never owned.
+    pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
 }
@@ -425,7 +428,7 @@ async fn try_admit_codex_jsonl_observations(
                 .scope_verdict
                 .get_or_insert_with(|| scope_matcher.accepts(state.context.cwd.as_deref()));
             if !in_scope && !hints.may_change_codex_context {
-                return Ok(JsonlFrameAdmission::non_durable(
+                return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
                 ));
             }
@@ -482,6 +485,7 @@ async fn try_admit_codex_jsonl_observations(
         frames_decoded: progress.frames_decoded,
         frames_accepted: progress.frames_accepted,
         frames_skipped: progress.frames_skipped,
+        frames_rejected_before_decode: progress.frames_rejected_before_decode,
         frames_refused: progress.frames_refused,
         frames_persisted: progress.frames_persisted,
     })
