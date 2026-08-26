@@ -236,6 +236,10 @@ pub struct McpServer {
     /// Retains non-request maintenance futures so shutdown can fence task
     /// admission, cancel every live future, and join it before stores close.
     background_tasks: McpBackgroundTaskOwner,
+    /// Single-flights optional tool-activity persistence. A busy session-store
+    /// writer may delay this local-detail observation, but it must never delay
+    /// the foreground tool whose activity is being observed.
+    tool_activity_publish_running: Arc<AtomicBool>,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -955,6 +959,7 @@ impl McpServer {
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
             background_tasks: McpBackgroundTaskOwner::default(),
+            tool_activity_publish_running: Arc::new(AtomicBool::new(false)),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
