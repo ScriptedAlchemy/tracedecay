@@ -183,24 +183,35 @@ fn proxy_serve_handshake(
 ) -> Result<crate::daemon::DaemonHandshake> {
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
-    let mut project_path = if explicit_path {
+    let mut resolved_path = if explicit_path {
         crate::config::resolve_path(path)
     } else {
         crate::config::resolve_path_with_discovery(None)
     };
 
-    let initialized = TraceDecay::is_initialized(&project_path);
-    let auto_init_root = (!initialized && crate::config::load_sync_config(&project_path).auto_init)
-        .then(|| crate::worktree::git_worktree_root(&project_path))
-        .flatten();
+    let ambient_discovery =
+        !explicit_path && crate::config::is_ambient_project_root(&resolved_path);
+    let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
+    let auto_init_root = (!ambient_discovery
+        && !initialized
+        && crate::config::load_sync_config(&resolved_path).auto_init)
+        .then(|| crate::worktree::git_worktree_root(&resolved_path))
+        .flatten()
+        .filter(|root| !crate::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
-        project_path.clone_from(root);
+        resolved_path.clone_from(root);
     }
 
-    let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
-    let telemetry_timings = timings || crate::config::load_telemetry_config(&project_path).timings;
+    let project_path = (!ambient_discovery).then_some(resolved_path);
+    let scope_prefix = project_path
+        .as_deref()
+        .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
+    let telemetry_timings = timings
+        || project_path
+            .as_deref()
+            .is_some_and(|path| crate::config::load_telemetry_config(path).timings);
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
-        Some(project_path),
+        project_path,
         scope_prefix,
         telemetry_timings,
         auto_init_root.is_some(),
@@ -209,7 +220,7 @@ fn proxy_serve_handshake(
     // initialize roots only when cwd neither resolved nor can be auto-inited,
     // matching the local resolver's fallback order.
     handshake.allow_initialize_root_routing =
-        !explicit_path && !initialized && auto_init_root.is_none();
+        !explicit_path && (!initialized || ambient_discovery) && auto_init_root.is_none();
     Ok(handshake)
 }
 

@@ -38,22 +38,41 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     check_binary(&mut dc);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
-    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let daemon_status = daemon_project_status(&project_path).await;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_path = crate::config::discover_project_root(&cwd);
+    let daemon_status = match project_path.as_deref() {
+        Some(project_path) => Some(daemon_project_status(project_path).await),
+        None => {
+            dc.info(
+                "No indexed code project at the current directory; project database checks skipped",
+            );
+            None
+        }
+    };
     let storage_healthy = match daemon_status.as_ref() {
-        Ok(status) => check_database(&mut dc, status),
-        Err(error) => {
+        Some(Ok(status)) => check_database(&mut dc, status),
+        Some(Err(error)) => {
             report_daemon_diagnostics_unavailable(
                 &mut dc,
-                fallback_database_path(&project_path).as_deref(),
+                project_path
+                    .as_deref()
+                    .and_then(fallback_database_path)
+                    .as_deref(),
                 error,
             );
             false
         }
+        None => true,
     };
 
     check_global_db(&mut dc);
-    check_stale_stores(&mut dc, daemon_status.as_ref().ok());
+    check_stale_stores(
+        &mut dc,
+        daemon_status
+            .as_ref()
+            .and_then(|status| status.as_ref().ok()),
+        project_path.is_some(),
+    );
     check_watcher(&mut dc);
     check_user_config(&mut dc);
     check_external_tools(&mut dc);
@@ -62,7 +81,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     if let Some(ref home) = agents::home_dir() {
         let hctx = HealthcheckContext {
             home: home.clone(),
-            project_path: project_path.clone(),
+            project_path: cwd.clone(),
         };
         let agents_to_check: Vec<Box<dyn agents::AgentIntegration>> = match agent_filter {
             Some(id) => match agents::get_integration(id) {
@@ -78,7 +97,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
             ag.healthcheck(&mut dc, &hctx);
         }
         let materialization_root =
-            crate::automation::skill_materialization::resolve_project_root(&project_path);
+            crate::automation::skill_materialization::resolve_project_root(&cwd);
         check_managed_skill_materialization(&mut dc, home, &materialization_root);
     } else {
         dc.fail("Could not determine home directory");
@@ -88,11 +107,11 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     print_summary(&dc);
 
     match daemon_status {
-        Err(error) => Err(error),
-        Ok(_) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
+        Some(Err(error)) => Err(error),
+        Some(Ok(_)) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
             message: "doctor storage health check failed".to_string(),
         }),
-        Ok(_) => Ok(()),
+        Some(Ok(_)) | None => Ok(()),
     }
 }
 
@@ -442,7 +461,11 @@ fn check_global_db(dc: &mut DoctorCounters) {
 
 /// Registry `SQLite` is owned by the daemon. The external doctor reports that
 /// ownership and leaves stale-row inspection/repair to daemon-backed tools.
-fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
+fn check_stale_stores(
+    dc: &mut DoctorCounters,
+    status: Option<&serde_json::Value>,
+    has_current_project: bool,
+) {
     eprintln!("\n\x1b[1mStorage registry\x1b[0m");
     if let Some(storage) = status.and_then(|value| value.get("storage_health")) {
         let owner = storage
@@ -467,8 +490,10 @@ fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value
         dc.pass(&format!(
             "Registry/database inspection delegated to daemon owner pid={owner}, {identity}"
         ));
-    } else {
+    } else if has_current_project {
         dc.warn("Registry diagnostics unavailable because the daemon owner did not answer; doctor did not open the global DB");
+    } else {
+        dc.info("No current code project; daemon-owned project registry inspection skipped");
     }
     dc.info("Use `tracedecay projects list` for daemon-backed registry inspection and `tracedecay migrate registry-gc --json` to preview explicit offline cleanup.");
 }

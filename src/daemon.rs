@@ -2557,6 +2557,14 @@ impl DaemonEngine {
         let canonical_project_path = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.clone());
+        if crate::config::is_ambient_project_root(&canonical_project_path) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",
+                    canonical_project_path.display()
+                ),
+            });
+        }
         let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
         Ok((canonical_project_path, route))
     }
@@ -2744,6 +2752,45 @@ async fn apply_daemon_initialize_route(
     handshake.project_path = Some(route.project_path.clone());
     handshake.allow_init = route.allow_init;
     Ok(Some(route))
+}
+
+fn apply_daemon_tool_project_route(
+    handshake: &mut DaemonHandshake,
+    first_request_line: &mut String,
+) {
+    let Ok(mut request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
+        return;
+    };
+    let Some(project_path) = daemon_request_tool_name(&request)
+        .and_then(|_| request.params.as_ref())
+        .and_then(|params| params.get("arguments"))
+        .and_then(|arguments| {
+            arguments
+                .get("project_path")
+                .or_else(|| arguments.get("projectPath"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    else {
+        return;
+    };
+    handshake.project_path = Some(project_path);
+    handshake.scope_prefix = None;
+    handshake.allow_init = false;
+    if let Some(arguments) = request
+        .params
+        .as_mut()
+        .and_then(|params| params.get_mut("arguments"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        arguments.remove("project_path");
+        arguments.remove("projectPath");
+    }
+    if let Ok(routed_request) = serde_json::to_string(&request) {
+        *first_request_line = routed_request;
+    }
 }
 
 fn attach_initialize_route_metadata(
@@ -2975,7 +3022,7 @@ async fn serve_broker_socket_client(
         result = transport.read_line() => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
     };
-    let Some(first_request_line) = first_request_line else {
+    let Some(mut first_request_line) = first_request_line else {
         return Ok(());
     };
     let initialize_route = apply_daemon_initialize_route(
@@ -2984,6 +3031,7 @@ async fn serve_broker_socket_client(
         &engine.store_administration,
     )
     .await?;
+    apply_daemon_tool_project_route(&mut handshake, &mut first_request_line);
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -3163,12 +3211,13 @@ async fn serve_windows_broker_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    let Some(first_request_line) = transport.read_line().await? else {
+    let Some(mut first_request_line) = transport.read_line().await? else {
         return Ok(());
     };
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;
+    apply_daemon_tool_project_route(&mut handshake, &mut first_request_line);
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => {

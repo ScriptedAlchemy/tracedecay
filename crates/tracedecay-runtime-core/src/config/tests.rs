@@ -1,6 +1,7 @@
 use super::{
-    GENERATED_DIR_SEGMENTS, SyncConfig, TraceDecayConfig, USER_DATA_DIR_ENV, canonicalize_data_dir,
-    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
+    GENERATED_DIR_SEGMENTS, PinnedUserDataDir, SyncConfig, TraceDecayConfig, USER_DATA_DIR_ENV,
+    canonicalize_data_dir, db_filename, discover_project_root, get_project_db_path,
+    get_tracedecay_dir, is_ambient_project_root, is_excluded, is_excluded_dir,
     is_generated_dir_segment, is_generated_path_segment, is_ignored_by_explicit_global_excludes,
     is_ignored_by_git, is_included, lock_user_data_dir_test_env, user_data_dir,
 };
@@ -51,6 +52,18 @@ fn project_data_paths_use_the_current_layout() {
         db_filename(&root.path().join(".tracedecay")),
         "tracedecay.db"
     );
+}
+
+#[test]
+fn implicit_discovery_never_selects_the_user_profile_root() {
+    let _profile = PinnedUserDataDir::new();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    fs::write(get_project_db_path(&home), b"").expect("ambient project marker");
+    let nested = home.join("unrelated/nested");
+    fs::create_dir_all(&nested).expect("nested directory");
+
+    assert!(is_ambient_project_root(&home));
+    assert_eq!(discover_project_root(&nested), None);
 }
 
 #[test]

@@ -591,6 +591,106 @@ fn daemon_tool_deadlines_keep_hook_and_metadata_calls_fast() {
     );
 }
 
+#[test]
+fn explicit_mcp_project_path_replaces_an_ambient_handshake_route() {
+    let project = TempDir::new().expect("project dir");
+    let project = project.path().canonicalize().expect("canonical project");
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut request = json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_context",
+            "arguments": {"project_path": project, "task": "route explicitly"}
+        }
+    })
+    .to_string();
+
+    super::apply_daemon_tool_project_route(&mut handshake, &mut request);
+
+    assert_eq!(handshake.project_path, Some(project));
+    assert_eq!(handshake.scope_prefix, None);
+    assert!(!handshake.allow_init);
+    let routed: serde_json::Value = serde_json::from_str(&request).expect("routed request");
+    assert_eq!(routed["params"]["arguments"]["task"], "route explicitly");
+    assert!(routed["params"]["arguments"].get("project_path").is_none());
+}
+
+#[test]
+fn daemon_project_route_rejects_the_user_profile_root() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let handshake = DaemonHandshake {
+        project_path: Some(home),
+        ..test_handshake_defaults()
+    };
+
+    let error = DaemonEngine::project_route(&handshake)
+        .expect_err("ambient home route must fail before project open");
+
+    assert!(error.to_string().contains("ambient user/filesystem root"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ambient_mcp_session_routes_explicit_project_path_to_a_real_server() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    drop(
+        crate::tracedecay::TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project"),
+    );
+    let mut config = crate::config::load_config(&project).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&project, &config).expect("disable startup catch-up");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "explicit-mcp-route-test")
+            .expect("daemon database scope");
+    let engine = DaemonEngine::default();
+    let handshake = DaemonHandshake {
+        project_path: std::env::var_os("HOME").map(std::path::PathBuf::from),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"project_path": project, "format": "json"}
+        }
+    });
+
+    let responses = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        daemon_round_trip(engine.clone(), &handshake, request),
+    )
+    .await
+    .expect("explicit project route timed out");
+    let response = responses
+        .iter()
+        .find(|response| response["id"] == json!(9))
+        .expect("status response");
+
+    assert!(response.get("result").is_some(), "{response}");
+    tokio::time::timeout(tokio::time::Duration::from_secs(20), engine.shutdown_all())
+        .await
+        .expect("explicit route shutdown timed out");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {

@@ -835,13 +835,13 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let worktree_root = crate::worktree::git_worktree_root(start);
     loop {
-        if has_project_database(&dir)
+        let initialized = has_project_database(&dir)
             || crate::storage::has_enrollment_marker(&dir)
             || crate::storage::resolve_layout_for_current_profile(&dir).is_ok_and(|layout| {
                 layout.storage_mode == crate::storage::StorageMode::ProfileSharded
                     && layout.graph_db_path.exists()
-            })
-        {
+            });
+        if initialized && !is_ambient_project_root(&dir) {
             return Some(dir);
         }
         if worktree_root
@@ -854,6 +854,22 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Returns whether a path is too broad to be an implicit code-project root.
+///
+/// Filesystem roots and the current user profile commonly contain many
+/// repositories. Treating either as an implicit project can turn MCP startup
+/// freshness work into a full-machine or full-home traversal.
+pub fn is_ambient_project_root(path: &Path) -> bool {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical.parent().is_none()
+        || ["HOME", "USERPROFILE"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .map(|home| std::fs::canonicalize(&home).unwrap_or(home))
+            .any(|home| home == canonical)
 }
 
 /// Like [`resolve_path`], but when `path` is `None` it walks up from `cwd`
