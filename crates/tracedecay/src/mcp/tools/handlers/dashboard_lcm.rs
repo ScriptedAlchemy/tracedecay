@@ -32,6 +32,24 @@ const DASHBOARD_AGGREGATE_PAGE_LIMIT: usize = 16;
 const ADMITTED_RETRIEVAL_PAGE_LIMIT: i64 = 100;
 const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DashboardLcmRequestAdmissionErrorV1 {
+    DeadlineElapsed,
+    Unavailable(&'static str),
+}
+
+impl DashboardLcmRequestAdmissionErrorV1 {
+    const fn read_state_and_reason(self) -> (DashboardLcmReadStateV1, &'static str) {
+        match self {
+            Self::DeadlineElapsed => (
+                DashboardLcmReadStateV1::TimedOut,
+                "lcm_dashboard_request_deadline_elapsed",
+            ),
+            Self::Unavailable(reason) => (DashboardLcmReadStateV1::Unavailable, reason),
+        }
+    }
+}
+
 struct SummaryHydrationRequest {
     provider: String,
     session_id: SessionId,
@@ -80,7 +98,10 @@ impl DashboardLcmReadAdapter {
         }
         let (context, cancellation) = match self.request_context(&control) {
             Ok(admission) => admission,
-            Err(reason) => return not_ready(DashboardLcmReadStateV1::Unavailable, reason),
+            Err(error) => {
+                let (state, reason) = error.read_state_and_reason();
+                return not_ready(state, reason);
+            }
         };
         let aggregate = matches!(
             request,
@@ -572,16 +593,16 @@ impl DashboardLcmReadAdapter {
     fn request_context(
         &self,
         control: &DashboardHttpRequestControlV1,
-    ) -> Result<(RequestContext, CancellationSignal), &'static str> {
+    ) -> Result<(RequestContext, CancellationSignal), DashboardLcmRequestAdmissionErrorV1> {
         if control.deadline().is_elapsed_at(control.observed_at()) {
-            return Err("lcm_dashboard_request_deadline_elapsed");
+            return Err(DashboardLcmRequestAdmissionErrorV1::DeadlineElapsed);
         }
-        let scope = self
-            .identity
-            .session_request_scope()
-            .map_err(|_| "lcm_dashboard_scope_unavailable")?;
-        let actor = ActorId::new("dashboard.session-retrieval")
-            .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        let scope = self.identity.session_request_scope().map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_scope_unavailable")
+        })?;
+        let actor = ActorId::new("dashboard.session-retrieval").map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
         let cancellation = control.cancellation().clone();
         let digest = canonical_sha256(&(
             "tracedecay.dashboard.session-retrieval.grant.v1",
@@ -595,23 +616,34 @@ impl DashboardLcmReadAdapter {
             control.deadline().expires_at.0,
             cancellation.context().token_id.as_str(),
         ))
-        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
         let grant = CapabilityGrantSnapshot::new(
-            CapabilityGrantId::new("grant.dashboard.session-retrieval")
-                .map_err(|_| "lcm_dashboard_admission_invalid")?,
+            CapabilityGrantId::new("grant.dashboard.session-retrieval").map_err(|_| {
+                DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+            })?,
             1,
             digest,
             actor.clone(),
             control.observed_at(),
             control.deadline().expires_at,
             scope.clone(),
-            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval")
-                .map_err(|_| "lcm_dashboard_admission_invalid")?]),
-            BTreeSet::from([UseCaseId::new("use-case.dashboard.lcm-read")
-                .map_err(|_| "lcm_dashboard_admission_invalid")?]),
+            BTreeSet::from([
+                CapabilityId::new("capability.session.temporal-retrieval").map_err(|_| {
+                    DashboardLcmRequestAdmissionErrorV1::Unavailable(
+                        "lcm_dashboard_admission_invalid",
+                    )
+                })?,
+            ]),
+            BTreeSet::from([UseCaseId::new("use-case.dashboard.lcm-read").map_err(|_| {
+                DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+            })?]),
             DisclosureClass::Evidence,
         )
-        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
         let context = RequestContext::new(
             actor,
             scope,
@@ -620,7 +652,9 @@ impl DashboardLcmReadAdapter {
             control.deadline(),
             cancellation.context(),
         )
-        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        .map_err(|_| {
+            DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
+        })?;
         Ok((context, cancellation))
     }
 }
@@ -856,6 +890,74 @@ fn retrieval_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnusedSessionRetrieval;
+
+    impl SessionApplicationRetrievalPortV1 for UnusedSessionRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+            panic!("expired dashboard admission must not invoke retrieval")
+        }
+    }
+
+    fn dashboard_lcm_test_identity() -> ResolvedSessionIdentity {
+        ResolvedSessionIdentity::for_project(
+            tracedecay_usecases::context::ProfileId::new("profile.dashboard-lcm-test")
+                .expect("profile identity"),
+            tracedecay_domain::ProjectId::new("project.dashboard-lcm-test")
+                .expect("project identity"),
+            tracedecay_usecases::context::SessionStoreId::new("store.dashboard-lcm-test")
+                .expect("store identity"),
+            tracedecay_usecases::context::SessionRootId::new("root.dashboard-lcm-test")
+                .expect("root identity"),
+            tracedecay_usecases::context::ResolvedGitRoute::new(
+                tracedecay_domain::RepositoryId::new("repository.dashboard-lcm-test")
+                    .expect("repository identity"),
+                tracedecay_domain::WorktreeId::new("worktree.dashboard-lcm-test")
+                    .expect("worktree identity"),
+                tracedecay_usecases::context::BranchId::new("branch.dashboard-lcm-test")
+                    .expect("branch identity"),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn expired_dashboard_request_is_timed_out_before_retrieval() {
+        let adapter = DashboardLcmReadAdapter::new(
+            Arc::new(UnusedSessionRetrieval),
+            dashboard_lcm_test_identity(),
+        )
+        .expect("project dashboard adapter");
+        let control = DashboardHttpRequestControlV1::from_parts_for_test(
+            tracedecay_application::RequestId::new("request.dashboard-lcm-expired")
+                .expect("request identity"),
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(100))
+                .expect("request deadline"),
+            CancellationSignal::active("cancel.dashboard-lcm-expired")
+                .expect("request cancellation"),
+            tracedecay_domain::UtcMicros(100),
+        );
+
+        let outcome = adapter
+            .execute(
+                control,
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Overview {
+                    query: String::new(),
+                    limit: 1,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("expired dashboard request must be terminal");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::TimedOut);
+        assert_eq!(reason, "lcm_dashboard_request_deadline_elapsed");
+    }
 
     #[test]
     fn wrong_scope_is_unavailable_and_never_reported_as_locked() {
