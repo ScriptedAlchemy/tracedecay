@@ -116,38 +116,46 @@ impl CodeLexicalArtifactReaderV1 {
         }
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| map_reader_open_error(path, error))?;
+        let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| map_reader_open_error(path, error))
+        })?;
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
-        configure_reader_window(&connection, cache_budget_bytes, 0)?;
-        connection
-            .pragma_update(None, "query_only", true)
-            .map_err(sqlite_error)?;
-        verify_artifact_state_revision(&connection, control)?;
-        verify_required_artifact_indexes(&connection)?;
-        let receipt_bytes: Vec<u8> = connection
-            .query_row(
-                "SELECT receipt FROM artifact_state WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_corrupt)?;
-        let receipt = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "content-addressed lexical artifact has no finalized receipt".to_owned(),
-            )
+        hotpath::measure_block!("query.artifact.open.head_schema_verify", {
+            configure_reader_window(&connection, cache_budget_bytes, 0)?;
+            connection
+                .pragma_update(None, "query_only", true)
+                .map_err(sqlite_error)?;
+            verify_artifact_state_revision(&connection, control)?;
+            verify_required_artifact_indexes(&connection)
+        })?;
+        let receipt = hotpath::measure_block!("query.artifact.open.head_receipt_restore", {
+            let receipt_bytes: Vec<u8> = connection
+                .query_row(
+                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_corrupt)?;
+            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "content-addressed lexical artifact has no finalized receipt".to_owned(),
+                )
+            })
         })?;
         if receipt.file_size_bytes() != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "embedded receipt disagrees with the durable head file size".to_owned(),
             ));
         }
-        let reader =
-            Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control)?;
+        let reader = hotpath::measure_block!(
+            "query.artifact.open.reader_restore",
+            Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control,)
+        )?;
         verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
         verify_named_path_identity(path, &file)?;
         crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
@@ -179,13 +187,17 @@ impl CodeLexicalArtifactReaderV1 {
                 expected.file_size_bytes()
             )));
         }
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| map_reader_open_error(path, error))?;
-        let reader =
-            Self::open_connection_with_control(connection, expected, cache_budget_bytes, control)?;
+        let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| map_reader_open_error(path, error))
+        })?;
+        let reader = hotpath::measure_block!(
+            "query.artifact.open.reader_restore",
+            Self::open_connection_with_control(connection, expected, cache_budget_bytes, control,)
+        )?;
         crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
         hotpath::gauge!("query.artifact.bytes").set(expected.file_size_bytes());
         hotpath::gauge!("query.artifact.pages").set(expected.page_count());
@@ -199,72 +211,90 @@ impl CodeLexicalArtifactReaderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        connection
-            .pragma_update(None, "query_only", true)
-            .map_err(sqlite_error)?;
-        verify_artifact_state_revision(&connection, control)?;
-        verify_required_artifact_indexes(&connection)?;
+        hotpath::measure_block!("query.artifact.open.schema_verify", {
+            connection
+                .pragma_update(None, "query_only", true)
+                .map_err(sqlite_error)?;
+            verify_artifact_state_revision(&connection, control)?;
+            verify_required_artifact_indexes(&connection)
+        })?;
         // Read the BLOB length first so the page cache can be configured
         // before metadata is materialized. The retained metadata copy plus
         // SQLite's cache therefore cannot exceed the caller's reservation.
-        let stored_metadata_len: i64 = connection
-            .query_row(
-                "SELECT length(metadata) FROM artifact_state WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        let stored_metadata_len = usize::try_from(stored_metadata_len)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if stored_metadata_len >= cache_budget_bytes {
-            return Err(CodeLexicalArtifactErrorV1::Unreserved(
-                "lexical artifact metadata exhausts the reader cache budget".to_owned(),
-            ));
-        }
-        // Kernel SQLite window: no mmap grant, page cache clamped to
-        // [2, 64] MiB. The caller budget covers the retained metadata copy
-        // plus the cache actually granted; nothing else is claimed.
-        let sqlite_budget = cache_budget_bytes - stored_metadata_len;
-        if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
-            return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
-                "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
-            )));
-        }
-        let page_cache_bytes =
-            configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
-        let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
-            .query_row(
-                "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if stored_metadata_bytes.len() != stored_metadata_len {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact metadata changed while opening its sealed reader".to_owned(),
-            ));
-        }
-        let metadata: super::super::CodeLexicalProjectionMetadataV1 =
-            serde_json::from_slice(&stored_metadata_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        let integrity: String = connection
-            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-            .map_err(sqlite_corrupt)?;
+        let (page_cache_bytes, stored_metadata_bytes, stored_metadata_digest, metadata) = hotpath::measure_block!(
+            "query.artifact.open.metadata_restore",
+            {
+                let stored_metadata_len: i64 = connection
+                    .query_row(
+                        "SELECT length(metadata) FROM artifact_state WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                let stored_metadata_len = usize::try_from(stored_metadata_len)
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                if stored_metadata_len >= cache_budget_bytes {
+                    return Err(CodeLexicalArtifactErrorV1::Unreserved(
+                        "lexical artifact metadata exhausts the reader cache budget".to_owned(),
+                    ));
+                }
+                // Kernel SQLite window: no mmap grant, page cache clamped to
+                // [2, 64] MiB. The caller budget covers the retained metadata copy
+                // plus the cache actually granted; nothing else is claimed.
+                let sqlite_budget = cache_budget_bytes - stored_metadata_len;
+                if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
+                    return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
+                        "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
+                    )));
+                }
+                let page_cache_bytes =
+                    configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
+                let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
+                    .query_row(
+                        "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                if stored_metadata_bytes.len() != stored_metadata_len {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact metadata changed while opening its sealed reader"
+                            .to_owned(),
+                    ));
+                }
+                let metadata: super::super::CodeLexicalProjectionMetadataV1 =
+                    serde_json::from_slice(&stored_metadata_bytes)
+                        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                Ok::<_, CodeLexicalArtifactErrorV1>((
+                    page_cache_bytes,
+                    stored_metadata_bytes,
+                    stored_metadata_digest,
+                    metadata,
+                ))
+            }
+        )?;
+        let integrity: String = hotpath::measure_block!("query.artifact.open.quick_check", {
+            connection
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(sqlite_corrupt)
+        })?;
         if integrity != "ok" {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(integrity));
         }
         checkpoint(control)?;
-        let receipt_bytes: Vec<u8> = connection
-            .query_row(
-                "SELECT receipt FROM artifact_state WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        let stored = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact has no finalized receipt".to_owned(),
-            )
+        let stored = hotpath::measure_block!("query.artifact.open.receipt_restore", {
+            let receipt_bytes: Vec<u8> = connection
+                .query_row(
+                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact has no finalized receipt".to_owned(),
+                )
+            })
         })?;
         if stored != *expected {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -288,24 +318,30 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact metadata digest does not verify".to_owned(),
             ));
         }
-        let sections = compute_section_digests(&connection, control)?;
+        let sections = hotpath::measure_block!(
+            "query.artifact.open.section_digest_verify",
+            compute_section_digests(&connection, control)
+        )?;
         if sections != stored.section_digests() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact section digests do not verify".to_owned(),
             ));
         }
-        let digest = artifact_digest(
-            stored.metadata_digest(),
-            stored.source_state_digest(),
-            stored.source_format_revision(),
-            stored.page_count(),
-            stored.total_chunks(),
-            stored.total_payload_bytes(),
-            stored.total_imports(),
-            stored.import_payload_bytes(),
-            stored.import_dictionary_digest(),
-            stored.source_cumulative_digest(),
-            &sections,
+        let digest = hotpath::measure_block!(
+            "query.artifact.open.artifact_digest_verify",
+            artifact_digest(
+                stored.metadata_digest(),
+                stored.source_state_digest(),
+                stored.source_format_revision(),
+                stored.page_count(),
+                stored.total_chunks(),
+                stored.total_payload_bytes(),
+                stored.total_imports(),
+                stored.import_payload_bytes(),
+                stored.import_dictionary_digest(),
+                stored.source_cumulative_digest(),
+                &sections,
+            )
         )?;
         if &digest != stored.artifact_digest() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
