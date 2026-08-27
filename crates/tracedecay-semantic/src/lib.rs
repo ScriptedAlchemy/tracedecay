@@ -40,6 +40,8 @@ use self::session_pool::{
 
 mod artifact_store;
 pub mod embedding_parallelism;
+#[cfg(feature = "semantic-fastembed")]
+mod execution_provider;
 mod fastembed_adapter;
 pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
 mod generation_resume;

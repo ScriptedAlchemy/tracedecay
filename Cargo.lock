@@ -6472,6 +6472,7 @@ dependencies = [
  "hex",
  "hf-hub",
  "hotpath",
+ "ort",
  "rayon",
  "serde",
  "serde_json",
@@ -6484,6 +6485,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-query",
  "tracedecay-runtime-core",
+ "tracing",
  "url",
 ]
 

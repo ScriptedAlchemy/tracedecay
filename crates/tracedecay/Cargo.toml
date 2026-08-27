@@ -280,6 +280,19 @@ semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
 ]
+# Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
+# request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
+# default build, and a GPU-featured build left at the runtime default
+# (`TRACEDECAY_EMBED_EXECUTION_PROVIDER` unset), stay byte-identical to the
+# CPU-only adapter. See `tracedecay-semantic/src/execution_provider.rs`.
+semantic-gpu-coreml = [
+    "tracedecay-semantic/semantic-gpu-coreml",
+    "tracedecay-usecases/semantic-gpu-coreml",
+]
+semantic-gpu-cuda = [
+    "tracedecay-semantic/semantic-gpu-cuda",
+    "tracedecay-usecases/semantic-gpu-cuda",
+]
 
 [lib]
 name = "tracedecay"
