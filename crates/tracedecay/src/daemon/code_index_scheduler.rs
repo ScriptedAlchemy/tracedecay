@@ -1121,6 +1121,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// no cache lock held; every caller that arrives while it runs parks on the
     /// condvar and is handed the same `Arc`. Nothing is memoized on failure, so
     /// a corrupt or unreadable store still errors every request.
+    #[hotpath::measure(label = "daemon.code_index.generation.load_active")]
     fn load_active_shared(
         &self,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
@@ -1174,6 +1175,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     /// Read, verify, and decode the generation named by the durable active
     /// pointer. Never called with the decoded-generation cache lock held.
+    #[hotpath::measure(label = "daemon.code_index.generation.decode")]
     fn decode_active_generation(
         &self,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
@@ -1240,6 +1242,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
+        hotpath::gauge!("daemon.code_index.generation.decode.bytes").set(encoded_bytes);
         Ok(Some(Arc::new(generation)))
     }
 
