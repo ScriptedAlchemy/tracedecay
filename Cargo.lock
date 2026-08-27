@@ -6438,6 +6438,7 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "hex",
+ "hotpath",
  "serde",
  "serde_json",
  "sha2 0.11.0",
