@@ -140,7 +140,6 @@ pub struct CandidateWorkloadV1 {
     pub incremental_fixture: IncrementalFixtureV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
-    pub resource_budgets: ResourceBudgetsV1,
     pub decision_policy: DecisionPolicySliceV1,
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
@@ -210,6 +209,8 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
+    /// Minimum nonnegative cosine similarity, in parts per million. This is
+    /// not the former shifted `[-1, 1]` calibration domain.
     pub calibration_threshold_ppm: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
@@ -235,21 +236,6 @@ pub struct DirectEvaluatedProfileMaterialV1 {
     pub profile: FusionProfile,
     pub diversity: DiversityPolicy,
     pub rerank: Option<RerankPolicy>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceBudgetsV1 {
-    pub current: ResourceBudgetV1,
-    #[serde(rename = "10x")]
-    pub ten_x: ResourceBudgetV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceBudgetV1 {
-    pub maximum_peak_rss_bytes: u64,
-    pub maximum_p99_latency_us: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1017,6 +1003,12 @@ pub fn validate_workload_for_tuning(
         if !profile_ids.insert(profile.profile_id.as_str()) {
             return Err(CandidateOutputError::Contract(format!(
                 "duplicate profile_id {}",
+                profile.profile_id
+            )));
+        }
+        if profile.calibration_threshold_ppm > 1_000_000 {
+            return Err(CandidateOutputError::Contract(format!(
+                "profile {} calibration threshold exceeds one million ppm",
                 profile.profile_id
             )));
         }
@@ -3276,12 +3268,23 @@ fn fusion_profile(
             RetrieverKind::Graph,
             tracedecay_query::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
         ),
-        (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
+        (
+            RetrieverKind::Semantic,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+        ),
     ]
     .into_iter()
     .filter(|(lane, _)| weights.contains_key(lane))
     .map(|(lane, domain)| {
         let score_domain = id::<ScoreDomainId>(domain)?;
+        let (raw_min_micros, raw_max_micros) = if lane == RetrieverKind::Semantic {
+            (
+                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
+                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+            )
+        } else {
+            (0, 1_000_000)
+        };
         Ok((
             score_domain.clone(),
             ScoreDomainCalibrationV1 {
@@ -3291,8 +3294,8 @@ fn fusion_profile(
                     profile.profile_id
                 ))?,
                 score_domain,
-                raw_min_micros: 0,
-                raw_max_micros: 1_000_000,
+                raw_min_micros,
+                raw_max_micros,
             },
         ))
     })
@@ -3305,6 +3308,10 @@ fn fusion_profile(
         ))?,
         calibrations,
         score_domain_calibrations,
+        minimum_calibrated_feature_micros: (include_semantic && profile.semantic_weight_ppm > 0)
+            .then_some((RetrieverKind::Semantic, profile.calibration_threshold_ppm))
+            .into_iter()
+            .collect(),
         weights_micros: weights,
         diversity_policy_id: id::<DiversityPolicyId>("diversity.candidate.v1")?,
         rerank_policy_id: profile
@@ -3592,6 +3599,30 @@ mod tests {
                 .profile
                 .weights_micros
                 .contains_key(&RetrieverKind::Semantic)
+        );
+        let semantic_score_domain = id::<ScoreDomainId>(
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+        )
+        .expect("evaluation semantic score domain");
+        let semantic_calibration = semantic
+            .profile
+            .score_domain_calibrations
+            .get(&semantic_score_domain)
+            .expect("semantic score calibration");
+        assert_eq!(
+            semantic_calibration.raw_min_micros,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1
+        );
+        assert_eq!(
+            semantic_calibration.raw_max_micros,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
+        );
+        assert_eq!(
+            semantic
+                .profile
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&400_000)
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
@@ -4237,7 +4268,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_evidence_enforces_state_budgets_and_exact_catalog() {
+    fn resource_evidence_enforces_state_and_exact_catalog_without_size_caps() {
         let fixture = authenticated_repo_fixture();
         let fixture_root = &fixture.root;
         let workload = workload();
@@ -4281,26 +4312,20 @@ mod tests {
             crate::DirectEvaluationStatusV1::Fail
         );
 
-        let mut over_budget = result.clone();
-        let current = over_budget.outputs[0]
+        let mut large_measurement = result.clone();
+        let current = large_measurement.outputs[0]
             .resources
             .get_mut("current")
             .expect("current resource");
         current.status = ResourceMeasurementStatusV1::Measured;
-        current.peak_rss_bytes = Some(1);
+        current.peak_rss_bytes = Some(u64::MAX);
         current.pending_reason = None;
-        current.latency_samples_us.fill(
-            workload
-                .resource_budgets
-                .current
-                .maximum_p99_latency_us
-                .saturating_add(1),
-        );
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
+        current.latency_samples_us.fill(u64::MAX);
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
             .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Pass
         );
 
         let mut extra_resource = result;

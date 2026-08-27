@@ -271,6 +271,45 @@ fn fusion_calibrates_raw_scores_in_their_declared_score_domain() {
 }
 
 #[test]
+fn fusion_rejects_only_candidates_below_the_profile_calibration_threshold() {
+    let below = candidate(RetrieverKind::Lexical, "below-threshold", 699_999, 0);
+    let boundary = candidate(RetrieverKind::Lexical, "at-threshold", 700_000, 1);
+    let mut fusion_profile = profile();
+    fusion_profile
+        .minimum_calibrated_feature_micros
+        .insert(RetrieverKind::Lexical, 700_000);
+
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: fusion_profile,
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(vec![below, boundary], "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .expect("composition applies the accepted calibration threshold");
+
+    assert_eq!(output.ranked_candidates.len(), 1);
+    assert_eq!(
+        output.ranked_candidates[0].candidate.anchor_id.as_str(),
+        "anchor.at-threshold"
+    );
+}
+
+#[test]
 fn same_source_duplicate_rows_collapse_only_for_the_same_evidence_pair() {
     let lexical = candidate(RetrieverKind::Lexical, "duplicate", 800_000, 0);
     let mut graph = candidate(RetrieverKind::Graph, "duplicate", 400_000, 0);

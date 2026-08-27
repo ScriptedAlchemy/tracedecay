@@ -159,8 +159,13 @@ impl QueryAuthorityV1 {
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
+        let thresholds_are_valid = profile
+            .minimum_calibrated_feature_micros
+            .iter()
+            .all(|(lane, threshold)| expected_lanes.contains(lane) && *threshold <= 1_000_000);
         if calibration_lanes != expected_lanes
             || weight_lanes != expected_lanes
+            || !thresholds_are_valid
             || profile.rerank_policy_id.is_some()
         {
             return Err(QueryAuthorityErrorV1::InvalidAuthority(

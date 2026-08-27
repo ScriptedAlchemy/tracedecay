@@ -28,6 +28,50 @@ pub struct DirectQueryEvaluationV1 {
     pub status: DirectEvaluationStatusV1,
 }
 
+pub(crate) fn pairwise_query_pairs<'a>(
+    candidate: &'a [DirectQueryEvaluationV1],
+    baseline: &'a [DirectQueryEvaluationV1],
+) -> Vec<(&'a DirectQueryEvaluationV1, &'a DirectQueryEvaluationV1)> {
+    let mut pairs = candidate
+        .iter()
+        .filter(|query| {
+            query
+                .strata
+                .iter()
+                .any(|stratum| stratum == "natural_language")
+        })
+        .filter_map(|query| {
+            baseline
+                .iter()
+                .find(|baseline_query| baseline_query.query_id == query.query_id)
+                .map(|baseline_query| (query, baseline_query))
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_by_key(|(_, baseline_query)| baseline_query.first_useful_rank == Some(1));
+    pairs
+}
+
+pub(crate) fn semantic_distance_summary(distances: impl IntoIterator<Item = i64>) -> String {
+    let mut distances = distances.into_iter().collect::<Vec<_>>();
+    distances.sort_unstable();
+    let top_distance = distances.first().copied();
+    let second_distance = distances.get(1).copied();
+    let top_margin = top_distance
+        .zip(second_distance)
+        .map(|(top, second)| u64::try_from(i128::from(second) - i128::from(top)).unwrap_or(0));
+    let display =
+        |value: Option<i64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+    let display_margin =
+        |value: Option<u64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+    format!(
+        "semantic_candidates={},top_distance={},second_distance={},top_margin={}",
+        distances.len(),
+        display(top_distance),
+        display(second_distance),
+        display_margin(top_margin),
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRatioMetricV1 {
@@ -238,6 +282,12 @@ impl DirectEvaluationReportV1 {
         workload: &CandidateWorkloadV1,
         vector_generation_evidence: NativeVectorGenerationEvidence,
     ) -> Result<(), SearchEvalError> {
+        if self.status == DirectEvaluationStatusV1::Fail {
+            return Err(SearchEvalError::Contract(format!(
+                "native activation direct evaluation report failed: {}",
+                self.failure_diagnostic()
+            )));
+        }
         if self.status != DirectEvaluationStatusV1::Pass {
             return Err(SearchEvalError::Contract(
                 "only a passing direct evaluation report can activate semantics".to_owned(),
@@ -345,6 +395,204 @@ impl DirectEvaluationReportV1 {
             }
         }
         Ok(())
+    }
+
+    fn failure_diagnostic(&self) -> String {
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.status == DirectEvaluationStatusV1::Fail)
+        {
+            if let Some(query) = profile
+                .queries
+                .iter()
+                .find(|query| query.status == DirectEvaluationStatusV1::Fail)
+            {
+                let semantic_confidence = self
+                    .raw_outputs
+                    .iter()
+                    .find(|output| {
+                        output.profile_id == profile.profile_id
+                            && output.partition == profile.partition
+                    })
+                    .and_then(|output| {
+                        output
+                            .queries
+                            .iter()
+                            .find(|raw| raw.query_id == query.query_id)
+                    })
+                    .and_then(|raw| raw.native.as_ref())
+                    .map(|native| match &native.exact_flat_oracle {
+                        SemanticNativeStageResultV1::Complete(oracle) => semantic_distance_summary(
+                            oracle.hits.iter().map(|hit| hit.evidence.distance.micros()),
+                        ),
+                        SemanticNativeStageResultV1::NotRequested => {
+                            "semantic_candidates=not_requested".to_owned()
+                        }
+                        SemanticNativeStageResultV1::Pending { .. } => {
+                            "semantic_candidates=pending".to_owned()
+                        }
+                    })
+                    .unwrap_or_else(|| "semantic_candidates=unavailable".to_owned());
+                return format!(
+                    "{}:{} query {} failed: first_useful_rank={:?} returned_candidates={} wrong_scope_hits={} forbidden_hits={} expected_no_result={} protected={} recall={}/{} duplicates={}/{} {}",
+                    profile.profile_id,
+                    profile.partition,
+                    query.query_id,
+                    query.first_useful_rank,
+                    query.returned_candidates,
+                    query.wrong_scope_hits,
+                    query.forbidden_hits,
+                    query.expected_no_result,
+                    query.protected,
+                    query.quality.recall_at_10.numerator,
+                    query.quality.recall_at_10.denominator,
+                    query.quality.duplicate_rate.numerator,
+                    query.quality.duplicate_rate.denominator,
+                    semantic_confidence,
+                );
+            }
+            if !profile.fallback_stable {
+                return format!(
+                    "{}:{} fallback bytes changed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if !profile.cancellation_bounded {
+                return format!(
+                    "{}:{} cancellation contract failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if !profile.offline {
+                return format!(
+                    "{}:{} offline contract failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if profile.resource_status == DirectEvaluationStatusV1::Fail {
+                return format!(
+                    "{}:{} resource budget failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            return format!(
+                "{}:{} aggregate quality failed: protected_recall={}/{} duplicates={}/{}",
+                profile.profile_id,
+                profile.partition,
+                profile.quality.protected_recall_at_10.numerator,
+                profile.quality.protected_recall_at_10.denominator,
+                profile.quality.duplicate_rate.numerator,
+                profile.quality.duplicate_rate.denominator,
+            );
+        }
+        let diagnostic = crate::pairwise_candidate_failure_diagnostic(&self.profiles)
+            .unwrap_or_else(|| "pairwise candidate quality failed".to_owned());
+        self.pairwise_query_diagnostic()
+            .map_or(diagnostic.clone(), |queries| {
+                format!("{diagnostic} queries=[{queries}]")
+            })
+    }
+
+    fn pairwise_query_diagnostic(&self) -> Option<String> {
+        for candidate in self.profiles.iter().filter(|profile| {
+            profile.profile_id == crate::SEMANTIC_PROFILE
+                || profile.profile_id == crate::RERANK_PROFILE
+        }) {
+            let baseline = self.profiles.iter().find(|profile| {
+                profile.profile_id == crate::QUERY_BASELINE_PROFILE
+                    && profile.partition == candidate.partition
+            })?;
+            let baseline_natural = baseline
+                .quality
+                .strata
+                .iter()
+                .find(|stratum| stratum.stratum == "natural_language")?;
+            let candidate_natural = candidate
+                .quality
+                .strata
+                .iter()
+                .find(|stratum| stratum.stratum == "natural_language")?;
+            if candidate_natural
+                .ndcg_at_10_ppm
+                .saturating_sub(baseline_natural.ndcg_at_10_ppm)
+                >= crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
+            {
+                continue;
+            }
+            let output = self.raw_outputs.iter().find(|output| {
+                output.profile_id == candidate.profile_id && output.partition == candidate.partition
+            })?;
+            let details = pairwise_query_pairs(&candidate.queries, &baseline.queries)
+                .into_iter()
+                .filter_map(|(query, baseline_query)| {
+                    let raw = output
+                        .queries
+                        .iter()
+                        .find(|raw| raw.query_id == query.query_id)?;
+                    let native = raw.native.as_ref()?;
+                    let semantic_candidates = match &native.measurements.semantic {
+                        SemanticNativeStageResultV1::Complete(measurement) => {
+                            measurement.output_candidates.to_string()
+                        }
+                        SemanticNativeStageResultV1::NotRequested => "not_requested".to_owned(),
+                        SemanticNativeStageResultV1::Pending { .. } => "pending".to_owned(),
+                    };
+                    let relevant_anchor = query
+                        .first_useful_rank
+                        .and_then(|rank| usize::try_from(rank.saturating_sub(1)).ok())
+                        .and_then(|index| raw.ranked.get(index))
+                        .map(|ranked| ranked.anchor.as_str());
+                    let (oracle_hits, top_distance, relevant_distance) =
+                        match &native.exact_flat_oracle {
+                            SemanticNativeStageResultV1::Complete(oracle) => (
+                                oracle.hits.len().to_string(),
+                                oracle
+                                    .hits
+                                    .first()
+                                    .map(|hit| hit.evidence.distance.micros().to_string())
+                                    .unwrap_or_else(|| "none".to_owned()),
+                                relevant_anchor
+                                    .and_then(|anchor| {
+                                        oracle.hits.iter().find(|hit| {
+                                            hit.candidate.anchor_id.as_str() == anchor
+                                        })
+                                    })
+                                    .map(|hit| hit.evidence.distance.micros().to_string())
+                                    .unwrap_or_else(|| "none".to_owned()),
+                            ),
+                        SemanticNativeStageResultV1::NotRequested => {
+                            (
+                                "not_requested".to_owned(),
+                                "none".to_owned(),
+                                "none".to_owned(),
+                            )
+                        }
+                        SemanticNativeStageResultV1::Pending { .. } => {
+                            (
+                                "pending".to_owned(),
+                                "none".to_owned(),
+                                "none".to_owned(),
+                            )
+                        }
+                    };
+                    Some(format!(
+                        "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={},relevant_distance={}",
+                        query.query_id,
+                        baseline_query.first_useful_rank,
+                        query.first_useful_rank,
+                        semantic_candidates,
+                        oracle_hits,
+                        top_distance,
+                        relevant_distance,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !details.is_empty() {
+                return Some(details.join(";"));
+            }
+        }
+        None
     }
 
     /// Derive the accepted semantic resource pins from the exact selected

@@ -835,6 +835,7 @@ fn admitted_lanes(
         .profile
         .calibrations
         .keys()
+        .chain(input.profile.minimum_calibrated_feature_micros.keys())
         .chain(input.profile.weights_micros.keys())
         .any(|lane| !seen.contains(lane))
     {
@@ -929,6 +930,17 @@ impl DeterministicFixedPointFusion {
                 return Err(FusionStageError::ProfileLaneMismatch);
             }
             let calibrated_feature_micros = calibration.calibrate(candidate.raw_score)?;
+            let minimum_calibrated_feature_micros = profile
+                .minimum_calibrated_feature_micros
+                .get(&candidate.retriever)
+                .copied()
+                .unwrap_or(0);
+            if minimum_calibrated_feature_micros > 1_000_000 {
+                return Err(FusionStageError::InvalidCalibratedFeature);
+            }
+            if calibrated_feature_micros < minimum_calibrated_feature_micros {
+                continue;
+            }
             let weighted_contribution_micros =
                 FixedPointScore(u64::from(calibrated_feature_micros))
                     .checked_weight(weight_micros)?;

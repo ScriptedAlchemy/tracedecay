@@ -143,6 +143,7 @@ fn accepted_profile_with_compatibility(
             })
             .collect(),
         score_domain_calibrations: BTreeMap::new(),
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: lanes.iter().copied().map(|lane| (lane, 1)).collect(),
         diversity_policy_id: id(&format!("diversity.{evaluated_profile_id}")),
         rerank_policy_id: None,

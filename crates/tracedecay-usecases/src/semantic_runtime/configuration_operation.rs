@@ -41,6 +41,7 @@ pub struct SemanticEvaluationFusionCandidateV1 {
     pub profile_id: FusionProfileId,
     pub calibrations: BTreeMap<RetrieverKind, CalibrationProfileId>,
     pub score_domain_calibrations: BTreeMap<ScoreDomainId, ScoreDomainCalibrationV1>,
+    pub minimum_calibrated_feature_micros: BTreeMap<RetrieverKind, u32>,
     pub weights_micros: BTreeMap<RetrieverKind, u32>,
     pub diversity_policy_id: DiversityPolicyId,
     pub rerank_policy_id: Option<RerankPolicyId>,
@@ -676,6 +677,7 @@ fn prepare_semantic_activation_publication(
         evaluation_result_anchor: evaluation_anchor.clone(),
         calibrations: evaluated_profile.calibrations,
         score_domain_calibrations: evaluated_profile.score_domain_calibrations,
+        minimum_calibrated_feature_micros: evaluated_profile.minimum_calibrated_feature_micros,
         weights_micros: evaluated_profile.weights_micros,
         diversity_policy_id: evaluated_profile.diversity_policy_id,
         rerank_policy_id: evaluated_profile.rerank_policy_id,
@@ -770,6 +772,8 @@ fn candidate_matches_evaluated_material(
         && candidate.profile.calibrations == evaluated.profile.calibrations
         && candidate.profile.score_domain_calibrations
             == evaluated.profile.score_domain_calibrations
+        && candidate.profile.minimum_calibrated_feature_micros
+            == evaluated.profile.minimum_calibrated_feature_micros
         && candidate.profile.weights_micros == evaluated.profile.weights_micros
         && candidate.profile.diversity_policy_id == evaluated.profile.diversity_policy_id
         && candidate.profile.rerank_policy_id == evaluated.profile.rerank_policy_id
@@ -1078,6 +1082,7 @@ mod tests {
                 profile_id: typed::<FusionProfileId>("profile.qualification-rejection-test"),
                 calibrations: BTreeMap::new(),
                 score_domain_calibrations: BTreeMap::new(),
+                minimum_calibrated_feature_micros: BTreeMap::new(),
                 weights_micros: BTreeMap::new(),
                 diversity_policy_id: typed("diversity.qualification-rejection-test"),
                 rerank_policy_id: None,
@@ -1463,6 +1468,10 @@ mod tests {
                 profile_id: material.profile.profile_id.clone(),
                 calibrations: material.profile.calibrations.clone(),
                 score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
+                minimum_calibrated_feature_micros: material
+                    .profile
+                    .minimum_calibrated_feature_micros
+                    .clone(),
                 weights_micros: material.profile.weights_micros.clone(),
                 diversity_policy_id: material.profile.diversity_policy_id.clone(),
                 rerank_policy_id: material.profile.rerank_policy_id.clone(),
@@ -1488,6 +1497,16 @@ mod tests {
             .weights_micros
             .get_mut(&RetrieverKind::Lexical)
             .expect("lexical weight") += 1;
+        assert!(!candidate_matches_evaluated_material(&candidate, &material));
+        *candidate
+            .profile
+            .weights_micros
+            .get_mut(&RetrieverKind::Lexical)
+            .expect("lexical weight") -= 1;
+        candidate
+            .profile
+            .minimum_calibrated_feature_micros
+            .insert(RetrieverKind::Lexical, 1);
         assert!(!candidate_matches_evaluated_material(&candidate, &material));
         let serialized = serde_json::to_string(&candidate).expect("serialize candidate");
         assert!(!serialized.contains("evaluation_result_anchor"));

@@ -133,8 +133,8 @@
     "required_offline": "no_network_and_query_fallback_available"
   },
   "expected_query_fallback_digests": {
-    "train": "sha256:ba4226316948e4a9bdca4b0b7f7714e635622abfb84efa6f0e6e92c602a5b6b6",
-    "validation": "sha256:1d722233d3fd68be4b39f558b49f309da242337ac6142994be0f16c49b0006e1"
+    "train": "sha256:85e1a27cba7ac0c484e62f27f8b079b4d38579b4f232fa284c285bf3b05d3af8",
+    "validation": "sha256:55bcf22f0c14855f53c886e51d19d391e77c9c72b983d87ed3f611529c630081"
   },
   "profile_matrix": [
     {
@@ -146,7 +146,7 @@
       "semantic_weight_ppm": 0
     },
     {
-      "calibration_threshold_ppm": 700000,
+      "calibration_threshold_ppm": 400000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-conservative",
@@ -154,7 +154,7 @@
       "semantic_weight_ppm": 250000
     },
     {
-      "calibration_threshold_ppm": 700000,
+      "calibration_threshold_ppm": 400000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-reranked",
@@ -680,16 +680,6 @@
       ]
     }
   ],
-  "resource_budgets": {
-    "10x": {
-      "maximum_p99_latency_us": 10000000,
-      "maximum_peak_rss_bytes": 4294967296
-    },
-    "current": {
-      "maximum_p99_latency_us": 5000000,
-      "maximum_peak_rss_bytes": 2147483648
-    }
-  },
   "schema_version": 1,
   "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
   "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
