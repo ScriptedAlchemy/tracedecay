@@ -138,6 +138,12 @@ fn remove_owned_temp(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+fn remove_owned_temp_if_contents_match(path: &Path, owned_contents: &[u8]) {
+    if fs::read(path).is_ok_and(|contents| contents == owned_contents) {
+        remove_owned_temp(path);
+    }
+}
+
 fn sync_owned_file(file: &File) -> io::Result<()> {
     hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
 }
@@ -195,6 +201,215 @@ pub fn replace_via_rename(temporary: &Path, destination: &Path) -> io::Result<()
     fs::rename(temporary, destination)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionalPublishExpectation {
+    Missing,
+    Present,
+}
+
+pub struct ConditionalPublishCallbacks<Prepare, BeforePublish, VerifyDisplaced, VerifyPublished> {
+    pub prepare: Prepare,
+    pub before_publish: BeforePublish,
+    pub verify_displaced: VerifyDisplaced,
+    pub verify_published: VerifyPublished,
+}
+
+fn unused_temporary_path(destination: &Path, kind: &str) -> io::Result<PathBuf> {
+    for _ in 0..64 {
+        let path = temporary_path(destination, kind);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate conditional publish rollback path",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let first = CString::new(first.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let second = CString::new(second.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            first.as_ptr(),
+            libc::AT_FDCWD,
+            second.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let first = CString::new(first.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let second = CString::new(second.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let result = unsafe { libc::renamex_np(first.as_ptr(), second.as_ptr(), libc::RENAME_SWAP) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn exchange_paths(_first: &Path, _second: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic file exchange is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn replace_existing_with_backup(
+    replacement: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
+
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let destination = wide(destination);
+    let replacement = wide(replacement);
+    let backup = wide(backup);
+    let result = unsafe {
+        ReplaceFileW(
+            destination.as_ptr(),
+            replacement.as_ptr(),
+            backup.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn replace_existing_with_backup(
+    replacement: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> io::Result<()> {
+    exchange_paths(replacement, destination)?;
+    if let Err(error) = rename_noreplace(replacement, backup) {
+        return match exchange_paths(replacement, destination) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(io::Error::other(format!(
+                "failed to retain displaced file ({error}) and rollback exchange ({rollback_error})"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let source = wide(source);
+    let destination = wide(destination);
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn atomic_write(
     destination: &Path,
     kind: &str,
@@ -237,6 +452,157 @@ pub fn atomic_write_prepared(
         remove_owned_temp(&temporary);
     }
     result
+}
+
+/// Stage a prepared file and publish only against the exact expected
+/// destination existence state.
+///
+/// A missing destination uses an atomic no-replace rename. An existing
+/// destination is atomically replaced while retaining the displaced object;
+/// the caller verifies that object against its exact snapshot. A mismatch is
+/// rolled back before this function returns an error.
+#[hotpath::measure]
+pub fn atomic_write_prepared_conditionally<
+    Prepare,
+    BeforePublish,
+    VerifyDisplaced,
+    VerifyPublished,
+>(
+    destination: &Path,
+    kind: &str,
+    bytes: &[u8],
+    expectation: ConditionalPublishExpectation,
+    callbacks: ConditionalPublishCallbacks<
+        Prepare,
+        BeforePublish,
+        VerifyDisplaced,
+        VerifyPublished,
+    >,
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<()>
+where
+    Prepare: FnOnce(&Path) -> io::Result<()>,
+    BeforePublish: FnOnce(),
+    VerifyDisplaced: FnOnce(&Path) -> io::Result<bool>,
+    VerifyPublished: FnOnce(&Path) -> io::Result<bool>,
+{
+    let ConditionalPublishCallbacks {
+        prepare,
+        before_publish,
+        verify_displaced,
+        verify_published,
+    } = callbacks;
+    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
+    validate_regular_or_missing(destination)?;
+    let (temporary, mut output) = create_owned_temp(destination, kind)?;
+    let result = (|| {
+        output.write_all(bytes)?;
+        sync_owned_file(&output)?;
+        prepare(&temporary)?;
+        sync_owned_file(&output)?;
+        drop(output);
+        before_publish();
+        match expectation {
+            ConditionalPublishExpectation::Missing => {
+                rename_noreplace(&temporary, destination).map_err(|error| {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        io::Error::other("destination changed since it was read")
+                    } else {
+                        error
+                    }
+                })?;
+            }
+            ConditionalPublishExpectation::Present => {
+                let rollback = unused_temporary_path(destination, "conditional-rollback")?;
+                replace_existing_with_backup(&temporary, destination, &rollback)?;
+                let displaced = verify_displaced(&rollback);
+                if !matches!(displaced, Ok(true)) {
+                    replace_existing_with_backup(&rollback, destination, &temporary).map_err(
+                        |error| {
+                            io::Error::other(format!(
+                                "failed to rollback conditional publication; displaced destination is retained at {}: {error}",
+                                rollback.display()
+                            ))
+                        },
+                    )?;
+                    if !matches!(verify_published(&temporary), Ok(true)) {
+                        replace_existing_with_backup(&temporary, destination, &rollback).map_err(
+                            |error| {
+                                io::Error::other(format!(
+                                    "failed to restore a concurrent destination edit retained at {}: {error}",
+                                    temporary.display()
+                                ))
+                            },
+                        )?;
+                        remove_owned_temp(&rollback);
+                    }
+                    sync_parent_directory(destination, directory_policy)?;
+                    return match displaced {
+                        Err(error) => Err(error),
+                        Ok(false) => Err(io::Error::other("destination changed since it was read")),
+                        Ok(true) => Err(io::Error::other(
+                            "conditional publication verification changed result",
+                        )),
+                    };
+                }
+                if let Err(error) = fs::remove_file(&rollback) {
+                    replace_existing_with_backup(&rollback, destination, &temporary)?;
+                    sync_parent_directory(destination, directory_policy)?;
+                    return Err(error);
+                }
+            }
+        }
+        sync_parent_directory(destination, directory_policy)
+    })();
+    if result.is_err() {
+        remove_owned_temp_if_contents_match(&temporary, bytes);
+    }
+    result
+}
+
+/// Remove an existing destination only after atomically retaining and
+/// verifying the exact object that occupied the path at publication time.
+#[hotpath::measure]
+pub fn remove_conditionally(
+    destination: &Path,
+    before_publish: impl FnOnce(),
+    verify_displaced: impl FnOnce(&Path) -> io::Result<bool>,
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<()> {
+    if !validate_regular_or_missing(destination)? {
+        return Ok(());
+    }
+    let rollback = unused_temporary_path(destination, "conditional-remove")?;
+    before_publish();
+    rename_noreplace(destination, &rollback)?;
+    let displaced = verify_displaced(&rollback);
+    if !matches!(displaced, Ok(true)) {
+        if let Err(rollback_error) = rename_noreplace(&rollback, destination) {
+            return Err(io::Error::other(format!(
+                "conditional remove verification failed and rollback is retained at {}: {rollback_error}",
+                rollback.display()
+            )));
+        }
+        sync_parent_directory(destination, directory_policy)?;
+        return match displaced {
+            Err(error) => Err(error),
+            Ok(false) => Err(io::Error::other("destination changed since it was read")),
+            Ok(true) => Err(io::Error::other(
+                "conditional remove verification changed result",
+            )),
+        };
+    }
+    if let Err(error) = fs::remove_file(&rollback) {
+        if let Err(rollback_error) = rename_noreplace(&rollback, destination) {
+            return Err(io::Error::other(format!(
+                "failed to remove retained destination ({error}); rollback is retained at {}: {rollback_error}",
+                rollback.display()
+            )));
+        }
+        sync_parent_directory(destination, directory_policy)?;
+        return Err(error);
+    }
+    sync_parent_directory(destination, directory_policy)
 }
 
 #[hotpath::measure]
