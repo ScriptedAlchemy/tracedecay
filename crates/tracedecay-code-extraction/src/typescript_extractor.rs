@@ -4,7 +4,7 @@
 /// emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
@@ -203,21 +203,13 @@ impl TypeScriptExtractor {
 
     /// Parse source code into a tree-sitter AST, selecting grammar by file extension.
     fn parse_source(source: &str, extension: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
         let (key, label) = match extension {
             "ts" | "astro" | "svelte" => ("typescript", "TypeScript"),
             "tsx" => ("tsx", "TSX"),
             "js" | "jsx" => ("javascript", "JavaScript"),
             other => (other, other),
         };
-        let language = crate::ts_provider::try_language(key)
-            .map_err(|e| format!("failed to load {label} grammar: {e}"))?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load {label} grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source_with_labeled_lookup(key, label, source)
     }
 
     /// Visit all children of a node.

@@ -3,7 +3,7 @@
 /// Parses C# source files and emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::complexity::{CSHARP_COMPLEXITY, count_complexity};
 use crate::types::{
@@ -148,14 +148,7 @@ impl CSharpExtractor {
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("c_sharp")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load C# grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("c_sharp", "C#", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {

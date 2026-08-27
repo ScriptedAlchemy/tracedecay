@@ -6,7 +6,7 @@
 /// parented to their enclosing table (or to the file if at top level).
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
@@ -129,14 +129,7 @@ impl TomlExtractor {
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("toml")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load TOML grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("toml", "TOML", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {

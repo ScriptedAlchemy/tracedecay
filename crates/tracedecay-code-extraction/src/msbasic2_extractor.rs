@@ -8,7 +8,7 @@
 /// lines as docstrings.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
@@ -166,14 +166,7 @@ impl MsBasic2Extractor {
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("msbasic2")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load MS BASIC 2.0 grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("msbasic2", "MS BASIC 2.0", source)
     }
 
     fn collect_selected_lines<'tree>(
