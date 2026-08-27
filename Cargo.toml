@@ -161,7 +161,9 @@ opt-level = 2
 [profile.perf.package.sha2]
 opt-level = 3
 
-# Workspace dependencies keep the upstream package API while the canonical
-# patched grammar sources ship inside the standalone code-extraction package.
+# The upstream Rust grammar rejects `#[cfg(...)]` attributes on
+# struct-destructuring fields (tree-sitter/tree-sitter-rust#301). Every
+# `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
+# pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
-tree-sitter-rust = { path = "vendor/tree-sitter-rust" }
+tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }

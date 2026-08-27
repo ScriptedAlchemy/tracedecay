@@ -7,16 +7,12 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use tree_sitter::{Language, Parser, Tree};
 
-/// Package-owned patched Rust grammar.
+/// Patched Rust grammar.
 pub mod rust_grammar {
-    use tree_sitter_language::LanguageFn;
-
-    unsafe extern "C" {
-        fn tracedecay_tree_sitter_rust() -> *const ();
-    }
-
-    /// The patched Rust grammar compiled from `vendor/tree-sitter-rust`.
-    pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tracedecay_tree_sitter_rust) };
+    /// The Rust grammar with struct-pattern field attribute support, served by
+    /// the git-pinned `tree-sitter-rust` fork in the workspace
+    /// `[patch.crates-io]` table.
+    pub use tree_sitter_rust::LANGUAGE;
 }
 
 // tree-sitter-wgsl 0.0.6 was built against tree-sitter 0.20, whose Language
