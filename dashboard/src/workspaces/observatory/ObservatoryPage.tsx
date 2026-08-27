@@ -54,6 +54,7 @@ import {
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
+import { SystemsHeader } from './SystemsHeader.tsx';
 import {
   OBSERVATORY_WING_PANEL_ID,
   ObservatoryWingSwitcher,
@@ -85,6 +86,7 @@ export function ObservatoryPage() {
         <ObservatoryWingSwitcher active={wing} onSelect={selectWing} />
         <span className="min-w-0 text-2xs text-text-muted">{observatoryWingNote(wing)}</span>
       </header>
+      <SystemsHeader />
       <div
         id={OBSERVATORY_WING_PANEL_ID}
         role="tabpanel"
