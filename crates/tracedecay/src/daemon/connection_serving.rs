@@ -84,47 +84,72 @@ pub(super) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
     first_request_line: String,
-    pending_lines: impl IntoIterator<Item = String>,
+    pending_lines: VecDeque<String>,
     initialize_route: Option<InitializeRouteMetadata>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
 ) -> Result<()> {
-    let initialize_response_decorator = initialize_route.map(|route| {
-        Arc::new(move |response: &mut JsonRpcResponse| {
-            attach_initialize_route_metadata(response, &route);
-        }) as RmcpInitializeResponseDecorator
-    });
-    let mut transport =
-        transport.with_project_response_lifecycle(server.project_server_response_lifecycle());
-    transport.push_replay(first_request_line)?;
-    for line in pending_lines {
-        transport.push_replay(line)?;
-    }
-    let adapter =
-        RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)?;
-    let transport = transport
-        .with_rmcp_selected_project_responses(adapter.selected_project_responses())
-        .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-    let running = adapter
-        .serve(transport)
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("rmcp server initialization failed: {error}"),
-        })?;
-    let cancellation = running.cancellation_token();
-    let waiting = running.waiting();
-    tokio::pin!(waiting);
-    let result = tokio::select! {
-        result = &mut waiting => result,
-        () = lifecycle.wait_for_draining() => {
-            hotpath::measure_block!("daemon.engine.transport.cancel", cancellation.cancel());
-            waiting.await
+    serve_routed_rmcp_connection_inner(
+        server,
+        transport,
+        first_request_line,
+        pending_lines,
+        initialize_route,
+        timings_enabled,
+        lifecycle,
+    )
+    .await
+}
+
+fn serve_routed_rmcp_connection_inner(
+    server: Arc<crate::mcp::McpServer>,
+    transport: BrokerStreamTransport,
+    first_request_line: String,
+    pending_lines: VecDeque<String>,
+    initialize_route: Option<InitializeRouteMetadata>,
+    timings_enabled: bool,
+    lifecycle: &DaemonLifecycle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    // Erase the deeply nested rmcp service future before it reaches the
+    // measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let initialize_response_decorator = initialize_route.map(|route| {
+            Arc::new(move |response: &mut JsonRpcResponse| {
+                attach_initialize_route_metadata(response, &route);
+            }) as RmcpInitializeResponseDecorator
+        });
+        let mut transport =
+            transport.with_project_response_lifecycle(server.project_server_response_lifecycle());
+        transport.push_replay(first_request_line)?;
+        for line in pending_lines {
+            transport.push_replay(line)?;
         }
-    };
-    result.map_err(|error| TraceDecayError::Config {
-        message: format!("rmcp server task failed: {error}"),
-    })?;
-    Ok(())
+        let adapter =
+            RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)?;
+        let transport = transport
+            .with_rmcp_selected_project_responses(adapter.selected_project_responses())
+            .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
+        let running = adapter
+            .serve(transport)
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("rmcp server initialization failed: {error}"),
+            })?;
+        let cancellation = running.cancellation_token();
+        let waiting = running.waiting();
+        tokio::pin!(waiting);
+        let result = tokio::select! {
+            result = &mut waiting => result,
+            () = lifecycle.wait_for_draining() => {
+                hotpath::measure_block!("daemon.engine.transport.cancel", cancellation.cancel());
+                waiting.await
+            }
+        };
+        result.map_err(|error| TraceDecayError::Config {
+            message: format!("rmcp server task failed: {error}"),
+        })?;
+        Ok(())
+    })
 }
 
 fn is_mcp_initialize_request(line: &str) -> bool {
