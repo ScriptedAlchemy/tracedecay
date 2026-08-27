@@ -720,8 +720,12 @@ impl ProductionSemanticRuntimeV1 {
         }
         let mut resources = current.generation_resources();
         resources.incremental_source_generation = generation.manifest().generation_id.clone();
-        resources.incremental_source_manifest_digest =
-            prepared.prepared.request.changes.manifest_digest.clone();
+        resources.incremental_source_manifest_digest = generation
+            .projection()
+            .request()
+            .changes
+            .manifest_digest
+            .clone();
         resources.incremental_rebuild_micros = elapsed_micros(started);
         Ok(resources)
     }
@@ -2117,7 +2121,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
                 total.checked_add(bytes)
             })
             .ok_or(SemanticRuntimeScheduleFailureV1::Projection)?;
-        let source_manifest_digest = prepared.prepared.request.changes.manifest_digest.clone();
+        let source_manifest_digest = code.projection().request().changes.manifest_digest.clone();
         let source_generation = code.manifest().generation_id.clone();
         let sequence_length = prepared
             .prepared
@@ -2126,14 +2130,9 @@ impl PreparedSemanticEvaluationGenerationV1 {
             .truncation_length;
         let resources = ProductionCandidateNativeGenerationResourcesV1 {
             source_generation: source_generation.clone(),
-            source_manifest_digest,
+            source_manifest_digest: source_manifest_digest.clone(),
             incremental_source_generation: source_generation.clone(),
-            incremental_source_manifest_digest: prepared
-                .prepared
-                .request
-                .changes
-                .manifest_digest
-                .clone(),
+            incremental_source_manifest_digest: source_manifest_digest,
             vector_generation: Some(vector_generation.clone()),
             artifact_digest: Some(artifact_digest),
             model_bytes: artifact_bytes.model,
