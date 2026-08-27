@@ -239,6 +239,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "query.generation.resolve")]
     pub(in crate::daemon) async fn generation_for_controlled(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -246,6 +247,8 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -253,8 +256,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     std::sync::Arc::clone(&worktree.scheduler),
                     std::sync::Arc::clone(&worktree.serving_generation),
                 ),
-                UniqueMountedWorktree::None => return Ok(None),
+                UniqueMountedWorktree::None => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("query.generation.resolve.outcome.unavailable_total")
+                        .inc(1_u64);
+                    return Ok(None);
+                }
                 UniqueMountedWorktree::Ambiguous => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
                     return Err(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                     );
@@ -284,24 +294,34 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
                 return Ok(Some(generation));
             }
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let generation = scheduler
-                .generation(&generation_id)
-                .map_err(|error| match error {
-                    super::CodeIndexSchedulerErrorV1::Production(
-                        crate::code_index::production::CodeIndexProductionErrorV1::Publication(
-                            error,
-                        ),
-                    ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
-                    _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                })?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
+            let scheduler = hotpath::measure_block!("query.generation.resolve.scheduler_wait", {
+                scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+            let generation = hotpath::measure_block!("query.generation.resolve.load", {
+                scheduler
+                    .generation(&generation_id)
+                    .map_err(|error| match error {
+                        super::CodeIndexSchedulerErrorV1::Production(
+                            crate::code_index::production::CodeIndexProductionErrorV1::Publication(
+                                error,
+                            ),
+                        ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
+                        _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    })
+            })?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
-        match crate::daemon::park_admission(
+        let result = match crate::daemon::park_admission(
             crate::daemon::code_index_task_support::settle_owned_blocking_task(
                 task,
                 std::time::Duration::from_millis(10),
@@ -317,7 +337,20 @@ impl CodeIndexSchedulerRegistryV1 {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal),
             Err(reason) => Err(reason),
+        };
+        #[cfg(feature = "hotpath")]
+        match &result {
+            Ok(Some(_)) => {
+                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
+            }
+            Ok(None) => {
+                hotpath::gauge!("query.generation.resolve.outcome.unavailable_total").inc(1_u64);
+            }
+            Err(_) => {
+                hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
+            }
         }
+        result
     }
 
     /// Resolve the generation a callable-code query serves.
