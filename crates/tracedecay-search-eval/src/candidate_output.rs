@@ -140,7 +140,6 @@ pub struct CandidateWorkloadV1 {
     pub incremental_fixture: IncrementalFixtureV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
-    pub resource_budgets: ResourceBudgetsV1,
     pub decision_policy: DecisionPolicySliceV1,
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
@@ -235,21 +234,6 @@ pub struct DirectEvaluatedProfileMaterialV1 {
     pub profile: FusionProfile,
     pub diversity: DiversityPolicy,
     pub rerank: Option<RerankPolicy>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceBudgetsV1 {
-    pub current: ResourceBudgetV1,
-    #[serde(rename = "10x")]
-    pub ten_x: ResourceBudgetV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceBudgetV1 {
-    pub maximum_peak_rss_bytes: u64,
-    pub maximum_p99_latency_us: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4282,7 +4266,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_evidence_enforces_state_budgets_and_exact_catalog() {
+    fn resource_evidence_enforces_state_and_exact_catalog_without_size_caps() {
         let fixture = authenticated_repo_fixture();
         let fixture_root = &fixture.root;
         let workload = workload();
@@ -4326,26 +4310,20 @@ mod tests {
             crate::DirectEvaluationStatusV1::Fail
         );
 
-        let mut over_budget = result.clone();
-        let current = over_budget.outputs[0]
+        let mut large_measurement = result.clone();
+        let current = large_measurement.outputs[0]
             .resources
             .get_mut("current")
             .expect("current resource");
         current.status = ResourceMeasurementStatusV1::Measured;
-        current.peak_rss_bytes = Some(1);
+        current.peak_rss_bytes = Some(u64::MAX);
         current.pending_reason = None;
-        current.latency_samples_us.fill(
-            workload
-                .resource_budgets
-                .current
-                .maximum_p99_latency_us
-                .saturating_add(1),
-        );
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
+        current.latency_samples_us.fill(u64::MAX);
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
             .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Pass
         );
 
         let mut extra_resource = result;

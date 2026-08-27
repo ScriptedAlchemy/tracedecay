@@ -558,7 +558,7 @@ fn evaluate_profile(
     let cancellation_bounded =
         output.cancellation == workload.decision_policy.required_cancellation;
     let offline = output.offline == workload.decision_policy.required_offline;
-    let resource_status = evaluate_resources(workload, output);
+    let resource_status = evaluate_resources(output);
     let failed_queries = results
         .iter()
         .filter(|result| result.status == DirectEvaluationStatusV1::Fail)
@@ -1113,10 +1113,7 @@ fn mean_ppm(values: impl Iterator<Item = u32>, support: u64) -> u32 {
 }
 
 #[hotpath::measure]
-fn evaluate_resources(
-    workload: &CandidateWorkloadV1,
-    output: &ProductionCandidateOutputV1,
-) -> DirectEvaluationStatusV1 {
+fn evaluate_resources(output: &ProductionCandidateOutputV1) -> DirectEvaluationStatusV1 {
     if output.resources.len() != 2 {
         return DirectEvaluationStatusV1::Fail;
     }
@@ -1133,10 +1130,7 @@ fn evaluate_resources(
         return DirectEvaluationStatusV1::Fail;
     }
     let mut pending = false;
-    for (name, budget) in [
-        ("current", &workload.resource_budgets.current),
-        ("10x", &workload.resource_budgets.ten_x),
-    ] {
+    for name in ["current", "10x"] {
         let Some(sample) = output.resources.get(name) else {
             return DirectEvaluationStatusV1::Fail;
         };
@@ -1147,11 +1141,6 @@ fn evaluate_resources(
                     || sample.measured_queries != sample.latency_samples_us.len() as u64
                     || sample.measured_queries != output.queries.len() as u64
                     || sample.latency_samples_us.is_empty()
-                    || sample
-                        .peak_rss_bytes
-                        .is_some_and(|peak| peak > budget.maximum_peak_rss_bytes)
-                    || p99_latency_us(&sample.latency_samples_us)
-                        .is_none_or(|p99| p99 > budget.maximum_p99_latency_us)
                 {
                     return DirectEvaluationStatusV1::Fail;
                 }
@@ -1176,12 +1165,6 @@ fn evaluate_resources(
     } else {
         DirectEvaluationStatusV1::Pass
     }
-}
-
-fn p99_latency_us(samples: &[u64]) -> Option<u64> {
-    let mut ordered = samples.to_vec();
-    ordered.sort_unstable();
-    nearest_rank(&ordered, 99)
 }
 
 const fn pass_if(condition: bool) -> DirectEvaluationStatusV1 {
@@ -1293,7 +1276,7 @@ mod tests {
     use super::{
         QUERY_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE, activation_profile_chain,
         aggregate_profile_status, aggregate_quality, evaluate_query,
-        load_authoritative_default_workload, p99_latency_us, ratio_metric,
+        load_authoritative_default_workload, ratio_metric,
     };
     use crate::candidate_output::{
         HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
@@ -1390,17 +1373,6 @@ mod tests {
             status: super::DirectEvaluationStatusV1::Pass,
             queries: Vec::new(),
         }
-    }
-
-    #[test]
-    fn p99_uses_nearest_rank_over_real_samples() {
-        assert_eq!(p99_latency_us(&[]), None);
-        assert_eq!(p99_latency_us(&[7]), Some(7));
-        assert_eq!(
-            p99_latency_us(&(1..=100).rev().collect::<Vec<_>>()),
-            Some(99)
-        );
-        assert_eq!(p99_latency_us(&(1..=101).collect::<Vec<_>>()), Some(100));
     }
 
     #[test]

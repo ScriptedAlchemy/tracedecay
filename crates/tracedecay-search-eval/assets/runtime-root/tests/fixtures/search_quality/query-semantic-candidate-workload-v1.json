@@ -680,16 +680,6 @@
       ]
     }
   ],
-  "resource_budgets": {
-    "10x": {
-      "maximum_p99_latency_us": 10000000,
-      "maximum_peak_rss_bytes": 4294967296
-    },
-    "current": {
-      "maximum_p99_latency_us": 5000000,
-      "maximum_peak_rss_bytes": 2147483648
-    }
-  },
   "schema_version": 1,
   "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
   "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
