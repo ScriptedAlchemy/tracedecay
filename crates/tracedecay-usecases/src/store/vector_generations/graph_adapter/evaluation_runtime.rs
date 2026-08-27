@@ -44,8 +44,9 @@ use tracedecay_store::{
     SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
-    StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStageState,
+    SemanticVectorStagingStore, StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 use crate::semantic_runtime::{
@@ -838,9 +839,40 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-cancel",
-            |registration, context| {
-                self.registry
-                    .cancel_generation_stage(registration, &mut *authority, context, stage)
+            |_registration, context| {
+                // This graph and its native rows share one temporary owner and
+                // are destroyed together after evaluation. Terminalize the
+                // canonical staging authority here, but do not run the
+                // persistent registry's page-wise native retirement while the
+                // evaluator is still measuring projection behavior.
+                let Some(record) = authority.stage(stage, context).map_err(map_staging_error)?
+                else {
+                    return Ok(SemanticVectorStageCancelOutcome::MissingStage);
+                };
+                if record.plan.key != *stage {
+                    return Err(GraphDbError::Conflict);
+                }
+                if record.state == SemanticVectorStageState::Cancelled {
+                    return Ok(SemanticVectorStageCancelOutcome::ExactReplay(record));
+                }
+                if record.state != SemanticVectorStageState::Pending {
+                    return Ok(SemanticVectorStageCancelOutcome::ReadyToPublish(record));
+                }
+                if !matches!(
+                    authority
+                        .replay(&record.plan.publication_key, context)
+                        .map_err(map_publication_error)?,
+                    tracedecay_store::GraphPublicationReplayLookupV1::Missing
+                ) || authority
+                    .verified_head(&record.plan.key.projection, context)
+                    .map_err(map_publication_error)?
+                    .is_some_and(|head| head.key == record.plan.publication_key)
+                {
+                    return Err(GraphDbError::Conflict);
+                }
+                authority
+                    .cancel_stage(stage, &record.plan.writer_fence, context)
+                    .map_err(map_staging_error)
             },
         )
     }
