@@ -2661,7 +2661,10 @@ fn block_on_semantic_evaluation<Output>(
     future: impl Future<Output = Result<Output, SemanticRuntimeScheduleFailureV1>>,
 ) -> Result<Output, SemanticRuntimeScheduleFailureV1> {
     match tokio::runtime::Handle::try_current() {
-        Ok(_) => Err(SemanticRuntimeScheduleFailureV1::Runtime),
+        // Daemon evaluation owns a Tokio blocking worker. Those workers retain
+        // the runtime handle even though they are outside an async task, so the
+        // handle is the canonical executor for projection-case futures.
+        Ok(runtime) => runtime.block_on(future),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3736,6 +3739,17 @@ mod tests {
             accepted.max_concurrent_sessions
         );
         assert_ne!(applied.max_resident_bytes, configured.max_resident_bytes);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_evaluation_drives_async_projection_on_daemon_runtime() {
+        let observed = tokio::task::spawn_blocking(|| {
+            block_on_semantic_evaluation(async { Ok::<_, SemanticRuntimeScheduleFailureV1>(7) })
+        })
+        .await
+        .expect("blocking evaluator joins");
+
+        assert_eq!(observed, Ok(7));
     }
 
     #[test]
