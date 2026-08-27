@@ -23,14 +23,16 @@ use super::store::execution_control_graph_cancellation;
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.begin_rebuild")]
     pub async fn begin_session_generation_rebuild_result(
         &self,
         request: SessionGenerationRebuildRequestV1,
     ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(BEGIN_OPERATION, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(BEGIN_OPERATION, error))?
+        });
         bootstrap_first_active_generation(
             &transaction,
             request.session_id(),
@@ -87,13 +89,19 @@ impl RegisteredGlobalDb {
             SessionGenerationRebuildDispositionV1::Started
         };
         let recorded_at = now_micros(BEGIN_OPERATION)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(BEGIN_OPERATION, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(BEGIN_OPERATION, error))?
+        });
         SessionGenerationRebuildReceiptV1::new(&request, disposition, recorded_at)
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.txn.activate_generation"
+    )]
     pub async fn activate_session_temporal_generation_result(
         &self,
         request: SessionGenerationActivationRequestV1,
@@ -106,10 +114,11 @@ impl RegisteredGlobalDb {
             ACTIVATE_OPERATION,
         )
         .await?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+        });
         let previous_generation = require_active_generation(
             &transaction,
             request.session_id(),
@@ -201,10 +210,12 @@ impl RegisteredGlobalDb {
                 "candidate generation did not transition from ready to active",
             ));
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+        });
 
         // Receipt watermarks pin the newly active generation; durable frozen
         // watermarks remain immutable after insert (schema transition guard).
@@ -222,6 +233,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.rebuild.relations")]
 pub(super) async fn rebuild_candidate_session_relations(
     database: &RegisteredGlobalDb,
     session_id: &tracedecay_domain::SessionId,
@@ -254,15 +266,19 @@ pub(super) async fn rebuild_candidate_session_relations(
     drop(snapshot);
 
     checkpoint_relation_rebuild_control(control)?;
-    let receipt = database
-        .begin_write_transaction()
-        .await
-        .map_err(|error| storage(operation, error))?;
+    let receipt = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        database
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage(operation, error))?
+    });
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
-    receipt
-        .commit()
-        .await
-        .map_err(|error| storage(operation, error))?;
+    hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        receipt
+            .commit()
+            .await
+            .map_err(|error| storage(operation, error))?
+    });
     checkpoint_relation_rebuild_control(control)?;
 
     let apply_cancellation = execution_control_graph_cancellation(control);
@@ -384,7 +400,10 @@ async fn bootstrap_first_active_generation(
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.projection.validate_frontier"
+)]
 pub(super) async fn validate_candidate_frontier(
     conn: &impl QueryExecutor,
     session_id: &str,

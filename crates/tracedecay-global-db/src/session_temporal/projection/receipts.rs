@@ -23,7 +23,10 @@ use super::persist::*;
 
 const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.projection.validate_receipt"
+)]
 pub async fn validate_final_projection_receipt(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
@@ -162,7 +165,10 @@ pub async fn validate_final_projection_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.projection.validate_assertions"
+)]
 pub(super) async fn validate_canonical_assertion_completeness(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
@@ -318,6 +324,10 @@ pub(in crate::session_temporal) fn digest_bytes(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.persist.observation_effect"
+)]
 pub async fn record_canonical_observation_effect(
     conn: &impl Executor,
     sequence: u64,
@@ -686,7 +696,10 @@ fn update_ordered_row_digest(digest: &mut Sha256, prior_rows: usize, row: &[u8])
     digest.update(row);
 }
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.projection.coverage"
+)]
 pub(super) async fn projection_coverage(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
@@ -822,15 +835,16 @@ pub(super) async fn projection_coverage(
 #[inline(always)]
 fn record_assertion_validation_probe() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.activation.assertion_query_probes").inc(1_u64);
+    hotpath::gauge!("global_db.session_temporal.activation.assertion_query_probes").inc(1_u64);
 }
 
 #[inline(always)]
 fn record_assertion_history_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.activation.history_rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes").inc(bytes);
+        hotpath::gauge!("global_db.session_temporal.activation.history_rows").inc(1_u64);
+        hotpath::gauge!("global_db.session_temporal.activation.history_row_payload_bytes")
+            .inc(bytes);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = bytes;
@@ -839,15 +853,15 @@ fn record_assertion_history_row(bytes: u64) {
 #[inline(always)]
 fn record_coverage_query_probe() {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.coverage.query_probes").inc(1_u64);
+    hotpath::gauge!("global_db.session_temporal.coverage.query_probes").inc(1_u64);
 }
 
 #[inline(always)]
 fn record_coverage_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.coverage.rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.coverage.row_payload_bytes").inc(bytes);
+        hotpath::gauge!("global_db.session_temporal.coverage.rows").inc(1_u64);
+        hotpath::gauge!("global_db.session_temporal.coverage.row_payload_bytes").inc(bytes);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = bytes;

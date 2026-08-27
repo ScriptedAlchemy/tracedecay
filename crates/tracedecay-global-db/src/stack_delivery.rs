@@ -394,6 +394,7 @@ async fn lookup_signal(
 impl RegisteredGlobalDb {
     /// Appends one immutable signal and its recipient bindings.  Overflow
     /// bindings are durably deferred and reported as typed saturation.
+    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.append")]
     pub async fn append_github_stack_signal(
         &self,
         record: GitHubStackSignalRecordV1,
@@ -548,6 +549,7 @@ impl RegisteredGlobalDb {
 
     /// Publishes a host batch.  This is the durable handoff boundary: rows
     /// become `host_pending`, never `settled`, before a host receipt arrives.
+    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.publish")]
     pub async fn publish_github_stack_deliveries(
         &self,
         project_id: &str,
@@ -564,6 +566,7 @@ impl RegisteredGlobalDb {
 
     /// Coordinator acknowledgement is intentionally not final host
     /// settlement.  It is idempotent for both `pending` and `host_pending`.
+    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.acknowledge")]
     pub async fn acknowledge_github_stack_deliveries(
         &self,
         project_id: &str,

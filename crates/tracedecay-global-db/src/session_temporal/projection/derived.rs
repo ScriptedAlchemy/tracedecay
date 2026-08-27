@@ -11,7 +11,10 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
 use super::super::rebuild::checkpoint_relation_rebuild_control;
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.projection.rebuild_derived"
+)]
 pub(super) async fn rebuild_derived_evidence(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,

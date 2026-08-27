@@ -69,7 +69,10 @@ impl RegisteredGlobalDb {
         Ok((generation, relations))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.persist.relation_projection"
+    )]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
@@ -130,7 +133,10 @@ impl RegisteredGlobalDb {
         }))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.persist.recover_relations"
+    )]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -257,6 +263,10 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.persist.seed_relation"
+)]
 pub async fn seed_session_relation_projection(
     database: &RegisteredGlobalDb,
     conn: &impl QueryExecutor,

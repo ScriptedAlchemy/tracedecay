@@ -332,6 +332,7 @@ fn native_project_path_alias_decode_error(error: String) -> String {
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.registry.query.validate")]
 pub(super) async fn validate_project_rows_have_canonical_keys(
     conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -371,6 +372,7 @@ struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::DatabaseEngineReadSnapshot);
 
 impl<'db> ProjectRegistryDatabase<'db> {
+    #[hotpath::measure(future = true, label = "global_db.registry.txn.snapshot")]
     async fn read_snapshot(
         self,
         operation: &'static str,
@@ -403,6 +405,7 @@ pub(super) async fn list_registered_code_project_paths(
     list_code_project_paths_from(ProjectRegistryDatabase(db), limit).await
 }
 
+#[hotpath::measure(future = true, label = "global_db.registry.query.list")]
 async fn list_code_project_paths_from(
     db: ProjectRegistryDatabase<'_>,
     limit: usize,
@@ -554,6 +557,7 @@ pub(super) async fn list_registered_lossless_paths(
     list_lossless_paths_from(ProjectRegistryDatabase(db), sql, operation).await
 }
 
+#[hotpath::measure(future = true, label = "global_db.registry.query.list_paths")]
 async fn list_lossless_paths_from(
     db: ProjectRegistryDatabase<'_>,
     sql: &str,
@@ -638,6 +642,7 @@ impl RegisteredGlobalDb {
     /// [`TraceDecayError::ProjectRoute`]: tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute
     /// [`TraceDecayError::ResetRequired`]: tracedecay_runtime_core::errors::TraceDecayError::ResetRequired
     /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.upsert")]
     pub async fn upsert_code_project(
         &self,
         project_id: &str,
@@ -660,6 +665,7 @@ impl RegisteredGlobalDb {
                 ),
             );
         }
+        crate::hotpath_observe::record_transaction_rows(1);
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
@@ -842,12 +848,14 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.alias")]
     async fn upsert_project_alias_key(
         &self,
         alias: &str,
         project_id: &str,
     ) -> tracedecay_runtime_core::errors::Result<ProjectAliasRecord> {
         const OPERATION: &str = "upsert project alias";
+        crate::hotpath_observe::record_transaction_rows(1);
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let transaction = self
             .begin_write_transaction()
@@ -913,11 +921,13 @@ impl RegisteredGlobalDb {
     /// is a registry inconsistency and not a legitimate absence.
     ///
     /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.store")]
     pub async fn upsert_store_instance(
         &self,
         upsert: StoreInstanceUpsert,
     ) -> tracedecay_runtime_core::errors::Result<StoreInstanceRecord> {
         const OPERATION: &str = "upsert store instance";
+        crate::hotpath_observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -987,11 +997,13 @@ impl RegisteredGlobalDb {
     /// [`RegisteredGlobalDb::upsert_store_instance`].
     ///
     /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.graph_scope")]
     pub async fn upsert_graph_scope(
         &self,
         upsert: GraphScopeUpsert,
     ) -> tracedecay_runtime_core::errors::Result<GraphScopeRecord> {
         const OPERATION: &str = "upsert graph scope";
+        crate::hotpath_observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1060,11 +1072,13 @@ impl RegisteredGlobalDb {
     /// [`RegisteredGlobalDb::upsert_project_alias`].
     ///
     /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.artifact")]
     pub async fn upsert_store_artifact(
         &self,
         upsert: StoreArtifactUpsert,
     ) -> tracedecay_runtime_core::errors::Result<StoreArtifactRecord> {
         const OPERATION: &str = "upsert store artifact";
+        crate::hotpath_observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1228,6 +1242,7 @@ impl RegisteredGlobalDb {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.query.search")]
     pub async fn try_search_code_projects(
         &self,
         query: &str,
@@ -1312,6 +1327,7 @@ impl RegisteredGlobalDb {
 
     /// Resolves the sole store for a project-path alias without hiding
     /// ambiguity, query, or row-decoding failures.
+    #[hotpath::measure(future = true, label = "global_db.registry.query.resolve")]
     pub async fn try_resolve_project_store_record_by_alias(
         &self,
         alias_path: &Path,
@@ -1410,6 +1426,7 @@ impl RegisteredGlobalDb {
     ///
     /// Repository marker conflicts and registry failures propagate so callers
     /// fail closed instead of minting a second project shard.
+    #[hotpath::measure(future = true, label = "global_db.registry.query.identity")]
     pub async fn resolve_project_store_by_identity(
         &self,
         project_root: &Path,
@@ -1496,6 +1513,7 @@ impl RegisteredGlobalDb {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.query.identity_ids")]
     pub(super) async fn project_ids_by_identity(
         &self,
         project_root: &Path,
@@ -1528,6 +1546,7 @@ impl RegisteredGlobalDb {
         path: &Path,
         kind: ProjectIdentityAliasKind,
     ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
+        #[hotpath::measure(future = true, label = "global_db.registry.query.alias")]
         async fn project_id_by_alias_key(
             db: &RegisteredGlobalDb,
             alias: &str,
@@ -1560,11 +1579,15 @@ impl RegisteredGlobalDb {
         project_id_by_alias_key(self, &alias).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.delete")]
     pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
         const CHUNK: usize = 256;
         if project_ids.is_empty() {
             return 0;
         }
+        crate::hotpath_observe::record_transaction_rows(
+            u64::try_from(project_ids.len()).unwrap_or(u64::MAX),
+        );
         let Ok(transaction) = self.begin_write_transaction().await else {
             return 0;
         };
@@ -1586,7 +1609,9 @@ impl RegisteredGlobalDb {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.delete_ledger")]
     pub async fn delete_project(&self, project_path: &Path) {
+        crate::hotpath_observe::record_transaction_rows(1);
         let Ok(transaction) = self.begin_write_transaction().await else {
             return;
         };
@@ -1606,11 +1631,15 @@ impl RegisteredGlobalDb {
         self.delete_project_paths(project_paths).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.delete_paths")]
     pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
         const CHUNK: usize = 256;
         if project_paths.is_empty() {
             return 0;
         }
+        crate::hotpath_observe::record_transaction_rows(
+            u64::try_from(project_paths.len()).unwrap_or(u64::MAX),
+        );
         let Ok(transaction) = self.begin_write_transaction().await else {
             return 0;
         };
@@ -1682,6 +1711,7 @@ impl RegisteredGlobalDb {
     /// operation. Nothing in planning or applying a reap deletes a file.
     ///
     /// [`apply_registry_reap`]: Self::apply_registry_reap
+    #[hotpath::measure(future = true, label = "global_db.registry.query.reap_plan")]
     pub async fn plan_registry_reap(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegistryReapPlan> {
@@ -1822,11 +1852,15 @@ impl RegisteredGlobalDb {
     /// so a checkout that reappeared between the two calls is skipped instead
     /// of unregistered. Returns the number of rows actually removed. No
     /// filesystem path is deleted, moved, or opened for writing.
+    #[hotpath::measure(future = true, label = "global_db.registry.persist.reap")]
     pub async fn apply_registry_reap(
         &self,
         plan: &RegistryReapPlan,
     ) -> tracedecay_runtime_core::errors::Result<usize> {
         const OPERATION: &str = "apply registry reap";
+        crate::hotpath_observe::record_transaction_rows(
+            u64::try_from(plan.reapable.len()).unwrap_or(u64::MAX),
+        );
         let transaction = self
             .begin_write_transaction()
             .await

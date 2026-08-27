@@ -957,6 +957,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(batch)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.candidates")]
     async fn produce_candidates(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1102,6 +1103,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(PageStatus::Complete)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.records")]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,

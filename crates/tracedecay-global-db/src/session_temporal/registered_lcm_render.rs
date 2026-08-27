@@ -72,6 +72,7 @@ async fn session_summary_ids(
     Ok(ids)
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.describe")]
 pub(super) async fn describe(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
@@ -136,6 +137,7 @@ pub(super) async fn describe(
     })
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.expand")]
 pub(super) async fn expand(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmExpandRequest,

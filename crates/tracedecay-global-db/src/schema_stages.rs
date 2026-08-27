@@ -430,7 +430,7 @@ struct RegisteredSchemaAdmissionClassification {
 /// shared by initialization admission and existing-store attach. Each
 /// authority surfaces its own typed reset state; nothing here mutates the
 /// store.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
     binding: &tracedecay_store::StoreRuntimeBindingV1,
@@ -511,6 +511,7 @@ async fn classify_registered_schema_admission(
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
+#[hotpath::measure(future = true, label = "global_db.schema.persist.admission")]
 pub async fn ensure_registered_schema_for_admission(
     installation: &RegisteredSchemaInstallationV1,
 ) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
@@ -567,7 +568,7 @@ pub async fn ensure_registered_schema_for_admission(
 /// Installs (or idempotently re-ensures) every registered schema stage inside
 /// the caller's admission transaction. Callers classify admission first, so
 /// this stage runs only for stores classified fresh or exactly current.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "global_db.schema.persist.install")]
 async fn install_registered_schema_stages(
     transaction: &(impl Executor + Sync),
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
@@ -754,6 +755,7 @@ async fn install_registered_schema_stages(
 /// project-path passes were all one-time legacy upgrades and have been removed.
 /// Only the authority invariant audit remains, and it stays out of line because
 /// it pages real authority rows on a large store.
+#[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
 pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
@@ -771,7 +773,7 @@ pub async fn converge_registered_schema(
     transaction.commit().await
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
 async fn converge_registered_schema_on(
     connection: &impl Executor,
     convergence: RegisteredSchemaConvergence,
@@ -793,6 +795,7 @@ async fn converge_registered_schema_on(
 /// its foreign-key sweep, mirroring
 /// [`ensure_registered_schema_for_admission`]. An untampered store resumes
 /// from its plausible checkpoint and pays only the bounded suffix audit.
+#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_attached")]
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -822,6 +825,7 @@ pub async fn converge_attached_registered_schema(
 /// An admissible store then re-ensures every idempotent schema stage, so an
 /// admissibly-fresh store — an existing database file with no schema objects —
 /// receives the full install exactly as initialization would have.
+#[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub async fn ensure_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_runtime_core::errors::Result<()> {

@@ -110,6 +110,7 @@ impl RegisteredGlobalDb {
     /// Rescans every persisted LCM raw-message body under the current
     /// detector revision, remediating hits through the canonical ingest path.
     /// Runs at most once per store per detector revision.
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.privacy_rescan")]
     pub async fn lcm_privacy_rescan_raw_messages(
         &self,
     ) -> Result<LcmPrivacyRescanOutcomeV1, LcmError> {

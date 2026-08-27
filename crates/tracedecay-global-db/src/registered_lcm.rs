@@ -101,6 +101,7 @@ impl RegisteredGlobalDb {
         query::describe(&snapshot, request).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.expand")]
     pub async fn lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -127,6 +128,7 @@ impl RegisteredGlobalDb {
         query::expand_query(&snapshot, request).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
         let git_scope_session_ids = self
             .git_scope_session_ids(&request.git_filter)
@@ -141,6 +143,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.load")]
     pub async fn lcm_load_session(
         &self,
         request: LcmLoadSessionRequest,
@@ -196,6 +199,7 @@ impl RegisteredGlobalDb {
             .map_err(Into::into)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.status")]
     pub async fn lcm_status_with_options(
         &self,
         provider: &str,
@@ -217,6 +221,7 @@ impl RegisteredGlobalDb {
 
     /// Publishes one immutable summary and advances its native relation
     /// projection in the same controlled mutation journey.
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.publish")]
     pub async fn lcm_publish_immutable_summary_guarded<F>(
         &self,
         publication: LcmImmutableSummaryPublication,
@@ -527,11 +532,13 @@ impl RegisteredGlobalDb {
         Ok(protected)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.lcm.ingest")]
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), LcmError> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
         let staged = raw::stage_raw_message_with_payload_tracked(

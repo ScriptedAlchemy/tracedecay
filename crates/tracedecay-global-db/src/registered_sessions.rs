@@ -29,6 +29,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.ingest_health")]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -199,7 +200,10 @@ impl RegisteredGlobalDb {
                 break;
             }
             for (path, byte_offset, mtime) in &page {
-                let Ok(metadata) = std::fs::metadata(path) else {
+                let Ok(metadata) = hotpath::measure_block!(
+                    "global_db.registered_sessions.ingest_stat",
+                    std::fs::metadata(path)
+                ) else {
                     continue;
                 };
                 health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
@@ -230,6 +234,7 @@ impl RegisteredGlobalDb {
         Ok(health)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists")]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -259,6 +264,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode session message existence: {error}"))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         let mut rows = self
             .read_connection()
@@ -274,6 +280,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode session message count: {error}"))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count_project")]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
@@ -298,6 +305,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode project session message count: {error}"))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.after")]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -354,6 +362,7 @@ impl RegisteredGlobalDb {
         Ok(out)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
     pub async fn latest_session_activity_secs(&self) -> Option<i64> {
         let mut rows = self
             .read_connection()
@@ -391,6 +400,7 @@ impl RegisteredGlobalDb {
         latest
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.get")]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -410,6 +420,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Searches message text for a provider, optionally constrained to one project.
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.search")]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -524,6 +535,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Lists each session's latest canonical goal state, newest first.
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.goals")]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -685,6 +697,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
     pub async fn workflow_fact_rows(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>>
@@ -741,6 +754,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
     provider: &str,

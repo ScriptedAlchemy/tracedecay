@@ -13,6 +13,10 @@ use super::GlobalDbNativeIntegrationStore;
 use super::store::{commit_outcome, decode, encode, invalid, invalid_domain, text, unavailable};
 
 impl GlobalDbNativeIntegrationStore<'_> {
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.native_integration.persist.cleanup_begin"
+    )]
     pub async fn begin_worktree_cleanup(
         &self,
         record: NativeWorktreeCleanupTransactionV1,
@@ -123,6 +127,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
         Ok(pending)
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.native_integration.persist.cleanup_cas"
+    )]
     pub async fn compare_and_swap_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -158,6 +166,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
         commit_outcome(transaction, outcome).await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.native_integration.persist.cleanup_terminal"
+    )]
     pub async fn write_worktree_cleanup_terminal(
         &self,
         confirmation_digest: &ManifestDigest,

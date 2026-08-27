@@ -498,13 +498,13 @@ fn canonical_projected_message(
 }
 
 impl GlobalDbHydrationBackend<'_> {
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.hydrate.resolve")]
     async fn resolve_current(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        hotpath::gauge!("global_db.session_temporal.hydration").inc(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -518,14 +518,14 @@ impl GlobalDbHydrationBackend<'_> {
         Ok(resolution)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.hydrate.read")]
     async fn read_bounded(
         &self,
         descriptor: &PayloadDescriptor,
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        hotpath::gauge!("global_db.session_temporal.hydration").inc(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {

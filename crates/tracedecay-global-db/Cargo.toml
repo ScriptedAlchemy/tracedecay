@@ -13,6 +13,7 @@ include = ["/src/**"]
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "hotpath/hotpath",
+    "hotpath/tokio",
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-graph-db/hotpath",
@@ -21,6 +22,7 @@ hotpath = [
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
 ]
 hotpath-alloc = [
@@ -34,6 +36,7 @@ hotpath-alloc = [
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -47,6 +50,7 @@ hotpath-cpu = [
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
 ]
 # Explicit opt-in (same policy as the query kernel): exposes the registered

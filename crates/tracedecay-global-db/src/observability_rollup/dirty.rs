@@ -8,6 +8,7 @@ impl RegisteredGlobalDb {
     /// Leases the oldest dirty execution-topology day for one exact scope.
     /// At most one bounded day is returned; expired leases are retryable and
     /// a later accepted source event revokes the lease atomically.
+    #[hotpath::measure(future = true, label = "global_db.observability_rollup.persist.claim")]
     pub async fn claim_observability_rollup_dirty_day(
         &self,
         authorized_scope_ref: &str,
@@ -78,6 +79,10 @@ impl RegisteredGlobalDb {
 
     /// Releases one exact lease after a bounded rebuild attempt could not
     /// produce a complete fragment. The dirty marker and watermark remain.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.observability_rollup.persist.release"
+    )]
     pub async fn release_observability_rollup_dirty_day(
         &self,
         claim: &ObservabilityRollupDirtyDayClaimV1,

@@ -135,6 +135,10 @@ pub(super) async fn validate_current_predecessor(
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.persist.publish_generation"
+)]
 pub(super) async fn publish_candidate_generation(
     conn: &impl Executor,
     session_id: &str,
