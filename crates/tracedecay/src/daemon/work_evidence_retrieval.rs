@@ -403,18 +403,10 @@ fn task_session_evidence(
             observed,
             maximum,
         } => {
-            return Err(WorkEvidenceHydrationErrorV1::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
-                    kind,
-                    observed,
-                    maximum,
-                },
-            ));
+            return Err(cursor_manifest_hydration_refusal(kind, observed, maximum));
         }
         TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage } => {
-            return Err(WorkEvidenceHydrationErrorV1::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
-            ));
+            return Err(budget_hydration_refusal(stage));
         }
         TaskSessionRetrievalOutcomeV1::Unavailable => {
             return Err(WorkEvidenceHydrationErrorV1::Unavailable);
@@ -529,6 +521,28 @@ fn task_session_evidence(
     })
 }
 
+const fn cursor_manifest_hydration_refusal(
+    kind: tracedecay_domain::CursorManifestLimitKindV1,
+    observed: usize,
+    maximum: usize,
+) -> WorkEvidenceHydrationErrorV1 {
+    WorkEvidenceHydrationErrorV1::StructuralRefusal(
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
+    )
+}
+
+const fn budget_hydration_refusal(
+    stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
+) -> WorkEvidenceHydrationErrorV1 {
+    WorkEvidenceHydrationErrorV1::StructuralRefusal(
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+    )
+}
+
 fn reauthorize_work_stage(
     selector: &dyn TaskSessionRankSelectorV1,
     binding: &TaskSessionBindingV1,
@@ -621,6 +635,35 @@ pub(crate) mod tests {
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
+
+    #[test]
+    fn task_session_structural_refusals_retain_exact_hydration_causes() {
+        assert_eq!(
+            cursor_manifest_hydration_refusal(
+                tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                257,
+                256,
+            ),
+            WorkEvidenceHydrationErrorV1::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                }
+            )
+        );
+        assert_eq!(
+            budget_hydration_refusal(
+                tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens
+            ),
+            WorkEvidenceHydrationErrorV1::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    stage:
+                        tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens,
+                }
+            )
+        );
+    }
 
     pub(super) fn id<T>(value: &str) -> T
     where

@@ -615,6 +615,24 @@ async fn structural_task_session_refusal_remains_typed_in_hydration_omission() {
     );
 }
 
+#[test]
+fn structural_budget_stage_survives_hydration_rendering() {
+    let refusal = SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+        stage: crate::retrieval::SessionRetrievalBudgetStageV1::ContextTokens,
+    };
+
+    assert_eq!(
+        hydration_omission(
+            "task_session",
+            WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal),
+        ),
+        WorkEvidenceOmissionV1 {
+            relation: "task_session".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal),
+        }
+    );
+}
+
 #[tokio::test]
 async fn stale_task_session_without_a_matched_continuation_remains_an_omission() {
     let sessions = Sessions {
