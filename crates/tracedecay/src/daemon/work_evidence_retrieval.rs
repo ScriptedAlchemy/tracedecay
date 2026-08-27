@@ -219,7 +219,7 @@ impl WorkTaskSessionPortV1 for DaemonWorkEvidenceRetrievalV1 {
                     .await;
                 task_session_evidence(&request, outcome, &selector)
             },
-            label = "daemon.session_retrieval.evidence",
+            label = "daemon.session_retrieval.evidence"
         ))
     }
 }
@@ -387,6 +387,9 @@ fn task_session_evidence(
         }
         TaskSessionRetrievalOutcomeV1::Stale { .. } => {
             return Err(WorkEvidenceHydrationErrorV1::Stale);
+        }
+        TaskSessionRetrievalOutcomeV1::TimedOut => {
+            return Err(WorkEvidenceHydrationErrorV1::TimedOut);
         }
         TaskSessionRetrievalOutcomeV1::Cancelled => {
             return Err(WorkEvidenceHydrationErrorV1::Cancelled);

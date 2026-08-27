@@ -552,9 +552,22 @@ impl MessageSearchInput {
             | SessionRetrievalServiceOutcome::Unavailable(_) => {
                 return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
             }
-            SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-            | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
+            SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            } => {
+                return Err(message_search_cursor_manifest_refusal(
+                    kind, observed, maximum,
+                ));
+            }
+            SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
                 return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal());
+            }
+            SessionRetrievalServiceOutcome::TimedOut => {
+                return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                    tracedecay_application::CancellationStage::DuringRead,
+                ));
             }
             SessionRetrievalServiceOutcome::Cancelled => {
                 return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
@@ -617,6 +630,54 @@ impl MessageSearchInput {
             workflow_filter_applied: self.workflow_run.as_ref().map(|_| true),
             workflow_run: self.workflow_run.clone(),
             workflow_run_parent_session: None,
+        }
+    }
+}
+
+fn message_search_cursor_manifest_refusal(
+    kind: tracedecay_domain::CursorManifestLimitKindV1,
+    observed: usize,
+    maximum: usize,
+) -> RetainedSurfaceExecutionErrorV1 {
+    RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use tracedecay_application::{
+        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
+    };
+    use tracedecay_domain::CursorManifestLimitKindV1;
+
+    use super::message_search_cursor_manifest_refusal;
+
+    #[test]
+    fn message_search_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
+        for (kind, expected_code) in [
+            (
+                CursorManifestLimitKindV1::Participants,
+                "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                CursorManifestLimitKindV1::CanonicalBytes,
+                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+        ] {
+            let error = message_search_cursor_manifest_refusal(kind, 257, 256);
+            assert!(!matches!(
+                &error,
+                tracedecay_application::RetainedSurfaceExecutionErrorV1::Saturated
+            ));
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(expected_code)
+            );
         }
     }
 }

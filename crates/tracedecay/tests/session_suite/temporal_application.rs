@@ -1604,7 +1604,7 @@ async fn cancellation_or_deadline_during_authorization_prevents_execution_constr
     );
     assert!(matches!(
         retrieve(&deadline_service, &deadline_context, query("alpha")).await,
-        SessionRetrievalOutcome::Cancelled
+        SessionRetrievalOutcome::TimedOut
     ));
     assert!(application_observed_at() >= deadline_context.deadline().expires_at);
     assert_eq!(deadline_port.calls.load(Ordering::SeqCst), 0);
@@ -1625,7 +1625,7 @@ async fn request_budget_preflight_rejects_before_execution() {
     assert!(matches!(
         retrieve(&service, &constrained, query("alpha")).await,
         SessionRetrievalOutcome::BudgetExhausted {
-            stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+            stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
         }
     ));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
