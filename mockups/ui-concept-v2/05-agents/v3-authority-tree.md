@@ -17,9 +17,8 @@ Usage, hierarchy, handoff frontier, tokens, and failures stay distinct.
 
 ## Supported interactions
 
-- Overview
-- delegation/handoff
-- failure context.
+- Depicted: ready usage, stale diagnostics, ready subagent tree/work graph, schema-refused handoff tokens, and failure-context categories.
+- It does not execute delegation, handoff, or recovery.
 
 ## Truth boundary
 

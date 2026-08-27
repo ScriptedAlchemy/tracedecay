@@ -17,10 +17,8 @@ Unavailable camera data is labeled instead of drawn.
 
 ## Supported interactions
 
-- Board
-- projection switch
-- selected task
-- topology selection.
+- Depicted: Board selected over one immutable graph revision, ready/blocked/unavailable tasks, measured empty, and unavailable other cameras.
+- It does not execute a projection or task selection.
 
 ## Truth boundary
 

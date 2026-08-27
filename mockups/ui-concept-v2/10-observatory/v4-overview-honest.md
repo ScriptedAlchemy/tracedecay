@@ -17,9 +17,8 @@ Source state is per panel, not a global health badge.
 
 ## Supported interactions
 
-- Overview
-- index progress
-- storage findings.
+- Depicted: Doctor findings, partial observations, budget outcomes, hook coverage, and measured/unavailable store telemetry.
+- It does not execute refetch, progress, or recovery.
 
 ## Truth boundary
 

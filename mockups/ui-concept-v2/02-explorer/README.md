@@ -8,26 +8,28 @@ Route: `/explorer`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/explorer/ExplorerPage.tsx` composes `controller.ts`, `laneModel.ts`, `absence.ts`, and `Inspector.tsx`; they are the source-local lane and inspector authority.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Browse lanes | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Open `/explorer` and begin a supported search. |
-| Search progress | No current plate | Required semantic coverage; no current plate. |
-| Cancelled | No current plate | Required semantic coverage; no current plate. |
-| Result inspector | No current plate | Required semantic coverage; no current plate. |
-| Complete empty | No current plate | Required semantic coverage; no current plate. |
-| Partial | No current plate | Required semantic coverage; no current plate. |
-| Stale | No current plate | Required semantic coverage; no current plate. |
-| Offline | No current plate | Required semantic coverage; no current plate. |
-| Source unavailable | No current plate | Required semantic coverage; no current plate. |
-| Error | No current plate | Required semantic coverage; no current plate. |
+| Create submitted | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Poll running | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Cancel available | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Code lane ready | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Sessions lane partial | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Knowledge lane measured empty | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Semantic lane absent | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Selected code-hit inspector | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| Lane/run-state legend | [v4-lane-lifecycle.md](v4-lane-lifecycle.md) | Depicted by this selected still. |
+| A completed cancellation result | No current plate | Required interaction/result is not depicted. |
+| A timed-out lane result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

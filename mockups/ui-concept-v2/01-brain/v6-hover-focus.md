@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v6 hover focus direction for Brain.
+This plate studies focused neighborhood treatment.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: bright focused neighborhood with outsiders dimmed.
 
 ## Visible state
 
-Synthetic historical composition for v6 hover focus; not a current semantic-state selection.
+The image uses proposed hover inspection.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is The still does not prove the supported inspect path and risks equating hover/focus with activity.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

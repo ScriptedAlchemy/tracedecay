@@ -17,10 +17,8 @@ Lifecycle decisions and run-lookup boundaries are named.
 
 ## Supported interactions
 
-- Definitions
-- detail
-- lifecycle CAS
-- run lookup.
+- Depicted: definitions, pinned digests/steps, CAS conflict/refusal controls, idle disabled run lookup, and named lookup states.
+- It does not execute a lifecycle write or run read.
 
 ## Truth boundary
 

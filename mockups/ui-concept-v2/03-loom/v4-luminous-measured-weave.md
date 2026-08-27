@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v4 luminous measured weave direction for Loom.
+This plate studies luminous measured weave.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: brightened strands over weave geometry.
 
 ## Visible state
 
-Synthetic historical composition for v4 luminous measured weave; not a current semantic-state selection.
+The image uses richer strand inspection.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It omits loaded-page replay and separate source coverage; the plate is rejected.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

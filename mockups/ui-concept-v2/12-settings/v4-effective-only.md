@@ -17,10 +17,8 @@ Missing provenance and unconfigured remote state remain visible.
 
 ## Supported interactions
 
-- Effective configuration
-- filter/focus
-- review
-- CAS conflict.
+- Depicted: effective values, writable/locked rows, advertised multi-root without a query, reachable Remote Brain, and loading/partial/stale/reachable cells.
+- It does not execute filtering, review, or compare-and-swap.
 
 ## Truth boundary
 

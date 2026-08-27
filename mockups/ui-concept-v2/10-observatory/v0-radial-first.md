@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v0 radial first direction for Observatory.
+This plate studies radial observatory entry.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: radial source-family visualization.
 
 ## Visible state
 
-Synthetic historical composition for v0 radial first; not a current semantic-state selection.
+The image uses center-out source scanning.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It implies aggregate health where coverage must stay separate.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

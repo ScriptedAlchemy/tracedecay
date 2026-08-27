@@ -8,26 +8,28 @@ Route: `/knowledge`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/knowledge/KnowledgePage.tsx` uses generated `MemoryOverviewPayloadV1Schema`, `MemoryStatusPayloadV1Schema`, and `MemoryFactDetailPayloadV1Schema`; `MemoryGeometry.tsx`, `CurationConsole.tsx`, and `MemoryOplog.tsx` own camera reads.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Facts | [v4-four-cameras.md](v4-four-cameras.md) | Open `/knowledge` after the selected camera authority responds. |
-| Geometry | No current plate | Required semantic coverage; no current plate. |
-| Curation | No current plate | Required semantic coverage; no current plate. |
-| Oplog | No current plate | Required semantic coverage; no current plate. |
-| Empty store | No current plate | Required semantic coverage; no current plate. |
-| Partial coverage | No current plate | Required semantic coverage; no current plate. |
-| Detail unavailable | No current plate | Required semantic coverage; no current plate. |
-| Geometry unavailable | No current plate | Required semantic coverage; no current plate. |
-| Curation locked | No current plate | Required semantic coverage; no current plate. |
-| Curation partial | No current plate | Required semantic coverage; no current plate. |
+| Facts admitted/disputed/withheld | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Geometry unavailable | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Method not PCA | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Curation partial | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Curation pending/applied/rejected | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Oplog loading | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Oplog partial | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Oplog stale | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Oplog unavailable | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Registry/stream state matrix | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| A completed curation mutation | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

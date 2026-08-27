@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v1 provider burn direction for Costs.
+This plate studies provider-burn emphasis.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: burn-rate oriented provider treatment.
 
 ## Visible state
 
-Synthetic historical composition for v1 provider burn; not a current semantic-state selection.
+The image uses provider consumption comparison.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It does not preserve priced, unpriced, savings, and coverage distinctions.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

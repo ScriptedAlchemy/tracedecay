@@ -8,31 +8,29 @@ Route: `/loom`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable. Loom weave, replay, and chain evidence is named in `../INTERACTION-STATES.md` (`WeaveCanvas`, `ThreadPlayback`, `playback`, `LoomPage`, and `ThreadChain`).
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- `dashboard/src/workspaces/loom/WeaveCanvas.tsx`, `dashboard/src/workspaces/loom/ThreadPlayback.tsx`, `dashboard/src/workspaces/loom/ThreadChain.tsx`, and `dashboard/src/workspaces/loom/LoomPage.dom.test.tsx` are the named time-window, replay, and chain authority.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Weave overview | [v3-measured-weave.md](v3-measured-weave.md) | Open `/loom` after a thread page and coverage information are available. |
-| Zoom/pan/Fit | No current plate | Required semantic coverage; no current plate. |
-| Thread selected | No current plate | Required semantic coverage; no current plate. |
-| Thread chain | No current plate | Required semantic coverage; no current plate. |
-| Loaded-page replay | [v3-measured-weave.md](v3-measured-weave.md) | Open `/loom` after a thread page and coverage information are available. |
-| Loading | No current plate | Required semantic coverage; no current plate. |
-| Served empty | No current plate | Required semantic coverage; no current plate. |
-| Undated partial | No current plate | Required semantic coverage; no current plate. |
-| Stale | No current plate | Required semantic coverage; no current plate. |
-| Offline | No current plate | Required semantic coverage; no current plate. |
-| Store unavailable | No current plate | Required semantic coverage; no current plate. |
-| Source partial | No current plate | Required semantic coverage; no current plate. |
-| Source unavailable | No current plate | Required semantic coverage; no current plate. |
-| Chain unavailable | No current plate | Required semantic coverage; no current plate. |
-| Linked-boundary partial | No current plate | Required semantic coverage; no current plate. |
+| Measured time/host weave | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Recorded thread | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Open thread | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Selected thread | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Causal-crossings page 1 of 8 | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Loaded LCM playback metadata | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Transcript/tool chain | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Commits/edited-files/branch-worktree spans | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Source coverage and freshness | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Load-state legend | [v3-measured-weave.md](v3-measured-weave.md) | Depicted by this selected still. |
+| Zoom/pan/Fit controls | No current plate | Required interaction/result is not depicted. |
+| Playback transport controls | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

@@ -17,10 +17,8 @@ Stale, warming, and unavailable diagnostics stay typed.
 
 ## Supported interactions
 
-- Cortex
-- graph hover
-- Trace
-- Core.
+- Depicted: Trace selected, a direct-lens graph, selected-symbol evidence, served strata, fresh/index progress, and diagnostic-state cards.
+- Cortex and Core are visible choices, not depicted loaded content.
 
 ## Truth boundary
 

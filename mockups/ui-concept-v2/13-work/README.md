@@ -8,26 +8,30 @@ Route: `/work`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/work/WorkPage.tsx` uses `useWorkGraphViews`, `useWorkAttempts`, and `useWorkTopology`; `WorkProjectionSwitcher.tsx`, `WorkBoard.tsx`, and `workViewsModel.ts` bind projections to one graph read.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Board | [v4-six-cameras.md](v4-six-cameras.md) | Open `/work` after a product-graph generation and available camera authorities respond. |
-| Projection switch | No current plate | Required semantic coverage; no current plate. |
-| Selected task | No current plate | Required semantic coverage; no current plate. |
-| Topology selection | No current plate | Required semantic coverage; no current plate. |
-| Empty board | No current plate | Required semantic coverage; no current plate. |
-| Stale generation | No current plate | Required semantic coverage; no current plate. |
-| Runtime unavailable | No current plate | Required semantic coverage; no current plate. |
-| Attempt unavailable | No current plate | Required semantic coverage; no current plate. |
-| Topology unavailable | No current plate | Required semantic coverage; no current plate. |
-| Stream offline | No current plate | Required semantic coverage; no current plate. |
+| Board selected | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Immutable graph revision | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Ready task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Blocked task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Unavailable task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Measured empty | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| DAG unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Timeline unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Causal unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Workload unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| Topology unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
+| A projection switch result | No current plate | Required interaction/result is not depicted. |
+| A task-selection result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

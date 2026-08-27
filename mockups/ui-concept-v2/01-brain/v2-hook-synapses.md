@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v2 hook synapses direction for Brain.
+This plate studies free-form hook-synapse network.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: connected hook nodes without registry grouping.
 
 ## Visible state
 
-Synthetic historical composition for v2 hook synapses; not a current semantic-state selection.
+The image uses node-to-node inspection.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It has no scoped-project rule or independent Feed/Authority disclosure.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

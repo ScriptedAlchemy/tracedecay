@@ -17,9 +17,8 @@ Artifacts and integrity evidence are separate.
 
 ## Supported interactions
 
-- Overview
-- scheduler pause/resume
-- run artifacts.
+- Depicted: paused/configured scheduler, write lock, unavailable retry, due/skip, malformed job, skill states, receipt outcomes, run ledger, and failed artifact integrity.
+- It does not execute pause/resume or a run action.
 
 ## Truth boundary
 

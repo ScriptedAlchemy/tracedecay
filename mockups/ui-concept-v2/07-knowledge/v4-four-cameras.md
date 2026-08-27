@@ -17,11 +17,8 @@ Camera states remain independent; unsupported geometry remains unserved.
 
 ## Supported interactions
 
-- Facts
-- Geometry
-- Curation
-- Oplog
-- supported detail inspection.
+- Depicted: Facts trust rows, Geometry unavailable because method is not PCA, partial Curation, and Oplog loading/partial/stale/unavailable.
+- It does not execute a camera switch or mutation.
 
 ## Truth boundary
 

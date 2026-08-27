@@ -17,9 +17,8 @@ Each source state is separately labeled.
 
 ## Supported interactions
 
-- Browse lanes
-- search progress/cancel
-- result inspector.
+- Depicted: submitted create, running poll, available cancel, selected code hit, and lanes in ready, partial, measured-empty, and absent states.
+- The legend labels additional states; the still does not execute a query or cancellation.
 
 ## Truth boundary
 

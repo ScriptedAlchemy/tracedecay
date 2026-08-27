@@ -17,9 +17,8 @@ Open `/sessions` after a timeline/list response.
 
 ## Supported interactions
 
-- Timeline/list
-- transcript search
-- paged inspector.
+- Depicted: search chrome, provider-qualified rows, selected raw inspector, page-two pagination, coverage/truncation, and redaction/store fields.
+- The state legend is reference material; the still does not execute search or paging.
 
 ## Truth boundary
 

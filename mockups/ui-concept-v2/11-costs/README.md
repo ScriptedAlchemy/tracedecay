@@ -8,23 +8,23 @@ Route: `/costs`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/costs/CostsPage.tsx` reads `/api/plugins/savings/overview` with `SavingsOverviewPayloadV1Schema`; `CanonicalCosts.tsx`, `TopologyMetricsCosts.tsx`, and `spend.ts` preserve spend/coverage distinctions.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Actual spend | [v3-provider-spend.md](v3-provider-spend.md) | Open `/costs` after spend and coverage authorities respond. |
-| Coverage | No current plate | Required semantic coverage; no current plate. |
-| Empty ledger | No current plate | Required semantic coverage; no current plate. |
-| Partial coverage | No current plate | Required semantic coverage; no current plate. |
-| Source unavailable | No current plate | Required semantic coverage; no current plate. |
-| Pricing unavailable | No current plate | Required semantic coverage; no current plate. |
-| Identity unknown | No current plate | Required semantic coverage; no current plate. |
+| Priced provider spend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| Unpriced/null spend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| Absent provider values | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| Count-only saved tokens | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| Loading/partial/stale/unavailable/denied/measured-empty legend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| A time-range change result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

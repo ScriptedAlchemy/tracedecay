@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v1 three lanes direction for Explorer.
+This plate studies compact three-source comparison.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: three parallel result lanes.
 
 ## Visible state
 
-Synthetic historical composition for v1 three lanes; not a current semantic-state selection.
+The image uses cross-source reading.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It cannot show the semantic lane or its typed absence.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

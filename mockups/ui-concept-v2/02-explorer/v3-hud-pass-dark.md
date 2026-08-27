@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v3 hud pass dark direction for Explorer.
+This plate studies dark explorer hud.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: dark shell around early lanes.
 
 ## Visible state
 
-Synthetic historical composition for v3 hud pass dark; not a current semantic-state selection.
+The image uses lane-label contrast review.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It carries no lifecycle or selected-result state.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

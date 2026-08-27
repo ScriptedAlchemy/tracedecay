@@ -8,25 +8,30 @@ Route: `/code`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/code/CodePage.tsx` reads `/api/plugins/graph/{overview,search,subgraph}` with `GraphOverviewPayloadV1Schema`, `GraphSearchPayloadV1Schema`, and `GraphSubgraphPayloadV1Schema`; `CodeDiagnostics.tsx` and `IndexFreshness.tsx` own state readouts.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Cortex | [v3-lenses.md](v3-lenses.md) | Open `/code` after the index serves the selected model. |
-| Graph hover | No current plate | Required semantic coverage; no current plate. |
-| Trace | No current plate | Required semantic coverage; no current plate. |
-| Core | No current plate | Required semantic coverage; no current plate. |
-| Index empty | No current plate | Required semantic coverage; no current plate. |
-| Stale index | No current plate | Required semantic coverage; no current plate. |
-| Warming index | No current plate | Required semantic coverage; no current plate. |
-| Renderer unavailable | No current plate | Required semantic coverage; no current plate. |
-| Diagnostics unavailable | No current plate | Required semantic coverage; no current plate. |
+| Trace lens selected | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Direct-lens graph | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Selected-symbol evidence | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Served strata | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Fresh branch/index | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Build progress | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Diagnostics warming | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Diagnostics stale | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Unavailable generation | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Diagnostics ready | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Registry/stream state matrix | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
+| Loaded Cortex content | No current plate | Required interaction/result is not depicted. |
+| Loaded Core content | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

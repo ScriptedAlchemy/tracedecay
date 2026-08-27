@@ -17,10 +17,8 @@ Recorded, open, and unknown ends remain distinct; only a loaded LCM page is repr
 
 ## Supported interactions
 
-- Zoom/pan/Fit with printed window
-- keyboard thread selection
-- loaded-page replay starts paused
-- separate thread-chain source coverage.
+- Depicted: recorded/open strands, selected thread, paginated causal crossings, loaded-page playback metadata, source coverage, and freshness.
+- The still does not depict zoom, pan, Fit, playback controls, or a transition.
 
 ## Truth boundary
 

@@ -8,32 +8,25 @@ Route: `/brain`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable. Brain scoping and activity evidence is named in `../INTERACTION-STATES.md` (`BrainPage`, `ScopedBrain`, and GraphCanvas propagation tests).
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- `dashboard/src/workspaces/brain/BrainPage.tsx`, `dashboard/src/workspaces/brain/ScopedBrain.tsx`, and `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx` are the named scoping and propagation authority.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Registry overview | [v4-measured-registry.md](v4-measured-registry.md) | Open `/brain` with `Project: all` after the registry authority serves the field. |
-| Project hover/focus | No current plate | Required semantic coverage; no current plate. |
-| Project narrow | No current plate | Required semantic coverage; no current plate. |
-| Scoped project | No current plate | Required semantic coverage; no current plate. |
-| Return to all projects | No current plate | Required semantic coverage; no current plate. |
-| Admitted activity | No current plate | Required semantic coverage; no current plate. |
-| Registry loading | No current plate | Required semantic coverage; no current plate. |
-| Registry empty | No current plate | Required semantic coverage; no current plate. |
-| Registry partial | No current plate | Required semantic coverage; no current plate. |
-| Registry unavailable | No current plate | Required semantic coverage; no current plate. |
-| Registry inconsistent | No current plate | Required semantic coverage; no current plate. |
-| Registry truncated | No current plate | Required semantic coverage; no current plate. |
-| Feed connecting | No current plate | Required semantic coverage; no current plate. |
-| Feed offline | No current plate | Required semantic coverage; no current plate. |
-| Graph empty | No current plate | Required semantic coverage; no current plate. |
-| Renderer unavailable | No current plate | Required semantic coverage; no current plate. |
+| All-project registry field | [v4-measured-registry.md](v4-measured-registry.md) | Depicted by this selected still. |
+| Highlighted project row | [v4-measured-registry.md](v4-measured-registry.md) | Depicted by this selected still. |
+| Registry HTTP ready | [v4-measured-registry.md](v4-measured-registry.md) | Depicted by this selected still. |
+| Stream SSE connecting | [v4-measured-registry.md](v4-measured-registry.md) | Depicted by this selected still. |
+| Pulse-state matrix labels | [v4-measured-registry.md](v4-measured-registry.md) | Depicted by this selected still. |
+| Hover inspection | No current plate | Required interaction/result is not depicted. |
+| Scoped-project content | No current plate | Required interaction/result is not depicted. |
+| Explicit scope clear | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v1 cortex direction for Code.
+This plate studies cortex-first graph overview.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: single cortex-like graph field.
 
 ## Visible state
 
-Synthetic historical composition for v1 cortex; not a current semantic-state selection.
+The image uses neighborhood exploration.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It predates direct lens, node-evidence, freshness, and diagnostic boundaries.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

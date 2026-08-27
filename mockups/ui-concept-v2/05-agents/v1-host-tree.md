@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v1 host tree direction for Agents.
+This plate studies host-centered hierarchy.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: tree organized by host identity.
 
 ## Visible state
 
-Synthetic historical composition for v1 host tree; not a current semantic-state selection.
+The image uses expanding host relationships.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It lacks usage, handoff, token-refusal, and failure authorities.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

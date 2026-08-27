@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v7 real activity synapse direction for Brain.
+This plate studies activity synapse treatment.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: bright synapse/pulse centered on an event.
 
 ## Visible state
 
-Synthetic historical composition for v7 real activity synapse; not a current semantic-state selection.
+The image uses proposed one-hop activity trace.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It lacks separate Feed and Authority disclosure for an admitted activity claim.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

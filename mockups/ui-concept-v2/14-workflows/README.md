@@ -8,25 +8,29 @@ Route: `/workflows`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/workflows/WorkflowsPage.tsx` and `workflowQueries.ts` use the canonical `/application/workflow` routes for definitions, lifecycle, and run projection; generated contracts decode every rendered value.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Definitions | [v3-definition-ledger.md](v3-definition-ledger.md) | Open `/workflows` after the definition registry responds. |
-| Detail | No current plate | Required semantic coverage; no current plate. |
-| Lifecycle CAS | No current plate | Required semantic coverage; no current plate. |
-| Run lookup | No current plate | Required semantic coverage; no current plate. |
-| Empty registry | No current plate | Required semantic coverage; no current plate. |
-| Unknown | No current plate | Required semantic coverage; no current plate. |
-| Runtime unavailable | No current plate | Required semantic coverage; no current plate. |
-| CAS conflict | No current plate | Required semantic coverage; no current plate. |
-| Concealed run | No current plate | Required semantic coverage; no current plate. |
+| Definitions loading/ready/measured-empty/refused/unknown | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Selected definition detail | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Pinned policy/config/catalog digests | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Steps | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| CAS conflict | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Schema refusal | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Validation failure | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Denied/locked scope | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Idle disabled run lookup | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| Run lookup state chips | [v3-definition-ledger.md](v3-definition-ledger.md) | Depicted by this selected still. |
+| A lifecycle write result | No current plate | Required interaction/result is not depicted. |
+| A found run projection | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

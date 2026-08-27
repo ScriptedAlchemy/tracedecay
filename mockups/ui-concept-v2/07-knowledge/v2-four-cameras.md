@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v2 four cameras direction for Knowledge.
+This plate studies early four-camera layout.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: four camera apertures.
 
 ## Visible state
 
-Synthetic historical composition for v2 four cameras; not a current semantic-state selection.
+The image uses camera switching.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It predates explicit per-camera unavailable, partial, and loading states.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

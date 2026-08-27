@@ -8,25 +8,26 @@ Route: `/observatory`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/observatory/ObservatoryPage.tsx` reads `/api/storage/telemetry`, `/api/code-index/freshness`, `/api/observatory`, and analytics diagnostics; `DoctorInspector.tsx`, `CanonicalObservations.tsx`, `PerformanceBudgets.tsx`, and `HookHints.tsx` own panels.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Overview | [v4-overview-honest.md](v4-overview-honest.md) | Open `/observatory` after one or more source authorities respond. |
-| Index progress | No current plate | Required semantic coverage; no current plate. |
-| Storage findings | No current plate | Required semantic coverage; no current plate. |
-| Empty | No current plate | Required semantic coverage; no current plate. |
-| Partial | No current plate | Required semantic coverage; no current plate. |
-| Stale | No current plate | Required semantic coverage; no current plate. |
-| Baseline pending | No current plate | Required semantic coverage; no current plate. |
-| Unsupported | No current plate | Required semantic coverage; no current plate. |
-| Blocked progress | No current plate | Required semantic coverage; no current plate. |
+| Doctor findings | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Doctor partial/stale | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Observed/omitted/unavailable families | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Budget under/over/unmeasured | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Hook coverage partial | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Store measured | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Store unavailable | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Registry/stream/pulse matrix | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| A refetch or recovery result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

@@ -10,8 +10,34 @@ The pre-Task-1 canonical table is the conservative basis: one current plate per 
 
 ## Verification
 
-The task handoff checks exact PNG-to-sidecar parity, one asset-ledger row per PNG, permitted lifecycle vocabulary, and unchanged PNG paths in the Git diff.
+Executed from the isolated worktree after the review fixes:
+
+```sh
+root=mockups/ui-concept-v2
+diff -u \
+  <(find "$root"/[0-9][0-9]-* -maxdepth 1 -type f -name '*.png' -print | sed 's/\.png$//' | sort) \
+  <(find "$root"/[0-9][0-9]-* -maxdepth 1 -type f -name '*.md' ! -name README.md -print | sed 's/\.md$//' | sort)
+
+for screen in "$root"/[0-9][0-9]-*; do
+  for png in "$screen"/*.png; do
+    stem=${png:t:r}
+    test "$(grep -F -c "[$stem.png]($stem.png)" "$screen/README.md")" -eq 1
+  done
+  test "$(awk '/^## Asset ledger/{on=1;next} /^## /{on=0} on && /^\\| \\[.*\\.png\\]/{n++} END{print n+0}' "$screen/README.md")" -eq "$(find "$screen" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
+  test "$(rg -c 'dashboard/src/' "$screen/README.md")" -ge 1
+done
+
+! rg -n 'Capture the historical|No shipping interaction is asserted|Synthetic historical composition' "$root"/[0-9][0-9]-* -g '*.md'
+! git diff --name-only -- "$root" | rg '\\.png$'
+git diff --check
+```
+
+Output summary:
+
+```text
+PASS: pngs=70 sidecars=70; exact ledgers, lifecycle vocabulary, screen authority paths, non-template markers, sidecar sections, and unchanged PNG diff verified.
+```
 
 ## Result
 
-Documentation is limited to `mockups/ui-concept-v2/` and this report. The command output and commit SHA are in the task handoff.
+Documentation is limited to `mockups/ui-concept-v2/` and this report. The follow-up commit SHA is in the task handoff.

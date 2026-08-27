@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v3 hud pass dark direction for Brain.
+This plate studies dark hud treatment for brain.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: dark high-contrast chrome around an early aperture.
 
 ## Visible state
 
-Synthetic historical composition for v3 hud pass dark; not a current semantic-state selection.
+The image uses shell readability comparison.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It is styling, not a registry or activity authority.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

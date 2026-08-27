@@ -8,25 +8,27 @@ Route: `/sessions`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/sessions/SessionsPage.tsx` reads `/api/plugins/hermes-lcm/{overview,timeline,search}` through `LcmOverviewPayloadV1Schema` and `LcmTimelinePayloadV1Schema`; `dashboard/src/workspaces/sessions/SessionInspector.tsx` owns detail.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Timeline/list | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Open `/sessions` after a timeline/list response. |
-| Transcript search | No current plate | Required semantic coverage; no current plate. |
-| Paged inspector | No current plate | Required semantic coverage; no current plate. |
-| Empty window | No current plate | Required semantic coverage; no current plate. |
-| Partial page | No current plate | Required semantic coverage; no current plate. |
-| Offline | No current plate | Required semantic coverage; no current plate. |
-| Store unavailable | No current plate | Required semantic coverage; no current plate. |
-| Temporal unavailable | No current plate | Required semantic coverage; no current plate. |
-| Token count unknown | No current plate | Required semantic coverage; no current plate. |
+| Transcript search chrome | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Provider-qualified session list | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Active, ended, and failed rows | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Selected raw inspector | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Page-two pagination | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Coverage truncated/paginated | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Redaction none | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| Store serving | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| State legend | [v3-provenance-inspector.md](v3-provenance-inspector.md) | Depicted by this selected still. |
+| A submitted transcript-search result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

@@ -8,25 +8,27 @@ Route: `/settings`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/settings/SettingsPage.tsx` decodes `/api/settings` with `SettingsPayloadV1Schema` and `DashboardEnvelopeV1Schema`; `SettingsEditorController.tsx`, `MultiRootPanel.tsx`, and `RemoteBrainPanel.tsx` own write gates and remote state.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Effective configuration | [v4-effective-only.md](v4-effective-only.md) | Open `/settings` after effective configuration is served. |
-| Filter/focus | No current plate | Required semantic coverage; no current plate. |
-| Review | No current plate | Required semantic coverage; no current plate. |
-| CAS conflict | No current plate | Required semantic coverage; no current plate. |
-| No match | No current plate | Required semantic coverage; no current plate. |
-| Read-only | No current plate | Required semantic coverage; no current plate. |
-| Remote unconfigured | No current plate | Required semantic coverage; no current plate. |
-| Remote partial | No current plate | Required semantic coverage; no current plate. |
-| Remote unavailable | No current plate | Required semantic coverage; no current plate. |
+| Effective values | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Writable rows | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| System-locked rows | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Multi-root advertised/no query | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Remote Brain reachable | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Registry loading | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Stream partial | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Multi-root stale | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| Remote Brain state matrix | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
+| A filter, review, or CAS result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v2 hook synapses admitted ingress direction for Brain.
+This plate studies hook ingress as a synapse narrative.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: ingress marks around a hook edge.
 
 ## Visible state
 
-Synthetic historical composition for v2 hook synapses admitted ingress; not a current semantic-state selection.
+The image uses following a proposed event.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It cannot establish the exact admitted project identity or permitted hop.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

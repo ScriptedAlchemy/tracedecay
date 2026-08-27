@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v5 luminous idle registry direction for Brain.
+This plate studies luminous treatment for an idle registry.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: ambient glow over an otherwise idle field.
 
 ## Visible state
 
-Synthetic historical composition for v5 luminous idle registry; not a current semantic-state selection.
+The image uses visual inspection while idle.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is Glow can be misread as activity or health; the plate is rejected.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 

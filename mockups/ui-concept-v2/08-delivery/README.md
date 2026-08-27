@@ -8,26 +8,26 @@ Route: `/delivery`.
 
 ## Production authorities
 
-- [NAVIGATION.md](../NAVIGATION.md) owns the shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- A concept plate is not a production authority. The shipping workspace derives each state from its named production response, transport, and authorization paths; otherwise it is unavailable.
+- [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- At `975a0acb`, `dashboard/src/workspaces/delivery/DeliveryPage.tsx`, `DeliveryField.tsx`, `field.ts`, and `time.ts` are the delivery-field authority; its DOM test fixes independent local/provider behavior.
+- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix
 
-| Required semantic or interaction state | Current explainer | Entry condition |
+| Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Repository field | [v3-independent-authorities.md](v3-independent-authorities.md) | Open `/delivery` after registry response or explicit repository selection. |
-| Selected repository | No current plate | Required semantic coverage; no current plate. |
-| Pipeline | No current plate | Required semantic coverage; no current plate. |
-| Empty registry | No current plate | Required semantic coverage; no current plate. |
-| Stale | No current plate | Required semantic coverage; no current plate. |
-| Failed | No current plate | Required semantic coverage; no current plate. |
-| Rate-limited | No current plate | Required semantic coverage; no current plate. |
-| Denied | No current plate | Required semantic coverage; no current plate. |
-| Unavailable | No current plate | Required semantic coverage; no current plate. |
-| Unknown branches | No current plate | Required semantic coverage; no current plate. |
+| Local Git ready | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Pull requests unavailable | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Reviews unavailable | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| CI rate limited | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Failure localization stale | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Releases not published | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Index freshness ready | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| Projection-state matrix | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
+| A provider refetch result | No current plate | Required interaction/result is not depicted. |
 
-Rows marked “No current plate” are required coverage, not implied by the selected image.
+“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
 ## Asset ledger
 

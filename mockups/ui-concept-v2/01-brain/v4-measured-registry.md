@@ -17,10 +17,8 @@ Registry, Feed, and Authority states are separate.
 
 ## Supported interactions
 
-- Project-body/registry-row scope
-- hover/focus inspect only
-- explicit scope clear
-- exact-project admitted activity.
+- Depicted: unscoped measured registry, highlighted project row, `REGISTRY HTTP READY`, and `STREAM SSE CONNECTING`.
+- The matrix labels states; it does not execute hover, scope clear, or an admitted event.
 
 ## Truth boundary
 

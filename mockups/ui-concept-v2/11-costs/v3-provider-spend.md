@@ -17,8 +17,8 @@ Unpriced/null remains explicitly non-zero or unknown.
 
 ## Supported interactions
 
-- Actual spend
-- coverage.
+- Depicted: priced spend, unpriced/null rows, absent values, count-only saved tokens, and a state legend.
+- It does not execute a time-range change or provider refresh.
 
 ## Truth boundary
 

@@ -17,9 +17,8 @@ Not-published, denied, rate-limited, stale, and unavailable remain visible.
 
 ## Supported interactions
 
-- Repository field
-- selected repository
-- pipeline inspection.
+- Depicted: ready local Git, unavailable pull requests/reviews, rate-limited CI, stale retained evidence, not-published releases, and ready index freshness.
+- It does not execute a provider refetch or repository selection.
 
 ## Truth boundary
 

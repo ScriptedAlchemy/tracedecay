@@ -5,23 +5,23 @@
 
 ## Intent
 
-Capture the historical v2 four lanes direction for Explorer.
+This plate studies four independent source lanes.
 
 ## Entry condition
 
-Historical lookbook comparison only; this plate supplies no production runtime entry condition.
+Historical design review: four adjacent lane regions.
 
 ## Visible state
 
-Synthetic historical composition for v2 four lanes; not a current semantic-state selection.
+The image uses lane-local reading.
 
 ## Supported interactions
 
-- No shipping interaction is asserted by this historical concept plate.
+The intended reading is It predates the selected create/poll/cancel lifecycle framing.; it asserts no shipping control.
 
 ## Truth boundary
 
-This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establishes no production data, authority availability, counts, health, freshness, persistence, or control. Any unavailable production path remains visibly unavailable.
+undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
 
 ## Lifecycle history
 
