@@ -2729,8 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38cf1373a739aeaa070430588c4026b3c1aa11cd0ad6e6673bda22a390aacda4"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=22b8614fcb443cb3ee6337b71d10c0e09ca7c894#22b8614fcb443cb3ee6337b71d10c0e09ca7c894"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2745,6 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=22b8614fcb443cb3ee6337b71d10c0e09ca7c894#22b8614fcb443cb3ee6337b71d10c0e09ca7c894"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,6 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=22b8614fcb443cb3ee6337b71d10c0e09ca7c894#22b8614fcb443cb3ee6337b71d10c0e09ca7c894"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2788,6 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=22b8614fcb443cb3ee6337b71d10c0e09ca7c894#22b8614fcb443cb3ee6337b71d10c0e09ca7c894"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2809,8 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=22b8614fcb443cb3ee6337b71d10c0e09ca7c894#22b8614fcb443cb3ee6337b71d10c0e09ca7c894"
 dependencies = [
  "bincode",
  "byteorder",
