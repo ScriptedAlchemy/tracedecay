@@ -159,6 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1
 pub struct ExternalSourceExecutor;
 
 impl ExternalSourceExecutor {
+    #[hotpath::measure(label = "rusqlite.external_source.execute_write")]
     pub fn execute_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -190,6 +191,7 @@ impl ExternalSourceExecutor {
         }
     }
 
+    #[hotpath::measure(label = "rusqlite.external_source.execute_authority_publication")]
     pub fn execute_authority_publication(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -219,6 +221,7 @@ impl ExternalSourceExecutor {
         persist_authority_publication(savepoint, revised.as_ref(), &receipt)
     }
 
+    #[hotpath::measure(label = "rusqlite.external_source.execute_projection_write")]
     pub fn execute_projection_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -255,6 +258,7 @@ impl ExternalSourceExecutor {
         }
     }
 
+    #[hotpath::measure(label = "rusqlite.external_source.execute_acquisition_cas")]
     pub fn execute_acquisition_state_cas(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -541,6 +545,7 @@ fn load_current_mutations(
 
 const ROOT_PROJECTION_FRONTIER: &str = "root";
 
+#[hotpath::measure(label = "rusqlite.external_source.persist_commit")]
 fn persist_source_commit(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -706,6 +711,7 @@ fn persist_source_commit(
     upsert_current_state(savepoint, state)
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.persist_projection")]
 fn persist_projection(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -827,6 +833,7 @@ fn persist_projection(
     Ok(())
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.persist_authority")]
 fn persist_authority_publication(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -1003,6 +1010,7 @@ const REVISION_COLLISION_PROBE_CHUNK: usize = 100;
 /// `(binding_id, native_object_digest, revision_digest)` index in batched
 /// row-value `IN` chunks. Returns each mutation's encoding keyed by mutation
 /// digest so the persist path reuses it instead of re-serializing.
+#[hotpath::measure(label = "rusqlite.external_source.validate_revision_collisions")]
 fn validate_revision_collisions(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,

@@ -34,13 +34,15 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
-        let _ = transaction.rollback();
-        frontier
+        hotpath::measure_block!("rusqlite.work_run_control.txn.frontier", {
+            let transaction = self
+                .handle()
+                .begin_immediate()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
+            let _ = transaction.rollback();
+            frontier
+        })
     }
 
     fn run_admission(
@@ -140,20 +142,22 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         next: &WorkRunControlV1,
         blocked_intervals: &[WorkBlockedIntervalReceiptV1],
     ) -> Result<(), WorkRunControlStorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        if let Err(error) =
-            publish_run_control_tx(&transaction, authority, expected, next, blocked_intervals)
-        {
-            let _ = transaction.rollback();
-            return Err(error);
-        }
-        transaction
-            .commit()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        Ok(())
+        hotpath::measure_block!("rusqlite.work_run_control.txn.publish", {
+            let transaction = self
+                .handle()
+                .begin_immediate()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            if let Err(error) =
+                publish_run_control_tx(&transaction, authority, expected, next, blocked_intervals)
+            {
+                let _ = transaction.rollback();
+                return Err(error);
+            }
+            transaction
+                .commit()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            Ok(())
+        })
     }
 
     fn publish_run_control_at_frontier(
@@ -163,30 +167,33 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         next: &WorkRunControlV1,
         blocked_intervals: &[WorkBlockedIntervalReceiptV1],
     ) -> Result<(), WorkRunControlStorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let current =
-            run_control_frontier_from(&transaction, authority, next.task_id(), next.run_id())?;
-        if current.as_ref() != Some(expected) {
-            let _ = transaction.rollback();
-            return Err(WorkRunControlStorageError::AuthorityConflict);
-        }
-        if let Err(error) = publish_run_control_tx(
-            &transaction,
-            authority,
-            expected.control.as_ref().map(WorkRunControlV1::authority),
-            next,
-            blocked_intervals,
-        ) {
-            let _ = transaction.rollback();
-            return Err(error);
-        }
-        transaction
-            .commit()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        Ok(())
+        hotpath::measure_block!("rusqlite.work_run_control.txn.publish_at_frontier", {
+            let transaction = self
+                .handle()
+                .begin_immediate()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let current = hotpath::measure_block!("rusqlite.work_run_control.cas.frontier", {
+                run_control_frontier_from(&transaction, authority, next.task_id(), next.run_id())
+            })?;
+            if current.as_ref() != Some(expected) {
+                let _ = transaction.rollback();
+                return Err(WorkRunControlStorageError::AuthorityConflict);
+            }
+            if let Err(error) = publish_run_control_tx(
+                &transaction,
+                authority,
+                expected.control.as_ref().map(WorkRunControlV1::authority),
+                next,
+                blocked_intervals,
+            ) {
+                let _ = transaction.rollback();
+                return Err(error);
+            }
+            transaction
+                .commit()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            Ok(())
+        })
     }
 
     fn open_blocked_intervals(
@@ -203,30 +210,36 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         limit: u32,
     ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, WorkRunControlStorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let cursor = load_blocked_interval_observation_cursor(&transaction, authority)?;
-        let mut receipts = settled_blocked_interval_observation_page(
-            &transaction,
-            authority,
-            cursor.as_ref(),
-            limit,
-        )?;
-        if receipts.is_empty() && cursor.is_some() {
-            receipts =
-                settled_blocked_interval_observation_page(&transaction, authority, None, limit)?;
-        }
-        let Some(last) = receipts.last() else {
-            let _ = transaction.rollback();
-            return Ok(Vec::new());
-        };
-        persist_blocked_interval_observation_cursor(&transaction, authority, last)?;
-        transaction
-            .commit()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        Ok(receipts)
+        hotpath::measure_block!("rusqlite.work_run_control.txn.observe_settled", {
+            let transaction = self
+                .handle()
+                .begin_immediate()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let cursor = load_blocked_interval_observation_cursor(&transaction, authority)?;
+            let mut receipts = settled_blocked_interval_observation_page(
+                &transaction,
+                authority,
+                cursor.as_ref(),
+                limit,
+            )?;
+            if receipts.is_empty() && cursor.is_some() {
+                receipts = settled_blocked_interval_observation_page(
+                    &transaction,
+                    authority,
+                    None,
+                    limit,
+                )?;
+            }
+            let Some(last) = receipts.last() else {
+                let _ = transaction.rollback();
+                return Ok(Vec::new());
+            };
+            persist_blocked_interval_observation_cursor(&transaction, authority, last)?;
+            transaction
+                .commit()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            Ok(receipts)
+        })
     }
 
     fn mark_settled_blocked_interval_durable(
@@ -234,46 +247,55 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         receipt: &WorkBlockedIntervalReceiptV1,
     ) -> Result<(), WorkRunControlStorageError> {
-        let payload =
-            serde_json::to_string(receipt).map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let changed = transaction
-            .execute(
-                exact_sql_statement(
-                    "UPDATE work_blocked_intervals_v1
+        hotpath::measure_block!("rusqlite.work_run_control.txn.mark_interval_durable", {
+            let payload = serde_json::to_string(receipt)
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let transaction = self
+                .handle()
+                .begin_immediate()
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let changed =
+                hotpath::measure_block!("rusqlite.work_run_control.cas.interval_durable", {
+                    transaction
+                        .execute(
+                            exact_sql_statement(
+                                "UPDATE work_blocked_intervals_v1
                      SET observability_durable = 1
                      WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                        AND actor_id = ?4 AND policy_digest = ?5
                        AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8 AND step_id = ?9
                        AND cause_authority_version = ?10 AND interval_revision = ?11
                        AND settled = 1 AND observability_durable = 0 AND receipt_payload = ?12",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(blocked_identity_params(receipt))
-                        .chain([
-                            ExactSqlValue::Integer(
-                                i64::try_from(receipt.cause().authority().get())
-                                    .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(i64::from(receipt.interval_revision())),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        if changed.changed_rows != 1 {
-            let _ = transaction.rollback();
-            return Err(WorkRunControlStorageError::AuthorityConflict);
-        }
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(|_| WorkRunControlStorageError::Unavailable)
+                                authority_params_owned(authority)
+                                    .into_iter()
+                                    .chain(blocked_identity_params(receipt))
+                                    .chain([
+                                        ExactSqlValue::Integer(
+                                            i64::try_from(receipt.cause().authority().get())
+                                                .map_err(|_| {
+                                                    WorkRunControlStorageError::Unavailable
+                                                })?,
+                                        ),
+                                        ExactSqlValue::Integer(i64::from(
+                                            receipt.interval_revision(),
+                                        )),
+                                        ExactSqlValue::Text(payload),
+                                    ])
+                                    .collect(),
+                            )
+                            .map_err(|_| WorkRunControlStorageError::Unavailable)?,
+                        )
+                        .map_err(|_| WorkRunControlStorageError::Unavailable)
+                })?;
+            if changed.changed_rows != 1 {
+                let _ = transaction.rollback();
+                return Err(WorkRunControlStorageError::AuthorityConflict);
+            }
+            transaction
+                .commit()
+                .map(|_| ())
+                .map_err(|_| WorkRunControlStorageError::Unavailable)
+        })
     }
 }
 
@@ -417,39 +439,15 @@ fn publish_run_control_tx(
         serde_json::to_string(next).map_err(|_| WorkRunControlStorageError::Unavailable)?;
     let authority_version = i64::try_from(next.authority().get())
         .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-    let changed = match expected {
-        None => transaction
-            .execute(
-                exact_sql_statement(
-                    "INSERT OR IGNORE INTO work_run_controls_v1 (
+    let changed = hotpath::measure_block!("rusqlite.work_run_control.cas.publish", {
+        match expected {
+            None => transaction
+                .execute(
+                    exact_sql_statement(
+                        "INSERT OR IGNORE INTO work_run_controls_v1 (
                         project_id, repository_id, worktree_id, actor_id, policy_digest,
                         task_id, run_id, state, authority_version, control_payload
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(run_params(next.task_id(), next.run_id()))
-                        .chain([
-                            ExactSqlValue::Text(state_text(next.state())),
-                            ExactSqlValue::Integer(authority_version),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-        Some(expected) => {
-            let expected_version = i64::try_from(expected.get())
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-            transaction
-                .execute(
-                    exact_sql_statement(
-                        "UPDATE work_run_controls_v1 SET
-                            state = ?8, authority_version = ?9, control_payload = ?10
-                         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-                           AND actor_id = ?4 AND policy_digest = ?5
-                           AND task_id = ?6 AND run_id = ?7
-                           AND authority_version = ?11",
                         authority_params_owned(authority)
                             .into_iter()
                             .chain(run_params(next.task_id(), next.run_id()))
@@ -457,15 +455,41 @@ fn publish_run_control_tx(
                                 ExactSqlValue::Text(state_text(next.state())),
                                 ExactSqlValue::Integer(authority_version),
                                 ExactSqlValue::Text(payload),
-                                ExactSqlValue::Integer(expected_version),
                             ])
                             .collect(),
                     )
                     .map_err(|_| WorkRunControlStorageError::Unavailable)?,
                 )
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?
+                .map_err(|_| WorkRunControlStorageError::Unavailable),
+            Some(expected) => {
+                let expected_version = i64::try_from(expected.get())
+                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+                transaction
+                    .execute(
+                        exact_sql_statement(
+                            "UPDATE work_run_controls_v1 SET
+                            state = ?8, authority_version = ?9, control_payload = ?10
+                         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+                           AND actor_id = ?4 AND policy_digest = ?5
+                           AND task_id = ?6 AND run_id = ?7
+                           AND authority_version = ?11",
+                            authority_params_owned(authority)
+                                .into_iter()
+                                .chain(run_params(next.task_id(), next.run_id()))
+                                .chain([
+                                    ExactSqlValue::Text(state_text(next.state())),
+                                    ExactSqlValue::Integer(authority_version),
+                                    ExactSqlValue::Text(payload),
+                                    ExactSqlValue::Integer(expected_version),
+                                ])
+                                .collect(),
+                        )
+                        .map_err(|_| WorkRunControlStorageError::Unavailable)?,
+                    )
+                    .map_err(|_| WorkRunControlStorageError::Unavailable)
+            }
         }
-    };
+    })?;
     if changed.changed_rows != 1 {
         return Err(WorkRunControlStorageError::AuthorityConflict);
     }
@@ -632,24 +656,25 @@ fn persist_blocked_intervals(
     run_id: &RunId,
     receipts: &[WorkBlockedIntervalReceiptV1],
 ) -> Result<(), WorkRunControlStorageError> {
-    for receipt in receipts {
-        if receipt.identity().task_id() != task_id || receipt.identity().run_id() != run_id {
-            return Err(WorkRunControlStorageError::AuthorityConflict);
-        }
-        let payload =
-            serde_json::to_string(receipt).map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let cause_authority = i64::try_from(receipt.cause().authority().get())
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let started_at = receipt.started_at().0;
-        let changed = if receipt.is_settled() {
-            let previous_revision = receipt
-                .interval_revision()
-                .checked_sub(1)
-                .ok_or(WorkRunControlStorageError::AuthorityConflict)?;
-            transaction
-                .execute(
-                    exact_sql_statement(
-                        "UPDATE work_blocked_intervals_v1 SET
+    hotpath::measure_block!("rusqlite.work_run_control.cas.blocked_interval", {
+        for receipt in receipts {
+            if receipt.identity().task_id() != task_id || receipt.identity().run_id() != run_id {
+                return Err(WorkRunControlStorageError::AuthorityConflict);
+            }
+            let payload = serde_json::to_string(receipt)
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let cause_authority = i64::try_from(receipt.cause().authority().get())
+                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let started_at = receipt.started_at().0;
+            let changed = if receipt.is_settled() {
+                let previous_revision = receipt
+                    .interval_revision()
+                    .checked_sub(1)
+                    .ok_or(WorkRunControlStorageError::AuthorityConflict)?;
+                transaction
+                    .execute(
+                        exact_sql_statement(
+                            "UPDATE work_blocked_intervals_v1 SET
                             interval_revision = ?12, settled = 1, observability_durable = 0,
                             receipt_payload = ?13
                          WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
@@ -657,54 +682,55 @@ fn persist_blocked_intervals(
                            AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8 AND step_id = ?9
                            AND cause_authority_version = ?10 AND started_at = ?11
                            AND settled = 0 AND interval_revision = ?14",
-                        authority_params_owned(authority)
-                            .into_iter()
-                            .chain(blocked_identity_params(receipt))
-                            .chain([
-                                ExactSqlValue::Integer(cause_authority),
-                                ExactSqlValue::Integer(started_at),
-                                ExactSqlValue::Integer(i64::from(receipt.interval_revision())),
-                                ExactSqlValue::Text(payload),
-                                ExactSqlValue::Integer(i64::from(previous_revision)),
-                            ])
-                            .collect(),
+                            authority_params_owned(authority)
+                                .into_iter()
+                                .chain(blocked_identity_params(receipt))
+                                .chain([
+                                    ExactSqlValue::Integer(cause_authority),
+                                    ExactSqlValue::Integer(started_at),
+                                    ExactSqlValue::Integer(i64::from(receipt.interval_revision())),
+                                    ExactSqlValue::Text(payload),
+                                    ExactSqlValue::Integer(i64::from(previous_revision)),
+                                ])
+                                .collect(),
+                        )
+                        .map_err(|_| WorkRunControlStorageError::Unavailable)?,
                     )
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-                )
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?
-        } else {
-            if receipt.interval_revision() != 1 {
-                return Err(WorkRunControlStorageError::AuthorityConflict);
-            }
-            transaction
-                .execute(
-                    exact_sql_statement(
-                        "INSERT INTO work_blocked_intervals_v1 (
+                    .map_err(|_| WorkRunControlStorageError::Unavailable)?
+            } else {
+                if receipt.interval_revision() != 1 {
+                    return Err(WorkRunControlStorageError::AuthorityConflict);
+                }
+                transaction
+                    .execute(
+                        exact_sql_statement(
+                            "INSERT INTO work_blocked_intervals_v1 (
                             project_id, repository_id, worktree_id, actor_id, policy_digest,
                             task_id, run_id, attempt_id, step_id, cause_authority_version,
                             started_at, interval_revision, settled, observability_durable,
                             receipt_payload
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, 0, ?13)",
-                        authority_params_owned(authority)
-                            .into_iter()
-                            .chain(blocked_identity_params(receipt))
-                            .chain([
-                                ExactSqlValue::Integer(cause_authority),
-                                ExactSqlValue::Integer(started_at),
-                                ExactSqlValue::Integer(i64::from(receipt.interval_revision())),
-                                ExactSqlValue::Text(payload),
-                            ])
-                            .collect(),
+                            authority_params_owned(authority)
+                                .into_iter()
+                                .chain(blocked_identity_params(receipt))
+                                .chain([
+                                    ExactSqlValue::Integer(cause_authority),
+                                    ExactSqlValue::Integer(started_at),
+                                    ExactSqlValue::Integer(i64::from(receipt.interval_revision())),
+                                    ExactSqlValue::Text(payload),
+                                ])
+                                .collect(),
+                        )
+                        .map_err(|_| WorkRunControlStorageError::Unavailable)?,
                     )
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?,
-                )
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?
-        };
-        if changed.changed_rows != 1 {
-            return Err(WorkRunControlStorageError::AuthorityConflict);
+                    .map_err(|_| WorkRunControlStorageError::Unavailable)?
+            };
+            if changed.changed_rows != 1 {
+                return Err(WorkRunControlStorageError::AuthorityConflict);
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn decode_blocked_interval(

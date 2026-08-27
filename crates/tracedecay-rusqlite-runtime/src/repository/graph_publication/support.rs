@@ -57,6 +57,7 @@ const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 /// exceeded the row cap in one chunk.
 const GRAPH_REPLAY_DEPENDENCY_BATCH: usize = 38;
 
+#[hotpath::measure(label = "rusqlite.graph_publication.begin")]
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
@@ -64,7 +65,9 @@ pub(super) fn begin(
     let mut busy_attempts = 0_u32;
     loop {
         ensure_not_interrupted(context)?;
-        match handle.begin_immediate() {
+        match hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
+            handle.begin_immediate()
+        }) {
             Ok(transaction) => {
                 ensure_not_interrupted(context)?;
                 return Ok(transaction);
@@ -118,6 +121,7 @@ pub(super) fn ensure_shard_owner(
     }
 }
 
+#[hotpath::measure(label = "rusqlite.graph_publication.begin_read")]
 pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
@@ -125,7 +129,9 @@ pub(super) fn begin_read(
     let mut busy_attempts = 0_u32;
     loop {
         ensure_not_interrupted(context)?;
-        match handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE) {
+        match hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
+            handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
+        }) {
             Ok(snapshot) => {
                 ensure_not_interrupted(context)?;
                 return Ok(ExactPublicationRead::Snapshot(snapshot));
@@ -144,10 +150,12 @@ pub(super) fn begin_read(
             }
         }
     }
-    handle
-        .begin_deferred()
-        .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+    hotpath::measure_block!("rusqlite.graph_publication.begin_deferred", {
+        handle
+            .begin_deferred()
+            .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
+            .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+    })
 }
 
 pub(super) fn commit(transaction: ExactSqlTransaction) -> GraphPublicationStoreResultV1<()> {
