@@ -27,7 +27,7 @@ use super::contract::{
 };
 use super::{
     APPLICATION_RETRIEVAL_MAX_BYTES, DaemonSessionRetrievalService, MESSAGE_SEARCH_MAX_BYTES,
-    message_search_digest,
+    message_search_digest, temporal_kernel_deadline,
 };
 
 impl DaemonSessionRetrievalService {
@@ -698,6 +698,9 @@ fn describe_execution_error(
             LcmDescribeServiceOutcome::BudgetExhausted
         }
         SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
+            LcmDescribeServiceOutcome::TimedOut
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => {
             LcmDescribeServiceOutcome::Stale {
                 temporal,
@@ -730,6 +733,9 @@ fn expand_execution_error(
         }
         SessionTemporalExecutionError::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
+            LcmExpandServiceOutcome::TimedOut
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag }),
