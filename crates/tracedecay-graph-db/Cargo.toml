@@ -56,15 +56,15 @@ graph-disk-tier = [
 # + compressed `EpochStore`, all of which are heap-resident (the arena calls
 # `std::alloc::alloc`; `EpochStore` holds `RwLock<HashMap<EpochId, ..>>`).
 #
-# KNOWN BROKEN at grafeo 0.5.42 — do not enable outside experiments.
-# `Arena::alloc_value_with_offset` only ever allocates into `chunks.first()`,
-# because `HotVersionRef` addresses records by a u32 offset within a single
-# chunk. That primary chunk is `DEFAULT_CHUNK_SIZE` = 1 MiB and `LpgStore`
-# hardcodes `ArenaAllocator::new()`, so there is no way to raise it from
-# here. `NodeRecord` is 32 bytes, giving a hard ceiling near 32 Ki records
-# per epoch, after which `node_ops.rs` *panics* on `AllocError::
-# InsufficientSpace` rather than returning an error. See the failure
-# inventory in the commit that introduced this feature.
+# This was unusable on published grafeo 0.5.42:
+# `Arena::alloc_value_with_offset` only ever allocated into `chunks.first()`,
+# because `HotVersionRef` addressed records by a u32 offset within a single
+# 1 MiB chunk that `LpgStore` had no way to enlarge. `NodeRecord` is 32
+# bytes, so an epoch hit a hard ceiling near 32 Ki records and then panicked
+# in `node_ops.rs` on `AllocError::InsufficientSpace`. The vendored fork in
+# `vendor/grafeo` fixes it: the u32 is now a flat address over the epoch's
+# chunks, so an epoch grows to the 4 GiB a u32 can reach and exhaustion is a
+# typed error. See `vendor/grafeo/PROVENANCE.md`.
 graph-tiered-storage = [
     "graph-disk-tier",
     "grafeo-core/tiered-storage",

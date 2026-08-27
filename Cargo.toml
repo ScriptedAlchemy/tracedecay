@@ -31,7 +31,18 @@ members = [
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
 ]
-exclude = [".worktrees", ".codex-worktrees"]
+# The vendored grafeo fork is wired in through `[patch.crates-io]`, not as a
+# member: its crates keep their own lint config and dev-dependencies, and
+# nothing in this workspace should build them twice. Listing them here lets
+# `cargo test` run from inside a vendored crate without cargo insisting the
+# package join this workspace.
+exclude = [
+    ".worktrees",
+    ".codex-worktrees",
+    "vendor/grafeo/grafeo-common",
+    "vendor/grafeo/grafeo-core",
+    "vendor/grafeo/grafeo-engine",
+]
 resolver = "3"
 
 [workspace.metadata.cargo-shear]
@@ -180,3 +191,12 @@ opt-level = 3
 # patched grammar sources ship inside the standalone code-extraction package.
 [patch.crates-io]
 tree-sitter-rust = { path = "vendor/tree-sitter-rust" }
+
+# Patched grafeo 0.5.42. The published crates carry a tiered-storage arena
+# whose `HotVersionRef` can only address a single 1 MiB chunk, which caps an
+# epoch near 32 Ki node records and then panics. `vendor/grafeo/PROVENANCE.md`
+# records the upstream revision and every local edit; `grafeo-adapters` and
+# `grafeo-storage` stay on the registry and pick these up transitively.
+grafeo-common = { path = "vendor/grafeo/grafeo-common" }
+grafeo-core = { path = "vendor/grafeo/grafeo-core" }
+grafeo-engine = { path = "vendor/grafeo/grafeo-engine" }

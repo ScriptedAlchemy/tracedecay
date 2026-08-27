@@ -1,0 +1,98 @@
+[package]
+name = "grafeo-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core graph models, indexes, and execution primitives for Grafeo"
+
+[dependencies]
+grafeo-common.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Data structures
+smallvec.workspace = true
+hashbrown.workspace = true
+indexmap.workspace = true
+dashmap.workspace = true
+arcstr.workspace = true
+
+# Hashing
+foldhash.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json = { version = "1", optional = true }
+byteorder.workspace = true
+bytes.workspace = true
+bincode.workspace = true
+
+# Data import (optional)
+parquet = { version = "58", optional = true, default-features = false }
+
+# Concurrency
+parking_lot.workspace = true
+arc-swap = { workspace = true, optional = true }
+crossbeam = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+
+# Regex (use regex-lite for smaller WASM builds)
+regex = { workspace = true, optional = true }
+regex-lite = { workspace = true, optional = true }
+
+# Unicode normalization (for IS NORMALIZED predicate)
+unicode-normalization.workspace = true
+
+# Vector index (optional)
+ordered-float = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+crc32fast.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+serde_json = "1"
+tempfile.workspace = true
+
+[features]
+default = ["lpg", "parallel", "spill", "mmap", "regex"]
+lpg = []  # Enable LPG (labeled property graph) model
+parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam work-stealing)
+spill = []                         # Disk spilling for out-of-core execution (sync only, async in grafeo-engine)
+mmap = []                          # File-backed vector storage (MmapStorage)
+triple-store = []  # Enable RDF triple store model
+rdf = ["triple-store"]  # Deprecated: use triple-store
+tiered-storage = ["grafeo-common/tiered-storage"]  # Enable tiered hot/cold storage
+temporal = ["grafeo-common/temporal"]  # Enable append-only versioned properties
+succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
+compact-store = ["dep:arc-swap"]  # CompactStore — columnar graph for read-only workloads
+ring-index = ["succinct-indexes", "triple-store"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and triple-store)
+shacl = ["triple-store"]  # SHACL shapes constraint language (W3C validation)
+vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
+text-index = []  # BM25 inverted index for full-text search
+hybrid-search = ["text-index", "vector-index"]  # Combined text + vector search with score fusion
+
+# Data import
+jsonl-import = ["serde_json"]   # JSON Lines file import (LOAD DATA ... FORMAT JSONL)
+parquet-import = ["parquet"]  # Apache Parquet file import (LOAD DATA ... FORMAT PARQUET)
+
+# Convenience groups
+ai = ["vector-index", "text-index", "hybrid-search"]  # All AI/RAG search features
+
+# Testing utilities (zero overhead when disabled)
+testing-crash-injection = ["grafeo-common/testing-crash-injection"]  # Deterministic crash injection for recovery testing
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "index_bench"
+harness = false
+required-features = ["vector-index"]
+
+[[bench]]
+name = "top_k"
+harness = false
