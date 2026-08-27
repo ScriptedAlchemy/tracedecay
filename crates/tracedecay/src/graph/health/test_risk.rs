@@ -315,6 +315,7 @@ pub(crate) struct VerifiedTestEvidence {
     pub(crate) test_annotated: HashSet<String>,
 }
 
+#[hotpath::measure(label = "graph.health.test_risk.evidence")]
 pub(crate) fn verified_test_evidence(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
 ) -> Result<VerifiedTestEvidence> {
@@ -363,6 +364,8 @@ pub(crate) fn verified_test_evidence(
         &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Annotates],
         MAX_TEST_RISK_RELATIONS,
     )?;
+    hotpath::gauge!("graph.health.test_risk.symbols_total").inc(symbols.len() as u64);
+    hotpath::gauge!("graph.health.test_risk.edges_total").inc(edges.len() as u64);
     let mut calls = Vec::new();
     let mut test_annotated = HashSet::new();
     for edge in edges {
@@ -405,6 +408,7 @@ fn test_risk_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
 }
 
+#[hotpath::measure(label = "graph.health.test_risk.attribution")]
 fn build_test_attribution_depths(
     calls: &[(String, String)],
     node_to_file: &HashMap<String, String>,

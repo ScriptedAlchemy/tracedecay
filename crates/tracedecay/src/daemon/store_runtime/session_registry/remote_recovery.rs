@@ -271,6 +271,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         ])
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.remote_recovery.backup")]
     fn create_backup(
         &self,
         operation_id: &str,
@@ -301,6 +302,9 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         if manifest_path.exists() {
             validate_recovery_artifact_file(&self.backup_root, &manifest_path)?;
             validate_recovery_artifact_file(&self.backup_root, &database_path)?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.session_registry.remote_recovery.backup_reused_total")
+                .inc(1_u64);
             return load_existing_backup(
                 &manifest_path,
                 &database_path,
@@ -337,10 +341,16 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let replay = Arc::clone(&self.replay);
         let snapshot_path = database_path.clone();
         let snapshot_project_id = project_id.clone();
-        let receipt = run_controlled(control, request_id, &interruption, move || {
-            replay.snapshot_target(snapshot_project_id, snapshot_path, probe)
-        })?
+        let receipt = hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.backup.snapshot",
+            run_controlled(control, request_id, &interruption, move || {
+                replay.snapshot_target(snapshot_project_id, snapshot_path, probe)
+            })
+        )?
         .map_err(classify_runtime_error)?;
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("daemon.session_registry.remote_recovery.backup_bytes_total")
+            .inc(receipt.destination_bytes);
         let snapshot = BackupSnapshotV1 {
             source_watermark: receipt.source_watermark,
             destination_bytes: receipt.destination_bytes,
@@ -388,6 +398,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.remote_recovery.restore")]
     fn publish_staged_restore(
         &self,
         request: &StagedRestoreConfirmationV1,
@@ -433,19 +444,29 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
                 return Err(RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired);
             }
         };
-        validate_manifest(
-            &manifest,
-            &backup_path,
-            &request.backup_id,
-            expected,
-            &policy_digest,
-            &project_id,
-            &expected_shard,
+        hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.verify",
+            validate_manifest(
+                &manifest,
+                &backup_path,
+                &request.backup_id,
+                expected,
+                &policy_digest,
+                &project_id,
+                &expected_shard,
+            )
         )?;
-        if sha256_file(&manifest_path)? != request.manifest_digest {
+        if hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.verify",
+            sha256_file(&manifest_path)
+        )? != request.manifest_digest
+        {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
-        validate_isolated_restore(&backup_path)?;
+        hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.verify",
+            validate_isolated_restore(&backup_path)
+        )?;
 
         let suffix = safe_suffix(&request.preview_id)?;
         let staging = destination.with_extension(format!("remote-restore-{suffix}.staging"));
@@ -468,8 +489,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
                 }
             };
         }
-        let destination_matches_restore =
-            sha256_file(&destination).is_ok_and(|digest| digest == manifest.destination_sha256);
+        let destination_matches_restore = hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.verify",
+            sha256_file(&destination).is_ok_and(|digest| digest == manifest.destination_sha256)
+        );
         if self
             .runtime
             .block_on(self.publication.resume_retained_rollback(
@@ -548,10 +571,19 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired);
         }
         if !staging.exists() {
-            PrivateStoreIo::copy_artifact(&backup_path, &staging)
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
-            PrivateStoreIo::sync_sqlite_family(&staging)
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            hotpath::measure_block!(
+                "daemon.session_registry.remote_recovery.restore.stage_copy",
+                PrivateStoreIo::copy_artifact(&backup_path, &staging)
+            )
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            hotpath::measure_block!(
+                "daemon.session_registry.remote_recovery.restore.stage_copy",
+                PrivateStoreIo::sync_sqlite_family(&staging)
+            )
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.session_registry.remote_recovery.restore_bytes_total")
+                .inc(manifest.destination_bytes);
         }
         validate_isolated_restore(&staging)?;
         let staging_identity = sqlite_identity(&staging)?;
@@ -563,16 +595,19 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let staging_for_publish = staging.clone();
         let rollback_for_publish = rollback.clone();
         let publication_interruption = Arc::clone(&interruption);
-        let result = run_controlled(control, request_id, &interruption, move || {
-            runtime.block_on(publication.publish_restore(
-                project_for_publish,
-                staging_for_publish,
-                rollback_for_publish,
-                binding_for_publish,
-                staging_identity,
-                publication_interruption,
-            ))
-        })?;
+        let result = hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.publish",
+            run_controlled(control, request_id, &interruption, move || {
+                runtime.block_on(publication.publish_restore(
+                    project_for_publish,
+                    staging_for_publish,
+                    rollback_for_publish,
+                    binding_for_publish,
+                    staging_identity,
+                    publication_interruption,
+                ))
+            })
+        )?;
         match result {
             Ok(RestorePublicationV1::Published) => committed_restore(
                 request,
@@ -581,12 +616,18 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
                 interruption_value(&interruption),
             ),
             Ok(RestorePublicationV1::RolledBack) => {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!(
+                    "daemon.session_registry.remote_recovery.restore_rolled_back_total"
+                )
+                .inc(1_u64);
                 Err(RemoteRecoveryPhysicalEffectErrorV1::RolledBack)
             }
             Err(_) => Err(RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired),
         }
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.remote_recovery.promote")]
     fn promote(
         &self,
         operation_id: &str,

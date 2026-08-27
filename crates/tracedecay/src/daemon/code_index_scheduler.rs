@@ -123,12 +123,24 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 32;
+/// Measured on a 4379-file corpus with `journal_mode=DELETE`: each
+/// `query.artifact.batch.sqlite` transaction pays a fixed commit cost
+/// (journal fsync + page-cache flush) independent of its row count, and
+/// postings inserts alone were 73-76% of that phase (~212-245s of a ~7min
+/// batch phase). Doubling the page/work caps here roughly halves the number
+/// of commits paid for the same corpus while staying far inside both the
+/// 2M-row prepared-batch cap and the 1536MiB
+/// `CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1` ledger (see
+/// `TEXT_ARTIFACT_BATCH_BYTES_V1` below for the unchanged byte bound that
+/// still caps any single batch regardless of this page count).
+const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
-const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
+/// Doubled alongside `TEXT_ARTIFACT_BATCH_PAGES_V1` (see its comment) so one
+/// wake can still commit two full-sized batches under the raised page cap.
+const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 128;
 /// Cancellation-checkpoint cadence for a wake parked behind another wake's
 /// corpus-sized verified head open. The parked wake re-checks its typed
 /// cancellation state at this interval, so shutdown or supersession surfaces

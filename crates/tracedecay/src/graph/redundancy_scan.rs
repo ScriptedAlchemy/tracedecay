@@ -68,6 +68,8 @@ struct RedundancyPairScan<'a> {
     max_pairs: usize,
     outer: usize,
     inner: usize,
+    /// Total in-window candidate pairs examined across every slice.
+    compared: usize,
     found: Vec<RedundantPair<'a>>,
 }
 
@@ -91,6 +93,7 @@ impl<'a> RedundancyPairScan<'a> {
             max_pairs,
             outer: 0,
             inner: 0,
+            compared: 0,
             found: Vec::new(),
         }
     }
@@ -122,6 +125,7 @@ impl<'a> RedundancyPairScan<'a> {
                 }
                 self.inner += 1;
                 spent += 1;
+                self.compared += 1;
                 if spent >= budget {
                     return true;
                 }
@@ -313,29 +317,16 @@ pub(crate) async fn redundancy_scan(
         options.include_generated,
     )?;
     let total_candidates = nodes.len();
+    hotpath::gauge!("graph.redundancy_scan.candidates_total").inc(total_candidates as u64);
 
     // 2. Compute fresh, request-owned fingerprints. The final graph authority
     // intentionally has no parallel SQLite fingerprint or pair cache.
     let fingerprints = ensure_fingerprints(cg, &nodes).await?;
     let scanned = fingerprints.len();
 
-    // 3. Bucket by token count to keep pairwise comparison sub-quadratic, and
-    //    walk the buckets in bounded slices so this CPU-bound analysis cannot
-    //    pin a runtime worker for its whole duration while the daemon is
-    //    serving interactive queries. The slice cursor changes only *when* the
-    //    loop pauses, never which pairs it visits or how they rank, so a paced
-    //    scan returns exactly what a single-shot scan returns.
+    // 3. Bucket by token count and score every in-window pair.
     let scoped = scoped_fingerprints(&nodes, &fingerprints);
-    let mut scan = RedundancyPairScan::new(
-        scoped,
-        options.threshold,
-        options.include_naming,
-        options.max_pairs,
-    );
-    while scan.advance(REDUNDANCY_PAIR_SLICE) {
-        tokio::task::yield_now().await;
-    }
-    let pairs = scan.finish();
+    let pairs = score_candidate_pairs(scoped, options).await;
 
     // Connected components are the shared source of truth for the JSON `groups`
     // array and the markdown Groups section; compute them once and thread the
@@ -360,6 +351,30 @@ pub(crate) async fn redundancy_scan(
         pairs: pair_views(&pairs),
         groups: group_views(&groups),
     })
+}
+
+/// Pairwise comparison: buckets by token count to keep the scan
+/// sub-quadratic, and walks the buckets in bounded slices so this CPU-bound
+/// analysis cannot pin a runtime worker for its whole duration while the
+/// daemon is serving interactive queries. The slice cursor changes only
+/// *when* the loop pauses, never which pairs it visits or how they rank, so
+/// a paced scan returns exactly what a single-shot scan returns.
+#[hotpath::measure(label = "graph.redundancy_scan.compare", future = true)]
+async fn score_candidate_pairs<'a>(
+    scoped: Vec<ScopedFingerprint<'a>>,
+    options: &RedundancyOptions<'_>,
+) -> Vec<RedundantPair<'a>> {
+    let mut scan = RedundancyPairScan::new(
+        scoped,
+        options.threshold,
+        options.include_naming,
+        options.max_pairs,
+    );
+    while scan.advance(REDUNDANCY_PAIR_SLICE) {
+        tokio::task::yield_now().await;
+    }
+    hotpath::gauge!("graph.redundancy_scan.pairs_compared_total").inc(scan.compared as u64);
+    scan.finish()
 }
 
 /// `name (file:line)` locator that chains into `tracedecay_body` / `_callers`.
@@ -523,6 +538,7 @@ fn normalized_projection(values: &[f32]) -> Option<f64> {
     (norm_sq > 0.0).then(|| first / norm_sq.sqrt())
 }
 
+#[hotpath::measure(label = "graph.redundancy_scan.semantic_pairs")]
 fn semantic_pairs<'a>(
     nodes: &'a [RedundancyCandidate],
     structural: &[RedundantPair<'_>],
@@ -793,6 +809,7 @@ fn redundancy_output(
 // 1. Candidate selection
 // ---------------------------------------------------------------------------
 
+#[hotpath::measure(label = "graph.redundancy_scan.candidates")]
 fn collect_candidates(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     path_prefix: Option<&str>,
@@ -931,6 +948,7 @@ struct FingerprintLoad {
     computed_fingerprints: usize,
 }
 
+#[hotpath::measure(label = "graph.redundancy_scan.fingerprint")]
 fn compute_fingerprints(
     project_root: &Path,
     candidates: &[RedundancyCandidate],
@@ -942,6 +960,7 @@ fn compute_fingerprints(
     for n in candidates {
         by_file.entry(n.file_path.clone()).or_default().push(n);
     }
+    let file_count = by_file.len();
 
     let mut out: HashMap<String, Fingerprint> = HashMap::new();
     #[cfg(test)]
@@ -1019,6 +1038,8 @@ fn compute_fingerprints(
         }
     }
 
+    hotpath::gauge!("graph.redundancy_scan.files_parsed_total").inc(file_count as u64);
+    hotpath::gauge!("graph.redundancy_scan.fingerprints_total").inc(out.len() as u64);
     Ok(FingerprintLoad {
         fingerprints: out,
         #[cfg(test)]
