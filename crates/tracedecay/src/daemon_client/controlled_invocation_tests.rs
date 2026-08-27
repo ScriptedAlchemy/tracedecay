@@ -27,37 +27,6 @@ fn deadline_after(duration: Duration) -> Deadline {
     Deadline::new(UtcMicros(now.0.saturating_add(delta))).expect("deadline")
 }
 
-fn semantic_qualification_candidate()
--> tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-    let material = crate::search_eval::load_default_evaluated_profile_material("query-fallback")
-        .expect("checked-in query fallback profile");
-    tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-        evaluated_profile_id: "query-fallback".to_owned(),
-        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
-            profile_id: material.profile.profile_id.clone(),
-            calibrations: material.profile.calibrations.clone(),
-            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
-            weights_micros: material.profile.weights_micros.clone(),
-            diversity_policy_id: material.profile.diversity_policy_id.clone(),
-            rerank_policy_id: material.profile.rerank_policy_id.clone(),
-            retrieval_budget: material.profile.retrieval_budget,
-        },
-        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
-        rerank: None,
-        compatibility:
-            tracedecay_usecases::config::retrieval::RetrievalCompatibilityPinsV1::default(),
-    }
-}
-
 fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationRequest {
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
@@ -699,7 +668,7 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
 }
 
 #[tokio::test]
-async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_bytes() {
+async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical_bytes() {
     const DEADLINE_MICROS: i64 = 5_000_000;
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.success";
     let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
@@ -726,12 +695,12 @@ async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_b
         let request_id = request.request_id.clone();
         match request.payload {
             DaemonInvocationPayload::SemanticQualify {
-                candidate,
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
-                assert_eq!(candidate.evaluated_profile_id, "query-fallback");
+                assert_eq!(evaluated_profile_id, "hybrid-conservative");
                 assert_eq!(
                     deadline.expires_at.0 - observed_at.0,
                     DEADLINE_MICROS,
@@ -789,11 +758,7 @@ async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_b
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
 
     let result = client
-        .qualify_semantic_profile_until(
-            semantic_qualification_candidate(),
-            DEADLINE_MICROS,
-            cancellation,
-        )
+        .qualify_semantic_profile_until("hybrid-conservative", DEADLINE_MICROS, cancellation)
         .await
         .expect("canonical qualification bytes");
 
@@ -879,11 +844,7 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
     let call_client = client.clone();
     let call = tokio::spawn(async move {
         call_client
-            .qualify_semantic_profile_until(
-                semantic_qualification_candidate(),
-                5_000_000,
-                call_cancellation,
-            )
+            .qualify_semantic_profile_until("hybrid-conservative", 5_000_000, call_cancellation)
             .await
     });
     admitted.await.expect("request admission");

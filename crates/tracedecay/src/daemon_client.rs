@@ -780,7 +780,7 @@ impl DaemonInvocationClient {
 
     pub async fn qualify_semantic_profile_until(
         &self,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: &str,
         deadline_micros: i64,
         cancellation: CancellationSignal,
     ) -> crate::errors::Result<SemanticEvaluationQualificationResultV1> {
@@ -806,7 +806,7 @@ impl DaemonInvocationClient {
             .invoke_controlled(
                 crate::daemon_contract::DaemonInvocationRequest::semantic_qualify(
                     request_id.as_str(),
-                    candidate,
+                    evaluated_profile_id.to_owned(),
                     observed_at,
                     deadline.clone(),
                     cancellation.context(),

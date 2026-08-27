@@ -817,7 +817,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::SemanticQualify {
-                candidate,
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
@@ -825,7 +825,7 @@ impl DaemonInvocationService {
                 self.execute_semantic_qualification(
                     project_root,
                     request_id,
-                    *candidate,
+                    evaluated_profile_id,
                     observed_at,
                     deadline,
                     cancellation,
