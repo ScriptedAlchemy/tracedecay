@@ -209,6 +209,8 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
+    /// Minimum nonnegative cosine similarity, in parts per million. This is
+    /// not the former shifted `[-1, 1]` calibration domain.
     pub calibration_threshold_ppm: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
@@ -3620,7 +3622,7 @@ mod tests {
                 .profile
                 .minimum_calibrated_feature_micros
                 .get(&RetrieverKind::Semantic),
-            Some(&700_000)
+            Some(&400_000)
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")

@@ -34,7 +34,12 @@ pub(crate) fn pairwise_query_pairs<'a>(
 ) -> Vec<(&'a DirectQueryEvaluationV1, &'a DirectQueryEvaluationV1)> {
     let mut pairs = candidate
         .iter()
-        .filter(|query| query.strata.iter().any(|stratum| stratum == "natural_language"))
+        .filter(|query| {
+            query
+                .strata
+                .iter()
+                .any(|stratum| stratum == "natural_language")
+        })
         .filter_map(|query| {
             baseline
                 .iter()
