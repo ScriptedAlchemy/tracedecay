@@ -31,7 +31,7 @@ Current (highest `vN`) plate per channel:
 | 02 | 02-explorer/v2-four-lanes.png | Four fan-out lanes: code / sessions / knowledge / semantic. |
 | 03 | 03-loom/v1-weave.png | Weave canvas. Time down, host across, width = messages. Causal crossings listed, not drawn. |
 | 04 | 04-sessions/v1-inspector.png | Session list with real headers + LCM inspector. |
-| 05 | 05-agents/v1-host-tree.png | Host tree, handoffs, tool activity, failure context. |
+| 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
 | 06 | 06-code/v1-cortex.png | Cortex → Trace → Core lens on a dark optical field. |
 | 07 | 07-knowledge/v2-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks, never faded text. |
 | 08 | 08-delivery/v1-recency-field.png | Same recency field as Brain; bodies are branches and PRs. |
