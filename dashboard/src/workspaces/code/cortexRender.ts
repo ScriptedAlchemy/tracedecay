@@ -39,32 +39,34 @@ export interface CortexPalette {
 }
 
 const FALLBACK: Record<string, string> = {
-  '--raw-surface-0': '#141619',
-  '--raw-surface-1': '#1c2029',
-  '--raw-text-primary': '#eef0f4',
-  '--raw-text-muted': '#9aa1b0',
-  '--raw-edge-subtle': '#333a46',
-  '--raw-edge-strong': '#4c5464',
-  '--raw-grid': '#2a2f38',
-  '--raw-accent': '#5fd0e0',
+  '--raw-graph-substrate': '#0b0e16',
+  '--raw-graph-dim': '#232c3f',
+  '--raw-graph-text': '#c3cde0',
+  '--raw-graph-edge': '#39557a',
+  '--raw-graph-accent': '#5fd0e0',
   '--raw-state-unknown': '#8d919b',
 };
 
+/** The relief samples the NIGHT-WINDOW tokens, not the shell's: the terrain
+ * is projected light on the dark optical field inside either shell theme, so
+ * its palette never flips with the chrome and its kind hues stay the lit-body
+ * side of the arc. Under `data-contrast='more'` the graph tokens collapse to
+ * the shell palette and the relief flattens with the rest of the atmosphere. */
 export function resolveCortexPalette(element: HTMLElement): CortexPalette {
   const style = getComputedStyle(element);
   const token = (name: string): string =>
     style.getPropertyValue(name).trim() || FALLBACK[name] || '#888888';
   return {
-    surface0: token('--raw-surface-0'),
-    surface1: token('--raw-surface-1'),
-    textPrimary: token('--raw-text-primary'),
-    textMuted: token('--raw-text-muted'),
-    edgeSubtle: token('--raw-edge-subtle'),
-    edgeStrong: token('--raw-edge-strong'),
-    grid: token('--raw-grid'),
-    accent: token('--raw-accent'),
+    surface0: token('--raw-graph-substrate'),
+    surface1: token('--raw-graph-dim'),
+    textPrimary: token('--raw-graph-text'),
+    textMuted: token('--raw-graph-text'),
+    edgeSubtle: token('--raw-graph-edge'),
+    edgeStrong: token('--raw-graph-edge'),
+    grid: token('--raw-graph-dim'),
+    accent: token('--raw-graph-accent'),
     stateUnknown: token('--raw-state-unknown'),
-    light: document.documentElement.dataset['theme'] === 'light',
+    light: false,
   };
 }
 
@@ -166,14 +168,14 @@ export function createCortexRenderer(
   if (!ctx) throw new Error('no 2d context');
 
   let palette: CortexPalette = {
-    surface0: FALLBACK['--raw-surface-0']!,
-    surface1: FALLBACK['--raw-surface-1']!,
-    textPrimary: FALLBACK['--raw-text-primary']!,
-    textMuted: FALLBACK['--raw-text-muted']!,
-    edgeSubtle: FALLBACK['--raw-edge-subtle']!,
-    edgeStrong: FALLBACK['--raw-edge-strong']!,
-    grid: FALLBACK['--raw-grid']!,
-    accent: FALLBACK['--raw-accent']!,
+    surface0: FALLBACK['--raw-graph-substrate']!,
+    surface1: FALLBACK['--raw-graph-dim']!,
+    textPrimary: FALLBACK['--raw-graph-text']!,
+    textMuted: FALLBACK['--raw-graph-text']!,
+    edgeSubtle: FALLBACK['--raw-graph-edge']!,
+    edgeStrong: FALLBACK['--raw-graph-edge']!,
+    grid: FALLBACK['--raw-graph-dim']!,
+    accent: FALLBACK['--raw-graph-accent']!,
     stateUnknown: FALLBACK['--raw-state-unknown']!,
     light: false,
   };

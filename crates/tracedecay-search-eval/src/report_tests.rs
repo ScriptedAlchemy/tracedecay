@@ -63,6 +63,18 @@ fn pairwise_diagnostic_prioritizes_queries_with_improvement_headroom() {
 }
 
 #[test]
+fn semantic_distance_summary_exposes_absolute_confidence_and_ambiguity() {
+    assert_eq!(
+        crate::report::semantic_distance_summary([325_542_266, 325_542_266, 400_000_000]),
+        "semantic_candidates=3,top_distance=325542266,second_distance=325542266,top_margin=0"
+    );
+    assert_eq!(
+        crate::report::semantic_distance_summary(std::iter::empty()),
+        "semantic_candidates=0,top_distance=none,second_distance=none,top_margin=none"
+    );
+}
+
+#[test]
 fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     let repo_root = checked_in_fixture_root();
     let workload = load_candidate_workload(

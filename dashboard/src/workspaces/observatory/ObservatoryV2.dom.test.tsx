@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
 import { ObservatoryPage } from './ObservatoryPage.tsx';
@@ -170,10 +171,14 @@ describe('the mounted Observatory accounting surface', () => {
 
 function renderObservatory() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  // The accounting ledgers live on the Adoption wing, so this file opens the
+  // page with the camera already positioned there.
   return render(
-    <QueryClientProvider client={client}>
-      <ObservatoryPage />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={['/observatory?wing=adoption']}>
+      <QueryClientProvider client={client}>
+        <ObservatoryPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 

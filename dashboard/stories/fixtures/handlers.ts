@@ -41,6 +41,11 @@ export const handlers = [
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
+  // The Workflow reads share the Work family's POST-read application wrapper.
+  http.post('*/api/application/workflow/*', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+  }),
 ];
 
 /* ==========================================================================

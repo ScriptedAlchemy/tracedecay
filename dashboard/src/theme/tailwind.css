@@ -18,6 +18,8 @@
   --color-edge-strong: var(--raw-edge-strong);
   --color-accent: var(--raw-accent);
   --color-accent-emphasis: var(--raw-accent-emphasis);
+  --color-alert: var(--raw-alert);
+  --color-alert-emphasis: var(--raw-alert-emphasis);
 
   --color-state-loading: var(--raw-state-loading);
   --color-state-ready: var(--raw-state-ready);
@@ -66,7 +68,7 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
   /* The engraved tier. Only ever reached through this token — never a
    * hard-coded family in a component. */
-  --font-display: 'Archivo Variable', 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --font-display: 'Chakra Petch', 'IBM Plex Sans Variable', system-ui, sans-serif;
 
   /* Instrument type scale. `3xs` is the annotation size — used only for
    * letterspaced uppercase legends and units, never for prose.
@@ -128,13 +130,13 @@
    * wears this — small, letterspaced, uppercase, quiet.
    *
    * This is where the display face earns its keep. At 10px uppercase almost
-   * nothing of a face's personality survives except weight and WIDTH, so the
-   * display tier is set expanded: an expanded grotesque under heavy tracking is
-   * the faceplate-legend idiom, and it is the one register the body face cannot
-   * reach. The expansion is capped at `--display-width` because it is paid for
-   * in horizontal room — measured across all twelve surfaces at 1440 and 768,
-   * 112% costs one extra clipped label out of 464 while 125% costs thirteen,
-   * and a clipped label is lost information, which outranks the flourish. */
+   * nothing of a face's personality survives except weight and STROKE GEOMETRY,
+   * and Chakra Petch's chamfered terminals are exactly the detail that does
+   * survive: under heavy tracking the legends read as machine-engraved stamps,
+   * the register a round grotesque cannot reach. `font-stretch` stays declared
+   * so a future variable face with a width axis picks the tuned width up
+   * without touching every call site; Chakra Petch ships one width and
+   * ignores it. */
   .td-legend {
     font-family: var(--font-display);
     font-stretch: var(--display-width);
@@ -311,7 +313,16 @@
    * A quantity printed as text has no size; the same quantity given a length
    * can be compared across a column without reading a single digit. Every list
    * of numbers in this console wears one of these under or beside its value,
-   * which is what turns thirty identical rows into a distribution. */
+   * which is what turns thirty identical rows into a distribution.
+   *
+   * The fill is SEGMENTED — 5px cells on a 7px pitch — because a continuous
+   * pill is paint and a row of cells is an instrument register: the same
+   * length now also reads as a count of lit segments, and a wall of meters
+   * stops looking like a bar chart smeared across the page. The mask keeps
+   * the segmentation on whatever hue a call site's `tone` sets. Hairline
+   * (1px) meters are below the cell size and drop the mask via the
+   * height-conditional below — a 1px rule diced into 5px dashes reads as a
+   * dotted border, not a measurement. */
   .td-meter {
     position: relative;
     overflow: hidden;
@@ -322,5 +333,13 @@
     inset-block: 0;
     left: 0;
     background: var(--raw-accent);
+    mask-image: repeating-linear-gradient(
+      to right,
+      black 0 5px,
+      transparent 5px 7px
+    );
+  }
+  .h-px > .td-meter-fill {
+    mask-image: none;
   }
 }

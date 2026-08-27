@@ -69,14 +69,17 @@ export function DeliveryFieldPlot({
     y == null ? unknownY : TOP_PAD + (1 - y) * PLOT_HEIGHT;
 
   return (
-    <div ref={hostRef} className="td-well relative w-full border border-edge-subtle">
+    // The night optical window: the field draws in the graph palette inside
+    // either shell theme, so recency-as-luminance actually reads — a lit body
+    // on paper has no luminance axis to speak with.
+    <div ref={hostRef} className="td-optic td-grain relative w-full">
       <svg
         role="img"
         aria-label={ariaLabel}
         width="100%"
         height={height}
         viewBox={`0 0 ${Math.max(width, 1)} ${height}`}
-        className="block"
+        className="relative block"
       >
         {/* Branch-axis rules at the ceiling and the floor, labelled, so the log
           * scale can be read off the picture instead of assumed. */}
@@ -164,8 +167,8 @@ export function DeliveryFieldPlot({
                 r={radius}
                 className={cn(
                   body.branches == null
-                    ? 'fill-none stroke-text-muted'
-                    : 'fill-accent stroke-none',
+                    ? 'fill-none stroke-[var(--raw-graph-text)]'
+                    : 'fill-[var(--raw-graph-accent)] stroke-none',
                 )}
                 strokeWidth={1}
                 strokeDasharray={body.branches == null ? '2 2' : undefined}
@@ -181,7 +184,7 @@ export function DeliveryFieldPlot({
                   cx={cx}
                   cy={cy}
                   r={radius + 3}
-                  className="fill-none stroke-accent"
+                  className="fill-none stroke-[var(--raw-graph-accent)]"
                   strokeWidth={1}
                   strokeOpacity={0.7}
                 />
@@ -191,7 +194,7 @@ export function DeliveryFieldPlot({
                   cx={cx}
                   cy={cy}
                   r={radius + 5.5}
-                  className="fill-none stroke-text-primary"
+                  className="fill-none stroke-[var(--raw-graph-text)]"
                   strokeWidth={1}
                 />
               ) : null}

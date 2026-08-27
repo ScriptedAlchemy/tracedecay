@@ -156,12 +156,15 @@ export function WeaveCanvas({
   );
 
   return (
-    <div ref={hostRef} className="td-well relative w-full border border-edge-subtle">
+    // The toolbar is shell chrome; the weave itself is projected light on the
+    // night optical window, inside either shell theme, so its marks draw in
+    // the graph palette rather than shell ink.
+    <div ref={hostRef} className="relative w-full">
       {extent && view ? (
         <div
           role="toolbar"
           aria-label="Time window"
-          className="flex flex-wrap items-center gap-1 border-b border-edge-subtle bg-surface-1 px-2 py-1"
+          className="flex flex-wrap items-center gap-1 border border-b-0 border-edge-subtle bg-surface-1 px-2 py-1"
         >
           <ZoomButton label="Zoom in" onClick={() => applyZoom(0.5)}>
             +
@@ -197,13 +200,14 @@ export function WeaveCanvas({
           </span>
         </div>
       ) : null}
+      <div className="td-optic td-grain td-scanlines">
       <svg
         role="img"
         aria-label={ariaLabel}
         width="100%"
         height={height}
         viewBox={`0 0 ${Math.max(width, 1)} ${height}`}
-        className="block"
+        className="relative block"
       >
         {/* Calendar bands: the weave's warp. Alternating tint only, no label
           * inside the field — the axis gutter carries the words. */}
@@ -217,7 +221,8 @@ export function WeaveCanvas({
                   y={geometry.plotTop + band.x0}
                   width={fieldWidth}
                   height={Math.max(band.x1 - band.x0, 0)}
-                  className="fill-surface-2/40"
+                  className="fill-[var(--raw-graph-dim)]"
+                  fillOpacity={0.22}
                 />
               ))
           : null}
@@ -234,7 +239,8 @@ export function WeaveCanvas({
                       y1={HEAD}
                       x2={x}
                       y2={height}
-                      className="stroke-edge-subtle"
+                      className="stroke-[var(--raw-graph-edge)]"
+                      strokeOpacity={0.55}
                       strokeWidth={1}
                     />
                   ) : null}
@@ -276,10 +282,10 @@ export function WeaveCanvas({
                         x={x + 6}
                         y={HEAD - 9}
                         clipPath={`url(#weave-head-${index})`}
-                        className="fill-text-secondary text-[9px] uppercase tracking-[0.18em]"
+                        className="fill-[var(--raw-graph-text)] text-[9px] uppercase tracking-[0.18em]"
                       >
                         {truncateLabel(host.label, geometry.columnWidth)}
-                        <tspan dx={7} className="fill-text-muted tracking-normal">
+                        <tspan dx={7} fillOpacity={0.7} className="tracking-normal">
                           {host.count}
                         </tspan>
                       </text>
@@ -294,7 +300,7 @@ export function WeaveCanvas({
           y1={HEAD}
           x2={Math.max(width - RIGHT_PAD, GUTTER)}
           y2={HEAD}
-          className="stroke-edge-strong"
+          className="stroke-[var(--raw-graph-edge)]"
           strokeWidth={1}
         />
 
@@ -307,15 +313,16 @@ export function WeaveCanvas({
                   y1={geometry.plotTop + tick.x}
                   x2={Math.max(width - RIGHT_PAD, GUTTER)}
                   y2={geometry.plotTop + tick.x}
-                  className="stroke-edge-subtle"
+                  className="stroke-[var(--raw-graph-edge)]"
                   strokeWidth={1}
-                  strokeOpacity={0.5}
+                  strokeOpacity={0.4}
                 />
                 <text
                   x={GUTTER - 8}
                   y={geometry.plotTop + tick.x + 3}
                   textAnchor="end"
-                  className="fill-text-muted text-[9px] tabular-nums"
+                  className="fill-[var(--raw-graph-text)] text-[9px] tabular-nums"
+                  fillOpacity={0.75}
                 >
                   {tick.label}
                 </text>
@@ -352,6 +359,7 @@ export function WeaveCanvas({
           </g>
         ) : null}
       </svg>
+      </div>
     </div>
   );
 }
@@ -446,10 +454,10 @@ function Thread({
   // sub-column, so a wide thread can never overlap its neighbour.
   const thickness = Math.max(Math.min(2 + thread.weight * 26, maxThickness), 2);
   const half = thickness / 2;
-  const strokeClass =
-    'stroke-[var(--kind-dark)] [[data-theme=light]_&]:stroke-[var(--kind-light)]';
-  const fillClass =
-    'fill-[var(--kind-dark)] [[data-theme=light]_&]:fill-[var(--kind-light)]';
+  // Always the lit-body side of the kind hue: the weave draws on the night
+  // window in both shell themes, so the paper-ink variant never applies here.
+  const strokeClass = 'stroke-[var(--kind-dark)]';
+  const fillClass = 'fill-[var(--kind-dark)]';
   const measuredEnd = y1 != null && y1 > y0;
   const bodyEnd = measuredEnd ? y1 : y0 + HEAD_CAP;
   const boundaryClass =
@@ -548,7 +556,7 @@ function Thread({
           y={y0 - 3}
           width={thickness + 6}
           height={Math.max(bodyEnd - y0, 3) + 6}
-          className="fill-none stroke-accent"
+          className="fill-none stroke-[var(--raw-graph-accent)]"
           strokeWidth={1}
         />
       ) : null}

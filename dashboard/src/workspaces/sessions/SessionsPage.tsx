@@ -262,10 +262,31 @@ export function SessionsPage() {
               (max, row) => Math.max(max, row.message_count),
               0,
             );
+            const sessionsTotal = data.overview.sessions_total;
             return (
               <VirtualList
                 items={rows}
                 getKey={(row) => row.session_id}
+                header={
+                  <div className="sticky top-0 z-10 border-b border-edge-subtle bg-surface-0/95 backdrop-blur">
+                    {/* ONE raised count for the whole ledger — the loaded
+                      * slice against the store total, stated once here rather
+                      * than repeated per pane. */}
+                    <p className="tabular flex items-baseline gap-2 px-3 py-1.5 text-2xs text-text-muted">
+                      <span className="text-text-secondary">
+                        {rows.length.toLocaleString()} loaded
+                      </span>
+                      of {sessionsTotal.toLocaleString()} sessions on record
+                    </p>
+                    <div aria-hidden className="flex gap-3 border-t border-edge-subtle px-3 py-1.5">
+                      <span className="td-legend min-w-0 flex-1">Session</span>
+                      <span className="td-legend w-24 shrink-0 text-right">Messages</span>
+                      <span className="td-legend w-28 shrink-0 text-right max-md:hidden">
+                        Last activity
+                      </span>
+                    </div>
+                  </div>
+                }
                 renderItem={(row) => {
                   const id = row.session_id;
                   const count = row.message_count;

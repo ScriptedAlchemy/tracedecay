@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
 import { ObservatoryPage } from './ObservatoryPage.tsx';
@@ -606,10 +607,15 @@ function renderObservatory() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  // The wing camera lives in the address (`?wing=`), so the page needs a
+  // router to read it. Every read this file asserts on sits on the default
+  // Diagnosis wing.
   return render(
-    <QueryClientProvider client={client}>
-      <ObservatoryPage />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={['/observatory']}>
+      <QueryClientProvider client={client}>
+        <ObservatoryPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 

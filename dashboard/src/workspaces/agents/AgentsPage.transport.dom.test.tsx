@@ -16,10 +16,10 @@ import { AgentsPage } from './AgentsPage.tsx';
  * that always succeeds and varies the body; these vary the transport instead,
  * through the same MSW handlers the visual audit resolves its fixtures from.
  *
- * Agents is the subject for the whole matrix because its outer boundary wraps
- * the entire page: a failed read has nowhere to hide, so the single rendered
- * state is the page's whole answer, and any invented number would have to
- * appear beside it.
+ * Agents is the subject for the whole matrix because every plate on it is its
+ * own read boundary: under a page-wide fault each plate must report that
+ * fault on its own face, no plate may invent a number, and no two faults with
+ * different meanings may collapse into one reading.
  */
 const server = fixtureServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
@@ -68,26 +68,31 @@ const MATRIX: ReadonlyArray<{ fault: HttpFault; kind: FailKind; detail: string |
 
 describe('AgentsPage under HTTP transport faults', () => {
   it.each(MATRIX)(
-    'renders $fault as the $kind state and invents no analytics counts',
+    'renders $fault as the $kind state on every plate and invents no analytics counts',
     async ({ fault, kind, detail }) => {
       server.use(allRoutesFail(fault));
       const { container } = renderAgents();
 
-      const chip = await findChip(container);
-      expect(chip.getAttribute('data-state')).toBe(kind satisfies DomainStateKind);
-      if (detail) expect(chip.textContent).toContain(detail);
-
-      // The state's own sentence, and neither of the other two failure
-      // sentences: an unreachable daemon must not read as a bad payload.
-      expect(screen.getByText(GUIDANCE[kind])).toBeTruthy();
-      for (const other of Object.keys(GUIDANCE) as FailKind[]) {
-        if (other !== kind) expect(screen.queryByText(GUIDANCE[other])).toBeNull();
+      const chips = await findFaultChips(container);
+      // Every read boundary on the page reports the same wire fault; a plate
+      // rendering any other state would be inventing a reading.
+      for (const chip of chips) {
+        expect(chip.getAttribute('data-state')).toBe(kind satisfies DomainStateKind);
+        if (detail) expect(chip.textContent).toContain(detail);
       }
 
-      // Nothing was read, so nothing may be reported. The page's success
-      // surfaces are absent rather than present-and-empty: no content region,
-      // no event-window readouts, and none of the counts the fixtures serve.
-      expect(screen.queryByRole('region', { name: 'Agents content' })).toBeNull();
+      // The state's own sentence (once per failed plate), and none of the
+      // other failure sentences: an unreachable daemon must not read as a bad
+      // payload.
+      expect(screen.getAllByText(GUIDANCE[kind]).length).toBeGreaterThan(0);
+      for (const other of Object.keys(GUIDANCE) as FailKind[]) {
+        if (other !== kind) expect(screen.queryAllByText(GUIDANCE[other])).toHaveLength(0);
+      }
+
+      // The delegation plates stay on screen as named, failed regions — the
+      // frame is honest — but nothing was read, so nothing may be reported:
+      // no event-window readouts and none of the counts the fixtures serve.
+      expect(screen.getByRole('region', { name: 'Agents content' })).toBeTruthy();
       expect(screen.queryByText('Event window')).toBeNull();
       expect(screen.queryByText('mcp tool calls')).toBeNull();
       expect(screen.queryByText('hook calls')).toBeNull();
@@ -105,8 +110,8 @@ describe('AgentsPage under HTTP transport faults', () => {
       server.resetHandlers();
       server.use(allRoutesFail(fault));
       const view = renderAgents();
-      const chip = await findChip(view.container);
-      rendered.set(fault, `${chip.getAttribute('data-state')}${chip.textContent}`);
+      const [chip] = await findFaultChips(view.container);
+      rendered.set(fault, `${chip!.getAttribute('data-state')}${chip!.textContent}`);
       view.unmount();
     }
 
@@ -129,7 +134,8 @@ describe('AgentsPage under HTTP transport faults', () => {
     server.use(faultHandler('*/api/plugins/analytics/diagnostics', 'server_error'));
     renderAgents();
 
-    await screen.findByRole('region', { name: 'Agents content' });
+    // The telemetry register renders once its own usage read lands.
+    await screen.findByText('events (capped)');
     // The neighbouring read is untouched and still reports its own measurement.
     expect(readout('events (capped)')).toBe('10,000');
     // The failed one reports nothing, and an em dash is not a quantity.
@@ -163,12 +169,14 @@ function renderAgents() {
   );
 }
 
-/** The one state chip a fully failed page renders, once it has settled. */
-async function findChip(container: HTMLElement): Promise<Element> {
-  await screen.findByText(/^(Error|Offline|Unauthorized|Denied|Unsupported schema)$/);
+/** Every plate's state chip once the fully failed page has settled: each read
+ * boundary reports the fault on its own face, so there are several, and every
+ * one of them is part of the page's answer. */
+async function findFaultChips(container: HTMLElement): Promise<Element[]> {
+  await screen.findAllByText(/^(Error|Offline|Unauthorized|Denied|Unsupported schema)$/);
   const chips = [...container.querySelectorAll('[data-state]')];
-  expect(chips).toHaveLength(1);
-  return chips[0]!;
+  expect(chips.length).toBeGreaterThan(0);
+  return chips;
 }
 
 /** The value printed under a readout's engraved legend, or null when that

@@ -10,6 +10,9 @@ import {
   AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
+  type AnalyticsDiagnosticsPayloadV1,
+  type AnalyticsUnderusedPayloadV1,
+  type AnalyticsUsageSummaryV1,
 } from '../../contracts/generated.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
@@ -111,315 +114,359 @@ export function AgentsPage() {
   const attemptFailures = readAttemptFailures(workGraph.isPending ? undefined : workGraph.data);
 
   return (
-    <ReadSection
-      title="Agents"
-      chrome="centered"
-      state={envelopeReadState(usage.isPending, usage.data, {
-        loading: 'reading analytics usage',
-        transport: 'analytics usage could not be read',
-      })}
+    <div
+      className="flex h-full flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Agents content"
     >
-      {(envelope) => {
-        const data = envelope.payload;
-        const rows: UsageRow[] = data.by_category;
-        const dominance = summarizeDominance(rows);
-        const diag = envelopePayload(diagnostics.data);
-        const diagnosticsRead = diag?.available === false ? undefined : diag ?? undefined;
-        // A dash in the diagnostics figures is three different facts: a read
-        // still in flight, a read that failed, and a source that answered and
-        // declared itself unavailable. Only the last one may be called
-        // "unavailable" — the strip used to label all three that way.
-        const diagnosticsAbsence = diagnostics.isPending
-          ? 'diagnostics still loading'
-          : diag == null
-            ? 'analytics diagnostics could not be read'
-            : diag.available === false
-              ? 'analytics diagnostics unavailable'
-              : null;
-        const window = describeWindow(
-          data.available ? data.event_count : diagnosticsRead?.event_count,
-          diagnosticsRead?.events_per_hour,
-        );
-        const hookNote = diagnosticsRead
-          ? diagnosticsRead.hook_window.truncated
-            ? `recent suffix · ${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} rows scanned`
-            : `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
-          : (diagnosticsAbsence ?? 'analytics diagnostics unavailable');
-        return (
-          <div
-            className="flex h-full flex-col overflow-auto"
-            tabIndex={0}
-            role="region"
-            aria-label="Agents content"
-          >
-            <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
-              <h1 className="text-sm font-semibold tracking-tight">Agents</h1>
-              <span className="min-w-0 truncate text-2xs text-text-muted">
-                {data.available
-                  ? window.events == null
-                    ? 'session-message fallback · event count unavailable'
-                    : `analytics_events · ${window.capped ? `most recent ${ANALYTICS_EVENT_LIMIT.toLocaleString()} (endpoint cap)` : `${window.events.toLocaleString()} events`}`
-                  : 'analytics store unavailable'}
-              </span>
-            </div>
+      <div className="flex items-baseline gap-3 border-b border-edge-subtle bg-surface-1 px-4 py-2">
+        <h1 className="text-sm font-semibold tracking-tight">Agents</h1>
+        <span className="min-w-0 truncate text-2xs text-text-muted">
+          delegation trees, handoffs, failure context, and the tool telemetry behind them
+        </span>
+      </div>
 
-            {/* The window itself, which the page previously never stated. Every
-              * count below is taken inside it, and the endpoint refuses to
-              * count past `ANALYTICS_EVENT_LIMIT` — so the cap, the span and
-              * the rate are the frame the rest of the page hangs in, not a
-              * footnote. */}
-            <ReadoutBar
-              label="Event window"
-              size="xl"
-              elevation="raised"
-              items={[
-                {
-                  label: window.capped ? 'events (capped)' : 'events',
-                  value: window.events?.toLocaleString() ?? '—',
-                  note: window.capped
-                    ? 'the endpoint counts no further back'
-                    : window.events == null
-                      ? 'event count unavailable'
-                      : 'every event on record',
-                },
-                {
-                  label: 'window',
-                  value: formatSpan(window.spanHours),
-                  note: window.spanHours != null ? 'derived: events ÷ rate' : 'rate not served',
-                },
-                {
-                  label: 'rate',
-                  value: window.perHour != null ? Math.round(window.perHour).toLocaleString() : '—',
-                  unit: window.perHour != null ? '/h' : undefined,
-                  note: 'events per hour, served',
-                },
-                {
-                  label: 'mcp tool calls',
-                  value: exact(diagnosticsRead?.mcp_tool_call_count),
-                  note: diagnosticsRead ? 'inside the window' : (diagnosticsAbsence ?? 'inside the window'),
-                },
-                {
-                  label: 'hook calls',
-                  value: exact(diagnosticsRead?.hook_call_count),
-                  note: hookNote,
-                },
-              ]}
-            />
-
-            <OverviewGrid>
-              <OverviewCard title="Where the events go">
-                {!data.available ? (
-                  <ReadFailure label="Usage analytics unavailable" />
-                ) : window.events == null && rows.length === 0 ? (
-                  <ReadFailure label="Categorized usage events unavailable" />
+      {/* THE HERO REGISTER IS THE ORCHESTRATION, NOT THE EVENT COUNTER. What
+        * an operator opens this channel for is who delegated to whom, where
+        * the handoff frontier stands, and what failed — so those plates lead,
+        * each behind its own read, and the usage telemetry that used to gate
+        * the whole page is a demoted register underneath. */}
+      <section aria-label="Delegation">
+        <OverviewGrid>
+          <OverviewCard title="Subagent tree" className="md:col-span-2">
+            <ReadSection
+              title="Delegation edges"
+              chrome="centered"
+              state={envelopeReadState(subagentTree.isPending, subagentTree.data, {
+                loading: 'reading subagent tree',
+                transport: 'subagent tree could not be read',
+              })}
+            >
+              {(envelope) => {
+                const payload = envelope.payload;
+                return payload == null || payload.available === false ? (
+                  <ReadFailure
+                    label="Subagent tree unavailable"
+                    detail={envelope.coverage.omission_reasons[0]}
+                  />
                 ) : (
-                  // The window's own count, or null. Substituting the
-                  // categorized total made the two agree by construction, which
-                  // is a claim that every event was categorized.
-                  <CategoryComposition dominance={dominance} counted={window.events} />
-                )}
-              </OverviewCard>
+                  <SubagentTree payload={payload} />
+                );
+              }}
+            </ReadSection>
+          </OverviewCard>
 
-              <OverviewCard title="Most-called tools">
-                <ReadSection
-                  title="Tools"
-                  chrome="centered"
-                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
-                    loading: 'reading analytics diagnostics',
-                    transport: 'analytics diagnostics could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return (
-                    payload.available === false ? (
-                      <ReadFailure label="Analytics diagnostics unavailable" />
-                    ) : (
-                      <ToolRanking rows={payload.by_mcp_tool} />
-                    )
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+          <OverviewCard title="Agent groups">
+            <ReadSection
+              title="Subagents"
+              chrome="centered"
+              state={envelopeReadState(agents.isPending, agents.data, {
+                loading: 'reading subagent sessions',
+                transport: 'subagent sessions could not be read',
+              })}
+            >
+              {(envelope) => {
+                const payload = envelope.payload;
+                return payload == null || payload.available === false ? (
+                  <ReadFailure
+                    label="Subagent sessions unavailable"
+                    detail={envelope.coverage.omission_reasons[0]}
+                  />
+                ) : (
+                  <SubagentSessions rows={payload.by_agent} source={payload.source} />
+                );
+              }}
+            </ReadSection>
+          </OverviewCard>
 
-              <OverviewCard title="Latest events">
-                <ReadSection
-                  title="Events"
-                  chrome="centered"
-                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
-                    loading: 'reading analytics diagnostics',
-                    transport: 'analytics diagnostics could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return (
-                    payload.available === false ? (
-                      <ReadFailure label="Analytics diagnostics unavailable" />
-                    ) : (
-                      <RecentTape rows={payload.recent_events} />
-                    )
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+          {/* Handoffs and attempt failures come off the work-product
+            * graph read; tool activity comes off the diagnostics fold
+            * this page already pays for. */}
+          <OverviewCard title="Handoff frontier">
+            <AgentHandoffs reading={handoffFrontier} />
+          </OverviewCard>
 
-              <OverviewCard title="What the window is made of">
-                <ReadSection
-                  title="Composition"
-                  chrome="centered"
-                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
-                    loading: 'reading analytics diagnostics',
-                    transport: 'analytics diagnostics could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return (
-                    payload.available === false ? (
-                      <ReadFailure label="Analytics diagnostics unavailable" />
-                    ) : (
-                      <WindowComposition
-                        kinds={payload.by_event_kind}
-                        outcomes={payload.by_outcome}
-                        counted={payload.event_count}
-                      />
-                    )
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+          <OverviewCard title="Handoff tokens">
+            <AgentHandoffTokens reading={tokenReading} />
+          </OverviewCard>
 
-              <OverviewCard title="Tool families the hint engine watches">
-                <ReadSection
-                  title="Hints"
-                  chrome="centered"
-                  state={envelopeReadState(underused.isPending, underused.data, {
-                    loading: 'reading underused tool families',
-                    transport: 'underused tool families could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const hintData = envelope.payload;
-                    return (
-                    hintData.available === false ? (
-                      <ReadFailure
-                        label="Hint diagnostics unavailable"
-                        detail={envelope.coverage.omission_reasons[0]}
-                      />
-                    ) : (
-                      <FamilyList rows={hintData.families} />
-                    )
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+          <OverviewCard title="Failure context">
+            <ReadSection
+              title="Failures"
+              chrome="centered"
+              state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                loading: 'reading analytics diagnostics',
+                transport: 'analytics diagnostics could not be read',
+              })}
+            >
+              {(envelope) => {
+                const payload = envelope.payload;
+                return payload.available === false ? (
+                  <ReadFailure label="Analytics diagnostics unavailable" />
+                ) : (
+                  <AgentFailureContext
+                    outcomes={payload.by_outcome}
+                    recentEvents={payload.recent_events}
+                    attempts={attemptFailures}
+                  />
+                );
+              }}
+            </ReadSection>
+          </OverviewCard>
+        </OverviewGrid>
+      </section>
 
-              <OverviewCard title="Subagent delegation">
-                <ReadSection
-                  title="Subagents"
-                  chrome="centered"
-                  state={envelopeReadState(agents.isPending, agents.data, {
-                    loading: 'reading subagent sessions',
-                    transport: 'subagent sessions could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return payload == null || payload.available === false ? (
-                      <ReadFailure
-                        label="Subagent sessions unavailable"
-                        detail={envelope.coverage.omission_reasons[0]}
-                      />
-                    ) : (
-                      <SubagentSessions rows={payload.by_agent} source={payload.source} />
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+      <UsageRegister
+        usagePending={usage.isPending}
+        usageResult={usage.data}
+        diagnostics={diagnostics}
+        underused={underused}
+      />
+    </div>
+  );
+}
 
-              <OverviewCard title="Subagent tree">
-                <ReadSection
-                  title="Delegation edges"
-                  chrome="centered"
-                  state={envelopeReadState(subagentTree.isPending, subagentTree.data, {
-                    loading: 'reading subagent tree',
-                    transport: 'subagent tree could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return payload == null || payload.available === false ? (
-                      <ReadFailure
-                        label="Subagent tree unavailable"
-                        detail={envelope.coverage.omission_reasons[0]}
-                      />
-                    ) : (
-                      <SubagentTree payload={payload} />
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+/** The demoted telemetry register: the analytics event window and everything
+ * counted inside it. Gated on its own read so a dead analytics store never
+ * takes the delegation plates above down with it. */
+function UsageRegister({
+  usagePending,
+  usageResult,
+  diagnostics,
+  underused,
+}: {
+  usagePending: boolean;
+  usageResult: ReturnType<typeof useEnvelope<AnalyticsUsageSummaryV1>>['data'];
+  diagnostics: ReturnType<typeof useEnvelope<AnalyticsDiagnosticsPayloadV1>>;
+  underused: ReturnType<typeof useEnvelope<AnalyticsUnderusedPayloadV1>>;
+}) {
+  return (
+    <section aria-label="Tool telemetry" className="border-t border-edge-subtle">
+      <ReadSection
+        title="Tool telemetry"
+        chrome="centered"
+        state={envelopeReadState(usagePending, usageResult, {
+          loading: 'reading analytics usage',
+          transport: 'analytics usage could not be read',
+        })}
+      >
+        {(envelope) => {
+          const data = envelope.payload;
+          const rows: UsageRow[] = data.by_category;
+          const dominance = summarizeDominance(rows);
+          const diag = envelopePayload(diagnostics.data);
+          const diagnosticsRead = diag?.available === false ? undefined : diag ?? undefined;
+          // A dash in the diagnostics figures is three different facts: a read
+          // still in flight, a read that failed, and a source that answered and
+          // declared itself unavailable. Only the last one may be called
+          // "unavailable" — the strip used to label all three that way.
+          const diagnosticsAbsence = diagnostics.isPending
+            ? 'diagnostics still loading'
+            : diag == null
+              ? 'analytics diagnostics could not be read'
+              : diag.available === false
+                ? 'analytics diagnostics unavailable'
+                : null;
+          const window = describeWindow(
+            data.available ? data.event_count : diagnosticsRead?.event_count,
+            diagnosticsRead?.events_per_hour,
+          );
+          const hookNote = diagnosticsRead
+            ? diagnosticsRead.hook_window.truncated
+              ? `recent suffix · ${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} rows scanned`
+              : `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
+            : (diagnosticsAbsence ?? 'analytics diagnostics unavailable');
+          return (
+            <>
+              <div className="flex items-baseline gap-3 px-4 pt-2">
+                <h2 className="td-title">Tool telemetry</h2>
+                <span className="min-w-0 truncate text-2xs text-text-muted">
+                  {data.available
+                    ? window.events == null
+                      ? 'session-message fallback · event count unavailable'
+                      : `analytics_events · ${window.capped ? `most recent ${ANALYTICS_EVENT_LIMIT.toLocaleString()} (endpoint cap)` : `${window.events.toLocaleString()} events`}`
+                    : 'analytics store unavailable'}
+                </span>
+              </div>
 
-              {/* Handoffs and attempt failures come off the work-product
-                * graph read; tool activity comes off the diagnostics fold
-                * this page already pays for. */}
-              <OverviewCard title="Handoff tokens">
-                <AgentHandoffTokens reading={tokenReading} />
-              </OverviewCard>
+              {/* The window itself. Every count below is taken inside it, and
+                * the endpoint refuses to count past `ANALYTICS_EVENT_LIMIT` —
+                * so the cap, the span and the rate are the frame the rest of
+                * the register hangs in, not a footnote. */}
+              <ReadoutBar
+                label="Event window"
+                size="xl"
+                elevation="raised"
+                className="mt-2"
+                items={[
+                  {
+                    label: window.capped ? 'events (capped)' : 'events',
+                    value: window.events?.toLocaleString() ?? '—',
+                    note: window.capped
+                      ? 'the endpoint counts no further back'
+                      : window.events == null
+                        ? 'event count unavailable'
+                        : 'every event on record',
+                  },
+                  {
+                    label: 'window',
+                    value: formatSpan(window.spanHours),
+                    note: window.spanHours != null ? 'derived: events ÷ rate' : 'rate not served',
+                  },
+                  {
+                    label: 'rate',
+                    value: window.perHour != null ? Math.round(window.perHour).toLocaleString() : '—',
+                    unit: window.perHour != null ? '/h' : undefined,
+                    note: 'events per hour, served',
+                  },
+                  {
+                    label: 'mcp tool calls',
+                    value: exact(diagnosticsRead?.mcp_tool_call_count),
+                    note: diagnosticsRead ? 'inside the window' : (diagnosticsAbsence ?? 'inside the window'),
+                  },
+                  {
+                    label: 'hook calls',
+                    value: exact(diagnosticsRead?.hook_call_count),
+                    note: hookNote,
+                  },
+                ]}
+              />
 
-              <OverviewCard title="Handoff frontier">
-                <AgentHandoffs reading={handoffFrontier} />
-              </OverviewCard>
+              <OverviewGrid>
+                <OverviewCard title="Where the events go">
+                  {!data.available ? (
+                    <ReadFailure label="Usage analytics unavailable" />
+                  ) : window.events == null && rows.length === 0 ? (
+                    <ReadFailure label="Categorized usage events unavailable" />
+                  ) : (
+                    // The window's own count, or null. Substituting the
+                    // categorized total made the two agree by construction, which
+                    // is a claim that every event was categorized.
+                    <CategoryComposition dominance={dominance} counted={window.events} />
+                  )}
+                </OverviewCard>
 
-              <OverviewCard title="Tool activity">
-                <ReadSection
-                  title="Tool activity"
-                  chrome="centered"
-                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
-                    loading: 'reading analytics diagnostics',
-                    transport: 'analytics diagnostics could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return payload.available === false ? (
-                      <ReadFailure label="Analytics diagnostics unavailable" />
-                    ) : (
-                      <AgentToolActivity payload={payload} />
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
+                <OverviewCard title="Most-called tools">
+                  <ReadSection
+                    title="Tools"
+                    chrome="centered"
+                    state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                      loading: 'reading analytics diagnostics',
+                      transport: 'analytics diagnostics could not be read',
+                    })}
+                  >
+                    {(diagEnvelope) => {
+                      const payload = diagEnvelope.payload;
+                      return (
+                      payload.available === false ? (
+                        <ReadFailure label="Analytics diagnostics unavailable" />
+                      ) : (
+                        <ToolRanking rows={payload.by_mcp_tool} />
+                      )
+                      );
+                    }}
+                  </ReadSection>
+                </OverviewCard>
 
-              <OverviewCard title="Failure context">
-                <ReadSection
-                  title="Failures"
-                  chrome="centered"
-                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
-                    loading: 'reading analytics diagnostics',
-                    transport: 'analytics diagnostics could not be read',
-                  })}
-                >
-                  {(envelope) => {
-                    const payload = envelope.payload;
-                    return payload.available === false ? (
-                      <ReadFailure label="Analytics diagnostics unavailable" />
-                    ) : (
-                      <AgentFailureContext
-                        outcomes={payload.by_outcome}
-                        recentEvents={payload.recent_events}
-                        attempts={attemptFailures}
-                      />
-                    );
-                  }}
-                </ReadSection>
-              </OverviewCard>
-            </OverviewGrid>
-          </div>
-        );
-      }}
-    </ReadSection>
+                <OverviewCard title="Latest events">
+                  <ReadSection
+                    title="Events"
+                    chrome="centered"
+                    state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                      loading: 'reading analytics diagnostics',
+                      transport: 'analytics diagnostics could not be read',
+                    })}
+                  >
+                    {(diagEnvelope) => {
+                      const payload = diagEnvelope.payload;
+                      return (
+                      payload.available === false ? (
+                        <ReadFailure label="Analytics diagnostics unavailable" />
+                      ) : (
+                        <RecentTape rows={payload.recent_events} />
+                      )
+                      );
+                    }}
+                  </ReadSection>
+                </OverviewCard>
+
+                <OverviewCard title="What the window is made of">
+                  <ReadSection
+                    title="Composition"
+                    chrome="centered"
+                    state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                      loading: 'reading analytics diagnostics',
+                      transport: 'analytics diagnostics could not be read',
+                    })}
+                  >
+                    {(diagEnvelope) => {
+                      const payload = diagEnvelope.payload;
+                      return (
+                      payload.available === false ? (
+                        <ReadFailure label="Analytics diagnostics unavailable" />
+                      ) : (
+                        <WindowComposition
+                          kinds={payload.by_event_kind}
+                          outcomes={payload.by_outcome}
+                          counted={payload.event_count}
+                        />
+                      )
+                      );
+                    }}
+                  </ReadSection>
+                </OverviewCard>
+
+                <OverviewCard title="Tool families the hint engine watches">
+                  <ReadSection
+                    title="Hints"
+                    chrome="centered"
+                    state={envelopeReadState(underused.isPending, underused.data, {
+                      loading: 'reading underused tool families',
+                      transport: 'underused tool families could not be read',
+                    })}
+                  >
+                    {(hintEnvelope) => {
+                      const hintData = hintEnvelope.payload;
+                      return (
+                      hintData.available === false ? (
+                        <ReadFailure
+                          label="Hint diagnostics unavailable"
+                          detail={hintEnvelope.coverage.omission_reasons[0]}
+                        />
+                      ) : (
+                        <FamilyList rows={hintData.families} />
+                      )
+                      );
+                    }}
+                  </ReadSection>
+                </OverviewCard>
+
+                <OverviewCard title="Tool activity">
+                  <ReadSection
+                    title="Tool activity"
+                    chrome="centered"
+                    state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                      loading: 'reading analytics diagnostics',
+                      transport: 'analytics diagnostics could not be read',
+                    })}
+                  >
+                    {(diagEnvelope) => {
+                      const payload = diagEnvelope.payload;
+                      return payload.available === false ? (
+                        <ReadFailure label="Analytics diagnostics unavailable" />
+                      ) : (
+                        <AgentToolActivity payload={payload} />
+                      );
+                    }}
+                  </ReadSection>
+                </OverviewCard>
+              </OverviewGrid>
+            </>
+          );
+        }}
+      </ReadSection>
+    </section>
   );
 }
 
