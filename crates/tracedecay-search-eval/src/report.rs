@@ -28,6 +28,24 @@ pub struct DirectQueryEvaluationV1 {
     pub status: DirectEvaluationStatusV1,
 }
 
+pub(crate) fn pairwise_query_pairs<'a>(
+    candidate: &'a [DirectQueryEvaluationV1],
+    baseline: &'a [DirectQueryEvaluationV1],
+) -> Vec<(&'a DirectQueryEvaluationV1, &'a DirectQueryEvaluationV1)> {
+    let mut pairs = candidate
+        .iter()
+        .filter(|query| query.strata.iter().any(|stratum| stratum == "natural_language"))
+        .filter_map(|query| {
+            baseline
+                .iter()
+                .find(|baseline_query| baseline_query.query_id == query.query_id)
+                .map(|baseline_query| (query, baseline_query))
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_by_key(|(_, baseline_query)| baseline_query.first_useful_rank == Some(1));
+    pairs
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRatioMetricV1 {
@@ -452,15 +470,9 @@ impl DirectEvaluationReportV1 {
             let output = self.raw_outputs.iter().find(|output| {
                 output.profile_id == candidate.profile_id && output.partition == candidate.partition
             })?;
-            let details = candidate
-                .queries
-                .iter()
-                .filter(|query| query.strata.iter().any(|stratum| stratum == "natural_language"))
-                .filter_map(|query| {
-                    let baseline_query = baseline
-                        .queries
-                        .iter()
-                        .find(|baseline_query| baseline_query.query_id == query.query_id)?;
+            let details = pairwise_query_pairs(&candidate.queries, &baseline.queries)
+                .into_iter()
+                .filter_map(|(query, baseline_query)| {
                     let raw = output
                         .queries
                         .iter()
