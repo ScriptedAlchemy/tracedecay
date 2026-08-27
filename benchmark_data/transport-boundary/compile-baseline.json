@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "workload_id": "transport-boundary-compile-v1",
+  "packages": [
+    "tracedecay-api",
+    "tracedecay"
+  ],
+  "command": [
+    "cargo",
+    "check",
+    "-p",
+    "tracedecay-api",
+    "-p",
+    "tracedecay",
+    "--lib",
+    "--all-features"
+  ],
+  "measurement": {
+    "status": "unavailable",
+    "execution_state": "pending_execution",
+    "elapsed_ms": null,
+    "recorded_at": null,
+    "reason": "Pending an authorized execution of the declared all-feature compile workload."
+  },
+  "assertion": "CLI, MCP, HTTP, and SSE adapters preserve canonical application contracts while store, query, policy, and mutation authority remain behind application ports."
+}

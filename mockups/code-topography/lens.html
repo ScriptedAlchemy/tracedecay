@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>LENS — zoom as a position, not a transition</title>
+<link rel="stylesheet" href="topography.css" />
+<style>
+  .keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
+  .keycell { padding: 11px 16px; border-right: 1px solid var(--raw-edge-subtle); flex: 1 1 0; min-width: 0; }
+  .keycell:last-child { border-right: none; }
+  .keycell .cap { font-size: 10.5px; line-height: 1.42; color: var(--raw-text-secondary); margin-top: 7px; }
+  .keycell .cap b { color: var(--raw-text-primary); font-weight: 600; }
+  .keyhead { display: flex; align-items: center; gap: 8px; }
+  .argue { margin: 18px 28px 0; border: 1px solid var(--raw-accent); background: var(--raw-surface-1); padding: 14px 18px; }
+  .argue h2 { margin: 0 0 8px; font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase; font-weight: 600; color: var(--raw-accent); }
+  .argue p { margin: 0 0 8px; }
+  .argue p:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="spine">
+    <span class="chan">04</span>
+    <h1>Lens</h1>
+    <span class="sub">A fourth form, offered as an argument. The horizontal axis is not space — it is
+      <b>aggregation ratio</b>. One sheet holds the repository, a crate's modules and a file's symbols at once, and
+      one call path is drawn through all three at each scale's own resolution.</span>
+  </header>
+
+  <div class="readbar">
+    <div class="readout"><span class="td-legend">Scale span</span><span class="v">151 : 18 : 1 <span class="u">symbols per body</span></span></div>
+    <div class="readout"><span class="td-legend">Axis</span><span class="v">log <span class="u">continuous, no steps</span></span></div>
+    <div class="readout"><span class="td-legend">Thread</span><span class="v">1 412 <span class="u">call sites, conserved</span></span></div>
+    <div class="readout"><span class="td-legend">Splits</span><span class="v">1 → 3 → 9</span></div>
+    <div class="readout"><span class="td-legend">Bodies drawn</span><span class="v">8 + 10 + 11</span></div>
+    <div class="readout grow"><span class="td-legend">Resolution floor</span><span class="v">symbol <span class="u">statement scale is not held — drawn as the hatched margin</span></span></div>
+  </div>
+
+  <div class="field graticule"><svg id="lens" viewBox="0 0 1400 800" width="100%"></svg></div>
+
+  <div class="keystrip">
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">x axis</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 34" width="100%" height="34" id="k-axis"></svg>
+      <div class="cap"><b>Symbols per drawn body</b>, log scale, continuous. There are no zoom levels and no
+        transition: moving right is moving down the aggregation ratio, and the ratio is printed on the ruler.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Dissolve</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 34" width="100%" height="34" id="k-diss"></svg>
+      <div class="cap">Two representations <b>overlap</b> where their ratios overlap, rather than swapping at a
+        boundary. The overlap band is where a module is simultaneously a mass and a set of symbols — which is what
+        a reader needs to carry context across a scale change.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Thread</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 34" width="100%" height="34" id="k-thread"></svg>
+      <div class="cap">One call path, drawn at every scale at once. Width is call sites and <b>is</b> conserved
+        here, unlike sheet 02 — a split is a disaggregation of the same edge set, so 1 412 splits into 641 + 486 +
+        285 and then into nine landing counts that also sum to 1 412.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Bodies</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 34" width="100%" height="34" id="k-bod"></svg>
+      <div class="cap">Left: crate masses, area = symbol mass, contoured as on sheet 01. Middle: module regions,
+        same rule. Right: symbol bands at true line span, as on sheet 03. <b>Three sheets, one axis.</b></div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Floor</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 34" width="100%" height="34" id="k-floor"></svg>
+      <div class="cap">The axis <b>stops</b> where the index stops. Statement and expression granularity are not
+        held, so the continuum is drawn to its floor and then hatched rather than trailing off — the absence of
+        finer resolution is itself a reading.</div>
+    </div>
+  </div>
+
+  <div class="argue">
+    <h2>Why this one should exist</h2>
+    <p class="td-caption">Every code viewer that has ever been built makes zoom a <b>transition</b>: you click into a
+    crate, the screen replaces itself, and the thing you were looking at is gone. The cost is not the click — it is
+    that the reader must hold the previous frame in their head, and they cannot, which is why people say they "get
+    lost in the codebase". Sheets 01 and 03 each solve one scale beautifully and inherit exactly this problem the
+    moment you want both.</p>
+    <p class="td-caption">Lens makes zoom a <b>position</b>. The repository, the crate's modules and the file's
+    symbols are all on the sheet, adjacent, with one thread running through them, so the answer to "where is this in
+    the whole thing" is never a memory operation — it is a glance to the left. It is also the only one of the four
+    that is honest about aggregation as a continuum rather than as a cap: the subgraph endpoint's 80–250-node
+    ceiling stops being a limit you hit and becomes a <i>readable position on the ruler</i>, the point where bodies
+    stop being masses and start being symbols.</p>
+    <p class="td-caption">What it gives up: it is not a map. There is no "where things are" — the vertical axis is
+    the only free dimension left, and it has to carry dependency depth alone. If the reader's question is spatial
+    ("what is next to what"), sheet 01 is strictly better. Lens answers a different question — "what is this, at
+    every size" — and answers it in one frame.</p>
+  </div>
+
+  <div class="note">
+    <section>
+      <h2>What this is</h2>
+      <p class="td-caption">A single continuous surface whose horizontal axis is the aggregation ratio. At the left
+      edge one drawn body stands for 151 symbols; at the right edge one drawn body <i>is</i> one symbol. Nothing
+      between them is a step.</p>
+      <p class="td-caption">The vertical axis is the one thing carried through unchanged from sheet 01: <b>dependency
+      depth</b>. A crate mass, a module region and a symbol band at the same height all sit at the same depth, which
+      is what makes the three representations comparable rather than merely adjacent.</p>
+    </section>
+    <section>
+      <h2>Channel → data</h2>
+      <dl>
+        <dt>x</dt><dd>symbols ÷ drawn bodies, log. Derived from real counts; not itself stored.</dd>
+        <dt>y</dt><dd>file-level dependency depth. Real, shared with sheet 01.</dd>
+        <dt>body area</dt><dd>symbol mass (left, middle) / line span (right). Real.</dd>
+        <dt>thread width</dt><dd>call sites, conserved across splits. Real.</dd>
+        <dt>contours</dt><dd>internal edges ÷ symbols, same interval as sheet 01. Real.</dd>
+        <dt>hatched margin</dt><dd>the granularity the index does not hold. Real — it is a property of the extractor.</dd>
+      </dl>
+      <p class="td-caption" style="margin-top:8px">Left and middle are aggregates; only the right third is a direct
+      render. The ruler says exactly where that changes, which is the point.</p>
+    </section>
+    <section>
+      <h2>Open question</h2>
+      <p class="td-caption">The thread is drawn conserved, but that is only true because this particular path
+      happens to disaggregate cleanly. A call path that re-enters the same module at two scales, or a cycle, cannot
+      be a single left-to-right thread — it would have to double back, and a doubling-back thread on an axis that
+      means "resolution" is meaningless. Does the sheet refuse such paths, or does it grow a second thread lane?</p>
+      <p class="td-caption">And the honest worry: three representations on one sheet is three grammars to learn.
+      Sheet 01 has one. Is a reader who has to learn all three actually faster than one who clicks?</p>
+    </section>
+  </div>
+</div>
+
+<script src="topography.js"></script>
+<script>
+(function () {
+  'use strict';
+  var T = window.TOPO;
+  var el = T.el, text = T.text;
+  var svg = document.getElementById('lens');
+
+  var TOP = 92, BOTTOM = 690;
+  function depthY(d) { return BOTTOM - d * ((BOTTOM - TOP) / 6); }
+  function halo(node, weight) {
+    node.setAttribute('stroke', 'var(--raw-surface-0)');
+    node.setAttribute('stroke-width', String(weight || 3));
+    node.setAttribute('paint-order', 'stroke');
+    return node;
+  }
+
+  /* ---- the dissolve masks: representations overlap, they do not swap ---- */
+  var defs = el('defs', {}, svg);
+  function fade(id, stops) {
+    var g = el('linearGradient', { id: id, x1: '0', y1: '0', x2: '1', y2: '0' }, defs);
+    stops.forEach(function (s) {
+      el('stop', { offset: s[0], 'stop-color': s[1] === 1 ? '#fff' : '#000' }, g);
+    });
+    var m = el('mask', { id: id + '-m', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: 1400, height: 800 }, defs);
+    el('rect', { x: 0, y: 0, width: 1400, height: 800, fill: 'url(#' + id + ')' }, m);
+  }
+  fade('fA', [['0%', 1], ['21%', 1], ['34%', 0], ['100%', 0]]);
+  fade('fB', [['0%', 0], ['17%', 0], ['30%', 1], ['52%', 1], ['65%', 0], ['100%', 0]]);
+  fade('fC', [['0%', 0], ['54%', 0], ['67%', 1], ['100%', 1]]);
+
+  /* ---- 1. the ruler: the axis IS the aggregation ratio ------------------ */
+  var gAxis = el('g', {}, svg);
+  el('line', { x1: 40, y1: 52, x2: 1330, y2: 52, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, gAxis);
+  // Log ticks: symbols per drawn body, 151 → 1.
+  var TICKS = [[40, 151], [214, 96], [388, 61], [562, 39], [736, 25], [910, 16], [1084, 6], [1258, 1]];
+  TICKS.forEach(function (tick, i) {
+    el('line', { x1: tick[0], y1: 46, x2: tick[0], y2: 58, stroke: 'var(--raw-edge-strong)',
+      'stroke-width': i === 0 || i === TICKS.length - 1 ? 1.6 : 1 }, gAxis);
+    var t = text(gAxis, tick[0], 40, String(tick[1]), 'num', { 'text-anchor': 'middle' });
+    if (tick[1] === 1) t.setAttribute('fill', 'var(--raw-accent)');
+  });
+  halo(text(gAxis, 40, 26, 'SYMBOLS PER DRAWN BODY ⟶ 1 : 1', 'lbl'));
+  halo(text(gAxis, 1330, 26, 'RESOLUTION FLOOR', 'lbl', { 'text-anchor': 'end' }))
+    .setAttribute('fill', 'var(--raw-state-unknown)');
+  ['repository', 'crate modules', 'file symbols'].forEach(function (label, i) {
+    var x = [120, 640, 1140][i];
+    halo(text(gAxis, x, 74, label, 'lbl', { 'text-anchor': 'middle' }))
+      .setAttribute('fill', 'var(--raw-text-secondary)');
+  });
+  // Where aggregation stops. Stated on the ruler, not in a footnote.
+  el('line', { x1: 1084, y1: 46, x2: 1084, y2: BOTTOM + 26, stroke: 'var(--raw-accent)',
+    'stroke-width': 1, 'stroke-dasharray': '3 4', 'stroke-opacity': 0.55 }, gAxis);
+  halo(text(gAxis, 1078, BOTTOM + 40,
+    'SUBGRAPH CAP CROSSED HERE — RIGHT OF THIS RULE IS A DIRECT RENDER ⟶', 'lbl',
+    { 'text-anchor': 'end' })).setAttribute('fill', 'var(--raw-accent)');
+
+  /* ---- 2. zone A: eight crate masses ------------------------------------ */
+  var CRATES = [
+    { n: 'domain',   d: 0, sym: 281, x: 96 },
+    { n: 'policy',   d: 1, sym: 109, x: 190 },
+    { n: 'store',    d: 1, sym: 229, x: 74 },
+    { n: 'rusqlite', d: 2, sym: 101, x: 176 },
+    { n: 'application', d: 3, sym: 639, x: 120 },
+    { n: 'tool-catalog', d: 4, sym: 64, x: 236 },
+    { n: 'api',      d: 5, sym: 179, x: 108 },
+    { n: 'hooks',    d: 6, sym: 133, x: 176 },
+  ];
+  var gA = el('g', { mask: 'url(#fA-m)' }, svg);
+  CRATES.forEach(function (c) {
+    c.cx = c.x + 40; c.cy = depthY(c.d);
+    var r = Math.sqrt(c.sym) * 2.5;
+    c.r = r;
+    var seed = T.hashKind(c.n);
+    el('path', { d: T.blobPath(c.cx, c.cy, r, r * 0.56, seed, 0.12), fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.4 }, gA);
+    [0.7, 0.44].forEach(function (k, i) {
+      el('path', { d: T.blobPath(c.cx, c.cy, r * k, r * k * 0.56, seed + i * 9, 0.1), fill: 'none',
+        stroke: 'var(--relief-line)', 'stroke-width': 0.7 }, gA);
+    });
+    halo(text(gA, c.cx, c.cy + 2, c.n, 'name', { 'text-anchor': 'middle' })).setAttribute('font-size', '10');
+    halo(text(gA, c.cx, c.cy + 14, c.sym + ' sym', 'num', { 'text-anchor': 'middle' }));
+  });
+
+  /* ---- 3. zone B: ten module regions of the application crate ----------- */
+  var MODULES = [
+    { n: 'retrieval', d: 3, sym: 214, x: 470 },
+    { n: 'handlers',  d: 4, sym: 156, x: 630 },
+    { n: 'git',       d: 3, sym: 88,  x: 640 },
+    { n: 'feedback',  d: 3, sym: 102, x: 790 },
+    { n: 'storage',   d: 3, sym: 79,  x: 900 },
+    { n: 'authorization', d: 1, sym: 71, x: 520 },
+    { n: 'routing',   d: 1, sym: 38,  x: 660 },
+    { n: 'repository', d: 2, sym: 133, x: 560 },
+    { n: 'reader',    d: 2, sym: 54,  x: 720 },
+    { n: 'routes',    d: 5, sym: 121, x: 560 },
+  ];
+  var gB = el('g', { mask: 'url(#fB-m)' }, svg);
+  MODULES.forEach(function (m) {
+    m.cx = m.x; m.cy = depthY(m.d);
+    var r = Math.sqrt(m.sym) * 2.6;
+    m.r = r;
+    var seed = T.hashKind('mod-' + m.n);
+    el('path', { d: T.blobPath(m.cx, m.cy, r, r * 0.58, seed, 0.13), fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.4 }, gB);
+    [0.72, 0.46].forEach(function (k, i) {
+      el('path', { d: T.blobPath(m.cx, m.cy, r * k, r * k * 0.58, seed + i * 9, 0.1), fill: 'none',
+        stroke: 'var(--relief-line)', 'stroke-width': 0.7 }, gB);
+    });
+    halo(text(gB, m.cx, m.cy + 2, m.n, 'name', { 'text-anchor': 'middle' })).setAttribute('font-size', '10');
+    halo(text(gB, m.cx, m.cy + 14, m.sym + ' sym', 'num', { 'text-anchor': 'middle' }));
+  });
+
+  /* ---- 4. zone C: one file's symbols, at true line span ----------------- */
+  var FILE = { path: 'crates/tracedecay-application/src/retrieval/service.rs', lines: 742 };
+  var SYMS = [
+    ['RetrievalService', 'struct', 34, 58, 3], ['ContextRequest', 'struct', 60, 88, 3],
+    ['new', 'method', 96, 118, 3], ['resolve_context', 'method', 126, 232, 3],
+    ['symbol_graph_for', 'method', 238, 306, 3], ['hydrate_callable', 'method', 312, 368, 3],
+    ['assemble_evidence', 'method', 374, 441, 3], ['budget_for', 'function', 448, 486, 3],
+    ['RetrievalError', 'enum', 492, 524, 3], ['tests::resolves', 'test', 560, 614, 3],
+    ['tests::budgets', 'test', 620, 700, 3],
+  ];
+  var CX = 1130, CW = 150, CTOP = 118, CSCALE = (BOTTOM - CTOP) / FILE.lines;
+  var gC = el('g', { mask: 'url(#fC-m)' }, svg);
+  el('rect', { x: CX, y: CTOP, width: CW, height: FILE.lines * CSCALE, fill: 'var(--relief-fill-lo)',
+    stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, gC);
+  [0, 200, 400, 600].forEach(function (line) {
+    var ly = CTOP + line * CSCALE;
+    el('line', { x1: CX - 26, y1: ly, x2: CX + CW, y2: ly, stroke: 'var(--raw-grid)', 'stroke-width': 1,
+      'stroke-dasharray': line === 0 ? null : '1 6' }, gC);
+    halo(text(gC, CX - 30, ly + 3, line === 0 ? 'ln 1' : String(line), 'num', { 'text-anchor': 'end' }));
+  });
+  SYMS.forEach(function (s) {
+    var by = CTOP + s[2] * CSCALE, bh = Math.max(4, (s[3] - s[2]) * CSCALE);
+    s.cy = by + bh / 2;
+    el('rect', { x: CX, y: by, width: CW, height: bh, fill: T.paint(s[1]), opacity: 0.62 }, gC);
+    el('rect', { x: CX, y: by, width: CW, height: bh, fill: 'none', stroke: 'var(--raw-surface-0)',
+      'stroke-width': 1, 'stroke-opacity': 0.65 }, gC);
+    if (bh >= 13) {
+      halo(text(gC, CX + 6, by + 11, s[0].length > 17 ? s[0].slice(0, 16) + '…' : s[0], 'name'))
+        .setAttribute('font-size', '9.5');
+    }
+  });
+  halo(text(gC, CX + CW / 2, CTOP - 12, 'retrieval/service.rs · 742 lines', 'lbl',
+    { 'text-anchor': 'middle' }));
+
+  /* ---- 5. the thread: one path, three resolutions, volume conserved ----- */
+  var gThread = el('g', {}, svg);
+  var HUE = T.paint('downstream');
+  function w(calls) { return Math.max(2, calls * 0.0155); }
+
+  function leg(pts, c0, c1, label) {
+    el('path', { d: T.ribbonPath(pts, w(c0), w(c1)), fill: HUE, opacity: 0.4, stroke: HUE,
+      'stroke-width': 0.8, 'stroke-opacity': 0.6 }, gThread);
+    if (label) {
+      var mid = pts[Math.floor(pts.length / 2)];
+      halo(text(gThread, mid[0], mid[1] - w(c0) / 2 - 7, label, 'num', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', HUE);
+    }
+  }
+
+  // Scale 1: the whole path is one channel between two crate masses.
+  leg([[236, depthY(6)], [286, depthY(5.2)], [332, depthY(4.2)], [378, depthY(3.6)]],
+      1412, 1412, '1 412 call sites');
+
+  // Scale 2: the same edge set, disaggregated into three module channels.
+  var B_SPLIT = [
+    { to: 'handlers',  calls: 641, y: depthY(4) },
+    { to: 'retrieval', calls: 486, y: depthY(3) },
+    { to: 'repository', calls: 285, y: depthY(2) },
+  ];
+  B_SPLIT.forEach(function (branch, i) {
+    leg([[372, depthY(3.6)], [452, depthY(3.6) + (branch.y - depthY(3.6)) * 0.4],
+         [540, branch.y], [660, branch.y]], branch.calls, branch.calls,
+        branch.calls + ' → ' + branch.to);
+  });
+
+  // Scale 3: nine landing counts, on nine symbol bands. They sum to 1 412.
+  var C_SPLIT = [
+    { from: 0, sym: 3, calls: 212 }, { from: 0, sym: 4, calls: 186 },
+    { from: 0, sym: 2, calls: 134 }, { from: 0, sym: 6, calls: 109 },
+    { from: 1, sym: 5, calls: 201 }, { from: 1, sym: 7, calls: 164 },
+    { from: 1, sym: 9, calls: 121 }, { from: 2, sym: 8, calls: 158 },
+    { from: 2, sym: 10, calls: 127 },
+  ];
+  C_SPLIT.forEach(function (landing) {
+    var src = B_SPLIT[landing.from];
+    var ty = SYMS[landing.sym].cy;
+    leg([[660, src.y], [800, src.y + (ty - src.y) * 0.28], [980, src.y + (ty - src.y) * 0.72],
+         [CX, ty]], landing.calls, landing.calls, null);
+    // Landing counts sit inside the band's trailing edge, clear of the line
+    // rules in the gutter, which carry a different quantity.
+    halo(text(gThread, CX + CW - 6, ty + 3, String(landing.calls), 'num', { 'text-anchor': 'end' }))
+      .setAttribute('fill', HUE);
+  });
+  halo(text(gThread, 700, 102, 'SAME EDGE SET AT THREE RESOLUTIONS · 641 + 486 + 285 = 1 412 = Σ NINE LANDINGS',
+    'lbl', { 'text-anchor': 'middle' })).setAttribute('fill', HUE);
+
+  /* ---- 6. the floor: the absence beat ----------------------------------- */
+  var gFloor = el('g', {}, svg);
+  el('rect', { x: 1298, y: 62, width: 90, height: BOTTOM + 20 - 62, class: 'absence-hatch' }, gFloor);
+  el('line', { x1: 1298, y1: 62, x2: 1298, y2: BOTTOM + 20, stroke: 'var(--raw-state-unknown)',
+    'stroke-width': 1.4 }, gFloor);
+  var fx = 1343, fy = 300;
+  [['STATEMENT', 0], ['SCALE', 13], ['', 26], ['NOT HELD', 39], ['', 52],
+   ['the axis stops', 68], ['where the', 80], ['extractor stops', 92]].forEach(function (row) {
+    if (!row[0]) return;
+    var t = halo(text(gFloor, fx, fy + row[1], row[0], row[1] < 52 ? 'lbl' : 'num',
+      { 'text-anchor': 'middle' }));
+    t.setAttribute('fill', row[1] < 52 ? 'var(--raw-state-unknown)' : 'var(--raw-text-muted)');
+  });
+
+  /* ---- key strip figures ------------------------------------------------ */
+  (function keys() {
+    var ka = document.getElementById('k-axis');
+    el('line', { x1: 8, y1: 18, x2: 190, y2: 18, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, ka);
+    [[8, '151'], [70, '39'], [130, '16'], [190, '1']].forEach(function (t, i) {
+      el('line', { x1: t[0], y1: 13, x2: t[0], y2: 23, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, ka);
+      var n = text(ka, t[0], 9, t[1], 'num', { 'text-anchor': i === 0 ? 'start' : i === 3 ? 'end' : 'middle' });
+      if (i === 3) n.setAttribute('fill', 'var(--raw-accent)');
+    });
+    text(ka, 8, 32, 'symbols per body', 'lbl');
+
+    var kd = document.getElementById('k-diss');
+    var dg = el('linearGradient', { id: 'kdg', x1: '0', x2: '1' }, el('defs', {}, kd));
+    el('stop', { offset: '0%', 'stop-color': 'var(--relief-fill-hi)' }, dg);
+    el('stop', { offset: '100%', 'stop-color': 'transparent' }, dg);
+    var dg2 = el('linearGradient', { id: 'kdg2', x1: '0', x2: '1' }, kd.querySelector('defs'));
+    el('stop', { offset: '0%', 'stop-color': 'transparent' }, dg2);
+    el('stop', { offset: '100%', 'stop-color': T.paint('method') }, dg2);
+    el('rect', { x: 8, y: 6, width: 120, height: 12, fill: 'url(#kdg)' }, kd);
+    el('rect', { x: 70, y: 20, width: 122, height: 12, fill: 'url(#kdg2)' }, kd);
+    text(kd, 8, 4, 'masses', 'lbl');
+    text(kd, 192, 4, 'symbols', 'lbl', { 'text-anchor': 'end' });
+
+    var kt = document.getElementById('k-thread');
+    el('path', { d: T.ribbonPath([[8, 17], [60, 17], [96, 17]], 12, 12), fill: T.paint('downstream'),
+      opacity: 0.4 }, kt);
+    [8, 17, 26].forEach(function (yy) {
+      el('path', { d: T.ribbonPath([[96, 17], [140, yy], [186, yy]], 4, 4),
+        fill: T.paint('downstream'), opacity: 0.4 }, kt);
+    });
+    text(kt, 8, 8, '1 412', 'num');
+
+    var kb = document.getElementById('k-bod');
+    el('path', { d: T.blobPath(34, 17, 26, 11, 3, 0.12), fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.2 }, kb);
+    el('path', { d: T.blobPath(100, 17, 17, 8, 8, 0.12), fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--relief-line-index)', 'stroke-width': 1.2 }, kb);
+    el('rect', { x: 150, y: 4, width: 30, height: 11, fill: T.paint('method'), opacity: 0.62 }, kb);
+    el('rect', { x: 150, y: 17, width: 30, height: 15, fill: T.paint('struct'), opacity: 0.62 }, kb);
+    text(kb, 34, 34, 'crate', 'lbl', { 'text-anchor': 'middle' });
+    text(kb, 100, 34, 'module', 'lbl', { 'text-anchor': 'middle' });
+    text(kb, 186, 34, 'symbol', 'lbl', { 'text-anchor': 'end' });
+
+    var kf = document.getElementById('k-floor');
+    el('rect', { x: 8, y: 4, width: 60, height: 26, fill: T.paint('method'), opacity: 0.62 }, kf);
+    el('rect', { x: 68, y: 4, width: 54, height: 26, class: 'absence-hatch' }, kf);
+    el('line', { x1: 68, y1: 4, x2: 68, y2: 30, stroke: 'var(--raw-state-unknown)', 'stroke-width': 1.4 }, kf);
+    var t = text(kf, 128, 14, 'statement scale', 'lbl');
+    t.setAttribute('fill', 'var(--raw-state-unknown)');
+    text(kf, 128, 26, 'not held', 'lbl');
+  })();
+
+  var q = new URLSearchParams(location.search).get('theme');
+  if (q === 'light') document.documentElement.setAttribute('data-theme', 'light');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CORE SAMPLE — six files as strat columns</title>
+<link rel="stylesheet" href="topography.css" />
+<style>
+  .keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
+  .keycell { padding: 11px 16px; border-right: 1px solid var(--raw-edge-subtle); flex: 1 1 0; min-width: 0; }
+  .keycell:last-child { border-right: none; }
+  .keycell .cap { font-size: 10.5px; line-height: 1.42; color: var(--raw-text-secondary); margin-top: 7px; }
+  .keycell .cap b { color: var(--raw-text-primary); font-weight: 600; }
+  .keyhead { display: flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="spine">
+    <span class="chan">03</span>
+    <h1>Core&nbsp;sample</h1>
+    <span class="sub">Six files pulled as vertical cores and stood side by side against one shared line datum. Every
+      band is a symbol at its true line span, so the reader is looking at the file's actual stratigraphy — not a
+      list of its contents.</span>
+  </header>
+
+  <div class="readbar">
+    <div class="readout"><span class="td-legend">Cores</span><span class="v">6 <span class="u">files</span></span></div>
+    <div class="readout"><span class="td-legend">Symbols banded</span><span class="v">54</span></div>
+    <div class="readout"><span class="td-legend">Deepest core</span><span class="v">1 118 <span class="u">lines · handlers.rs</span></span></div>
+    <div class="readout"><span class="td-legend">Vertical scale</span><span class="v">1 px = 1.35 <span class="u">source lines</span></span></div>
+    <div class="readout"><span class="td-legend">Datum</span><span class="v">line 1 <span class="u">top rule, all cores</span></span></div>
+    <div class="readout"><span class="td-legend">Internal arcs</span><span class="v">16 <span class="u">same-file calls</span></span></div>
+    <div class="readout grow"><span class="td-legend">External arcs</span><span class="v">7 <span class="u">cross-file calls · 1 core partly unindexed</span></span></div>
+  </div>
+
+  <div class="field graticule"><svg id="core" viewBox="0 0 1400 1030" width="100%"></svg></div>
+
+  <div class="keystrip">
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Band height</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-span"></svg>
+      <div class="cap"><b>end_line − start_line.</b> A band is exactly as tall as the symbol is long, at the same
+        scale in every core, so a 400-line function looks like a 400-line function next to a 20-line one.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Hue</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-hue"></svg>
+      <div class="cap"><b>kind</b>, through <code>kindColor.ts</code> — the same arc the graph canvas and the
+        connectivity spine already use, so a <code>struct</code> is the same colour everywhere in the console.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Rail</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-rail"></svg>
+      <div class="cap"><b>Cyclomatic complexity</b> on the five-step severity ramp: ≤2 info, ≤5 low, ≤9 medium,
+        ≤14 high, &gt;14 critical. It is a rail and not a fill so complexity never competes with kind.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Arcs</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-arc"></svg>
+      <div class="cap"><b>Left gutter: calls inside the file.</b> Across the gutters: calls that leave it. Width is
+        call sites. An arc's two ends are the two true line positions, which is why a file that calls itself
+        upward is visibly recursive.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Interburden</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-gap"></svg>
+      <div class="cap">The <b>unbanded</b> stretches between symbols: imports, attributes, module docs, whitespace.
+        Drawn as empty core rather than closed up, because the distance between two functions is real.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Absence</span><span class="td-rule"></span></div>
+      <svg viewBox="0 0 200 40" width="100%" height="40" id="k-abs"></svg>
+      <div class="cap">Core 6 is banded to <b>line 331 and no further</b>. The rest of the file is drawn at full
+        length, hatched, and labelled with why. Its outgoing edges are unknown, not zero — so no arc leaves it.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <section>
+      <h2>What this is</h2>
+      <p class="td-caption">The other half of the ask: not "how do the modules sit against each other" but
+      <b>"what is the shape of the inside of a file, and of six files at once"</b>. A symbol list answers neither.
+      A core sample does both, because the vertical axis is the file itself.</p>
+      <p class="td-caption">Reading it: <code>handlers.rs</code> is a deep core with two enormous high-complexity
+      bands near the top and a long test seam at the bottom; <code>decision.rs</code> is short, tight and almost
+      all logic. That comparison takes about two seconds and is impossible in any tree view.</p>
+    </section>
+    <section>
+      <h2>Channel → data</h2>
+      <dl>
+        <dt>y</dt><dd><code>start_line</code>. Real, on every node payload.</dd>
+        <dt>band height</dt><dd><code>end_line − start_line</code>. Real.</dd>
+        <dt>hue</dt><dd><code>kind</code> via <code>kindColor.ts</code>. Real.</dd>
+        <dt>rail</dt><dd>per-symbol cyclomatic complexity. Real; it is already computed.</dd>
+        <dt>arc width</dt><dd>call sites on that <code>calls</code> edge. Real.</dd>
+        <dt>column order</dt><dd>DSM cluster order — the same left-to-right order as sheet 01, not alphabetical.</dd>
+        <dt>hatch</dt><dd>lines present in the file with no node covering them. Real: the index knows what it parsed.</dd>
+      </dl>
+      <p class="td-caption" style="margin-top:8px">54 symbols and 23 edges — a single-file-set query, far below the
+      subgraph cap. No aggregation on this sheet either.</p>
+    </section>
+    <section>
+      <h2>Open question</h2>
+      <p class="td-caption">Six cores fit. Sixty do not, and "many files" was the actual ask. The honest options are
+      (a) keep six and make core selection the interesting problem — cores chosen by churn, by complexity, by being
+      on the traced path from sheet 02; or (b) let the core width collapse toward a hairline as the count grows, so
+      forty files become forty ruled strips with bands but no names — a <i>fabric</i> rather than a set of samples.
+      (b) is closer to "the topography of the codebase" and gives up the line numbers.</p>
+      <p class="td-caption">Also: nesting. A method inside an <code>impl</code> inside a module is three
+      containments, and this sheet flattens them to one band. Indenting the band by containment depth would show
+      it and would cost the shared left edge that makes the cores comparable.</p>
+    </section>
+  </div>
+</div>
+
+<script src="topography.js"></script>
+<script>
+(function () {
+  'use strict';
+  var T = window.TOPO;
+  var el = T.el, text = T.text;
+
+  var TOP = 116;            // the datum: line 1, shared by every core
+  var SCALE = 0.742;        // px per source line — 1 px ≈ 1.35 lines
+  var COL_W = 116;
+  var RULE_EVERY = 200;
+
+  function y(line) { return TOP + line * SCALE; }
+
+  /* ---- six cores. Symbols carry exactly what the wire carries:
+   *      name, kind, start_line, end_line, plus cyclomatic complexity. ---- */
+  var CORES = [
+    { path: 'crates/tracedecay-application/src/retrieval/service.rs', lines: 742, x: 120, symbols: [
+      ['RetrievalService', 'struct', 34, 58, 1], ['ContextRequest', 'struct', 60, 88, 1],
+      ['new', 'method', 96, 118, 2], ['resolve_context', 'method', 126, 232, 14],
+      ['symbol_graph_for', 'method', 238, 306, 9], ['hydrate_callable', 'method', 312, 368, 7],
+      ['assemble_evidence', 'method', 374, 441, 11], ['budget_for', 'function', 448, 486, 5],
+      ['RetrievalError', 'enum', 492, 524, 1], ['tests::resolves', 'test', 560, 614, 3],
+      ['tests::budgets', 'test', 620, 700, 4],
+    ], internal: [[3, 4, 9], [3, 5, 5], [3, 6, 6], [6, 7, 3], [9, 3, 2]] },
+
+    { path: 'crates/tracedecay-application/src/retrieval/catalog.rs', lines: 486, x: 336, symbols: [
+      ['CatalogEntry', 'struct', 22, 48, 1], ['Catalog', 'struct', 52, 84, 1],
+      ['insert', 'method', 92, 126, 4], ['assemble_context', 'method', 132, 214, 12],
+      ['prune', 'method', 220, 268, 6], ['merge_contributions', 'function', 274, 342, 8],
+      ['tests::merges', 'test', 372, 436, 3],
+    ], internal: [[3, 5, 4], [2, 4, 2]] },
+
+    { path: 'crates/tracedecay-application/src/handlers.rs', lines: 1118, x: 552, symbols: [
+      ['HandlerContext', 'struct', 44, 92, 1], ['handle_context_request', 'function', 102, 268, 18],
+      ['handle_search_request', 'function', 274, 392, 13], ['handle_impact_request', 'function', 398, 506, 11],
+      ['handle_health_request', 'function', 512, 588, 6], ['dispatch', 'function', 596, 742, 21],
+      ['classify_error', 'function', 748, 806, 9], ['HandlerError', 'enum', 812, 868, 1],
+      ['tests::dispatches', 'test', 908, 1042, 7],
+    ], internal: [[5, 1, 5], [5, 2, 4], [5, 3, 3], [1, 6, 6]] },
+
+    { path: 'crates/tracedecay-policy/src/authorization/decision.rs', lines: 394, x: 768, symbols: [
+      ['Decision', 'enum', 18, 52, 1], ['DecisionInput', 'struct', 56, 94, 1],
+      ['evaluate_decision', 'function', 102, 208, 16], ['explain', 'method', 214, 262, 5],
+      ['redact', 'method', 268, 318, 7], ['tests::denies', 'test', 340, 382, 3],
+    ], internal: [[2, 3, 3], [2, 4, 2]] },
+
+    { path: 'crates/tracedecay-store/src/repository/sqlite.rs', lines: 903, x: 984, symbols: [
+      ['SqliteRepository', 'struct', 38, 76, 1], ['open', 'method', 84, 138, 5],
+      ['fetch_nodes', 'method', 144, 262, 13], ['fetch_edges', 'method', 268, 372, 12],
+      ['upsert_node', 'method', 378, 468, 10], ['prune_scope', 'method', 474, 566, 9],
+      ['migrate', 'function', 572, 706, 17], ['tests::round_trip', 'test', 742, 864, 6],
+    ], internal: [[2, 3, 6], [1, 6, 2], [5, 3, 3]] },
+
+    // The absence beat: banded to 331 and no further.
+    { path: 'crates/tracedecay-hooks/src/session/vendor_bridge.rs', lines: 612, x: 1200,
+      indexedTo: 331, why: 'extractor bailed at line 331 — unbalanced cfg block', symbols: [
+      ['VendorBridge', 'struct', 26, 64, 1], ['attach', 'method', 72, 142, 6],
+      ['forward_event', 'method', 148, 268, 10], ['drain', 'method', 274, 330, 4],
+    ], internal: [[1, 2, 3]] },
+  ];
+
+  /* Cross-file calls. Endpoints are true line positions, not column centres. */
+  var EXTERNAL = [
+    { from: [0, 3], to: [1, 3], calls: 11 },
+    { from: [0, 4], to: [4, 2], calls: 16 },
+    { from: [2, 1], to: [0, 3], calls: 34 },
+    { from: [2, 2], to: [0, 3], calls: 12 },
+    { from: [0, 3], to: [3, 2], calls: 8 },
+    { from: [1, 3], to: [4, 3], calls: 7 },
+    { from: [5, 2], to: [2, 5], calls: 5 },
+  ];
+
+  /* The severity ramp, five ordered steps — complexity, not kind. */
+  function railTone(cx) {
+    if (cx <= 2) return 'var(--raw-sev-info)';
+    if (cx <= 5) return 'var(--raw-sev-low)';
+    if (cx <= 9) return 'var(--raw-sev-medium)';
+    if (cx <= 14) return 'var(--raw-sev-high)';
+    return 'var(--raw-sev-critical)';
+  }
+
+  var svg = document.getElementById('core');
+  function halo(node, weight) {
+    node.setAttribute('stroke', 'var(--raw-surface-0)');
+    node.setAttribute('stroke-width', String(weight || 3));
+    node.setAttribute('paint-order', 'stroke');
+    return node;
+  }
+
+  /* ---- 1. the line datum: rules that cross every core ------------------- */
+  var gRules = el('g', {}, svg);
+  var deepest = Math.max.apply(null, CORES.map(function (c) { return c.lines; }));
+  for (var line = 0; line <= deepest; line += RULE_EVERY) {
+    var ry = y(line);
+    el('line', { x1: 96, y1: ry, x2: 1380, y2: ry, stroke: 'var(--raw-grid)', 'stroke-width': 1,
+      'stroke-dasharray': line === 0 ? null : '1 6' }, gRules);
+    var t = text(gRules, 88, ry + 3, line === 0 ? 'line 1' : String(line), 'num', { 'text-anchor': 'end' });
+    if (line === 0) t.setAttribute('fill', 'var(--raw-accent)');
+  }
+  halo(text(gRules, 88, 34, 'DATUM ↓', 'lbl', { 'text-anchor': 'end' }));
+  halo(text(gRules, 1380, 34,
+    'ONE VERTICAL SCALE FOR ALL SIX CORES — 1 PX = 1.35 SOURCE LINES', 'lbl', { 'text-anchor': 'end' }));
+
+  /* ---- 2. external arcs, behind the cores ------------------------------- */
+  var gExt = el('g', {}, svg);
+  EXTERNAL.forEach(function (e) {
+    var a = CORES[e.from[0]], b = CORES[e.to[0]];
+    var sa = a.symbols[e.from[1]], sb = b.symbols[e.to[1]];
+    var ay = y((sa[2] + sa[3]) / 2), by = y((sb[2] + sb[3]) / 2);
+    var forward = b.x > a.x;
+    var ax = forward ? a.x + COL_W : a.x;
+    var bx = forward ? b.x : b.x + COL_W;
+    var bulge = Math.min(120, Math.abs(bx - ax) * 0.26);
+    var pts = [[ax, ay], [ax + (forward ? bulge : -bulge), ay + (by - ay) * 0.3],
+               [bx + (forward ? -bulge : bulge), ay + (by - ay) * 0.7], [bx, by]];
+    var w = 1.6 + Math.sqrt(e.calls) * 0.95;
+    var hue = T.paint('downstream');
+    el('path', { d: T.ribbonPath(pts, w, w * 0.7), fill: hue, opacity: 0.34, stroke: hue,
+      'stroke-width': 0.7, 'stroke-opacity': 0.5 }, gExt);
+    var mx = (ax + bx) / 2, my = ay + (by - ay) * 0.5;
+    var lab = halo(text(gExt, mx, my - w / 2 - 6, String(e.calls), 'num', { 'text-anchor': 'middle' }));
+    lab.setAttribute('fill', hue);
+  });
+
+  /* ---- 3. the cores ----------------------------------------------------- */
+  CORES.forEach(function (core) {
+    var g = el('g', {}, svg);
+    var top = y(0), bottom = y(core.lines);
+
+    // The core barrel: the whole file at full length, drawn before anything is
+    // banded, so a file is never shortened to the part that was parsed.
+    el('rect', { x: core.x, y: top, width: COL_W, height: bottom - top,
+      fill: 'var(--relief-fill-lo)', stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, g);
+
+    if (core.indexedTo) {
+      var hy = y(core.indexedTo);
+      el('rect', { x: core.x, y: hy, width: COL_W, height: bottom - hy, class: 'absence-hatch' }, g);
+      el('line', { x1: core.x - 6, y1: hy, x2: core.x + COL_W + 6, y2: hy,
+        stroke: 'var(--raw-state-unknown)', 'stroke-width': 1.6 }, g);
+      halo(text(g, core.x + COL_W / 2, hy + 20, 'NOT BANDED', 'lbl', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-state-unknown)');
+      halo(text(g, core.x + COL_W / 2, hy + 34, 'lines ' + core.indexedTo + '–' + core.lines, 'num',
+        { 'text-anchor': 'middle' })).setAttribute('fill', 'var(--raw-text-muted)');
+      halo(text(g, core.x + COL_W / 2, hy + 50, '281 lines', 'num', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-text-muted)');
+      var wrap = core.why.split(' — ');
+      halo(text(g, core.x + COL_W / 2, hy + 70, wrap[0], 'num', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-text-muted)');
+      halo(text(g, core.x + COL_W / 2, hy + 82, wrap[1], 'num', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-text-muted)');
+      halo(text(g, core.x + COL_W / 2, hy + 102, 'OUTGOING EDGES UNKNOWN,', 'lbl', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-state-unknown)');
+      halo(text(g, core.x + COL_W / 2, hy + 114, 'NOT ZERO', 'lbl', { 'text-anchor': 'middle' }))
+        .setAttribute('fill', 'var(--raw-state-unknown)');
+    }
+
+    // Bands, in true line order.
+    core.symbols.forEach(function (sym, i) {
+      var name = sym[0], kind = sym[1], start = sym[2], end = sym[3], cyclo = sym[4];
+      var by = y(start), bh = Math.max(4, y(end) - y(start));
+      var hue = T.paint(kind);
+      el('rect', { x: core.x, y: by, width: COL_W, height: bh, fill: hue, opacity: 0.62 }, g);
+      el('rect', { x: core.x, y: by, width: COL_W, height: bh, fill: 'none',
+        stroke: 'var(--raw-surface-0)', 'stroke-width': 1, 'stroke-opacity': 0.65 }, g);
+      // Complexity rail: a 5 px stripe on the trailing edge of the band.
+      el('rect', { x: core.x + COL_W - 5, y: by, width: 5, height: bh, fill: railTone(cyclo) }, g);
+      // The line span, in the left gutter of the band.
+      if (bh >= 15) {
+        var nm = halo(text(g, core.x + 6, by + 12, name.length > 17 ? name.slice(0, 16) + '…' : name, 'name'));
+        nm.setAttribute('font-size', '9.5');
+        if (bh >= 26) {
+          halo(text(g, core.x + 6, by + 23, start + '–' + end + ' · cx ' + cyclo, 'num'))
+            .setAttribute('fill', 'var(--raw-text-secondary)');
+        }
+      } else {
+        // Too thin to letter: a tick into the gutter carries the name instead.
+        el('line', { x1: core.x - 10, y1: by + bh / 2, x2: core.x, y2: by + bh / 2,
+          stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, g);
+        halo(text(g, core.x - 13, by + bh / 2 + 3, name, 'num', { 'text-anchor': 'end' }));
+      }
+      sym.cy = (by + y(end)) / 2;
+      sym.top = by;
+      sym.bottom = by + bh;
+    });
+
+    // Internal call arcs: they bulge into the LEFT gutter, so a file's own
+    // structure never competes with its traffic to other files.
+    (core.internal || []).forEach(function (arc) {
+      var from = core.symbols[arc[0]], to = core.symbols[arc[1]], calls = arc[2];
+      var ay = from.cy, byy = to.cy;
+      // Reach is clamped to the gutter: an arc may bow into the empty space
+      // beside its own core and no further, so it can never be mistaken for a
+      // cross-file edge.
+      var reach = Math.min(76, 24 + Math.abs(byy - ay) * 0.30);
+      var w = 1.2 + Math.sqrt(calls) * 0.7;
+      var hue = T.paint('upstream');
+      el('path', {
+        d: T.bundledPath([[core.x, ay], [core.x - reach, ay + (byy - ay) * 0.28],
+                          [core.x - reach, ay + (byy - ay) * 0.72], [core.x, byy]]),
+        fill: 'none', stroke: hue, 'stroke-width': w, 'stroke-opacity': 0.75,
+        'stroke-linecap': 'round',
+      }, g);
+      // Upward arcs are the interesting ones: a symbol calling something
+      // defined above it. Marked, because that is what recursion looks like.
+      if (byy < ay) {
+        el('circle', { cx: core.x - reach, cy: (ay + byy) / 2, r: 2.6, fill: hue }, g);
+      }
+    });
+
+    // The core's own head plate.
+    var parts = core.path.split('/');
+    halo(text(g, core.x + COL_W / 2, top - 40, parts[parts.length - 1], 'name',
+      { 'text-anchor': 'middle' })).setAttribute('font-size', '12');
+    halo(text(g, core.x + COL_W / 2, top - 28,
+      parts.slice(1, -1).join('/').replace('tracedecay-', '') + '/', 'lbl', { 'text-anchor': 'middle' }));
+    halo(text(g, core.x + COL_W / 2, top - 14,
+      core.lines + ' lines · ' + core.symbols.length + ' sym', 'num', { 'text-anchor': 'middle' }))
+      .setAttribute('fill', 'var(--raw-text-muted)');
+    // The core's foot: where the file actually ends.
+    el('line', { x1: core.x - 6, y1: bottom, x2: core.x + COL_W + 6, y2: bottom,
+      stroke: 'var(--raw-edge-strong)', 'stroke-width': 1.6 }, g);
+    halo(text(g, core.x + COL_W / 2, bottom + 14, 'EOF ' + core.lines, 'num', { 'text-anchor': 'middle' }))
+      .setAttribute('fill', 'var(--raw-text-muted)');
+  });
+
+  /* ---- key strip figures ------------------------------------------------ */
+  (function keys() {
+    var ks = document.getElementById('k-span');
+    [[10, 166, 'handle_context_request'], [70, 24, 'new']].forEach(function (row, i) {
+      var h = row[1] * SCALE * 0.42;
+      el('rect', { x: row[0], y: 20 - h / 2, width: 44, height: h,
+        fill: T.paint('function'), opacity: 0.62 }, ks);
+      text(ks, row[0] + 22, 36, row[1] + ' ln', 'num', { 'text-anchor': 'middle' });
+    });
+    text(ks, 122, 16, 'same scale in', 'lbl');
+    text(ks, 122, 28, 'every core', 'lbl');
+
+    var kh = document.getElementById('k-hue');
+    ['struct', 'enum', 'method', 'function', 'test'].forEach(function (kind, i) {
+      el('rect', { x: 6 + i * 38, y: 6, width: 32, height: 16, fill: T.paint(kind),
+        opacity: 0.62 }, kh);
+      text(kh, 22 + i * 38, 34, kind.slice(0, 6), 'num', { 'text-anchor': 'middle' });
+    });
+
+    var kr = document.getElementById('k-rail');
+    [1, 4, 8, 13, 21].forEach(function (cx, i) {
+      el('rect', { x: 6 + i * 38, y: 6, width: 32, height: 16, fill: 'var(--relief-fill-lo)' }, kr);
+      el('rect', { x: 33 + i * 38, y: 6, width: 5, height: 16, fill: railTone(cx) }, kr);
+      text(kr, 22 + i * 38, 34, 'cx ' + cx, 'num', { 'text-anchor': 'middle' });
+    });
+
+    var ka = document.getElementById('k-arc');
+    el('path', { d: T.bundledPath([[46, 6], [14, 12], [14, 22], [46, 28]]), fill: 'none',
+      stroke: T.paint('upstream'), 'stroke-width': 3, 'stroke-opacity': 0.75,
+      'stroke-linecap': 'round' }, ka);
+    el('rect', { x: 46, y: 2, width: 26, height: 30, fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, ka);
+    text(ka, 78, 12, 'inside the file', 'lbl');
+    el('path', { d: T.ribbonPath([[72, 26], [120, 30], [164, 34]], 6, 4),
+      fill: T.paint('downstream'), opacity: 0.34 }, ka);
+    text(ka, 78, 24, 'across the gutter', 'lbl');
+
+    var kg = document.getElementById('k-gap');
+    el('rect', { x: 8, y: 4, width: 48, height: 32, fill: 'var(--relief-fill-lo)',
+      stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, kg);
+    el('rect', { x: 8, y: 4, width: 48, height: 9, fill: T.paint('struct'), opacity: 0.62 }, kg);
+    el('rect', { x: 8, y: 24, width: 48, height: 12, fill: T.paint('method'), opacity: 0.62 }, kg);
+    el('line', { x1: 60, y1: 18, x2: 68, y2: 18, stroke: 'var(--raw-edge-strong)', 'stroke-width': 1 }, kg);
+    text(kg, 72, 16, '11 unbanded', 'lbl');
+    text(kg, 72, 28, 'lines', 'lbl');
+
+    var kb = document.getElementById('k-abs');
+    el('rect', { x: 8, y: 4, width: 48, height: 14, fill: T.paint('method'), opacity: 0.62 }, kb);
+    el('rect', { x: 8, y: 18, width: 48, height: 18, class: 'absence-hatch' }, kb);
+    el('line', { x1: 4, y1: 18, x2: 60, y2: 18, stroke: 'var(--raw-state-unknown)', 'stroke-width': 1.6 }, kb);
+    var t = text(kb, 66, 16, 'banded to 331', 'lbl');
+    t.setAttribute('fill', 'var(--raw-text-secondary)');
+    var t2 = text(kb, 66, 30, 'not banded below', 'lbl');
+    t2.setAttribute('fill', 'var(--raw-state-unknown)');
+  })();
+
+  var q = new URLSearchParams(location.search).get('theme');
+  if (q === 'light') document.documentElement.setAttribute('data-theme', 'light');
+})();
+</script>
+</body>
+</html>
