@@ -1008,13 +1008,16 @@ pub(super) async fn handle_find_exact_symbol(
     let mut nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
     nodes = graph_symbols_in_scope(nodes, scope_prefix)?;
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
-        dependency_hints::admit_verified_ignored_dependency(
-            ignored_dependency_admission,
-            graph,
-            name,
-            scope_prefix,
-            deadline,
-            cancellation,
+        hotpath::future!(
+            dependency_hints::admit_verified_ignored_dependency(
+                ignored_dependency_admission,
+                graph,
+                name,
+                scope_prefix,
+                deadline,
+                cancellation,
+            ),
+            label = "mcp.graph.find_exact_symbol.admit"
         )
         .await?;
     }
