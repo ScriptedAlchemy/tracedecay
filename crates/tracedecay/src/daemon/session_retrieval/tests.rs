@@ -876,3 +876,20 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
         }
     ));
 }
+
+#[test]
+fn rendering_deadlines_remain_distinct_from_cancellation() {
+    for error in [
+        TemporalKernelError::DeadlineExceeded,
+        TemporalKernelError::Port(TemporalPortError::DeadlineExceeded),
+        TemporalKernelError::Hydration(HydrationError::Interrupted(
+            TemporalPortError::DeadlineExceeded,
+        )),
+        TemporalKernelError::Context(ContextError::Interrupted(
+            TemporalPortError::DeadlineExceeded,
+        )),
+    ] {
+        assert!(temporal_kernel_deadline(&error));
+    }
+    assert!(!temporal_kernel_deadline(&TemporalKernelError::Cancelled));
+}
