@@ -210,6 +210,21 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
+    /// Declared per-profile acceptance cut-off, in parts per million.
+    ///
+    /// This does **not** gate candidate admission. The semantic lane abstains
+    /// on `SemanticCalibrationProfileV1::maximum_distance_micros`, which is
+    /// measured from the committed generation's own vectors by
+    /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
+    /// — deliberately, because a fixed cosine cut-off is a property of the
+    /// model and corpus rather than of a checked-in profile.
+    ///
+    /// The field is currently read only to assert that the rerank comparison
+    /// profile differs from the semantic one by rerank material alone. Wiring
+    /// it as an explicit override of the measured bound would mean carrying it
+    /// through `DirectEvaluatedProfileMaterialV1` into the daemon candidate
+    /// builder; until then, treat a value here as documentation, not as a
+    /// threshold in force.
     pub calibration_threshold_ppm: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
