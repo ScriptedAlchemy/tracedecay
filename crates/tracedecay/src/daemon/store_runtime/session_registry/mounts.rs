@@ -102,11 +102,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
-            // Derived from the project ceiling; see MAX_RETAINED_GRAPH_DB_OWNERS for
-            // the arithmetic and for why a held attachment is never evictable.
-            GraphDbRegistryConfig {
-                max_open: super::MAX_RETAINED_GRAPH_DB_OWNERS,
-            },
+            GraphDbRegistryConfig { max_open: 8 },
             graph_manifest_provider.clone(),
         )
         .map_err(|error| {
@@ -114,18 +110,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
-        let profile_runtime = hotpath::future!(
-            open_runtime(
-                &registry,
-                resolver.as_ref(),
-                profile_shard.clone(),
-                incarnation,
-                None,
-                None,
-                true,
-                "mount profile authority store",
-            ),
-            label = "daemon.session_registry.mount"
+        let profile_runtime = open_runtime(
+            &registry,
+            resolver.as_ref(),
+            profile_shard.clone(),
+            incarnation,
+            None,
+            None,
+            true,
+            "mount profile authority store",
         )
         .await?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
@@ -167,11 +160,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_recovery_project_lifecycle: Arc::new(std::sync::OnceLock::new()),
             long_lived_session_maintenance,
         };
-        hotpath::future!(
-            registry.mount_registered_remote_nodes(),
-            label = "daemon.session_registry.mount"
-        )
-        .await?;
+        registry.mount_registered_remote_nodes().await?;
         Ok(registry)
     }
 
@@ -353,18 +342,15 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = hotpath::future!(
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id,
-                self.incarnation,
-                None,
-                None,
-                true,
-                "mount profile authority store",
-            ),
-            label = "daemon.session_registry.mount"
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id,
+            self.incarnation,
+            None,
+            None,
+            true,
+            "mount profile authority store",
         )
         .await?;
         let database = self
@@ -419,21 +405,18 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = hotpath::future!(
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(
-                    self.profile_authority_pin("mount profile session store")
-                        .await?,
-                ),
-                None,
-                true,
-                "mount profile session store",
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id.clone(),
+            self.incarnation,
+            Some(
+                self.profile_authority_pin("mount profile session store")
+                    .await?,
             ),
-            label = "daemon.session_registry.mount"
+            None,
+            true,
+            "mount profile session store",
         )
         .await?;
         let database = self
@@ -608,21 +591,18 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = hotpath::future!(
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(
-                    self.profile_authority_pin("mount profile memory store")
-                        .await?,
-                ),
-                None,
-                true,
-                "mount profile memory store",
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id.clone(),
+            self.incarnation,
+            Some(
+                self.profile_authority_pin("mount profile memory store")
+                    .await?,
             ),
-            label = "daemon.session_registry.mount"
+            None,
+            true,
+            "mount profile memory store",
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -689,23 +669,20 @@ impl DaemonSessionRuntimeRegistryV1 {
                     self.identity.profile_id().clone(),
                     node_id.clone(),
                 );
-                let (runtime, existed) = hotpath::future!(
-                    open_runtime_with_presence(
-                        &self.registry,
-                        self.resolver.as_ref(),
-                        shard_id,
-                        self.incarnation,
-                        Some(
-                            self.profile_authority_pin("mount Remote Brain node store")
-                                .await?,
-                        ),
-                        None,
-                        true,
-                        false,
-                        None,
-                        "mount Remote Brain node store",
+                let (runtime, existed) = open_runtime_with_presence(
+                    &self.registry,
+                    self.resolver.as_ref(),
+                    shard_id,
+                    self.incarnation,
+                    Some(
+                        self.profile_authority_pin("mount Remote Brain node store")
+                            .await?,
                     ),
-                    label = "daemon.session_registry.mount"
+                    None,
+                    true,
+                    false,
+                    None,
+                    "mount Remote Brain node store",
                 )
                 .await?;
                 let owner = RemoteNodeStoreOwnerV1 {
@@ -899,31 +876,24 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// reconciliation workers first; a graph client lease still held by a
     /// live consumer surfaces as a typed Conflict, not a hang.
     pub(crate) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
-        hotpath::future!(
-            async {
-                let identities = self.drain_retained_graph_owners_for_shutdown()?;
-                let mut first_error = None;
-                for (binding, locator) in identities {
-                    if let Err(error) =
-                        super::code_graph::graph_attachment::close_retained_for_shutdown(
-                            &self.graph_registry,
-                            binding,
-                            locator,
-                        )
-                        .await
-                        && first_error.is_none()
-                    {
-                        first_error = Some(error);
-                    }
-                }
-                match first_error {
-                    Some(error) => Err(error),
-                    None => Ok(()),
-                }
-            },
-            label = "daemon.session_registry.detach"
-        )
-        .await
+        let identities = self.drain_retained_graph_owners_for_shutdown()?;
+        let mut first_error = None;
+        for (binding, locator) in identities {
+            if let Err(error) = super::code_graph::graph_attachment::close_retained_for_shutdown(
+                &self.graph_registry,
+                binding,
+                locator,
+            )
+            .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Takes every retained graph-owning runtime out of the registry maps and
@@ -1178,21 +1148,18 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
-        let runtime = hotpath::future!(
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(
-                    self.profile_authority_pin("mount project session store")
-                        .await?,
-                ),
-                None,
-                true,
-                "mount project session store",
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id.clone(),
+            self.incarnation,
+            Some(
+                self.profile_authority_pin("mount project session store")
+                    .await?,
             ),
-            label = "daemon.session_registry.mount"
+            None,
+            true,
+            "mount project session store",
         )
         .await?;
         let database = self
@@ -1327,21 +1294,18 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
-        let runtime = hotpath::future!(
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(
-                    self.profile_authority_pin("mount project memory store")
-                        .await?,
-                ),
-                None,
-                true,
-                "mount project memory store",
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id.clone(),
+            self.incarnation,
+            Some(
+                self.profile_authority_pin("mount project memory store")
+                    .await?,
             ),
-            label = "daemon.session_registry.mount"
+            None,
+            true,
+            "mount project memory store",
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -1413,18 +1377,17 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id,
         );
-        let runtime = match hotpath::future!(
-            self.registry.open(StoreRuntimeOpenRequest::new_read_only(
+        let runtime = match self
+            .registry
+            .open(StoreRuntimeOpenRequest::new_read_only(
                 shard_id.clone(),
                 self.incarnation,
                 Some(
                     self.profile_authority_pin("mount project memory store read-only")
                         .await?,
                 ),
-            )),
-            label = "daemon.session_registry.mount"
-        )
-        .await
+            ))
+            .await
         {
             StoreRuntimeOpenResult::Published(runtime) => runtime,
             StoreRuntimeOpenResult::Failed(failure) => {

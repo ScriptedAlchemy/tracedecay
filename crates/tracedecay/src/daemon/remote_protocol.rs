@@ -89,7 +89,7 @@ pub(super) fn remote_query_result_observation(
     )
 }
 
-pub(crate) const MAX_REGISTERED_REMOTE_NODES: usize = 128;
+const MAX_REGISTERED_REMOTE_NODES: usize = 128;
 const MAX_REGISTERED_REMOTE_CREDENTIALS: usize = 8_192;
 
 #[derive(Clone)]
@@ -214,7 +214,6 @@ impl DaemonRemoteCredentialAuthorityV1 {
     /// `Unconfigured` is returned only when the optional remote plane has no
     /// listener and no registered node; `Unavailable` only when a mounted
     /// authority genuinely cannot be read.
-    #[hotpath::measure(label = "daemon.remote.operational_status")]
     pub(crate) fn operational_status(&self) -> RemoteOperationalStatusReadV1 {
         let now = tracedecay_application::clock::now_micros();
         if !self.accepting.load(Ordering::Acquire) {
@@ -294,7 +293,6 @@ impl DaemonRemoteCredentialAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.remote.register_storage")]
     pub(crate) fn register_storage(
         &self,
         node_id: BrainNodeId,
@@ -467,7 +465,6 @@ impl DaemonRemoteCredentialAuthorityV1 {
 }
 
 impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialAuthorityV1 {
-    #[hotpath::measure(label = "daemon.remote.credential_lookup")]
     fn credential_by_fingerprint(
         &self,
         class: RemoteCredentialClassV1,
@@ -659,7 +656,6 @@ struct DaemonRemoteEnrollmentProtocolPortV1 {
 }
 
 impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
-    #[hotpath::measure(label = "daemon.remote.enrollment")]
     fn execute_enrollment(
         &self,
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
@@ -728,7 +724,6 @@ struct DaemonRemoteCaptureProtocolPortV1 {
 impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtocolPortV1 {
     type Output = RemoteCaptureReceiptV1;
 
-    #[hotpath::measure(label = "daemon.remote.capture")]
     fn execute(
         &self,
         request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
@@ -806,7 +801,6 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         )
     }
 
-    #[hotpath::measure(label = "daemon.remote.frame_transfer")]
     fn execute_controlled(
         &self,
         request: RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
@@ -1060,7 +1054,6 @@ struct DaemonRemoteReplayProtocolPortV1 {
 impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolPortV1 {
     type Output = RemoteReplayOutcomeV1;
 
-    #[hotpath::measure(label = "daemon.remote.replay_protocol")]
     fn execute(
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
@@ -1189,7 +1182,6 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                 )
             }
 
-            #[hotpath::measure(label = "daemon.remote.recovery")]
             fn execute_controlled(
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
@@ -1230,7 +1222,6 @@ macro_rules! impl_daemon_remote_recovery_protocol {
     };
 }
 
-#[hotpath::measure(label = "daemon.remote.router_build")]
 pub(crate) fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
