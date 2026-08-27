@@ -473,30 +473,53 @@ impl DirectEvaluationReportV1 {
                         SemanticNativeStageResultV1::NotRequested => "not_requested".to_owned(),
                         SemanticNativeStageResultV1::Pending { .. } => "pending".to_owned(),
                     };
-                    let (oracle_hits, top_distance) = match &native.exact_flat_oracle {
-                        SemanticNativeStageResultV1::Complete(oracle) => (
-                            oracle.hits.len().to_string(),
-                            oracle
-                                .hits
-                                .first()
-                                .map(|hit| hit.evidence.distance.micros().to_string())
-                                .unwrap_or_else(|| "none".to_owned()),
-                        ),
+                    let relevant_anchor = query
+                        .first_useful_rank
+                        .and_then(|rank| usize::try_from(rank.saturating_sub(1)).ok())
+                        .and_then(|index| raw.ranked.get(index))
+                        .map(|ranked| ranked.anchor.as_str());
+                    let (oracle_hits, top_distance, relevant_distance) =
+                        match &native.exact_flat_oracle {
+                            SemanticNativeStageResultV1::Complete(oracle) => (
+                                oracle.hits.len().to_string(),
+                                oracle
+                                    .hits
+                                    .first()
+                                    .map(|hit| hit.evidence.distance.micros().to_string())
+                                    .unwrap_or_else(|| "none".to_owned()),
+                                relevant_anchor
+                                    .and_then(|anchor| {
+                                        oracle.hits.iter().find(|hit| {
+                                            hit.candidate.anchor_id.as_str() == anchor
+                                        })
+                                    })
+                                    .map(|hit| hit.evidence.distance.micros().to_string())
+                                    .unwrap_or_else(|| "none".to_owned()),
+                            ),
                         SemanticNativeStageResultV1::NotRequested => {
-                            ("not_requested".to_owned(), "none".to_owned())
+                            (
+                                "not_requested".to_owned(),
+                                "none".to_owned(),
+                                "none".to_owned(),
+                            )
                         }
                         SemanticNativeStageResultV1::Pending { .. } => {
-                            ("pending".to_owned(), "none".to_owned())
+                            (
+                                "pending".to_owned(),
+                                "none".to_owned(),
+                                "none".to_owned(),
+                            )
                         }
                     };
                     Some(format!(
-                        "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={}",
+                        "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={},relevant_distance={}",
                         query.query_id,
                         baseline_query.first_useful_rank,
                         query.first_useful_rank,
                         semantic_candidates,
                         oracle_hits,
                         top_distance,
+                        relevant_distance,
                     ))
                 })
                 .collect::<Vec<_>>();
