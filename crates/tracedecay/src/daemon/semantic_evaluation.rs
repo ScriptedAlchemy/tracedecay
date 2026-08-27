@@ -430,8 +430,23 @@ pub(crate) struct DaemonSemanticEvaluationWorkerOwnerV1 {
     workers: Mutex<SemanticEvaluationWorkersV1>,
 }
 
+struct SemanticEvaluationActiveGaugeV1;
+
+impl SemanticEvaluationActiveGaugeV1 {
+    fn enter() -> Self {
+        hotpath::gauge!("search_eval_active_workers").inc(1.0);
+        Self
+    }
+}
+
+impl Drop for SemanticEvaluationActiveGaugeV1 {
+    fn drop(&mut self) {
+        hotpath::gauge!("search_eval_active_workers").dec(1.0);
+    }
+}
+
 impl DaemonSemanticEvaluationWorkerOwnerV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(future = true)]
     pub(crate) async fn execute<Output, Work, WorkFuture>(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
@@ -478,7 +493,11 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                 if start_rx.await.is_err() {
                     return;
                 }
-                let mut evaluation = Box::pin(work(Arc::clone(&worker_control)));
+                let _active = SemanticEvaluationActiveGaugeV1::enter();
+                let mut evaluation = Box::pin(hotpath::future!(
+                    work(Arc::clone(&worker_control)),
+                    label = "search_eval.daemon.worker"
+                ));
                 let outcome = tokio::select! {
                     result = &mut evaluation => {
                         result.map_err(|error| worker_control.execution_error(error))
@@ -692,6 +711,7 @@ fn semantic_projection_pin_mismatch(
 }
 
 impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    #[hotpath::measure]
     fn with_query_inputs(
         &self,
         context: ProductionCandidateNativeQueryContextV1<'_>,
@@ -733,14 +753,15 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         "production semantic runtime is unavailable".to_owned(),
                     )
                 })?;
-            let generation = runtime
-                .prepare_evaluation_generation_with_cache(
+            let generation = hotpath::measure_block!("search_eval.projection.clean", {
+                runtime.prepare_evaluation_generation_with_cache(
                     context.code,
                     Arc::clone(&self.projection_batch_cache),
                     Arc::clone(&self.control)
                         as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
                 )
-                .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
+            })
+            .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
             if generation.projection() != &required.projection {
                 return Err(semantic_projection_pin_mismatch(
                     generation.projection(),
@@ -769,13 +790,16 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 crate::semantic_code::shared_lifecycle_owner()
                     .and_then(|owner| owner.mount_reranker(pins.clone()).ok())
             });
-        let result = generation.with_query_inputs(context, rerank_authority.as_ref(), evaluate);
+        let result = hotpath::measure_block!("search_eval.native_query.inputs", {
+            generation.with_query_inputs(context, rerank_authority.as_ref(), evaluate)
+        });
         self.control.checkpoint().map_err(|_| {
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
         result
     }
 
+    #[hotpath::measure]
     fn measure_resources(
         &self,
         context: ProductionCandidateNativeResourceContextV1<'_>,
@@ -802,14 +826,15 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                             "production semantic runtime is unavailable".to_owned(),
                         )
                     })?;
-                let generation = runtime
-                    .prepare_evaluation_generation_with_cache(
+                let generation = hotpath::measure_block!("search_eval.projection.clean", {
+                    runtime.prepare_evaluation_generation_with_cache(
                         context.code,
                         Arc::clone(&self.projection_batch_cache),
                         Arc::clone(&self.control)
                             as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
                     )
-                    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+                })
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
                 if generation.projection() != &required.projection {
                     return Err(semantic_projection_pin_mismatch(
                         generation.projection(),
@@ -820,7 +845,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             }
         }
         let resource_window = LinuxProcessResourceWindowV1::begin();
-        let latency_samples_us = execute_queries()?;
+        let latency_samples_us =
+            hotpath::measure_block!("search_eval.resource_measurement", execute_queries())?;
         self.control.checkpoint().map_err(|_| {
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
@@ -876,12 +902,14 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     // Measured without the cache lock held, for the same
                     // reason as the projection cases: long, idempotent work
                     // where a race should duplicate once rather than block.
-                    let measured = runtime
-                        .measure_incremental_evaluation_projection(
+                    let measured = hotpath::measure_block!(
+                        "search_eval.projection.incremental",
+                        runtime.measure_incremental_evaluation_projection(
                             prepared,
                             context.incremental_code,
                         )
-                        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+                    )
+                    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
                     self.incremental_projections
                         .lock()
@@ -940,12 +968,14 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     // Measured without the cache lock held: the work is long
                     // and idempotent, so a racing pass may duplicate it once
                     // rather than block, and the first result installed wins.
-                    let measured = runtime
-                        .measure_evaluation_projection_cases(
+                    let measured = hotpath::measure_block!(
+                        "search_eval.projection.cases",
+                        runtime.measure_evaluation_projection_cases(
                             prepared,
                             &context.semantic_projection_sources,
                         )
-                        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+                    )
+                    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
                     self.projection_cases
                         .lock()
