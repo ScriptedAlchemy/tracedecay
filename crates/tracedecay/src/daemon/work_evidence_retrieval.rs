@@ -219,7 +219,7 @@ impl WorkTaskSessionPortV1 for DaemonWorkEvidenceRetrievalV1 {
                     .await;
                 task_session_evidence(&request, outcome, &selector)
             },
-            label = "daemon.session_retrieval.evidence",
+            label = "daemon.session_retrieval.evidence"
         ))
     }
 }
