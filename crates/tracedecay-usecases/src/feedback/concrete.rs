@@ -459,6 +459,7 @@ pub async fn open_feedback_runtime(
 }
 
 impl FeedbackRuntime {
+    #[hotpath::measure(label = "usecases.feedback.open_runtime", future = true)]
     pub async fn open(
         database: Database,
         project_root: impl Into<PathBuf>,

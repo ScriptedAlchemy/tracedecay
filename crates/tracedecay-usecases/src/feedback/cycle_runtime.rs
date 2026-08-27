@@ -234,7 +234,7 @@ pub struct FeedbackCycleRuntime {
 
 /// Opens one cycle owner from already-open graph, test, and feedback authorities.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.feedback.open_cycle")]
 pub fn open_feedback_cycle_runtime(
     database: Database,
     feedback: Arc<FeedbackRuntime>,
@@ -318,7 +318,7 @@ impl FeedbackCycleRuntime {
 
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.feedback.run_once", future = true)]
     pub async fn run_once(
         &self,
         invocation: FeedbackCycleInvocation,
@@ -337,7 +337,7 @@ impl FeedbackCycleRuntime {
     /// Runs one canonical feedback cycle with source-backed advisory findings.
     /// It reuses this runtime's authorization, diagnostics, impact, and single
     /// durable publication/dedupe path.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.feedback.run_once_advisory", future = true)]
     pub async fn run_once_with_advisory(
         &self,
         context: &RequestContext,
@@ -658,6 +658,7 @@ struct VerifiedImpactEvidenceV1 {
     complete: bool,
 }
 
+#[hotpath::measure(label = "usecases.feedback.impact_evidence")]
 fn read_verified_impact_evidence_v1(
     reader: &CodeGraphInteractiveReader,
     symbol: &SymbolOccurrenceId,
@@ -723,152 +724,163 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
         context: &'a RequestContext,
         request: &'a FeedbackImpactRequest,
     ) -> FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
-        Box::pin(async move {
-            if request.validate().is_err() {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-            if !self
-                .authorization
-                .allows(context, &self.graph_operation, request.input.observed_at)
-            {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            let Some(symbol) = request.input.target.symbol.clone() else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            let Some(generation) = request.input.target.generation_id.clone() else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            let graph = match self
-                .code_graph
-                .open(CodeGraphReadRequest::from_context(
+        Box::pin(hotpath::future!(
+            async move {
+                if request.validate().is_err() {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                }
+                match context.admission_at(request.input.observed_at) {
+                    RequestAdmission::Admitted => {}
+                    RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                    RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+                }
+                if !self.authorization.allows(
+                    context,
+                    &self.graph_operation,
+                    request.input.observed_at,
+                ) {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                }
+                let Some(symbol) = request.input.target.symbol.clone() else {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                };
+                let Some(generation) = request.input.target.generation_id.clone() else {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                };
+                let graph = match self
+                    .code_graph
+                    .open(CodeGraphReadRequest::from_context(
+                        context,
+                        request.input.observed_at,
+                    ))
+                    .await
+                {
+                    Ok(graph) if graph.generation() == &generation => graph,
+                    Ok(_) => return FeedbackImpactPortOutcome::Stale,
+                    Err(error) => return graph_read_failure(error),
+                };
+                let cancellation = request_graph_cancellation(context);
+                let reader = match graph.reader_with_cancellation(
                     context,
                     request.input.observed_at,
-                ))
-                .await
-            {
-                Ok(graph) if graph.generation() == &generation => graph,
-                Ok(_) => return FeedbackImpactPortOutcome::Stale,
-                Err(error) => return graph_read_failure(error),
-            };
-            let cancellation = request_graph_cancellation(context);
-            let reader = match graph.reader_with_cancellation(
-                context,
-                request.input.observed_at,
-                Arc::clone(&cancellation),
-            ) {
-                Ok(reader) => reader,
-                Err(error) => return graph_read_failure(error),
-            };
-            let evidence =
-                match read_verified_impact_evidence_v1(&reader, &symbol, Arc::clone(&cancellation))
-                {
+                    Arc::clone(&cancellation),
+                ) {
+                    Ok(reader) => reader,
+                    Err(error) => return graph_read_failure(error),
+                };
+                let evidence = match read_verified_impact_evidence_v1(
+                    &reader,
+                    &symbol,
+                    Arc::clone(&cancellation),
+                ) {
                     Ok(Some(evidence)) => evidence,
                     Ok(None) => return FeedbackImpactPortOutcome::Unavailable,
                     Err(error) => return graph_read_failure(error),
                 };
-            let (affected_files, graph_state) = match self
-                .resolved_affected_files(&generation, &evidence.file_paths)
-                .await
-            {
-                ResolvedAffectedFiles::Complete(files) if evidence.complete => {
-                    (files, FeedbackImpactStateV1::Complete)
+                let (affected_files, graph_state) = match self
+                    .resolved_affected_files(&generation, &evidence.file_paths)
+                    .await
+                {
+                    ResolvedAffectedFiles::Complete(files) if evidence.complete => {
+                        (files, FeedbackImpactStateV1::Complete)
+                    }
+                    ResolvedAffectedFiles::Complete(files) => {
+                        (files, FeedbackImpactStateV1::Partial)
+                    }
+                    ResolvedAffectedFiles::Partial(files) => {
+                        (files, FeedbackImpactStateV1::Partial)
+                    }
+                    ResolvedAffectedFiles::IdentityUnavailable => {
+                        (Vec::new(), FeedbackImpactStateV1::Partial)
+                    }
+                    ResolvedAffectedFiles::GenerationMismatch => {
+                        return FeedbackImpactPortOutcome::Stale;
+                    }
+                };
+                match context.admission_at(request.input.observed_at) {
+                    RequestAdmission::Admitted => {}
+                    RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                    RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
                 }
-                ResolvedAffectedFiles::Complete(files) => (files, FeedbackImpactStateV1::Partial),
-                ResolvedAffectedFiles::Partial(files) => (files, FeedbackImpactStateV1::Partial),
-                ResolvedAffectedFiles::IdentityUnavailable => {
-                    (Vec::new(), FeedbackImpactStateV1::Partial)
-                }
-                ResolvedAffectedFiles::GenerationMismatch => {
-                    return FeedbackImpactPortOutcome::Stale;
-                }
-            };
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-            let affected_callers = evidence.affected_callers;
+                let affected_callers = evidence.affected_callers;
 
-            let Ok(page) = PageRequest::first(100) else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            let meta = RetrievalRequestMeta::current(
-                page,
-                ResultProjection::ReferencesOnly,
-                RetrievalOrder::StableIdentity,
-            );
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-            if !self
-                .authorization
-                .allows(context, &self.tests_operation, request.input.observed_at)
-            {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            let tests = self.tests.affected_tests(
-                &RetrievalPortContext {
-                    request: context,
-                    operation: &self.tests_operation,
-                },
-                &AffectedTestsRequest {
-                    symbol,
-                    generation,
-                    meta,
-                },
-            );
-            let (affected_tests, affected_tests_state) = match affected_tests_outcome(tests) {
-                DirectAffectedTestsOutcome::Evidence { tests, state } => (tests, state),
-                DirectAffectedTestsOutcome::Cancelled => {
-                    return FeedbackImpactPortOutcome::Cancelled;
+                let Ok(page) = PageRequest::first(100) else {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                };
+                let meta = RetrievalRequestMeta::current(
+                    page,
+                    ResultProjection::ReferencesOnly,
+                    RetrievalOrder::StableIdentity,
+                );
+                match context.admission_at(request.input.observed_at) {
+                    RequestAdmission::Admitted => {}
+                    RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                    RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
                 }
-                DirectAffectedTestsOutcome::TimedOut => {
-                    return FeedbackImpactPortOutcome::TimedOut;
+                if !self.authorization.allows(
+                    context,
+                    &self.tests_operation,
+                    request.input.observed_at,
+                ) {
+                    return FeedbackImpactPortOutcome::Unavailable;
                 }
-                DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
-            };
+                let tests = self.tests.affected_tests(
+                    &RetrievalPortContext {
+                        request: context,
+                        operation: &self.tests_operation,
+                    },
+                    &AffectedTestsRequest {
+                        symbol,
+                        generation,
+                        meta,
+                    },
+                );
+                let (affected_tests, affected_tests_state) = match affected_tests_outcome(tests) {
+                    DirectAffectedTestsOutcome::Evidence { tests, state } => (tests, state),
+                    DirectAffectedTestsOutcome::Cancelled => {
+                        return FeedbackImpactPortOutcome::Cancelled;
+                    }
+                    DirectAffectedTestsOutcome::TimedOut => {
+                        return FeedbackImpactPortOutcome::TimedOut;
+                    }
+                    DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
+                };
 
-            // The impact is complete only when both the graph and the
-            // affected-test evidence report complete coverage.
-            // `evidence_anchors` stays empty because this runtime binds no
-            // anchor authority — the graph traversal yields nodes, not
-            // retrieval anchors — and an invented anchor would be worse than
-            // none.
-            let state = if graph_state == FeedbackImpactStateV1::Complete
-                && affected_tests_state == FeedbackImpactStateV1::Complete
-            {
-                FeedbackImpactStateV1::Complete
-            } else {
-                FeedbackImpactStateV1::Partial
-            };
-            let impact = FeedbackImpactV1 {
-                target: request.input.target.clone(),
-                affected_files,
-                affected_callers,
-                affected_tests,
-                evidence_anchors: Vec::new(),
-                state,
-                affected_tests_state,
-            };
-            if impact.validate().is_err() {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            match state {
-                FeedbackImpactStateV1::Complete => FeedbackImpactPortOutcome::Complete(impact),
-                FeedbackImpactStateV1::Partial => FeedbackImpactPortOutcome::Partial(impact),
-                FeedbackImpactStateV1::Stale | FeedbackImpactStateV1::Unavailable => {
-                    FeedbackImpactPortOutcome::Unavailable
+                // The impact is complete only when both the graph and the
+                // affected-test evidence report complete coverage.
+                // `evidence_anchors` stays empty because this runtime binds no
+                // anchor authority — the graph traversal yields nodes, not
+                // retrieval anchors — and an invented anchor would be worse than
+                // none.
+                let state = if graph_state == FeedbackImpactStateV1::Complete
+                    && affected_tests_state == FeedbackImpactStateV1::Complete
+                {
+                    FeedbackImpactStateV1::Complete
+                } else {
+                    FeedbackImpactStateV1::Partial
+                };
+                let impact = FeedbackImpactV1 {
+                    target: request.input.target.clone(),
+                    affected_files,
+                    affected_callers,
+                    affected_tests,
+                    evidence_anchors: Vec::new(),
+                    state,
+                    affected_tests_state,
+                };
+                if impact.validate().is_err() {
+                    return FeedbackImpactPortOutcome::Unavailable;
                 }
-            }
-        })
+                match state {
+                    FeedbackImpactStateV1::Complete => FeedbackImpactPortOutcome::Complete(impact),
+                    FeedbackImpactStateV1::Partial => FeedbackImpactPortOutcome::Partial(impact),
+                    FeedbackImpactStateV1::Stale | FeedbackImpactStateV1::Unavailable => {
+                        FeedbackImpactPortOutcome::Unavailable
+                    }
+                }
+            },
+            label = "usecases.feedback.impact"
+        ))
     }
 }
 

@@ -70,7 +70,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.diagnostics.for_generation", future = true)]
     async fn diagnostics_for_generation(
         &self,
         generation: &CodeGenerationId,
@@ -82,7 +82,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         Ok(records)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
     async fn current_diagnostics(
         &self,
         generation: &CodeGenerationId,
@@ -94,6 +94,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         Ok(records)
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.current_file", future = true)]
     async fn current_diagnostics_for_file(
         &self,
         generation: &CodeGenerationId,
@@ -113,7 +114,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.diagnostics.by_anchor", future = true)]
     async fn diagnostic_by_anchor(
         &self,
         anchor: &RetrievalAnchorId,

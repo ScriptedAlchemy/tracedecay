@@ -470,11 +470,14 @@ impl ProductionConfigurationDaemonClient {
     pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {
         let store = self.store.clone();
         let target = self.target.clone();
-        Box::pin(async move {
-            let current = super::ports::ConfigurationControlStore::current(&store).await?;
-            PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
-                .map_err(|_| ConfigurationError::Unavailable)
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                let current = super::ports::ConfigurationControlStore::current(&store).await?;
+                PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
+                    .map_err(|_| ConfigurationError::Unavailable)
+            },
+            label = "usecases.configuration.current"
+        ))
     }
 }
 

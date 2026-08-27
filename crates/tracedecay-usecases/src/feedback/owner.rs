@@ -344,6 +344,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "usecases.feedback.invoke", future = true)]
     async fn invoke_resolved(
         &self,
         operation: FeedbackReadOperationV1,

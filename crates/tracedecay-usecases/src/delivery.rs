@@ -460,6 +460,7 @@ pub fn gated_project_delivery_read_handle_v1(
     })
 }
 
+#[hotpath::measure(label = "usecases.delivery.open")]
 pub fn open_project_delivery_read_authority_v1(
     input: ProjectDeliveryReadOpenV1,
 ) -> ProjectDeliveryReadAuthorityOpenOutcomeV1 {
@@ -511,66 +512,74 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
         request: &'a ProjectDeliveryReadRequestV1,
         control: &'a GitHubReleaseReadControlV1,
     ) -> ProjectDeliveryReadFutureV1<'a> {
-        Box::pin(async move {
-            if !request.validate() || !context_matches_delivery_scope(context, &self.scope) {
-                return ProjectDeliveryReadOutcomeV1::Denied;
-            }
-            if context.admission_at(now_micros()) != RequestAdmission::Admitted {
-                return ProjectDeliveryReadOutcomeV1::Unavailable;
-            }
-            let (github_allowed, ci_allowed) = delivery_source_grants(context);
-            if !github_allowed && !ci_allowed {
-                return ProjectDeliveryReadOutcomeV1::Denied;
-            }
-            let github_read = async {
-                if github_allowed {
-                    let manifest = self
-                        .github_reviews
-                        .load_inventory_manifest(context, &self.scope)
-                        .await;
-                    self.github_source(context, request, manifest).await
-                } else {
-                    ProjectDeliveryGitHubSourceV1::Denied {
-                        timeline: empty_github_timeline(),
-                    }
+        Box::pin(hotpath::future!(
+            async move {
+                if !request.validate() || !context_matches_delivery_scope(context, &self.scope) {
+                    return ProjectDeliveryReadOutcomeV1::Denied;
                 }
-            };
-            let ci_read = async {
-                if ci_allowed {
-                    let manifest = self
-                        .ci_checks
-                        .load_inventory_manifest(context, &self.scope)
-                        .await;
-                    self.ci_source(context, request, manifest).await
-                } else {
-                    ProjectDeliveryCiSourceV1::Denied {
-                        timeline: empty_ci_timeline(),
-                    }
+                if context.admission_at(now_micros()) != RequestAdmission::Admitted {
+                    return ProjectDeliveryReadOutcomeV1::Unavailable;
                 }
-            };
-            let (github_reviews, ci_checks, releases) = tokio::join!(
-                github_read,
-                ci_read,
-                self.release_read(context, request.max_releases, control),
-            );
-            if context.admission_at(now_micros()) != RequestAdmission::Admitted {
-                return ProjectDeliveryReadOutcomeV1::Unavailable;
-            }
-            ProjectDeliveryReadOutcomeV1::Ready {
-                snapshot: Box::new(ProjectDeliverySnapshotV1 {
-                    scope: self.scope.clone(),
-                    expected_head_commit_id: request.expected_head_commit_id.clone(),
-                    github_reviews,
-                    ci_checks,
-                    failure_localization: ProjectDeliveryFailureLocalizationSourceV1::NotConfigured,
-                    releases,
-                }),
-            }
-        })
+                let (github_allowed, ci_allowed) = delivery_source_grants(context);
+                if !github_allowed && !ci_allowed {
+                    return ProjectDeliveryReadOutcomeV1::Denied;
+                }
+                let github_read = async {
+                    if github_allowed {
+                        let manifest = hotpath::future!(
+                            self.github_reviews
+                                .load_inventory_manifest(context, &self.scope),
+                            label = "usecases.delivery.github_manifest"
+                        )
+                        .await;
+                        self.github_source(context, request, manifest).await
+                    } else {
+                        ProjectDeliveryGitHubSourceV1::Denied {
+                            timeline: empty_github_timeline(),
+                        }
+                    }
+                };
+                let ci_read = async {
+                    if ci_allowed {
+                        let manifest = hotpath::future!(
+                            self.ci_checks.load_inventory_manifest(context, &self.scope),
+                            label = "usecases.delivery.ci_manifest"
+                        )
+                        .await;
+                        self.ci_source(context, request, manifest).await
+                    } else {
+                        ProjectDeliveryCiSourceV1::Denied {
+                            timeline: empty_ci_timeline(),
+                        }
+                    }
+                };
+                let (github_reviews, ci_checks, releases) = tokio::join!(
+                    github_read,
+                    ci_read,
+                    self.release_read(context, request.max_releases, control),
+                );
+                if context.admission_at(now_micros()) != RequestAdmission::Admitted {
+                    return ProjectDeliveryReadOutcomeV1::Unavailable;
+                }
+                ProjectDeliveryReadOutcomeV1::Ready {
+                    snapshot: Box::new(ProjectDeliverySnapshotV1 {
+                        scope: self.scope.clone(),
+                        expected_head_commit_id: request.expected_head_commit_id.clone(),
+                        github_reviews,
+                        ci_checks,
+                        failure_localization:
+                            ProjectDeliveryFailureLocalizationSourceV1::NotConfigured,
+                        releases,
+                    }),
+                }
+            },
+            label = "usecases.delivery.read"
+        ))
     }
 }
 
 impl ProjectDeliveryReadAuthorityV1 {
+    #[hotpath::measure(label = "usecases.delivery.github_source", future = true)]
     async fn github_source(
         &self,
         context: &RequestContext,
@@ -754,6 +763,7 @@ impl ProjectDeliveryReadAuthorityV1 {
     /// Expands bounded sanitized body previews through the canonical
     /// body-evidence authority. Every non-expanded state stays typed as an
     /// absent preview beside the always-served body digest and anchor.
+    #[hotpath::measure(label = "usecases.delivery.hydrate_bodies", future = true)]
     async fn hydrate_review_body_previews(
         &self,
         context: &RequestContext,
@@ -805,6 +815,7 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.delivery.ci_source", future = true)]
     async fn ci_source(
         &self,
         context: &RequestContext,
@@ -904,6 +915,7 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.delivery.release_read", future = true)]
     async fn release_read(
         &self,
         context: &RequestContext,
@@ -933,7 +945,11 @@ impl ProjectDeliveryReadAuthorityV1 {
             repository_id: self.scope.repository_id.clone(),
             max_releases,
         };
-        let outcome = tokio::task::spawn_blocking(move || authority.read(&request, &control)).await;
+        let outcome = hotpath::future!(
+            tokio::task::spawn_blocking(move || authority.read(&request, &control)),
+            label = "usecases.delivery.release_blocking"
+        )
+        .await;
         if !crate::advisory::context_allows_feedback_operation(
             context,
             &self.scope,

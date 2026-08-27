@@ -365,6 +365,7 @@ fn wall_clock_micros() -> i64 {
 /// digest. Unlike the compatibility composition, this binds request budgets
 /// and the live cancellation token identity so a supplemental session binding
 /// cannot widen either after admission.
+#[hotpath::measure(label = "usecases.context.session_grant")]
 pub fn session_application_grant_digest(
     capability: CapabilityDigest,
     policy: PolicyDigest,
@@ -418,6 +419,7 @@ pub fn application_request_interruption(
 
 /// Runs one awaitable application step against the exact immutable deadline
 /// and the live cancellation token owned by the transport/runtime boundary.
+#[hotpath::measure(label = "usecases.context.interruptible", future = true)]
 pub async fn run_application_request_interruptible<T, F>(
     context: &tracedecay_application::RequestContext,
     cancellation: &CancellationToken,

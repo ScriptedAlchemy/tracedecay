@@ -293,6 +293,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
 
     /// Current repository status summary with per-class counts and a bounded
     /// changed-path sample.
+    #[hotpath::measure(label = "usecases.git.status_summary")]
     pub fn status_summary(
         &self,
         bounds: &GitQueryBounds,
@@ -331,6 +332,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
 
     /// Scoped diff (working tree, staged, or commit range), entry-bounded at
     /// the file level.
+    #[hotpath::measure(label = "usecases.git.scoped_diff")]
     pub fn scoped_diff(
         &self,
         bounds: &GitQueryBounds,
@@ -353,6 +355,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     /// bound and the adapter's hard limit before the walk, so no query walks
     /// unbounded history. Adapter-reported truncation surfaces as
     /// `truncated_by_bound` plus the adapter's own `TruncatedOutput` coverage.
+    #[hotpath::measure(label = "usecases.git.bounded_history")]
     pub fn bounded_history(
         &self,
         bounds: &GitQueryBounds,
@@ -379,6 +382,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     /// Path blame, entry-bounded at the line level. Truncation keeps the
     /// domain ordering invariant (lines are strictly increasing) and records
     /// `TruncatedOutput` in the envelope coverage.
+    #[hotpath::measure(label = "usecases.git.path_blame")]
     pub fn path_blame(
         &self,
         bounds: &GitQueryBounds,
@@ -401,6 +405,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     /// at the reference level. Range diffs fail truthfully; per-file
     /// read-only kinds remain visible through the paired typed diff and do
     /// not suppress safe text refs.
+    #[hotpath::measure(label = "usecases.git.hunk_refs")]
     pub fn hunk_refs(
         &self,
         bounds: &GitQueryBounds,
@@ -422,6 +427,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
 
     /// Fresh git-side revision evidence: HEAD state and oid plus the
     /// query-layer worktree digest over status and worktree-diff identity.
+    #[hotpath::measure(label = "usecases.git.revision_evidence")]
     pub fn revision_evidence(
         &self,
         bounds: &GitQueryBounds,

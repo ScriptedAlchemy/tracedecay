@@ -191,7 +191,7 @@ where
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "usecases.session.task_session")]
+    #[hotpath::measure(label = "usecases.session.task_session", future = true)]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,
@@ -222,15 +222,12 @@ where
             Ok(request) => request,
             Err(error) => return map_task_session_callback_error(error),
         };
-        let Ok(result) = hotpath::future!(
-            run_application_request_interruptible(
-                context,
-                session_binding.cancellation(),
-                self.execution
-                    .execute_task_session(request, selector, &self.estimator),
-                || admitted.cancellation_control.cancel(),
-            ),
-            label = "usecases.session.task_session.execute"
+        let Ok(result) = run_application_request_interruptible(
+            context,
+            session_binding.cancellation(),
+            self.execution
+                .execute_task_session(request, selector, &self.estimator),
+            || admitted.cancellation_control.cancel(),
         )
         .await
         else {

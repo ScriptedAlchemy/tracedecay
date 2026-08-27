@@ -136,7 +136,7 @@ impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
 }
 
 impl<A: FactStore> MemoryApplication<A> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.memory.commit", future = true)]
     pub async fn commit_fact(
         &self,
         batch: FactWriteBatch,
@@ -150,6 +150,7 @@ impl<A: FactStore> MemoryApplication<A> {
             .map_err(store_error)
     }
 
+    #[hotpath::measure(label = "usecases.memory.query.current", future = true)]
     pub async fn query_current_facts(
         &self,
         query: CurrentFactsQuery,
@@ -168,6 +169,7 @@ impl<A: FactStore> MemoryApplication<A> {
             .map_err(store_error)
     }
 
+    #[hotpath::measure(label = "usecases.memory.query.as_of", future = true)]
     pub async fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
@@ -182,6 +184,7 @@ impl<A: FactStore> MemoryApplication<A> {
         Ok(result.into_payload())
     }
 
+    #[hotpath::measure(label = "usecases.memory.query.fact", future = true)]
     pub async fn query_fact_current(
         &self,
         query: FactCurrentQuery,
@@ -195,6 +198,7 @@ impl<A: FactStore> MemoryApplication<A> {
         Ok(result.into_payload())
     }
 
+    #[hotpath::measure(label = "usecases.memory.query.lineage", future = true)]
     pub async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
@@ -214,6 +218,7 @@ impl<A: FactStore> MemoryApplication<A> {
         Ok(result.into_payload())
     }
 
+    #[hotpath::measure(label = "usecases.memory.anchor.get", future = true)]
     pub async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,

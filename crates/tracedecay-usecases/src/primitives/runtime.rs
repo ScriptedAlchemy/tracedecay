@@ -425,39 +425,42 @@ impl PrimitiveDispatch for OwnedPrimitiveRuntime {
         deadline: Deadline,
         cancellation: CancellationContext,
     ) -> PrimitiveTransportDispatchFuture<'_> {
-        Box::pin(async move {
-            if let Some(problem) = pre_admission_problem(
-                &request_id,
-                &operation,
-                observed_at,
-                &deadline,
-                &cancellation,
-            )? {
-                return Ok(Err(problem));
-            }
-            if observed_at >= self.access.grant_expires_at {
-                return Ok(Err(ApplicationProblemEnvelope::new(
-                    operation.result_contract().clone(),
+        Box::pin(hotpath::future!(
+            async move {
+                if let Some(problem) = pre_admission_problem(
+                    &request_id,
+                    &operation,
+                    observed_at,
+                    &deadline,
+                    &cancellation,
+                )? {
+                    return Ok(Err(problem));
+                }
+                if observed_at >= self.access.grant_expires_at {
+                    return Ok(Err(ApplicationProblemEnvelope::new(
+                        operation.result_contract().clone(),
+                        request_id,
+                        ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+                    )?));
+                }
+                let context = transport_context(
+                    &self.scope,
+                    &self.access,
                     request_id,
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )?));
-            }
-            let context = transport_context(
-                &self.scope,
-                &self.access,
-                request_id,
-                &operation,
-                observed_at,
-                deadline,
-                cancellation,
-            )?;
-            self.dispatch_invocation(
-                PrimitiveInvocation { operation, request },
-                context,
-                observed_at,
-            )
-            .await
-        })
+                    &operation,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )?;
+                self.dispatch_invocation(
+                    PrimitiveInvocation { operation, request },
+                    context,
+                    observed_at,
+                )
+                .await
+            },
+            label = "usecases.primitives.dispatch"
+        ))
     }
 }
 
@@ -468,21 +471,24 @@ impl OwnedPrimitiveRuntime {
         context: RequestContext,
         observed_at: UtcMicros,
     ) -> PrimitiveDispatchFuture<'_> {
-        Box::pin(async move {
-            if let Some(problem) = admission_problem(
-                &self.scope,
-                &self.access,
-                &context,
-                &invocation.operation,
-                observed_at,
-            )? {
-                return Ok(Err(problem));
-            }
-            let Some(_permit) = self.capacity.try_acquire() else {
-                return saturated(&context, &invocation.operation);
-            };
-            dispatch_admitted(self, invocation, context, observed_at).await
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                if let Some(problem) = admission_problem(
+                    &self.scope,
+                    &self.access,
+                    &context,
+                    &invocation.operation,
+                    observed_at,
+                )? {
+                    return Ok(Err(problem));
+                }
+                let Some(_permit) = self.capacity.try_acquire() else {
+                    return saturated(&context, &invocation.operation);
+                };
+                dispatch_admitted(self, invocation, context, observed_at).await
+            },
+            label = "usecases.primitives.execute"
+        ))
     }
 }
 
@@ -549,6 +555,7 @@ fn transport_context(
 /// runtime.
 ///
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "usecases.primitives.open_runtime")]
 pub fn open_primitive_project_runtime(
     database: Database,
     source_runtime: Arc<crate::tracedecay::SourceReadRuntime>,
@@ -645,6 +652,7 @@ fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), Application
     Ok(())
 }
 
+#[hotpath::measure(label = "usecases.primitives.admit")]
 fn admission_problem(
     scope: &ResolvedScope,
     access: &ProjectSourceAccessSnapshot,
@@ -686,6 +694,7 @@ fn admission_problem(
     Ok(None)
 }
 
+#[hotpath::measure(label = "usecases.primitives.admitted", future = true)]
 async fn dispatch_admitted(
     runtime: &OwnedPrimitiveRuntime,
     invocation: PrimitiveInvocation,
@@ -1048,6 +1057,7 @@ fn retrieval_context<'a>(
     }
 }
 
+#[hotpath::measure(label = "usecases.primitives.retrieval_outcome")]
 fn retrieval_outcome<T: Serialize>(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
@@ -1475,6 +1485,7 @@ impl std::io::Write for CountingSink {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "usecases.primitives.evidence")]
 fn evidence_result(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
@@ -1567,6 +1578,7 @@ fn evidence_result(
     )))
 }
 
+#[hotpath::measure(label = "usecases.primitives.recent_test_results", future = true)]
 async fn recent_test_results(
     runtime: &OwnedPrimitiveRuntime,
     context: &RequestContext,

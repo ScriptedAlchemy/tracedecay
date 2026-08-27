@@ -498,7 +498,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(Some(SemanticVectorVerifiedReadV1::new(snapshot)))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.begin_generation", future = true)]
     pub async fn begin_generation(
         &self,
         plan: VectorGenerationPlanV1,
@@ -507,7 +507,7 @@ impl GraphVectorGenerationStoreV1 {
         self.begin_generation_records(plan, false, cancellation)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.rebuild_generation", future = true)]
     pub async fn rebuild_generation(
         &self,
         plan: VectorGenerationPlanV1,
@@ -516,7 +516,7 @@ impl GraphVectorGenerationStoreV1 {
         self.begin_generation_records(plan, true, cancellation)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.cancel_generation", future = true)]
     pub async fn cancel_generation(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -525,7 +525,7 @@ impl GraphVectorGenerationStoreV1 {
         self.cancel_generation_records(build_id, cancellation)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.commit_batch", future = true)]
     pub async fn commit_batch(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -536,7 +536,7 @@ impl GraphVectorGenerationStoreV1 {
         self.commit_batch_records(build_id, expected_checkpoint, prepared, cancellation)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.publish_generation", future = true)]
     pub async fn publish_generation(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -619,7 +619,7 @@ impl GraphVectorGenerationStoreV1 {
         read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.resident_plan", future = true)]
     pub async fn verified_resident_plan(
         &self,
         expected_generation: &VectorGenerationIdV1,

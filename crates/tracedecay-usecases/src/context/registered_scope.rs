@@ -12,6 +12,7 @@ use super::ApplicationScopeError;
 pub struct RegisteredScopeResolver;
 
 impl RegisteredScopeResolver {
+    #[hotpath::measure(label = "usecases.context.registered_scope")]
     pub fn resolve(
         registered_root: &Path,
         requested_root: &Path,

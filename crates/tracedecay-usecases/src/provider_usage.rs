@@ -271,6 +271,7 @@ impl ProviderUsageScanV1 {
 /// Walks one pinned provider-usage snapshot to exhaustion. Pagination and
 /// truncation semantics live here so HTTP, MCP, hooks, and CLI cannot each
 /// implement a subtly different bounded scan.
+#[hotpath::measure(label = "usecases.provider_usage.aggregate", future = true)]
 pub async fn provider_usage_aggregate(
     db: &RegisteredGlobalDb,
     scope: &ObservationScopeV1,

@@ -24,6 +24,7 @@ use super::records::{
 };
 use super::verify::{application_contract_error, application_problem, config_error};
 
+#[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
@@ -225,6 +226,7 @@ fn reconcile_prepared_source_edit(
     reconcile_prepared_source_edit_controlled(durability, project_root, operation, request, None)
 }
 
+#[hotpath::measure(label = "usecases.edit.reconcile_prepared")]
 fn reconcile_prepared_source_edit_controlled(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -324,6 +326,7 @@ fn reconcile_prepared_source_edit_controlled(
     Ok(result)
 }
 
+#[hotpath::measure(label = "usecases.edit.recover", future = true)]
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
@@ -377,9 +380,11 @@ pub(super) async fn recover_source_edit_transaction(
     //     ever populated alongside `predicted_state` (see `execute.rs`), so a
     //     present predicted state is guaranteed here.
     if journal.predicted_state.as_ref() == Some(&observed_state) {
-        graph
-            .commit_source_edit_postimages(&journal.recovery_files)
-            .await?;
+        hotpath::future!(
+            graph.commit_source_edit_postimages(&journal.recovery_files),
+            label = "usecases.edit.recover.commit"
+        )
+        .await?;
         let outcome = SourceEditOutcome::Reconciled {
             success: true,
             message: "source edit crash recovery confirmed the edit already committed to disk"
@@ -409,9 +414,11 @@ pub(super) async fn recover_source_edit_transaction(
              are being discarded"
         );
     }
-    graph
-        .recover_source_edit_preimages(&journal.recovery_files)
-        .await?;
+    hotpath::future!(
+        graph.recover_source_edit_preimages(&journal.recovery_files),
+        label = "usecases.edit.recover.preimage"
+    )
+    .await?;
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if restored_state != journal.expected_state {
         return Err(config_error(
@@ -437,6 +444,7 @@ pub(super) async fn recover_source_edit_transaction(
     durability.clear_journal()
 }
 
+#[hotpath::measure(label = "usecases.edit.replay")]
 pub(super) fn recover_or_replay(
     durability: &SourceEditDurability,
     request: &SourceEditEffectRequestV1,

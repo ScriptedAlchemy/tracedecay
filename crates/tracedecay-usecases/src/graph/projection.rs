@@ -172,6 +172,7 @@ impl VerifiedCodeGraphRead {
         self.reader_with_cancellation(context, observed_at, request_graph_cancellation(context))
     }
 
+    #[hotpath::measure(label = "usecases.graph.reader")]
     pub fn reader_with_cancellation(
         &self,
         context: &RequestContext,

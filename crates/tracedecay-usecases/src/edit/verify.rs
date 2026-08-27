@@ -5,11 +5,17 @@ use tracedecay_application::{
 use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::TraceDecayError;
 
+#[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
 async fn run_edit_verification(
     graph: &SourceEditRuntime,
     file_path: &str,
 ) -> SourceEditVerificationV1 {
-    let diagnostics = match graph.run_diagnostics(file_path).await {
+    let diagnostics = match hotpath::future!(
+        graph.run_diagnostics(file_path),
+        label = "usecases.edit.verify.diagnostics"
+    )
+    .await
+    {
         Ok(diagnostics) => diagnostics,
         Err(error) => return failed_edit_verification(error),
     };
@@ -50,6 +56,7 @@ async fn run_edit_verification(
     }
 }
 
+#[hotpath::measure(label = "usecases.edit.verify", future = true)]
 pub(super) async fn run_edit_verifications(
     graph: &SourceEditRuntime,
     file_paths: &[String],

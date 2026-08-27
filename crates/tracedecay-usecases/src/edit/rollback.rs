@@ -130,6 +130,7 @@ fn persist_pre_effect(
     Ok(record.into_live_application_result(outcome, None))
 }
 
+#[hotpath::measure(label = "usecases.edit.rollback", future = true)]
 pub(super) async fn execute_source_edit_rollback_inner<A>(
     graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
@@ -316,9 +317,11 @@ where
         return Ok(record.into_live_application_result(outcome, None));
     }
 
-    let apply_result = graph
-        .apply_source_edit_rollback(&retained.recovery_files)
-        .await;
+    let apply_result = hotpath::future!(
+        graph.apply_source_edit_rollback(&retained.recovery_files),
+        label = "usecases.edit.rollback.apply"
+    )
+    .await;
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if apply_result.is_err() || committed_state != retained.expected_state {
         if committed_state != journal.expected_state {

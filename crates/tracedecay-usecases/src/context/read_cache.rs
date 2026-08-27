@@ -54,6 +54,7 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 /// cache was written) is reported as a miss; the caller is expected to
 /// recompute and `put` a fresh row, which replaces the stale one via the
 /// primary-key `INSERT OR REPLACE`.
+#[hotpath::measure(label = "usecases.context.read_cache.get", future = true)]
 pub async fn get(
     conn: &impl QueryExecutor,
     project_id: &str,
@@ -133,6 +134,7 @@ pub(crate) struct ReadCacheWrite<'a> {
     clippy::too_many_arguments,
     reason = "preserves the public read-cache API"
 )]
+#[hotpath::measure(label = "usecases.context.read_cache.put", future = true)]
 pub async fn put(
     db: &Database,
     project_id: &str,

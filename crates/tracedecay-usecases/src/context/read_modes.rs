@@ -77,6 +77,7 @@ pub fn render_lines(source: &str, range: LineRange) -> String {
     }
 }
 
+#[hotpath::measure(label = "usecases.context.render_map")]
 pub fn render_map(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -94,6 +95,7 @@ pub fn render_map(
 /// and keeps the symbols that declare one. Symbols whose extractor publishes no
 /// signature are counted in `without_signature` rather than emitted with a null
 /// signature, so an empty `symbols` list is never mistaken for an empty file.
+#[hotpath::measure(label = "usecases.context.render_signatures")]
 pub fn render_signatures(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -111,6 +113,7 @@ pub fn render_signatures(
 /// overlapping that range and the range is echoed back. When no selected symbol
 /// carries a usable span the call degrades to the whole-file list with a null
 /// `range` and an explanatory `note` instead of erroring.
+#[hotpath::measure(label = "usecases.context.render_symbol_context")]
 pub fn render_symbol_context(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,

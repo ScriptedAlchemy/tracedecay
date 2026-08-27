@@ -48,147 +48,152 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a AstGrepRequestV1,
     ) -> PrimitiveFutureV1<'a, AstGrepResultV1> {
-        Box::pin(async move {
-            if request.window.cursor.is_some() {
-                return unsupported_compatibility_cursor();
-            }
-            let project_root = self.source_runtime.project_root().to_path_buf();
-            let pattern = request.pattern.clone();
-            let lang = request.lang.clone();
-            let path_glob = request.path_glob.clone();
-            let max_results = request.window.limit as usize;
-            let scope_prefix = context.scope_prefix.map(str::to_owned);
-            let search = match super::support::run_bounded_source_search(
-                context.request.deadline(),
-                context.request.cancellation(),
-                move |cancelled| {
-                    search_tree_scoped_with_cancel(
-                        &project_root,
-                        &pattern,
-                        lang.as_deref(),
-                        path_glob.as_deref(),
-                        max_results,
-                        scope_prefix.as_deref(),
-                        || cancelled.load(std::sync::atomic::Ordering::Acquire),
-                    )
-                },
-            )
-            .await
-            {
-                super::support::BoundedSourceSearch::Completed(Ok(search)) if !search.cancelled => {
-                    search
+        Box::pin(hotpath::future!(
+            async move {
+                if request.window.cursor.is_some() {
+                    return unsupported_compatibility_cursor();
                 }
-                super::support::BoundedSourceSearch::Completed(Ok(_))
-                | super::support::BoundedSourceSearch::Cancelled => {
-                    return PrimitiveOutcomeV1::Cancelled;
-                }
-                super::support::BoundedSourceSearch::Completed(Err(error)) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-                super::support::BoundedSourceSearch::TimedOut => {
-                    return PrimitiveOutcomeV1::TimedOut;
-                }
-                super::support::BoundedSourceSearch::WorkerFailed => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        "AST grep worker failed".to_owned(),
-                    ));
-                }
-            };
-
-            if context.request.cancellation().is_cancelled() {
-                return PrimitiveOutcomeV1::Cancelled;
-            }
-
-            let graph_cancellation = crate::graph::request_graph_cancellation(context.request);
-            let verified = match self
-                .code_graph
-                .open(crate::graph::CodeGraphReadRequest::new(
-                    context.request,
-                    context.observed_at,
-                    Arc::clone(&graph_cancellation),
-                ))
+                let project_root = self.source_runtime.project_root().to_path_buf();
+                let pattern = request.pattern.clone();
+                let lang = request.lang.clone();
+                let path_glob = request.path_glob.clone();
+                let max_results = request.window.limit as usize;
+                let scope_prefix = context.scope_prefix.map(str::to_owned);
+                let search = match super::support::run_bounded_source_search(
+                    context.request.deadline(),
+                    context.request.cancellation(),
+                    move |cancelled| {
+                        search_tree_scoped_with_cancel(
+                            &project_root,
+                            &pattern,
+                            lang.as_deref(),
+                            path_glob.as_deref(),
+                            max_results,
+                            scope_prefix.as_deref(),
+                            || cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        )
+                    },
+                )
                 .await
-            {
-                Ok(verified) => verified,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-            };
-            let reader = match verified.reader_with_cancellation(
-                context.request,
-                context.observed_at,
-                Arc::clone(&graph_cancellation),
-            ) {
-                Ok(reader) => reader,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-            };
-            let files_scanned = count(search.files_scanned);
-            let truncated = search.truncated;
-            let mut incomplete_symbol_evidence = false;
-            let mut matches = Vec::with_capacity(search.matches.len());
-            for item in search.matches {
+                {
+                    super::support::BoundedSourceSearch::Completed(Ok(search))
+                        if !search.cancelled =>
+                    {
+                        search
+                    }
+                    super::support::BoundedSourceSearch::Completed(Ok(_))
+                    | super::support::BoundedSourceSearch::Cancelled => {
+                        return PrimitiveOutcomeV1::Cancelled;
+                    }
+                    super::support::BoundedSourceSearch::Completed(Err(error)) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
+                    }
+                    super::support::BoundedSourceSearch::TimedOut => {
+                        return PrimitiveOutcomeV1::TimedOut;
+                    }
+                    super::support::BoundedSourceSearch::WorkerFailed => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            "AST grep worker failed".to_owned(),
+                        ));
+                    }
+                };
+
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = match symbol_at_location(
-                    &reader,
-                    Arc::clone(&graph_cancellation),
-                    &item.file,
-                    item.line,
-                ) {
-                    Ok(enclosing) => enclosing,
-                    Err(()) => {
-                        incomplete_symbol_evidence = true;
-                        None
+
+                let graph_cancellation = crate::graph::request_graph_cancellation(context.request);
+                let verified = match self
+                    .code_graph
+                    .open(crate::graph::CodeGraphReadRequest::new(
+                        context.request,
+                        context.observed_at,
+                        Arc::clone(&graph_cancellation),
+                    ))
+                    .await
+                {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
                     }
                 };
-                matches.push(AstGrepHitV1 {
-                    file: item.file,
-                    line: item.line,
-                    column: item.column,
-                    lang: item.lang,
-                    matched_text: item.matched_text,
-                    line_text: item.line_text,
-                    symbol: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.simple_name.clone()),
-                    node_id: enclosing
-                        .as_ref()
-                        .map(|node| node.occurrence.as_str().to_owned()),
-                    kind: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.kind.clone()),
-                });
-            }
+                let reader = match verified.reader_with_cancellation(
+                    context.request,
+                    context.observed_at,
+                    Arc::clone(&graph_cancellation),
+                ) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let files_scanned = count(search.files_scanned);
+                let truncated = search.truncated;
+                let mut incomplete_symbol_evidence = false;
+                let mut matches = Vec::with_capacity(search.matches.len());
+                for item in search.matches {
+                    if context.request.cancellation().is_cancelled() {
+                        return PrimitiveOutcomeV1::Cancelled;
+                    }
+                    let enclosing = match symbol_at_location(
+                        &reader,
+                        Arc::clone(&graph_cancellation),
+                        &item.file,
+                        item.line,
+                    ) {
+                        Ok(enclosing) => enclosing,
+                        Err(()) => {
+                            incomplete_symbol_evidence = true;
+                            None
+                        }
+                    };
+                    matches.push(AstGrepHitV1 {
+                        file: item.file,
+                        line: item.line,
+                        column: item.column,
+                        lang: item.lang,
+                        matched_text: item.matched_text,
+                        line_text: item.line_text,
+                        symbol: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.simple_name.clone()),
+                        node_id: enclosing
+                            .as_ref()
+                            .map(|node| node.occurrence.as_str().to_owned()),
+                        kind: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.kind.clone()),
+                    });
+                }
 
-            let returned = count(matches.len());
-            let partial = truncated || incomplete_symbol_evidence;
-            let page = PrimitivePageV1 {
-                payload: AstGrepResultV1 {
-                    matches,
-                    truncated,
-                    files_scanned,
-                },
-                coverage: coverage(files_scanned, returned, partial),
-                continuation: None,
-                finished_at: context.observed_at,
-            };
-            if partial {
-                PrimitiveOutcomeV1::Partial(page)
-            } else {
-                PrimitiveOutcomeV1::Completed(page)
-            }
-        })
+                let returned = count(matches.len());
+                let partial = truncated || incomplete_symbol_evidence;
+                let page = PrimitivePageV1 {
+                    payload: AstGrepResultV1 {
+                        matches,
+                        truncated,
+                        files_scanned,
+                    },
+                    coverage: coverage(files_scanned, returned, partial),
+                    continuation: None,
+                    finished_at: context.observed_at,
+                };
+                if partial {
+                    PrimitiveOutcomeV1::Partial(page)
+                } else {
+                    PrimitiveOutcomeV1::Completed(page)
+                }
+            },
+            label = "usecases.primitives.ast_grep"
+        ))
     }
 }
 
@@ -208,20 +213,24 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a ComplexityRequestV1,
     ) -> PrimitiveFutureV1<'a, ComplexityResultV1> {
-        Box::pin(async move {
-            if request.window.cursor.is_some() {
-                return unsupported_compatibility_cursor();
-            }
-            let path = match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
-                Ok(path) => path,
-                Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
-            };
-            let _ = (&self.code_graph, path);
-            PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+        Box::pin(hotpath::future!(
+            async move {
+                if request.window.cursor.is_some() {
+                    return unsupported_compatibility_cursor();
+                }
+                let path =
+                    match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
+                        Ok(path) => path,
+                        Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
+                    };
+                let _ = (&self.code_graph, path);
+                PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                 "the verified graph generation does not publish the full complexity metric contract"
                     .to_owned(),
             ))
-        })
+            },
+            label = "usecases.primitives.complexity"
+        ))
     }
 }
 
@@ -241,81 +250,85 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a DependencyDepthRequestV1,
     ) -> PrimitiveFutureV1<'a, DependencyDepthResultV1> {
-        Box::pin(async move {
-            if request.window.cursor.is_some() {
-                return unsupported_compatibility_cursor();
-            }
-            let path = match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
-                Ok(path) => path,
-                Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
-            };
-            let cancellation = crate::graph::request_graph_cancellation(context.request);
-            let verified = match self
-                .code_graph
-                .open(crate::graph::CodeGraphReadRequest::new(
+        Box::pin(hotpath::future!(
+            async move {
+                if request.window.cursor.is_some() {
+                    return unsupported_compatibility_cursor();
+                }
+                let path =
+                    match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
+                        Ok(path) => path,
+                        Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
+                    };
+                let cancellation = crate::graph::request_graph_cancellation(context.request);
+                let verified = match self
+                    .code_graph
+                    .open(crate::graph::CodeGraphReadRequest::new(
+                        context.request,
+                        context.observed_at,
+                        Arc::clone(&cancellation),
+                    ))
+                    .await
+                {
+                    Ok(read) => read,
+                    Err(error) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let reader = match verified.reader_with_cancellation(
                     context.request,
                     context.observed_at,
                     Arc::clone(&cancellation),
-                ))
-                .await
-            {
-                Ok(read) => read,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
+                ) {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let adjacency = match GraphQueryManager::new(&reader, cancellation)
+                    .build_file_adjacency(path.as_deref())
+                    .await
+                {
+                    Ok(adjacency) => adjacency,
+                    Err(error) => {
+                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                if context.request.cancellation().is_cancelled() {
+                    return PrimitiveOutcomeV1::Cancelled;
                 }
-            };
-            let reader = match verified.reader_with_cancellation(
-                context.request,
-                context.observed_at,
-                Arc::clone(&cancellation),
-            ) {
-                Ok(reader) => reader,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-            };
-            let adjacency = match GraphQueryManager::new(&reader, cancellation)
-                .build_file_adjacency(path.as_deref())
-                .await
-            {
-                Ok(adjacency) => adjacency,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-            };
-            if context.request.cancellation().is_cancelled() {
-                return PrimitiveOutcomeV1::Cancelled;
-            }
 
-            let result = dependency_depth(&adjacency, request.window.limit as usize);
-            let chains = result
-                .chains
-                .into_iter()
-                .map(|chain| DependencyDepthChainV1 {
-                    file: chain.file,
-                    depth: count(chain.depth),
-                    chain: chain.chain,
+                let result = dependency_depth(&adjacency, request.window.limit as usize);
+                let chains = result
+                    .chains
+                    .into_iter()
+                    .map(|chain| DependencyDepthChainV1 {
+                        file: chain.file,
+                        depth: count(chain.depth),
+                        chain: chain.chain,
+                    })
+                    .collect::<Vec<_>>();
+                let returned = count(chains.len());
+                PrimitiveOutcomeV1::Completed(PrimitivePageV1 {
+                    payload: DependencyDepthResultV1 {
+                        max_depth: count(result.max_depth),
+                        ideal_depth: count(result.ideal_depth),
+                        depth_score: round4(depth_score(result.max_depth, result.ideal_depth)),
+                        chains,
+                    },
+                    coverage: coverage(count(adjacency.len()), returned, false),
+                    continuation: None,
+                    finished_at: context.observed_at,
                 })
-                .collect::<Vec<_>>();
-            let returned = count(chains.len());
-            PrimitiveOutcomeV1::Completed(PrimitivePageV1 {
-                payload: DependencyDepthResultV1 {
-                    max_depth: count(result.max_depth),
-                    ideal_depth: count(result.ideal_depth),
-                    depth_score: round4(depth_score(result.max_depth, result.ideal_depth)),
-                    chains,
-                },
-                coverage: coverage(count(adjacency.len()), returned, false),
-                continuation: None,
-                finished_at: context.observed_at,
-            })
-        })
+            },
+            label = "usecases.primitives.dependency_depth"
+        ))
     }
 }
 

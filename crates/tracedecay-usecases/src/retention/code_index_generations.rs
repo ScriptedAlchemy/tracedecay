@@ -653,7 +653,6 @@ pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
 
 /// Plan retention with full digest verification. This is the only planner a
 /// collection may be built from.
-#[hotpath::measure]
 pub fn plan_code_generation_retention(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -672,7 +671,6 @@ pub fn plan_code_generation_retention(
 /// Observability callers pass [`GenerationDigestVerificationV1::MetadataOnly`]:
 /// the counts, byte totals, and collectable set are identical, but no
 /// multi-gigabyte file is re-hashed to produce them.
-#[hotpath::measure]
 pub fn plan_code_generation_retention_with_verification(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -688,7 +686,7 @@ pub fn plan_code_generation_retention_with_verification(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.plan_next")]
 pub fn plan_next_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -713,7 +711,7 @@ pub fn plan_next_code_generation_retention_cancellable(
 /// writer transaction. Full verification checks `is_cancelled` between bounded
 /// read chunks, so shutdown never waits for every byte in a multi-GiB store
 /// while that transaction is held.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.prepare")]
 pub fn prepare_next_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -753,7 +751,7 @@ pub fn prepare_next_code_generation_retention_cancellable(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.plan")]
 fn plan_code_generation_retention_with_verification_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1230,7 +1228,6 @@ fn verify_unreferenced_completed_text_artifact(
 /// until the graph projection durably confirms it is no longer needed (the
 /// replay release queue's existing contract); `None` deletes retired files
 /// outright and is only sound for stores with no graph projection.
-#[hotpath::measure]
 pub fn execute_code_generation_retention(
     store_root: &Path,
     plan: CodeGenerationRetentionPlanV1,
@@ -1256,7 +1253,7 @@ pub fn execute_code_generation_retention(
 /// shutdown must be able to stop that full-file read before any candidate is
 /// renamed or any deletion receipt is published. Existing callers retain the
 /// non-cancellable wrapper above until their control path is wired through.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.execute")]
 pub fn execute_code_generation_retention_cancellable(
     store_root: &Path,
     plan: CodeGenerationRetentionPlanV1,
@@ -1429,7 +1426,7 @@ fn recover_code_generation_retention(
 /// a successful maintenance pass. Recovery is journaled, so a cancellation
 /// before either transaction family starts leaves the durable journal for the
 /// next attempt rather than clearing partial evidence.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.recover")]
 fn recover_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1457,7 +1454,6 @@ fn recover_code_generation_retention_cancellable(
     Ok(())
 }
 
-#[hotpath::measure]
 pub fn run_code_generation_retention(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1480,7 +1476,7 @@ pub fn run_code_generation_retention(
 /// Plan, recover, and apply with one cancellation authority. The old wrapper
 /// preserves current callers while daemon maintenance is integrated with this
 /// control boundary.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.run")]
 fn run_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1530,7 +1526,7 @@ fn run_code_generation_retention_cancellable(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.observe")]
 pub fn observe_code_generation_retention(
     store_root: &Path,
 ) -> Result<CodeGenerationRetentionObservationV1, CodeGenerationRetentionErrorV1> {
@@ -2191,7 +2187,7 @@ fn receipt_is_durable(
     Ok(true)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.stage")]
 fn stage_collectable_generations(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
@@ -2596,7 +2592,6 @@ fn open_file_sha256_hex(file: &File) -> Result<String, CodeGenerationRetentionEr
     open_file_sha256_hex_cancellable(file, &|| false)
 }
 
-#[hotpath::measure]
 fn open_file_sha256_hex_cancellable(
     file: &File,
     is_cancelled: &dyn Fn() -> bool,
@@ -3445,7 +3440,7 @@ pub struct ScopeRootRetentionReportV1 {
 /// This API never seals an Apply-capable plan. Production collection uses
 /// [`plan_scope_root_retention_with_liveness_proof`] after the canonical
 /// authorities have produced a complete revision-bound receipt.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.plan_scope")]
 pub fn plan_scope_root_retention(
     store_root: &Path,
     live_canonical_roots: &BTreeSet<PathBuf>,
@@ -3588,7 +3583,7 @@ fn plan_scope_root_retention_from_hashes(
 /// Collect the one stranded scope whose exact semantic binding-cleanup intent
 /// was durably recorded, under the journal → quarantine → durable receipt →
 /// unlink ordering generation retention uses.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.execute_scope")]
 pub fn execute_scope_root_retention(
     store_root: &Path,
     plan: ScopeRootRetentionPlanV1,
@@ -3728,7 +3723,7 @@ pub fn execute_scope_root_retention(
 }
 
 /// Finish or undo an interrupted scope-reconciliation transaction.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.recover_scope")]
 pub fn recover_scope_root_retention(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {

@@ -264,6 +264,7 @@ fn mcp_dispatch_envelope(
 /// observability authority. The caller receives a typed storage failure and
 /// must not change the already-determined MCP terminal response because
 /// telemetry persistence failed.
+#[hotpath::measure(label = "usecases.event_lane.record", future = true)]
 pub async fn record_observability(
     db: &RegisteredGlobalDb,
     envelope: tracedecay_domain::ObservabilityEnvelopeV1,

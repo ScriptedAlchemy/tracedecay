@@ -152,7 +152,7 @@ impl GraphVectorGenerationStoreV1 {
         .map_err(storage_error)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.begin_records")]
     pub(super) fn begin_generation_records(
         &self,
         plan: VectorGenerationPlanV1,
@@ -422,7 +422,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(publication)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.cancel_records")]
     pub(super) fn cancel_generation_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -475,6 +475,7 @@ impl GraphVectorGenerationStoreV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.store.commit_records")]
     pub(super) fn commit_batch_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,
@@ -573,7 +574,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(checkpoint)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.publish_records")]
     pub(super) fn publish_generation_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,

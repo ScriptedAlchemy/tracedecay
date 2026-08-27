@@ -487,6 +487,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
     /// Performs exactly one configured Hook V2 delivery. A delivery port owns
     /// the host transport; this composition layer only sends the canonical
     /// lookup notice and propagates its terminal outcome.
+    #[hotpath::measure(label = "usecases.delivery.hook_notice")]
     pub fn deliver_hook_lookup_notice<P>(
         &self,
         host: HostKindV1,

@@ -101,6 +101,7 @@ struct AssociatedRepositoryV1 {
 /// GitHub's commit-associated pull-request endpoint. Anonymous acquisition is
 /// used only for repositories this request proves publicly readable; private
 /// acquisition requires a registered verified read credential.
+#[hotpath::measure(label = "usecases.github_network.discover_pr")]
 pub fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,

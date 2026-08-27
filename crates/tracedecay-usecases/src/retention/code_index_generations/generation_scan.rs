@@ -10,7 +10,7 @@ use super::{
     MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
 };
 
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.retention.read_metadata")]
 pub(super) fn read_generation_metadata(
     path: &Path,
     verification: GenerationDigestVerificationV1,

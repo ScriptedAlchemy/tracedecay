@@ -293,7 +293,7 @@ where
     P: SessionTemporalExecutionPort,
     E: VersionedTokenEstimator + Sync,
 {
-    #[hotpath::measure(label = "usecases.session.retrieve")]
+    #[hotpath::measure(label = "usecases.session.retrieve", future = true)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,
@@ -305,16 +305,13 @@ where
             Err(failure) => return failure.into_outcome(),
         };
         let expected_execution = admitted.execution.clone();
-        let Ok(result) = hotpath::future!(
-            run_application_request_interruptible(
-                context,
-                binding.cancellation(),
-                self.execution.execute(admitted.execution, &self.estimator),
-                || {
-                    admitted.cancellation_control.cancel();
-                },
-            ),
-            label = "usecases.session.execute"
+        let Ok(result) = run_application_request_interruptible(
+            context,
+            binding.cancellation(),
+            self.execution.execute(admitted.execution, &self.estimator),
+            || {
+                admitted.cancellation_control.cancel();
+            },
         )
         .await
         else {

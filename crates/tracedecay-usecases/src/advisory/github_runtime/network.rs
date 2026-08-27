@@ -1222,7 +1222,12 @@ impl GitHubReadOnlyClientV1 {
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag.as_str());
         }
-        decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        // UreqHttpMiddleware times header completion; this span is body/decode
+        // (and 304 etag-cache validation) after that send.
+        let response = request.call();
+        hotpath::measure_block!("usecases.github_network.rest_get", {
+            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        })
     }
 
     fn post_static_graphql(&self, payload: &serde_json::Value) -> HttpResponseV1 {
@@ -1241,10 +1246,10 @@ impl GitHubReadOnlyClientV1 {
         if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
             request = request.header("Authorization", authorization.as_str());
         }
-        decode_ureq_response(
-            request.send_json(payload),
-            MAX_GITHUB_READ_RESPONSE_BYTES_V1,
-        )
+        let response = request.send_json(payload);
+        hotpath::measure_block!("usecases.github_network.graphql_post", {
+            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        })
     }
 }
 
@@ -1330,7 +1335,10 @@ impl GitHubCiReadOnlyClientV1 {
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag.as_str());
         }
-        decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        let response = request.call();
+        hotpath::measure_block!("usecases.github_network.ci_get", {
+            decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+        })
     }
 
     pub(crate) fn read_workflow_run<'a>(
@@ -1756,12 +1764,13 @@ fn decode_ureq_response(
             let etag = header(response.headers(), "etag")
                 .and_then(|value| GitHubReviewEtagV1::new(value).ok());
             let next_page = next_page(response.headers());
-            let Ok(body) = response
-                .body_mut()
-                .with_config()
-                .limit(maximum as u64)
-                .read_to_vec()
-            else {
+            let Ok(body) = hotpath::measure_block!("usecases.github_network.body_decode", {
+                response
+                    .body_mut()
+                    .with_config()
+                    .limit(maximum as u64)
+                    .read_to_vec()
+            }) else {
                 return HttpResponseV1::Unavailable;
             };
             HttpResponseV1::Ok {

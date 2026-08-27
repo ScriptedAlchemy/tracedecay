@@ -227,6 +227,7 @@ tokio::task_local! {
     static SOURCE_EDIT_APPLY_STATE: Arc<Mutex<SourceEditApplyState>>;
 }
 
+#[hotpath::measure(label = "usecases.edit.plan", future = true)]
 pub async fn capture_source_edit_plan<T>(
     future: impl Future<Output = T>,
 ) -> (T, Vec<PlannedSourceEditFile>) {
@@ -241,6 +242,7 @@ pub async fn capture_source_edit_plan<T>(
     (result, files)
 }
 
+#[hotpath::measure(label = "usecases.edit.apply", future = true)]
 pub async fn apply_source_edit_plan<T>(
     files: Vec<PlannedSourceEditFile>,
     future: impl Future<Output = T>,
@@ -281,6 +283,7 @@ pub fn capture_planned_source_edit(
         .is_ok()
 }
 
+#[hotpath::measure(label = "usecases.edit.validate")]
 pub fn validate_planned_source_edit(
     relative_path: &str,
     expected: Option<&str>,
@@ -328,6 +331,7 @@ struct SourceEditCandidateAuthority {
 }
 
 impl SourceEditCandidateAuthority {
+    #[hotpath::measure(label = "usecases.edit.open")]
     fn open(project_root: &Path, relative: &Path) -> Result<Self> {
         let relative = normalize_source_edit_relative_path(relative)?;
         let root = Dir::open_ambient_dir(project_root, ambient_authority())
@@ -411,9 +415,12 @@ impl SourceEditCandidateAuthority {
         )
         .map_err(|error| source_edit_path_error("identify source edit candidate", error))?;
         let mut bytes = Vec::new();
-        input
-            .read_to_end(&mut bytes)
-            .map_err(|error| source_edit_path_error("read source edit candidate", error))?;
+        hotpath::measure_block!(
+            "usecases.edit.read_bytes",
+            input
+                .read_to_end(&mut bytes)
+                .map_err(|error| source_edit_path_error("read source edit candidate", error))?
+        );
         let current = self
             .current_identity()?
             .ok_or_else(source_edit_unsafe_path)?;
@@ -430,6 +437,7 @@ pub fn validate_source_edit_candidate_parent(project_root: &Path, relative: &Pat
     SourceEditCandidateAuthority::open(project_root, relative).map(|_| ())
 }
 
+#[hotpath::measure(label = "usecases.edit.read")]
 pub fn read_source_edit_candidate(project_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>> {
     SourceEditCandidateAuthority::open(project_root, relative)?.read_optional()
 }
@@ -442,6 +450,7 @@ impl Drop for SyncLockGuard {
     }
 }
 
+#[hotpath::measure(label = "usecases.edit.lock")]
 pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;

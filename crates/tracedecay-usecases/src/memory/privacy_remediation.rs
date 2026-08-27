@@ -64,6 +64,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ///
     /// The rescan fails closed: a fact whose payload cannot be re-evaluated
     /// aborts the run with a typed error instead of skipping it silently.
+    #[hotpath::measure(label = "usecases.memory.privacy.rescan", future = true)]
     pub async fn privacy_remediation_rescan(
         &self,
         trigger: PrivacyRemediationTriggerV1,

@@ -253,6 +253,7 @@ where
     S: SessionRefreshStore,
     W: SessionRefreshSchedulerPort,
 {
+    #[hotpath::measure(label = "usecases.session.refresh.begin", future = true)]
     pub async fn begin_or_join(
         &self,
         context: &RequestContext,
@@ -342,6 +343,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "usecases.session.refresh.status", future = true)]
     pub async fn status(
         &self,
         context: &RequestContext,
@@ -386,6 +388,7 @@ where
         SessionRefreshOutcome::Running(progress)
     }
 
+    #[hotpath::measure(label = "usecases.session.refresh.cancel", future = true)]
     pub async fn cancel(
         &self,
         context: &RequestContext,

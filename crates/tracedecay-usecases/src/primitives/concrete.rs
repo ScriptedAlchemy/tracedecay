@@ -53,19 +53,22 @@ impl SourceReadPrimitivePort for SourceReadAdapter {
         context: SourceReadPortContext<'a>,
         request: &'a SourceReadPrimitiveRequest,
     ) -> SourceReadPortFuture<'a> {
-        Box::pin(async move {
-            if context.request.scope() != &self.scope || request.validate().is_err() {
-                return source_read_failed(context.observed_at);
-            }
-            match self.read(context, request).await {
-                Ok(result) => SourceReadPortOutcome::Completed {
-                    result,
-                    finished_at: context.observed_at,
-                    budget: OperationBudgetUsage::default(),
-                },
-                Err(()) => source_read_failed(context.observed_at),
-            }
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                if context.request.scope() != &self.scope || request.validate().is_err() {
+                    return source_read_failed(context.observed_at);
+                }
+                match self.read(context, request).await {
+                    Ok(result) => SourceReadPortOutcome::Completed {
+                        result,
+                        finished_at: context.observed_at,
+                        budget: OperationBudgetUsage::default(),
+                    },
+                    Err(()) => source_read_failed(context.observed_at),
+                }
+            },
+            label = "usecases.primitives.source_read"
+        ))
     }
 }
 
@@ -220,35 +223,38 @@ where
         cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
-        Box::pin(async move {
-            reauthorize_cursor_context(context, observed_at)?;
-            let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
-            validate_cursor_snapshot(context, snapshot.temporal())?;
-            let offset = match cursor {
-                // Verification is against the snapshot just read, so a cursor
-                // minted under a superseded generation cannot resolve to an
-                // offset here at all: it fails as stale rather than silently
-                // indexing into a different generation's result set.
-                Some(cursor) => {
-                    let sort_key = verify_cursor(
-                        cursor.as_str(),
-                        snapshot.temporal(),
-                        self.authenticator.as_ref(),
-                    )
-                    .map_err(cursor_verification_failure)?;
-                    if sort_key.stable_id != lane
-                        || sort_key.normalized_score_micros
-                            > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
-                    {
-                        return Err(invalid_cursor());
+        Box::pin(hotpath::future!(
+            async move {
+                reauthorize_cursor_context(context, observed_at)?;
+                let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
+                validate_cursor_snapshot(context, snapshot.temporal())?;
+                let offset = match cursor {
+                    // Verification is against the snapshot just read, so a cursor
+                    // minted under a superseded generation cannot resolve to an
+                    // offset here at all: it fails as stale rather than silently
+                    // indexing into a different generation's result set.
+                    Some(cursor) => {
+                        let sort_key = verify_cursor(
+                            cursor.as_str(),
+                            snapshot.temporal(),
+                            self.authenticator.as_ref(),
+                        )
+                        .map_err(cursor_verification_failure)?;
+                        if sort_key.stable_id != lane
+                            || sort_key.normalized_score_micros
+                                > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
+                        {
+                            return Err(invalid_cursor());
+                        }
+                        usize::try_from(sort_key.normalized_score_micros)
+                            .map_err(|_| invalid_cursor())?
                     }
-                    usize::try_from(sort_key.normalized_score_micros)
-                        .map_err(|_| invalid_cursor())?
-                }
-                None => 0,
-            };
-            Ok(SymbolGraphPageClaim { snapshot, offset })
-        })
+                    None => 0,
+                };
+                Ok(SymbolGraphPageClaim { snapshot, offset })
+            },
+            label = "usecases.primitives.cursor.claim"
+        ))
     }
 
     fn finish_page<'a>(
@@ -261,52 +267,55 @@ where
         has_more: bool,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
-        Box::pin(async move {
-            reauthorize_cursor_context(context, observed_at)?;
-            if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
-                return Err(invalid_cursor());
-            }
-            let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
-            validate_cursor_snapshot(context, snapshot.temporal())?;
-            // The rows were gathered against `claim.snapshot`. If the live
-            // identity has moved since, the page in hand belongs to a
-            // generation that is no longer being served, so the caller is told
-            // it is stale instead of being handed a page-set that silently
-            // spans two generations.
-            if snapshot != claim.snapshot {
-                return Err(primitive_failure(
-                    PrimitiveFailureKind::Stale,
-                    "application.symbol-graph.generation-changed",
-                    "the symbol-graph generation changed while the page was read",
-                ));
-            }
-            if !has_more {
-                return Ok(None);
-            }
-            let sort_key = StableSortKey {
-                normalized_score_micros: u64::try_from(next_offset)
-                    .map_err(|_| invalid_cursor())?,
-                knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
-                stable_id: lane.to_owned(),
-            };
-            // Minted against the claim rather than the freshly read snapshot:
-            // the continuation names the generation the page-set came from.
-            let encoded = encode_cursor(
-                claim.snapshot.temporal(),
-                &sort_key,
-                self.authenticator.as_ref(),
-            )
-            .map_err(cursor_issue_failure)?;
-            OpaqueCursor::new(encoded)
-                .map_err(|_| {
-                    primitive_failure(
-                        PrimitiveFailureKind::Unavailable,
-                        "application.symbol-graph.cursor-too-large",
-                        "the authenticated cursor exceeded the application cursor bound",
-                    )
-                })
-                .map(Some)
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                reauthorize_cursor_context(context, observed_at)?;
+                if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
+                    return Err(invalid_cursor());
+                }
+                let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
+                validate_cursor_snapshot(context, snapshot.temporal())?;
+                // The rows were gathered against `claim.snapshot`. If the live
+                // identity has moved since, the page in hand belongs to a
+                // generation that is no longer being served, so the caller is told
+                // it is stale instead of being handed a page-set that silently
+                // spans two generations.
+                if snapshot != claim.snapshot {
+                    return Err(primitive_failure(
+                        PrimitiveFailureKind::Stale,
+                        "application.symbol-graph.generation-changed",
+                        "the symbol-graph generation changed while the page was read",
+                    ));
+                }
+                if !has_more {
+                    return Ok(None);
+                }
+                let sort_key = StableSortKey {
+                    normalized_score_micros: u64::try_from(next_offset)
+                        .map_err(|_| invalid_cursor())?,
+                    knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
+                    stable_id: lane.to_owned(),
+                };
+                // Minted against the claim rather than the freshly read snapshot:
+                // the continuation names the generation the page-set came from.
+                let encoded = encode_cursor(
+                    claim.snapshot.temporal(),
+                    &sort_key,
+                    self.authenticator.as_ref(),
+                )
+                .map_err(cursor_issue_failure)?;
+                OpaqueCursor::new(encoded)
+                    .map_err(|_| {
+                        primitive_failure(
+                            PrimitiveFailureKind::Unavailable,
+                            "application.symbol-graph.cursor-too-large",
+                            "the authenticated cursor exceeded the application cursor bound",
+                        )
+                    })
+                    .map(Some)
+            },
+            label = "usecases.primitives.cursor.finish"
+        ))
     }
 }
 
