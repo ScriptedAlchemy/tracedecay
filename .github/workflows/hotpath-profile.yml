@@ -1,7 +1,13 @@
 # Experimental: hotpath performance CI (https://hotpath.rs/github_ci).
-# Manually triggered while the workload is the bounded MCP conformance
-# smoke; swap in a daemon-free indexing benchmark before enabling on
-# pull_request. Pinned to hotpath 0.24.0 like the workspace.
+# Still manually triggered while the head-vs-base numbers earn trust; the
+# workload itself is no longer a placeholder. Pinned to hotpath 0.24.0 like
+# the workspace.
+#
+# The profiled workload is `tracedecay-index-bench` (see
+# `benchmark_data/index-bench/README.md`): a daemon-free, socket-free,
+# deterministic indexing run over a committed fixture corpus. Head and base
+# index the same bytes in the same order, so a timing delta is attributable
+# to the diff rather than to the corpus, the clock, or the network.
 name: hotpath-profile
 
 on:
@@ -9,6 +15,19 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # The workload budget. A run that overruns it is measuring something other
+  # than the diff and its numbers are not comparable.
+  INDEX_BENCH_TIMEOUT_SECONDS: "180"
+  # Both sides index this copy, taken from the head checkout before the base
+  # checkout replaces the working tree. Pinning the corpus is what makes the
+  # delta attributable to the code: if base carried its own older corpus,
+  # a fixture edit would read as a performance change.
+  TRACEDECAY_INDEX_BENCH_CORPUS: /tmp/index-bench-corpus
+  # Hotpath binds a localhost metrics server by default; the benchmark turns
+  # it off itself, and this makes that explicit at the job boundary too.
+  HOTPATH_METRICS_SERVER_OFF: "1"
 
 jobs:
   profile:
@@ -21,12 +40,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
 
       - name: Create metrics directory
         run: mkdir -p /tmp/metrics
+
+      # Taken from head so the base profile below indexes the same bytes.
+      - name: Pin the benchmark corpus
+        run: |
+          cp -r benchmark_data/index-bench/corpus "${TRACEDECAY_INDEX_BENCH_CORPUS}"
+          find "${TRACEDECAY_INDEX_BENCH_CORPUS}" -type f | wc -l
 
       - name: Head profile (timing)
         env:
@@ -34,10 +56,15 @@ jobs:
           HOTPATH_OUTPUT_PATH: /tmp/metrics/head_timing.json
           HOTPATH_REPORT: functions-timing
         run: |
-          cargo build --locked -p tracedecay-cli --bin tracedecay \
+          cargo build --locked -p tracedecay-query --bin tracedecay-index-bench \
             --no-default-features --features production,hotpath
-          TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+          timeout "${INDEX_BENCH_TIMEOUT_SECONDS}" \
+            target/debug/tracedecay-index-bench | tee /tmp/metrics/head_workload.json
 
+      # The base commit must already carry `tracedecay-index-bench`. Until the
+      # commit that introduced it is an ancestor of the base, this step's
+      # build is the one that fails, and the failure is the honest signal:
+      # there is no comparable base profile yet.
       - name: Checkout base
         run: git checkout ${{ github.event.pull_request.base.sha || 'origin/master' }}
 
@@ -47,9 +74,28 @@ jobs:
           HOTPATH_OUTPUT_PATH: /tmp/metrics/base_timing.json
           HOTPATH_REPORT: functions-timing
         run: |
-          cargo build --locked -p tracedecay-cli --bin tracedecay \
+          cargo build --locked -p tracedecay-query --bin tracedecay-index-bench \
             --no-default-features --features production,hotpath
-          TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+          timeout "${INDEX_BENCH_TIMEOUT_SECONDS}" \
+            target/debug/tracedecay-index-bench | tee /tmp/metrics/base_workload.json
+
+      # A timing delta only means something if both sides indexed the same
+      # bytes. The sealed state digest is a function of the admitted corpus
+      # and the extraction output, so an unequal digest says the comparison
+      # is invalid - either the corpus moved or the diff changed sealed
+      # output, and both need a human before any number is believed.
+      - name: Compare workload identity
+        run: |
+          head_digest=$(jq -r .sealed_state_digest /tmp/metrics/head_workload.json)
+          base_digest=$(jq -r .sealed_state_digest /tmp/metrics/base_workload.json)
+          echo "head sealed state digest: ${head_digest}"
+          echo "base sealed state digest: ${base_digest}"
+          if [ "${head_digest}" != "${base_digest}" ]; then
+            echo "::warning::sealed state digest differs between head and base;" \
+                 "the timing comparison covers different indexing output"
+          fi
+          jq -r '"head peak RSS bytes: \(.peak_rss_bytes)"' /tmp/metrics/head_workload.json
+          jq -r '"base peak RSS bytes: \(.peak_rss_bytes)"' /tmp/metrics/base_workload.json
 
       - name: Save PR metadata
         run: |
