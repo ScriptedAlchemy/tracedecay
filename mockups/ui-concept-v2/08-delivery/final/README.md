@@ -17,9 +17,9 @@ The images are interaction references, not runtime receipts. Unless a brief says
 | Honest partial or unknown | [07-honest-partial-unknown.png](07-honest-partial-unknown.png) | [07-honest-partial-unknown.md](07-honest-partial-unknown.md) | approved |
 | Exact review coverage | [08-review-coverage-diff-checks.png](08-review-coverage-diff-checks.png) | [08-review-coverage-diff-checks.md](08-review-coverage-diff-checks.md) | approved |
 | Follow the Story review workspace | [09-follow-the-story-review-workspace.png](09-follow-the-story-review-workspace.png) | [09-follow-the-story-review-workspace.md](09-follow-the-story-review-workspace.md) | approved layout, synthetic content |
+| PR #743 Decision to Code | [10-decision-to-code-pr743.png](10-decision-to-code-pr743.png) | [10-decision-to-code-pr743.md](10-decision-to-code-pr743.md) | approved real-session evidence packet |
 
 ## Required follow-up states
 
-- A real-session Decision-to-Code state is pending regeneration from the recovered producer transcript and exact PR #743 evidence.
 - A dense 100+ agent state is pending final visual acceptance before promotion.
 - Rejected and superseded historical images remain outside this folder until replacement acceptance and cleanup.
