@@ -59,6 +59,7 @@ import {
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   StructureReadV12Schema,
+  WorkflowDefinitionSchema,
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
@@ -159,6 +160,9 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   // The work-product graph read. Two workspaces derive from it: the Work
   // projections, and the Agents handoff frontier and attempt failures.
   '/api/work/views': WorkGraphReadV1Schema,
+  // A workflow read answers through the same application wrapper Work reads
+  // use; the walked payload is the definitions array itself.
+  '/api/application/workflow/list-definitions': z.array(WorkflowDefinitionSchema),
 };
 
 const UNCONTRACTED: Readonly<Record<string, string>> = {

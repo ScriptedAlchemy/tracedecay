@@ -3123,7 +3123,81 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // The work-product graph read. Serves the Work projections and the Agents
   // workspace's handoff frontier and attempt failures.
   '/api/work/views': workEnvelope(workGraphViewsPayload()),
+  // The Workflows workspace's standing read (`operation.workflow.
+  // list_definitions`), through the same application envelope walker.
+  '/api/application/workflow/list-definitions': workEnvelope(workflowDefinitionsPayload()),
 };
+
+/** Two registered workflow definitions with real step graphs, so the audited
+ * surface renders a definition ledger rather than an unsupported-schema well.
+ * Digests are fixture-stable; steps reference each other's outputs the way
+ * plan 32's fan-out examples do. */
+function workflowDefinitionsPayload(): Record<string, unknown>[] {
+  const digest = (label: string): string => `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
+  const step = (
+    stepId: string,
+    operation: string,
+    predecessors: string[],
+    inputs: { output_name: string; producer_step_id: string }[],
+    outputs: string[],
+    fanOut: number | null,
+  ) => ({
+    step_id: stepId,
+    operation,
+    predecessors,
+    inputs,
+    outputs,
+    fan_out: fanOut == null ? null : { max_width: fanOut },
+  });
+  return [
+    {
+      definition_id: 'workflow.review-sweep',
+      definition_version: 3,
+      project_id: 'project.tracedecay',
+      pinned_catalog_digest: digest('catalog'),
+      pinned_configuration_digest: digest('config'),
+      pinned_policy_digest: digest('policy'),
+      steps: [
+        step('collect-diff', 'operation.git.change_context', [], [], ['diff'], null),
+        step(
+          'review-fanout',
+          'operation.agents.review',
+          ['collect-diff'],
+          [{ output_name: 'diff', producer_step_id: 'collect-diff' }],
+          ['findings'],
+          4,
+        ),
+        step(
+          'synthesize',
+          'operation.memory.curate',
+          ['review-fanout'],
+          [{ output_name: 'findings', producer_step_id: 'review-fanout' }],
+          ['facts'],
+          null,
+        ),
+      ],
+    },
+    {
+      definition_id: 'workflow.isolated-worktree-task',
+      definition_version: 1,
+      project_id: 'project.tracedecay',
+      pinned_catalog_digest: digest('catalog2'),
+      pinned_configuration_digest: digest('config2'),
+      pinned_policy_digest: digest('policy2'),
+      steps: [
+        step('mint-worktree', 'operation.git.create_worktree', [], [], ['worktree'], null),
+        step(
+          'execute',
+          'operation.work.run_attempt',
+          ['mint-worktree'],
+          [{ output_name: 'worktree', producer_step_id: 'mint-worktree' }],
+          ['attempt'],
+          null,
+        ),
+      ],
+    },
+  ];
+}
 
 /** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back
  * to these when there is no exact-path match. */

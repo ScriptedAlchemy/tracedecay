@@ -382,11 +382,13 @@ function RegionRow({
       className={cn(REGION_ROW, 'border-b border-edge-subtle', active && 'bg-surface-2')}
     >
       <div role="cell" className="max-w-72 px-3 py-1.5">
+        {/* The row's only control, so it carries the touch minimum itself —
+          * the cell's text metrics left it 16.5px tall. */}
         <button
           type="button"
           onClick={() => onSelect(active ? null : region.directory)}
           aria-pressed={active}
-          className="flex w-full min-w-0 items-center gap-1.5 text-left"
+          className="flex min-h-[var(--touch-target-min)] w-full min-w-0 items-center gap-1.5 text-left"
         >
           <span
             aria-hidden
