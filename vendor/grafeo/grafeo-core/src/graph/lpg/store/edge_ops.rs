@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use grafeo_common::mvcc::VersionChain;
 
 #[cfg(feature = "tiered-storage")]
+use grafeo_common::memory::AllocError;
+#[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
 impl LpgStore {
@@ -88,6 +90,13 @@ impl LpgStore {
 
     /// Creates a new edge within a transaction context.
     /// (Tiered storage version)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the epoch's arena cannot hold another edge record. Callers
+    /// that would rather handle that should use
+    /// [`try_create_edge_versioned`](Self::try_create_edge_versioned); this
+    /// signature is fixed by the `GraphStore` trait.
     #[cfg(feature = "tiered-storage")]
     #[doc(hidden)]
     pub fn create_edge_versioned(
@@ -98,19 +107,43 @@ impl LpgStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> EdgeId {
+        self.try_create_edge_versioned(src, dst, edge_type, epoch, transaction_id)
+            .unwrap_or_else(|error| panic!("arena allocation failed for edge record: {error}"))
+    }
+
+    /// Creates a new edge within a transaction context, reporting arena
+    /// exhaustion instead of panicking.
+    ///
+    /// TraceDecay patch. Upstream 0.5.42 only had the infallible form above and
+    /// swallowed the typed `AllocError` in an `expect`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the epoch's arena cannot be created or has no
+    /// room for another edge record.
+    #[cfg(feature = "tiered-storage")]
+    #[doc(hidden)]
+    pub fn try_create_edge_versioned(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Result<EdgeId, AllocError> {
         let id = EdgeId::new(self.next_edge_id.fetch_add(1, Ordering::Relaxed));
         let type_id = self.get_or_create_edge_type_id(edge_type);
 
         let record = EdgeRecord::new(id, src, dst, type_id, epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self
-            .arena_allocator
-            .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-        let (offset, _stored) = arena
-            .alloc_value_with_offset(record)
-            .expect("arena allocation failed for edge record");
+        // Allocate record in arena and get offset (create epoch if needed).
+        // Nothing below this point can fail, so the store is never left with a
+        // half-created edge.
+        let offset = {
+            let arena = self.arena_allocator.arena_or_create(epoch)?;
+            let (offset, _stored) = arena.alloc_value_with_offset(record)?;
+            offset
+        };
 
         // Uncommitted transactional versions use PENDING epoch so they are
         // invisible to other sessions until the transaction commits.
@@ -139,7 +172,7 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
-        id
+        Ok(id)
     }
 
     /// Creates a new edge with properties.
@@ -721,7 +754,12 @@ impl LpgStore {
     ///
     /// # Panics
     ///
-    /// Panics if the arena for the current epoch cannot be created.
+    /// Panics if the arena for the current epoch cannot be created or runs out
+    /// of room part-way through the batch. Unlike the single-edge path there is
+    /// no useful fallible form: a failure half-way through has already written
+    /// adjacency and version state for the earlier edges, and there is nothing
+    /// to unwind it with. Since the arena grows chunk by chunk, reaching this
+    /// means the epoch has exhausted its whole 4 GiB address space.
     #[cfg(feature = "tiered-storage")]
     pub fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
         if edges.is_empty() {
@@ -735,7 +773,7 @@ impl LpgStore {
         let arena = self
             .arena_allocator
             .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
+            .unwrap_or_else(|error| panic!("failed to create arena for epoch: {error}"));
 
         let mut ids = Vec::with_capacity(edges.len());
         let mut forward_batch = Vec::with_capacity(edges.len());
@@ -753,7 +791,9 @@ impl LpgStore {
                 let record = EdgeRecord::new(id, src, dst, type_id, epoch);
                 let (offset, _stored) = arena
                     .alloc_value_with_offset(record)
-                    .expect("arena allocation failed for edge record");
+                    .unwrap_or_else(|error| {
+                        panic!("arena allocation failed for edge record: {error}")
+                    });
                 let hot_ref = HotVersionRef::new(epoch, epoch, offset, TransactionId::SYSTEM);
                 versions.insert(id, VersionIndex::with_initial(hot_ref));
 

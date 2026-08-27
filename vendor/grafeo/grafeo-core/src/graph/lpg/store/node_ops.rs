@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use grafeo_common::mvcc::VersionChain;
 
 #[cfg(feature = "tiered-storage")]
+use grafeo_common::memory::AllocError;
+#[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
 impl LpgStore {
@@ -169,6 +171,13 @@ impl LpgStore {
 
     /// Creates a new node with the given labels within a transaction context.
     /// (Tiered storage version: stores data in arena, metadata in VersionIndex)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the epoch's arena cannot hold another node record. Callers
+    /// that would rather handle that should use
+    /// [`try_create_node_versioned`](Self::try_create_node_versioned); this
+    /// signature is fixed by the `GraphStore` trait.
     #[cfg(feature = "tiered-storage")]
     #[doc(hidden)]
     pub fn create_node_versioned(
@@ -177,6 +186,30 @@ impl LpgStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> NodeId {
+        self.try_create_node_versioned(labels, epoch, transaction_id)
+            .unwrap_or_else(|error| panic!("arena allocation failed for node record: {error}"))
+    }
+
+    /// Creates a new node with the given labels within a transaction context,
+    /// reporting arena exhaustion instead of panicking.
+    ///
+    /// TraceDecay patch. Upstream 0.5.42 only had the infallible form above and
+    /// swallowed the typed `AllocError` in an `expect`, so a full epoch arena
+    /// aborted the process. The allocation now happens before any store
+    /// mutation, so a failure leaves nothing behind but a consumed node id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the epoch's arena cannot be created or has no
+    /// room for another node record.
+    #[cfg(feature = "tiered-storage")]
+    #[doc(hidden)]
+    pub fn try_create_node_versioned(
+        &self,
+        labels: &[&str],
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Result<NodeId, AllocError> {
         let id = NodeId::new(self.next_node_id.fetch_add(1, Ordering::Relaxed));
 
         let mut record = NodeRecord::new(id, epoch);
@@ -192,19 +225,19 @@ impl LpgStore {
             EpochId::PENDING
         };
 
+        // Allocate record in arena and get offset (create epoch if needed).
+        // Kept ahead of the label registration and the version index so that a
+        // failure cannot leave a half-created node behind.
+        let offset = {
+            let arena = self.arena_allocator.arena_or_create(epoch)?;
+            let (offset, _stored) = arena.alloc_value_with_offset(record)?;
+            offset
+        };
+
         #[cfg(not(feature = "temporal"))]
         self.register_node_labels(id, labels);
         #[cfg(feature = "temporal")]
         self.register_node_labels(id, labels, version_epoch);
-
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self
-            .arena_allocator
-            .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-        let (offset, _stored) = arena
-            .alloc_value_with_offset(record)
-            .expect("arena allocation failed for node record");
 
         // Create HotVersionRef pointing to arena data
         let hot_ref = HotVersionRef::new(version_epoch, epoch, offset, transaction_id);
@@ -218,7 +251,7 @@ impl LpgStore {
         }
 
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
-        id
+        Ok(id)
     }
 
     /// Creates a new node with labels and properties.
