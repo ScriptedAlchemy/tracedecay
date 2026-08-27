@@ -810,7 +810,6 @@ impl ProductionSemanticRuntimeV1 {
         // stage recovery, byte-exact batch convergence, prepare, publish,
         // settle — with zero model calls, instead of a zero-work
         // already-published lookup.
-        let replay_started = std::time::Instant::now();
         let replay_store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
         let replay_build = match replay_store
             .begin_generation(clean_plan.clone(), Arc::clone(&cancellation))
@@ -841,7 +840,6 @@ impl ProductionSemanticRuntimeV1 {
             .publish_generation(&replay_build, Arc::clone(&cancellation))
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
-        let replay_elapsed = elapsed_micros(replay_started);
         if !replay_store
             .published_generation_is_visible(
                 &clean_publication.generation_id,
@@ -857,6 +855,7 @@ impl ProductionSemanticRuntimeV1 {
         // Durable idempotency: a third partition observes the published
         // generation without re-doing any work.
         let idempotent_store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
+        let idempotent_started = std::time::Instant::now();
         let idempotent = idempotent_store
             .begin_generation(clean_plan, Arc::clone(&cancellation))
             .await
@@ -872,6 +871,7 @@ impl ProductionSemanticRuntimeV1 {
                 "clean evaluation idempotent begin did not observe the published generation",
             ));
         }
+        let idempotent_elapsed = elapsed_micros(idempotent_started);
 
         let mut samples = BTreeMap::new();
         samples.insert(
@@ -883,15 +883,18 @@ impl ProductionSemanticRuntimeV1 {
                 SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
-        let mut replay_sample = projection_case_sample_from_prepared(
-            clean_prepared,
-            replay_elapsed,
-            clean.projection_input_bytes,
-            SemanticProjectionCaseOutcomeV1::Complete,
+        samples.insert(
+            SemanticProjectionCaseV1::IdempotencyReplay,
+            SemanticProjectionCaseSampleV1 {
+                outcome: SemanticProjectionCaseOutcomeV1::Complete,
+                elapsed_micros: idempotent_elapsed,
+                input_bytes: 0,
+                chunks_added_or_changed: 0,
+                chunks_deleted: 0,
+                chunks_reused: 0,
+                projection_calls: 0,
+            },
         );
-        // The replay re-commits retained vectors; it never invokes the model.
-        replay_sample.projection_calls = 0;
-        samples.insert(SemanticProjectionCaseV1::IdempotencyReplay, replay_sample);
 
         let clean_pointer = SemanticGenerationPointerV1 {
             generation: clean_publication.generation_id.clone(),
