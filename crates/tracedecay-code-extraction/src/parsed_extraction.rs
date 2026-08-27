@@ -65,16 +65,20 @@ impl ParsedExtractionArtifactV1 {
         scope: ParsedExtractionScope<'_>,
         metrics: ParsedTraversalMetrics,
     ) -> Self {
-        let disposition = match scope {
-            ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
-            ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
-        };
-        artifact.canonicalize_order();
-        Self {
-            artifact,
-            disposition,
-            metrics,
-        }
+        crate::hotpath_observe::measure_emit(|| {
+            let disposition = match scope {
+                ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
+                ParsedExtractionScope::ChangedRegions(_) => {
+                    ParsedExtractionDisposition::ChangedRegions
+                }
+            };
+            artifact.canonicalize_order();
+            Self {
+                artifact,
+                disposition,
+                metrics,
+            }
+        })
     }
 
     pub(crate) fn reset(
@@ -82,15 +86,17 @@ impl ParsedExtractionArtifactV1 {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        artifact.canonicalize_order();
-        Self {
-            artifact,
-            disposition: ParsedExtractionDisposition::Reset { reason },
-            metrics: ParsedTraversalMetrics {
-                visited_top_level_nodes: 0,
-                visited_bytes: source_bytes,
-            },
-        }
+        crate::hotpath_observe::measure_emit(|| {
+            artifact.canonicalize_order();
+            Self {
+                artifact,
+                disposition: ParsedExtractionDisposition::Reset { reason },
+                metrics: ParsedTraversalMetrics {
+                    visited_top_level_nodes: 0,
+                    visited_bytes: source_bytes,
+                },
+            }
+        })
     }
 
     pub(crate) fn from_parsed(parsed: ParsedExtraction) -> Self {
@@ -116,16 +122,20 @@ impl ParsedExtraction {
         scope: ParsedExtractionScope<'_>,
         metrics: ParsedTraversalMetrics,
     ) -> Self {
-        let disposition = match scope {
-            ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
-            ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
-        };
-        result.canonicalize_order();
-        Self {
-            result,
-            disposition,
-            metrics,
-        }
+        crate::hotpath_observe::measure_emit(|| {
+            let disposition = match scope {
+                ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
+                ParsedExtractionScope::ChangedRegions(_) => {
+                    ParsedExtractionDisposition::ChangedRegions
+                }
+            };
+            result.canonicalize_order();
+            Self {
+                result,
+                disposition,
+                metrics,
+            }
+        })
     }
 
     pub fn reset(
@@ -133,21 +143,31 @@ impl ParsedExtraction {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        result.canonicalize_order();
-        Self {
-            result,
-            disposition: ParsedExtractionDisposition::Reset { reason },
-            metrics: ParsedTraversalMetrics {
-                visited_top_level_nodes: 0,
-                visited_bytes: source_bytes,
-            },
-        }
+        crate::hotpath_observe::measure_emit(|| {
+            result.canonicalize_order();
+            Self {
+                result,
+                disposition: ParsedExtractionDisposition::Reset { reason },
+                metrics: ParsedTraversalMetrics {
+                    visited_top_level_nodes: 0,
+                    visited_bytes: source_bytes,
+                },
+            }
+        })
     }
 }
 
 /// Visit direct root children selected by one full or changed extraction
 /// request. A top-level child is visited at most once even when ranges overlap.
 pub(crate) fn visit_root_children(
+    tree: &Tree,
+    scope: ParsedExtractionScope<'_>,
+    visit: impl FnMut(TreeSitterNode<'_>),
+) -> ParsedTraversalMetrics {
+    crate::hotpath_observe::measure_query(|| visit_root_children_unmeasured(tree, scope, visit))
+}
+
+fn visit_root_children_unmeasured(
     tree: &Tree,
     scope: ParsedExtractionScope<'_>,
     mut visit: impl FnMut(TreeSitterNode<'_>),

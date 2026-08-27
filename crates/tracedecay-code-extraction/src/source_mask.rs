@@ -24,7 +24,7 @@
 //! literal earns the capture exception. Supported macros and their format-arg
 //! position (in top-level commas) are listed in [`format_macro_argument_index`].
 
-use tree_sitter::{Node as TsNode, Parser};
+use tree_sitter::Node as TsNode;
 
 /// Which node sets a masking pass blanks, and whether implicit format captures
 /// survive string masking.
@@ -79,29 +79,28 @@ pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
     let Some(tree) = parse(source) else {
         return source.to_string();
     };
-    let src = source.as_bytes();
-    let mut spans = Vec::new();
-    collect_spans(tree.root_node(), src, opts, &mut spans);
-    spans.sort_by_key(|span| span.start);
+    crate::hotpath_observe::measure_query(|| {
+        let src = source.as_bytes();
+        let mut spans = Vec::new();
+        collect_spans(tree.root_node(), src, opts, &mut spans);
+        spans.sort_by_key(|span| span.start);
 
-    let mut out = src.to_vec();
-    if opts.preserve_format_captures && opts.mask_strings {
-        blank_with_format_captures(src, &mut out, &spans);
-    } else {
-        for span in &spans {
-            blank_range(&mut out, span.start, span.end);
+        let mut out = src.to_vec();
+        if opts.preserve_format_captures && opts.mask_strings {
+            blank_with_format_captures(src, &mut out, &spans);
+        } else {
+            for span in &spans {
+                blank_range(&mut out, span.start, span.end);
+            }
         }
-    }
-    // Every replacement is an ASCII space and every untouched byte is the
-    // original, so the result is always valid UTF-8; fall back defensively.
-    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+        // Every replacement is an ASCII space and every untouched byte is the
+        // original, so the result is always valid UTF-8; fall back defensively.
+        String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+    })
 }
 
 fn parse(source: &str) -> Option<tree_sitter::Tree> {
-    let mut parser = Parser::new();
-    let language = crate::ts_provider::try_language("rust").ok()?;
-    parser.set_language(&language).ok()?;
-    parser.parse(source, None)
+    crate::ts_provider::parse_extractor_source("rust", "Rust", source).ok()
 }
 
 /// A byte range to blank, tagged with the classification needed to decide

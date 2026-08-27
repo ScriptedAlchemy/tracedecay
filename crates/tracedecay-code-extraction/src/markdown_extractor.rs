@@ -147,7 +147,9 @@ impl MarkdownExtractor {
         Self::add_file_node(&mut state, file_path, source);
 
         if let Ok(tree) = Self::parse(source) {
-            Self::visit(&mut state, tree.root_node());
+            crate::hotpath_observe::measure_query(|| {
+                Self::visit(&mut state, tree.root_node());
+            });
         }
 
         Self::build_result(state, start)
@@ -261,25 +263,40 @@ impl MarkdownExtractor {
     }
 
     fn build_result(mut state: ExtractionState, start: Instant) -> ExtractionResult {
-        Self::resolve_reference_links(&mut state);
-        Self::finalize_heading_spans(&mut state);
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+        crate::hotpath_observe::measure_emit(|| {
+            Self::resolve_reference_links(&mut state);
+            Self::finalize_heading_spans(&mut state);
+            ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: Vec::new(),
+                errors: Vec::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
+        })
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tracedecay_large_treesitters::markdown::LANGUAGE.into())
-            .map_err(|e| format!("failed to load markdown grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        let mut parser = crate::hotpath_observe::measure_language(|| {
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tracedecay_large_treesitters::markdown::LANGUAGE.into())
+                .map_err(|e| format!("failed to load markdown grammar: {e}"))?;
+            Ok::<_, String>(parser)
+        })?;
+        crate::hotpath_observe::measure_parse_file(
+            "Markdown",
+            source.len(),
+            || {
+                parser
+                    .parse(source, None)
+                    .ok_or_else(|| "tree-sitter parse returned None".to_string())
+            },
+            |result| match result {
+                Ok(tree) => tree.root_node().named_child_count(),
+                Err(_) => 0,
+            },
+        )
     }
 
     /// Walks the block tree. `atx_heading` / `setext_heading` produce `Module`

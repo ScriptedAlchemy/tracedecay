@@ -339,18 +339,21 @@ impl RetainedParseDocument {
         if let Some(parsed) = parsed_source.as_deref() {
             validate_prepared_source(&source, parsed)?;
         }
-        let language = ts_provider::try_language(&grammar_key).map_err(|_| {
-            ParseError::UnsupportedLanguage {
-                language_id: language_id.clone(),
-            }
-        })?;
-        let mut parser = Parser::new();
-        parser
-            .set_language(&language)
-            .map_err(|error| ParseError::GrammarRejected {
-                language_id: language_id.clone(),
-                detail: error.to_string(),
+        let mut parser = crate::hotpath_observe::measure_language(|| {
+            let language = ts_provider::try_language(&grammar_key).map_err(|_| {
+                ParseError::UnsupportedLanguage {
+                    language_id: language_id.clone(),
+                }
             })?;
+            let mut parser = Parser::new();
+            parser
+                .set_language(&language)
+                .map_err(|error| ParseError::GrammarRejected {
+                    language_id: language_id.clone(),
+                    detail: error.to_string(),
+                })?;
+            Ok::<_, ParseError>(parser)
+        })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
         let (tree, elapsed) =
             parse_with_deadline(&language_id, &mut parser, parse_text, None, limits)?;

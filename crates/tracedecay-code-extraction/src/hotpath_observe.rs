@@ -54,8 +54,8 @@ pub(crate) fn language_family(language: &str) -> &'static str {
         "Java" | "java" | "Kotlin" | "kotlin" | "Scala" | "scala" => "jvm",
         "C#" | "c#" | "csharp" | "c_sharp" | "F#" | "f#" | "fsharp" | "VB.NET" | "vb.net"
         | "vbnet" => "dotnet",
-        "Astro" | "astro" | "JavaScript" | "javascript" | "jsx" | "Svelte" | "svelte"
-        | "TypeScript" | "typescript" | "tsx" => "web",
+        "Astro" | "astro" | "JavaScript" | "javascript" | "jsx" | "JSX" | "Svelte" | "svelte"
+        | "TypeScript" | "typescript" | "tsx" | "TSX" => "web",
         "Python" | "python" => "python",
         "Go" | "go" => "go",
         "Dart" | "dart" | "Swift" | "swift" => "managed",
@@ -222,6 +222,45 @@ pub(crate) fn measure_markdown_composite_fallback<T>(f: impl FnOnce() -> T) -> T
     }
 }
 
+/// Time grammar acquisition and language-specific source prep (masking).
+#[inline]
+pub(crate) fn measure_language<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::measure_block!("code_extraction.language", f())
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        f()
+    }
+}
+
+/// Time one file-level AST walk. Per-node visitors stay unmeasured.
+#[inline]
+pub(crate) fn measure_query<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::measure_block!("code_extraction.query", f())
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        f()
+    }
+}
+
+/// Time file-level graph emit / canonicalize. Not a per-token emit.
+#[inline]
+pub(crate) fn measure_emit<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::measure_block!("code_extraction.emit", f())
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        f()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{file_byte_bucket, language_family};
@@ -232,6 +271,7 @@ mod tests {
         assert_eq!(language_family("rust"), "systems");
         assert_eq!(language_family("TypeScript"), "web");
         assert_eq!(language_family("tsx"), "web");
+        assert_eq!(language_family("TSX"), "web");
         assert_eq!(language_family("c_sharp"), "dotnet");
         assert_eq!(language_family("Objective-C"), "systems");
         assert_eq!(language_family("unknown-lang"), "other");
