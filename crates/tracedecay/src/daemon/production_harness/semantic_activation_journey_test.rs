@@ -223,10 +223,7 @@ pub(super) async fn evaluate_native_profile(
     project: &Path,
 ) -> ManifestDigest {
     let resources = harness.resources.as_ref().expect("live harness");
-    let evaluation_limits =
-        crate::daemon::semantic_evaluation::daemon_semantic_evaluation_resource_requirement(
-            crate::config::SemanticResourceCeilings::default(),
-        );
+    let evaluation_limits = crate::config::SemanticResourceCeilings::default();
     let observed_at = tracedecay_domain::UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -334,12 +331,12 @@ pub(super) async fn evaluate_native_profile(
                 measured.tokenizer_bytes, model.members["tokenizer"].length,
                 "accepted tokenizer bytes come from the evaluated artifact"
             );
-            assert!(measured.model_bytes < evaluation_limits.model_bytes);
-            assert!(measured.tokenizer_bytes < evaluation_limits.tokenizer_bytes);
+            assert!(measured.model_bytes < evaluation_limits.max_model_bytes);
+            assert!(measured.tokenizer_bytes < evaluation_limits.max_tokenizer_bytes);
             assert!(measured.resident_bytes >= measured.model_bytes);
             assert!(measured.resident_bytes >= measured.tokenizer_bytes);
-            assert!(measured.resident_bytes <= evaluation_limits.resident_bytes);
-            assert_eq!(measured.threads, evaluation_limits.threads);
+            assert!(measured.resident_bytes <= evaluation_limits.max_resident_bytes);
+            assert_eq!(measured.threads, evaluation_limits.max_threads);
             assert_eq!(
                 measured.max_concurrent_sessions, 1,
                 "native evaluation measures one real model session"
@@ -348,8 +345,11 @@ pub(super) async fn evaluate_native_profile(
                 measured.max_concurrent_sessions <= evaluation_limits.max_concurrent_sessions,
                 "measured model sessions must fit the configured ceiling"
             );
-            assert_eq!(measured.batch_size, evaluation_limits.batch_size);
-            assert_eq!(measured.sequence_length, evaluation_limits.sequence_length);
+            assert_eq!(measured.batch_size, evaluation_limits.max_batch_size);
+            assert_eq!(
+                measured.sequence_length,
+                evaluation_limits.max_sequence_length
+            );
             assert_eq!(
                 measured.load_deadline_ms,
                 evaluation_limits.load_deadline_ms

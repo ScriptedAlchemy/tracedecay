@@ -203,7 +203,11 @@ fn coordination_error_from_runtime(
         SemanticRuntimeBackendErrorV1::Unavailable => {
             SemanticActivationCoordinationErrorV1::Unavailable
         }
-        SemanticRuntimeBackendErrorV1::Rejected => SemanticActivationCoordinationErrorV1::Rejected,
+        SemanticRuntimeBackendErrorV1::Rejected => {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic runtime rejected the verified evaluation target authority".to_owned(),
+            )
+        }
         SemanticRuntimeBackendErrorV1::Conflict => SemanticActivationCoordinationErrorV1::Conflict,
     }
 }
@@ -213,7 +217,6 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
     scope: &ResolvedScope,
     scheduler: &CodeIndexSchedulerRegistryV1,
     evaluated_profile_id: &str,
-    configured_limits: crate::config::SemanticResourceCeilings,
     control: Arc<DaemonSemanticEvaluationControlV1>,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
     control.checkpoint()?;
@@ -264,7 +267,13 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
     {
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     }
-    daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, configured_limits)
+    let runtime =
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
+            .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let resources = runtime
+        .evaluation_target_resource_requirement()
+        .map_err(coordination_error_from_runtime)?;
+    daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
 }
 
 pub(super) fn semantic_publication_generation(
@@ -293,7 +302,7 @@ fn daemon_semantic_evaluation_candidate(
     evaluated_profile_id: &str,
     code: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     vector: &PublishedVectorGenerationV1,
-    configured_limits: crate::config::SemanticResourceCeilings,
+    resources: SemanticResourceRequirementV1,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
     let material = crate::search_eval::load_default_evaluated_profile_material(
         evaluated_profile_id,
@@ -323,7 +332,6 @@ fn daemon_semantic_evaluation_candidate(
                 "semantic evaluation search index identity is invalid".to_owned(),
             )
         })?;
-    let resources = daemon_semantic_evaluation_resource_requirement(configured_limits);
     let vector_generation_id = vector.generation_id().clone();
     let calibration = SemanticCalibrationProfileV1 {
         calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
@@ -377,11 +385,19 @@ fn daemon_semantic_evaluation_candidate(
         compatibility: RetrievalCompatibilityPinsV1 {
             semantic: Some(SemanticCompatibilityPinsV1 {
                 implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
-                    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+                    .map_err(|_| {
+                        SemanticActivationCoordinationErrorV1::RejectedDetail(
+                            "semantic evaluation implementation revision is invalid".to_owned(),
+                        )
+                    })?,
                 fusion_revision: ComponentRevision::new(
                     tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
                 )
-                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+                .map_err(|_| {
+                    SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "semantic evaluation fusion revision is invalid".to_owned(),
+                    )
+                })?,
                 artifact_manifest_digest: embedding.model_artifact_digest.clone(),
                 runtime_compatibility_digest,
                 projection: vector.embedding_key().clone(),
@@ -393,21 +409,6 @@ fn daemon_semantic_evaluation_candidate(
             rerank: None,
         },
     })
-}
-
-pub(super) fn daemon_semantic_evaluation_resource_requirement(
-    configured_limits: crate::config::SemanticResourceCeilings,
-) -> SemanticResourceRequirementV1 {
-    SemanticResourceRequirementV1 {
-        model_bytes: configured_limits.max_model_bytes,
-        tokenizer_bytes: configured_limits.max_tokenizer_bytes,
-        resident_bytes: configured_limits.max_resident_bytes,
-        threads: configured_limits.max_threads,
-        max_concurrent_sessions: configured_limits.max_concurrent_sessions,
-        batch_size: configured_limits.max_batch_size,
-        sequence_length: configured_limits.max_sequence_length,
-        load_deadline_ms: configured_limits.load_deadline_ms,
-    }
 }
 
 struct SemanticEvaluationWorkerV1 {

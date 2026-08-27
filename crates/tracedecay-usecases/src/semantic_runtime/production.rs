@@ -585,6 +585,24 @@ impl ProductionSemanticRuntimeV1 {
         )
     }
 
+    /// Mint pre-evaluation resource identity from the installed artifact and
+    /// the configured execution ceiling. Artifact member lengths are observed
+    /// facts; the remaining fields are admission bounds that the genuine
+    /// evaluator later replaces with measured report evidence.
+    pub fn evaluation_target_resource_requirement(
+        &self,
+    ) -> Result<
+        crate::config::retrieval::SemanticResourceRequirementV1,
+        SemanticRuntimeBackendErrorV1,
+    > {
+        let artifact = installed_artifact_member_bytes(&self.lifecycle)
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+        Ok(evaluation_target_resource_requirement(
+            self.resources,
+            artifact,
+        ))
+    }
+
     /// Prepare one evaluator generation with a cache retained by the daemon's
     /// enclosing evaluation request. The cache is never attached to the
     /// runtime, lifecycle, or durable vector state.
@@ -2467,6 +2485,16 @@ fn configured_semantic_resource_ceiling(
     }
 }
 
+fn evaluation_target_resource_requirement(
+    configured: SemanticResourceCeilings,
+    artifact: InstalledArtifactMemberBytesV1,
+) -> crate::config::retrieval::SemanticResourceRequirementV1 {
+    let mut requirement = configured_semantic_resource_ceiling(configured);
+    requirement.model_bytes = artifact.model;
+    requirement.tokenizer_bytes = artifact.tokenizer;
+    requirement
+}
+
 fn canonical_exact_flat_search_index_key()
 -> Result<SemanticSearchIndexKeyV1, SemanticRuntimeBackendErrorV1> {
     SemanticSearchIndexProfileV1::exact_flat_v1()
@@ -3708,6 +3736,34 @@ mod tests {
             accepted.max_concurrent_sessions
         );
         assert_ne!(applied.max_resident_bytes, configured.max_resident_bytes);
+    }
+
+    #[test]
+    fn evaluation_target_uses_exact_artifact_bytes_inside_configured_capacity() {
+        let configured = SemanticResourceCeilings {
+            max_model_bytes: 700,
+            max_tokenizer_bytes: 64,
+            max_resident_bytes: 2_048,
+            max_threads: 8,
+            max_concurrent_sessions: 4,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        };
+
+        let requirement = evaluation_target_resource_requirement(
+            configured,
+            InstalledArtifactMemberBytesV1 {
+                model: 633,
+                tokenizer: 5,
+            },
+        );
+
+        assert_eq!(requirement.model_bytes, 633);
+        assert_eq!(requirement.tokenizer_bytes, 5);
+        assert_eq!(requirement.resident_bytes, configured.max_resident_bytes);
+        assert_eq!(requirement.threads, configured.max_threads);
+        assert!(configured_resource_ceiling_covers(&configured, requirement));
     }
 
     #[test]

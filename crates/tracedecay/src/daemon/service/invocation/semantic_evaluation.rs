@@ -211,22 +211,16 @@ impl DaemonInvocationService {
         let scope = registered.scope.clone();
         let scheduler = self.code_index_schedulers.clone();
         let workers = Arc::clone(&registered.semantic_evaluation_workers);
-        let configuration = registered.runtime.client();
         let execution = match input {
             SemanticExecutionInputV1::Qualify(evaluated_profile_id) => {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let configured = control
-                                .interruptible(configuration.current())
-                                .await?
-                                .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
                             let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
                                 &canonical_root,
                                 &scope,
                                 &scheduler,
                                 &evaluated_profile_id,
-                                configured.config.semantic.resources,
                                 Arc::clone(&control),
                             )
                             .await?;
@@ -287,16 +281,11 @@ impl DaemonInvocationService {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let configured = control
-                                .interruptible(configuration.current())
-                                .await?
-                                .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
                             let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
                                 &canonical_root,
                                 &scope,
                                 &scheduler,
                                 &evaluated_profile_id,
-                                configured.config.semantic.resources,
                                 Arc::clone(&control),
                             )
                             .await?;
