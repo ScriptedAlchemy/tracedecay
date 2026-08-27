@@ -532,7 +532,7 @@ impl CodeIndexPublishedGenerationV1 {
         )?;
         crate::hotpath_observe::record_seal_bytes(admitted_len);
         let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
-            "code_index.sealed_decode.envelope_parse",
+            "code_index.sealed_decode.format_probe",
             serde_json::from_slice(bytes).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation format probe failed: {error}"
@@ -552,7 +552,7 @@ impl CodeIndexPublishedGenerationV1 {
             )?,
             SEALED_GENERATION_FORMAT_REVISION_V1 => {
                 let raw: SealedPublishedGenerationRawEnvelopeV1 = hotpath::measure_block!(
-                    "code_index.sealed_decode.envelope_parse",
+                    "code_index.sealed_decode.raw_envelope_parse",
                     serde_json::from_slice(bytes).map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed generation decoding failed: {error}"

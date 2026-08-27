@@ -31,15 +31,36 @@ use tracedecay_runtime_core::privacy::{
 #[derive(Clone, Debug, Default)]
 pub struct ObservationCancellation {
     cancelled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl ObservationCancellation {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Wait until this exact operation is cancelled without losing a signal
+    /// between the readiness check and waiter registration.
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+
+    pub(crate) fn cancellation_flag(&self) -> &AtomicBool {
+        self.cancelled.as_ref()
     }
 
     /// Carries this exact operation cancellation into verified graph

@@ -844,12 +844,18 @@ fn successful_tool_result_exits_zero() {
         "**success:** true\n**files:** []"
     );
     let json_stdout = rendered_tool_output(&json_success, true);
-    assert!(
-        json_stdout.contains("\"success\":true"),
+    // Pretty serialization escapes the nested `content[0].text` JSON string.
+    // Parse the complete envelope back and compare it structurally instead of
+    // searching for an unescaped substring that valid output cannot contain.
+    let reparsed: Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
+    assert_eq!(
+        reparsed, json_success,
         "JSON stdout must keep the exact daemon payload: {json_stdout}"
     );
-    assert!(
-        json_stdout.contains("\"isError\": false"),
+    assert_eq!(
+        reparsed["isError"],
+        json!(false),
         "JSON stdout must keep the daemon isError flag: {json_stdout}"
     );
 }

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tree_sitter::Language;
+use tree_sitter::{Language, Parser, Tree};
 
 /// Package-owned patched Rust grammar.
 pub mod rust_grammar {
@@ -168,6 +168,63 @@ pub fn language(key: &str) -> Result<Language, String> {
     try_language(key)
 }
 
+/// Parse one file with the shared grammar table.
+///
+/// Language load and `set_language` are the `code_extraction.language` phase.
+/// The tree-sitter parse itself is the existing `code_extraction.parse_file`
+/// span. Callers keep their grammar-key and error-label strings so failure
+/// text stays byte-identical.
+pub(crate) fn parse_extractor_source(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+) -> Result<Tree, String> {
+    parse_extractor_source_inner(language_key, grammar_label, source, false)
+}
+
+pub(crate) fn parse_extractor_source_with_labeled_lookup(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+) -> Result<Tree, String> {
+    parse_extractor_source_inner(language_key, grammar_label, source, true)
+}
+
+fn parse_extractor_source_inner(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+    label_lookup_error: bool,
+) -> Result<Tree, String> {
+    let mut parser = crate::hotpath_observe::measure_language(|| {
+        let mut parser = Parser::new();
+        let language = try_language(language_key).map_err(|error| {
+            if label_lookup_error {
+                format!("failed to load {grammar_label} grammar: {error}")
+            } else {
+                error
+            }
+        })?;
+        parser
+            .set_language(&language)
+            .map_err(|e| format!("failed to load {grammar_label} grammar: {e}"))?;
+        Ok::<_, String>(parser)
+    })?;
+    crate::hotpath_observe::measure_parse_file(
+        grammar_label,
+        source.len(),
+        || {
+            parser
+                .parse(source, None)
+                .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        },
+        |result| match result {
+            Ok(tree) => tree.root_node().named_child_count(),
+            Err(_) => 0,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     fn expected_bundled_keys() -> Vec<&'static str> {
@@ -276,6 +333,21 @@ mod tests {
         };
         assert!(err.contains("unknown language key"));
         Ok(())
+    }
+
+    #[test]
+    fn labeled_parser_preserves_the_extractor_lookup_error_context() {
+        let error = super::parse_extractor_source_with_labeled_lookup(
+            "definitely-not-registered",
+            "fixture",
+            "",
+        )
+        .expect_err("an unknown extractor grammar must fail before parsing");
+        assert_eq!(
+            error,
+            "failed to load fixture grammar: ts_provider: unknown language key \
+             'definitely-not-registered'"
+        );
     }
 
     #[test]

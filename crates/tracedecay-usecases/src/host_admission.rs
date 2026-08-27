@@ -489,7 +489,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         expected: ParseOffset,
         next: ParseOffset,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(HostAdmissionFacade::replace_parse_offset(
+        Box::pin(HostAdmissionFacade::replace_registered_parse_offset(
             self, scope, path, expected, next,
         ))
     }
@@ -500,7 +500,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         first: (&'a str, ParseOffset, ParseOffset),
         second: (&'a str, ParseOffset, ParseOffset),
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(HostAdmissionFacade::replace_parse_offset_pair(
+        Box::pin(HostAdmissionFacade::replace_registered_parse_offset_pair(
             self, scope, first, second,
         ))
     }

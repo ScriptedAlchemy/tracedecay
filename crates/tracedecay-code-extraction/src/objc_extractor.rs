@@ -4,7 +4,7 @@
 /// Handles `.m` and `.mm` files.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{clean_c_doc_comment, docstring_from_preceding_comments};
 use crate::complexity::{OBJC_COMPLEXITY, count_complexity};
@@ -160,14 +160,7 @@ impl ObjcExtractor {
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("objc")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Objective-C grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("objc", "Objective-C", source)
     }
 
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
