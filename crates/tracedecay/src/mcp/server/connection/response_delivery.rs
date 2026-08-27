@@ -65,7 +65,10 @@ impl McpServer {
             .as_ref()
             .map(SelectedProjectResponseLease::revoked);
         if let Some(response) = response {
-            let mut json_line = serialize_response_line(&response);
+            let mut json_line = hotpath::measure_block!(
+                "mcp.server.response.serialize",
+                serialize_response_line(&response)
+            );
             json_line.push('\n');
             let _ = self
                 .write_response_line_or_revoke(transport, &json_line, response_revoked)

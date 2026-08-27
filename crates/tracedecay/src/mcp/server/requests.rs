@@ -1048,6 +1048,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.accounting", future = true)]
     async fn record_success_accounting(
         &self,
         cg: &TraceDecay,
@@ -1076,6 +1077,7 @@ impl McpServer {
         );
     }
 
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check", future = true)]
     async fn append_version_notice(
         &self,
         result: &mut ToolResult,
@@ -1103,6 +1105,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.index_warnings", future = true)]
     async fn prepend_index_warnings(
         &self,
         include_connection_worktree_warning: bool,
@@ -1150,15 +1153,17 @@ impl McpServer {
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 mark_semantic_tool_error(&mut result);
                 if !tool_result_has_semantic_error(&result)
-                    && let Err(error) =
+                    && let Err(error) = hotpath::future!(
                         super::live_transcript_refresh::join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
                             selected_owner.is_some(),
                             self.project_session_refresh_wake.as_ref(),
                             self.user_session_refresh_wake.as_ref(),
-                        )
-                        .await
+                        ),
+                        label = "mcp.server.tools_call.complete.transcript_refresh"
+                    )
+                    .await
                 {
                     self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                         project_root: cg.project_root(),
@@ -1197,21 +1202,26 @@ impl McpServer {
                     .await;
                 self.prepend_index_warnings(selected_owner.is_none(), &mut result)
                     .await;
-                JsonRpcResponse::success(id, result.value)
+                hotpath::measure_block!(
+                    "mcp.server.tools_call.complete.response",
+                    JsonRpcResponse::success(id, result.value)
+                )
             }
             Err(error) => {
-                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
-                    project_root: cg.project_root(),
-                    session_id: analytics_session_id,
-                    tool_name: &tool_name,
-                    request_id: &request_id,
-                    arguments: &analytics_arguments,
-                    duration_us: elapsed_us,
-                    error: &error,
-                    connection_client_name,
-                    connection_instance_id,
-                });
-                tool_error_response(id, &tool_name, &error)
+                hotpath::measure_block!("mcp.server.tools_call.complete.error", {
+                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id,
+                        tool_name: &tool_name,
+                        request_id: &request_id,
+                        arguments: &analytics_arguments,
+                        duration_us: elapsed_us,
+                        error: &error,
+                        connection_client_name,
+                        connection_instance_id,
+                    });
+                    tool_error_response(id, &tool_name, &error)
+                })
             }
         }
     }

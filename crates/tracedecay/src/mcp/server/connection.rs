@@ -278,8 +278,12 @@ impl McpServer {
         response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
     ) -> std::io::Result<bool> {
         let write = async {
-            transport.write_line(output).await?;
-            transport.flush().await
+            hotpath::future!(
+                transport.write_line(output),
+                label = "mcp.server.response.write"
+            )
+            .await?;
+            hotpath::future!(transport.flush(), label = "mcp.server.response.flush").await
         };
         let Some(response_revoked) = response_revoked else {
             return write.await.map(|()| true);
