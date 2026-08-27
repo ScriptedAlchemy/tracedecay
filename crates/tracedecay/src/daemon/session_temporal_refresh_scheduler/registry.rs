@@ -373,6 +373,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
         let wake = self.ensure_project(owner.clone(), database).await;
+        if session_ingest_disabled() {
+            // Dev/profiling switch: never install a history ingestor, so the
+            // project-open catch-up path cannot ingest either.
+            return wake;
+        }
         if let Some(entry) = self.project.lock().await.get(&owner) {
             let mut retained = entry
                 .history
@@ -398,6 +403,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
         let wake = self.ensure_profile(database_path.clone(), database).await;
+        if session_ingest_disabled() {
+            // Dev/profiling switch: never install a history ingestor, so the
+            // project-open catch-up path cannot ingest either.
+            return wake;
+        }
         if let Some(entry) = self.profile.lock().await.get(&database_path) {
             let mut retained = entry
                 .history
