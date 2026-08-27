@@ -927,6 +927,7 @@ impl GitHubReadOnlyClientV1 {
                 .cloned()
             {
                 return network_failure(HttpResponseV1::RateLimited {
+                    primary_rate_limit: Some(checkpoint.clone()),
                     checkpoint: Some(checkpoint),
                     retry_at: None,
                 });
@@ -1033,6 +1034,7 @@ impl GitHubReadOnlyClientV1 {
                         .cloned()
                     {
                         return Err(HttpResponseV1::RateLimited {
+                            primary_rate_limit: Some(checkpoint.clone()),
                             checkpoint: Some(checkpoint),
                             retry_at: None,
                         });
@@ -1180,6 +1182,7 @@ impl GitHubReadOnlyClientV1 {
             HttpResponseV1::RateLimited {
                 checkpoint,
                 retry_at,
+                ..
             } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
                 metadata: GitHubReadNetworkMetadataV1 {
                     status: GitHubReadNetworkStatusV1::RateLimited,
@@ -1537,7 +1540,8 @@ impl GitHubCiReadOnlyClientV1 {
                     )
                 {
                     let response = client.get(&url, request_etag.as_ref(), permission);
-                    permit.finish(http_response_rate_limit(&response));
+                    let (rate_limit, blocked_until) = http_response_quota(&response);
+                    permit.finish(rate_limit, blocked_until);
                     if request_context_admitted(&context_for_read)
                         && !matches!(
                             client.credential.authorization_for_repository(
@@ -1673,6 +1677,7 @@ enum HttpResponseV1 {
         rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
     },
     RateLimited {
+        primary_rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
         checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
         retry_at: Option<UtcMicros>,
     },
@@ -1680,15 +1685,22 @@ enum HttpResponseV1 {
     Unavailable,
 }
 
-fn http_response_rate_limit(
+fn http_response_quota(
     response: &HttpResponseV1,
-) -> Option<&GitHubReviewRateLimitCheckpointV1> {
+) -> (
+    Option<&GitHubReviewRateLimitCheckpointV1>,
+    Option<UtcMicros>,
+) {
     match response {
         HttpResponseV1::Ok { rate_limit, .. } | HttpResponseV1::NotModified { rate_limit, .. } => {
-            rate_limit.as_ref()
+            (rate_limit.as_ref(), None)
         }
-        HttpResponseV1::RateLimited { checkpoint, .. } => checkpoint.as_ref(),
-        HttpResponseV1::Denied | HttpResponseV1::Unavailable => None,
+        HttpResponseV1::RateLimited {
+            primary_rate_limit,
+            retry_at,
+            ..
+        } => (primary_rate_limit.as_ref(), *retry_at),
+        HttpResponseV1::Denied | HttpResponseV1::Unavailable => (None, None),
     }
 }
 
@@ -1697,6 +1709,7 @@ fn network_failure(failure: HttpResponseV1) -> GitHubReadNetworkOutcomeV1 {
         HttpResponseV1::RateLimited {
             checkpoint,
             retry_at,
+            ..
         } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
             metadata: GitHubReadNetworkMetadataV1 {
                 status: GitHubReadNetworkStatusV1::RateLimited,
@@ -1748,10 +1761,15 @@ fn decode_ureq_response(
         401 => HttpResponseV1::Denied,
         403 | 429 => {
             let retry_at = retry_after_at(response.headers());
-            let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at)
-                .or_else(|| rate_limit.filter(|limit| limit.remaining == 0));
+            let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at).or_else(|| {
+                rate_limit
+                    .as_ref()
+                    .filter(|limit| limit.remaining == 0)
+                    .cloned()
+            });
             if checkpoint.is_some() || retry_at.is_some() {
                 HttpResponseV1::RateLimited {
+                    primary_rate_limit: rate_limit,
                     checkpoint,
                     retry_at,
                 }
@@ -2746,10 +2764,15 @@ mod tests {
         }
     }
 
-    async fn assert_ci_quota_bootstrap_fails_closed(
+    async fn assert_ci_quota_response_blocks_page_two<First, Second>(
         response: Vec<u8>,
-        expected_first: GitHubCiTransportOutcomeV1,
-    ) {
+        known_rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
+        assert_first: First,
+        assert_second: Second,
+    ) where
+        First: FnOnce(GitHubCiTransportOutcomeV1),
+        Second: FnOnce(GitHubCiTransportOutcomeV1),
+    {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let probe = listener.try_clone().unwrap();
         let address = listener.local_addr().unwrap();
@@ -2759,12 +2782,15 @@ mod tests {
             stream.write_all(&response).unwrap();
         });
         let client = ci_fixture_client(address);
+        if let Some(known_rate_limit) = known_rate_limit.as_ref() {
+            let _ = client.rate_limits.record(known_rate_limit);
+        }
         let request_scope = scope("ci-quota-bootstrap");
         let request_context = context(&request_scope);
 
         let first = client.read_workflow_run(&request_context, 93).await;
         server.join().unwrap();
-        assert_eq!(first, expected_first);
+        assert_first(first);
         probe.set_nonblocking(true).unwrap();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
         let second_request = std::thread::spawn(move || {
@@ -2792,7 +2818,7 @@ mod tests {
         stop_tx.send(()).unwrap();
         let sent_second_request = second_request.join().unwrap();
 
-        assert_eq!(second, GitHubCiTransportOutcomeV1::Unavailable);
+        assert_second(second);
         assert!(!sent_second_request, "page two must not reach the provider");
     }
 
@@ -2805,9 +2831,11 @@ mod tests {
         )
         .into_bytes();
 
-        assert_ci_quota_bootstrap_fails_closed(
+        assert_ci_quota_response_blocks_page_two(
             response,
-            GitHubCiTransportOutcomeV1::Response(body),
+            None,
+            move |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Response(body)),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
         )
         .await;
     }
@@ -2821,19 +2849,69 @@ mod tests {
         )
         .into_bytes();
 
-        assert_ci_quota_bootstrap_fails_closed(
+        assert_ci_quota_response_blocks_page_two(
             response,
-            GitHubCiTransportOutcomeV1::Response(body),
+            None,
+            move |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Response(body)),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
         )
         .await;
     }
 
     #[tokio::test]
     async fn retry_after_only_ci_limit_is_typed_unavailable_and_fails_closed() {
-        assert_ci_quota_bootstrap_fails_closed(
+        assert_ci_quota_response_blocks_page_two(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 .to_vec(),
-            GitHubCiTransportOutcomeV1::Unavailable,
+            None,
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn secondary_limit_blocks_even_with_positive_primary_headers() {
+        assert_ci_quota_response_blocks_page_two(
+            b"HTTP/1.1 429 Too Many Requests\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4000\r\nX-RateLimit-Reset: 2000000000\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            None,
+            |actual| {
+                assert!(matches!(
+                    actual,
+                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
+                        if checkpoint.remaining == 4_000
+                ));
+            },
+            |actual| {
+                assert!(matches!(
+                    actual,
+                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
+                        if checkpoint.remaining == 4_000
+                ));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_only_blocks_a_known_primary_checkpoint() {
+        assert_ci_quota_response_blocks_page_two(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            Some(GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 4_000,
+                reset_at: UtcMicros(2_000_000_000_000_000),
+            }),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+            |actual| {
+                assert!(matches!(
+                    actual,
+                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
+                        if checkpoint.remaining == 3_999
+                ));
+            },
         )
         .await;
     }
