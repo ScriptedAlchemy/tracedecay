@@ -48,6 +48,23 @@ pub(super) enum PersistedCursorUpdate {
     Monotonic,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SharedJsonlFramePreparation {
+    None,
+    Lazy,
+    EagerWhenPinned,
+}
+
+impl From<bool> for SharedJsonlFramePreparation {
+    fn from(prepare_frames: bool) -> Self {
+        if prepare_frames {
+            Self::EagerWhenPinned
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// How one flush persists: the retention class the frames are captured under
 /// and whether the durable cursor may move backwards. Both are decided once per
 /// admission and always travel together, so they pass as one value.
@@ -67,7 +84,7 @@ pub(super) struct JsonlObservationAdmissionRequest<'request> {
     max_new_bytes: Option<u64>,
     persisted_cursor_update: PersistedCursorUpdate,
     cancellation: ObservationCancellation,
-    prepare_shared_frames: bool,
+    shared_frame_preparation: SharedJsonlFramePreparation,
 }
 
 impl<'request> JsonlObservationAdmissionRequest<'request> {
@@ -89,7 +106,7 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
             max_new_bytes: None,
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
             cancellation: ObservationCancellation::default(),
-            prepare_shared_frames: false,
+            shared_frame_preparation: SharedJsonlFramePreparation::None,
         }
     }
 
@@ -111,8 +128,8 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         self
     }
 
-    pub(super) fn with_shared_frame_preparation(mut self) -> Self {
-        self.prepare_shared_frames = true;
+    pub(super) fn with_lazy_shared_frame_preparation(mut self) -> Self {
+        self.shared_frame_preparation = SharedJsonlFramePreparation::Lazy;
         self
     }
 }
@@ -383,7 +400,7 @@ struct SharedJsonlPageKey {
     generation: u64,
     max_new_bytes: Option<u64>,
     resume: Option<(u64, u64, u64)>,
-    prepare_frames: bool,
+    preparation: SharedJsonlFramePreparation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -557,6 +574,9 @@ static SHARED_JSONL_PEAK_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
 static SHARED_JSONL_TOTAL_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
+static SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE: OnceLock<Mutex<HashMap<u64, usize>>> =
+    OnceLock::new();
+#[cfg(test)]
 static SHARED_JSONL_WAITER_REGISTRATIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> =
     OnceLock::new();
 #[cfg(test)]
@@ -596,14 +616,30 @@ struct SharedJsonlFramePreparationGuard;
 
 #[cfg(test)]
 impl SharedJsonlFramePreparationGuard {
-    fn enter() -> Self {
+    fn enter(file_identity: u64) -> Self {
         use std::sync::atomic::Ordering;
 
         let active = SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel) + 1;
         SHARED_JSONL_PEAK_FRAME_PREPARATIONS.fetch_max(active, Ordering::AcqRel);
         SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel);
+        let preparations =
+            SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut preparations = preparations.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = preparations.entry(file_identity).or_default();
+        *count = count.saturating_add(1);
         Self
     }
+}
+
+#[cfg(test)]
+fn shared_jsonl_frame_preparations_for_test(file_identity: u64) -> usize {
+    SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&file_identity)
+        .copied()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -847,6 +883,8 @@ fn build_shared_jsonl_page(
             resume_state,
         )?
     };
+    #[cfg(test)]
+    let preparation_file_identity = raw.file_identity;
     if cancellation
         .as_ref()
         .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire))
@@ -867,6 +905,9 @@ fn build_shared_jsonl_page(
             let hints = jsonl_frame_hints(bytes.as_ref());
             let prepared = tokio::sync::OnceCell::new();
             if prepare_frames {
+                #[cfg(test)]
+                let _frame_preparation =
+                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
                 let result = prepare_observation_record_v1(
                     bytes.as_ref(),
                     range,
@@ -1021,6 +1062,8 @@ async fn prepare_shared_jsonl_window(
     }
     let background_cpu = shared_jsonl_background_cpu()?;
     let task_cancellation = cancellation.clone();
+    #[cfg(test)]
+    let preparation_file_identity = page.file_identity;
     let prepared = tokio::task::spawn_blocking(move || {
         jobs.into_par_iter()
             .map(|(index, bytes, range)| {
@@ -1039,7 +1082,8 @@ async fn prepare_shared_jsonl_window(
                 hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
                 let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
-                let _frame_preparation = SharedJsonlFramePreparationGuard::enter();
+                let _frame_preparation =
+                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
                 Ok((
                     index,
                     prepare_observation_record_v1(
@@ -1114,14 +1158,14 @@ async fn shared_jsonl_page(
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
-    prepare_frames: bool,
+    preparation: impl Into<SharedJsonlFramePreparation>,
 ) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
     shared_jsonl_page_with_cancellation(
         path,
         previous,
         max_new_bytes,
         resume_state,
-        prepare_frames,
+        preparation,
         SharedJsonlCancellation::default(),
         false,
     )
@@ -1133,10 +1177,11 @@ async fn shared_jsonl_page_with_cancellation(
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
-    prepare_frames: bool,
+    preparation: impl Into<SharedJsonlFramePreparation>,
     cancellation: SharedJsonlCancellation,
     speculative: bool,
 ) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
+    let preparation = preparation.into();
     let SharedJsonlCancellation {
         blocking: cancellation,
         operation: operation_cancellation,
@@ -1157,12 +1202,12 @@ async fn shared_jsonl_page_with_cancellation(
     })
     .await
     .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: "jsonl" })??;
-    // A shared-hub generation pins its immutable path set before delivery.
-    // Only those paths pay eager canonical preparation; standalone/replay
-    // admission keeps raw frames so a scope prefilter can reject an entire
-    // rollout segment without decoding it. A prefetch race is harmless: the
-    // pin makes the first consumer build the same prepared cache entry.
-    let prepare_frames_eagerly = prepare_frames && shared_jsonl_path_is_pinned(&canonical_path);
+    // Preparation policy is part of the page key. Codex prefetch and demand
+    // both select `Lazy`, so a pinned page stays raw until ordered admission
+    // proves which frames can affect scope. Explicit eager consumers retain
+    // their own cache entry and cannot make the scope-first path pay a decode.
+    let prepare_frames_eagerly = preparation == SharedJsonlFramePreparation::EagerWhenPinned
+        && shared_jsonl_path_is_pinned(&canonical_path);
     let key = SharedJsonlPageKey {
         path: canonical_path,
         position: previous.position,
@@ -1170,7 +1215,7 @@ async fn shared_jsonl_page_with_cancellation(
         max_new_bytes,
         resume: resume_state
             .map(|resume| (resume.generation, resume.file_identity, resume.fingerprint)),
-        prepare_frames,
+        preparation,
     };
     let cache_lock = SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
     let in_flight = loop {
@@ -1300,7 +1345,8 @@ async fn shared_jsonl_page_with_cancellation(
             resume_state,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
-                reserve_lazy_preparation: prepare_frames && !prepare_frames_eagerly,
+                reserve_lazy_preparation: preparation != SharedJsonlFramePreparation::None
+                    && !prepare_frames_eagerly,
                 background_cpu,
                 memory,
                 cancellation,
@@ -1387,7 +1433,7 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 StoredCursor::default(),
                 Some(SHARED_JSONL_PAGE_MAX_NEW_BYTES),
                 None,
-                true,
+                SharedJsonlFramePreparation::Lazy,
                 SharedJsonlCancellation {
                     blocking: cancellation,
                     operation: None,
@@ -1799,7 +1845,7 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         max_new_bytes,
         persisted_cursor_update,
         cancellation,
-        prepare_shared_frames,
+        shared_frame_preparation,
     } = request;
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
@@ -1838,7 +1884,7 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
         previous,
         max_new_bytes,
         resume_state,
-        prepare_shared_frames,
+        shared_frame_preparation,
         SharedJsonlCancellation {
             blocking: None,
             operation: Some(cancellation.clone()),
@@ -1849,7 +1895,6 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
-        frames_decoded: u64::try_from(raw.frames.len()).unwrap_or(u64::MAX),
         io: if shared_page_hit {
             JsonlIoAccounting::default()
         } else {
@@ -2124,6 +2169,16 @@ pub(super) async fn admit_jsonl_observations<State: Clone>(
                 )?,
                 Err(error) => JsonlFrameAdmission::non_durable(preparation_failure_reason(error)),
             };
+        }
+        if matches!(
+            admission,
+            JsonlFrameAdmission::Durable { .. }
+                | JsonlFrameAdmission::NonDurable {
+                    before_decode: false,
+                    ..
+                }
+        ) {
+            progress.frames_decoded = progress.frames_decoded.saturating_add(1);
         }
         state = frame_state;
         let (parsed_record, native_record_id) = match admission {

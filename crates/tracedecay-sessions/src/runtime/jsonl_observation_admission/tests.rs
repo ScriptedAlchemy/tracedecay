@@ -173,7 +173,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         generation: 0,
         max_new_bytes: Some(1024),
         resume: None,
-        prepare_frames: false,
+        preparation: false.into(),
     };
     let cache = super::SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
     cache.lock().await.in_flight.insert(
@@ -236,7 +236,7 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
             StoredCursor::default(),
             Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
             None,
-            true,
+            super::SharedJsonlFramePreparation::Lazy,
         )
         .await
     });
@@ -441,7 +441,7 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
             StoredCursor::default(),
             Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
             None,
-            true,
+            super::SharedJsonlFramePreparation::Lazy,
         )
         .await
         .expect("prepared generation page");
@@ -509,7 +509,7 @@ fn speculative_capacity_is_one_global_quota_across_prefetch_generations() {
         generation: 0,
         max_new_bytes: Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
         resume: None,
-        prepare_frames: true,
+        preparation: true.into(),
     };
     let first = key("/generation-a.jsonl");
     let second = key("/generation-b.jsonl");
@@ -982,6 +982,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     let len = write_undecodable_tail_rollout(&path, &cwd);
+    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
     let spy = SeamSpyAdmission::default();
 
     // Profile scope owns exactly the records no registered project claims, so
@@ -996,6 +997,15 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     )
     .await
     .expect("an out-of-scope rollout is covered past, not an error");
+    let (page, hit) = super::shared_jsonl_page(
+        &path,
+        StoredCursor::default(),
+        None,
+        None,
+        super::SharedJsonlFramePreparation::Lazy,
+    )
+    .await
+    .expect("the retained admission page remains available");
 
     let reasons = spy
         .cover_past_advances()
@@ -1008,6 +1018,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
         "an out-of-scope frame that was never decoded cannot be reported as malformed"
     );
     assert_eq!(progress.frames_skipped, 3);
+    assert_eq!(progress.frames_decoded, 1);
     // The coverage reason proves the decode was skipped; this proves the seam
     // *reports* it. `session_meta` names itself, so it is still decoded before
     // it is judged — only the two frames that cannot move the cwd are refused
@@ -1019,6 +1030,19 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
          the one that can is not"
     );
     assert_eq!(progress.frames_persisted, 0);
+    assert!(hit);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
+        1,
+        "only the context-bearing session_meta frame may reach canonical preparation"
+    );
+    assert_eq!(
+        progress
+            .frames_decoded
+            .saturating_add(progress.frames_rejected_before_decode),
+        3,
+        "every attempted frame is either decoded or rejected before decode, never both"
+    );
     assert_eq!(spy.capture_count(), 0);
     assert!(spy.inner.observations().is_empty());
     assert_eq!(
@@ -1040,23 +1064,43 @@ async fn in_scope_frames_still_admit_and_keep_the_decode_verdict() {
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     write_undecodable_tail_rollout(&path, &cwd);
+    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
     let spy = SeamSpyAdmission::default();
 
     let progress =
         try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
             .await
             .expect("an in-scope rollout admits");
-    let (page, hit) = super::shared_jsonl_page(&path, StoredCursor::default(), None, None, true)
-        .await
-        .expect("the retained admission page remains available");
+    let (page, hit) = super::shared_jsonl_page(
+        &path,
+        StoredCursor::default(),
+        None,
+        None,
+        super::SharedJsonlFramePreparation::Lazy,
+    )
+    .await
+    .expect("the retained admission page remains available");
 
     assert_eq!(spy.inner.observations().len(), 2);
     assert_eq!(progress.frames_persisted, 2);
+    assert_eq!(progress.frames_decoded, 3);
     assert_eq!(
         progress.frames_rejected_before_decode, 0,
         "nothing in scope may be refused before it is decoded"
     );
     assert!(hit);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
+        3,
+        "the context frame and both in-scope frames must reach canonical preparation"
+    );
+    assert_eq!(
+        progress
+            .frames_decoded
+            .saturating_add(progress.frames_rejected_before_decode),
+        3,
+        "every attempted frame is either decoded or rejected before decode, never both"
+    );
     assert!(
         page.frames
             .iter()

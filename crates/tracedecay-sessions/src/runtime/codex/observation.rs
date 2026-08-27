@@ -402,7 +402,7 @@ async fn try_admit_codex_jsonl_observations(
     )
     .with_max_new_bytes(max_new_bytes)
     .with_persisted_cursor_update(PersistedCursorUpdate::Replace)
-    .with_shared_frame_preparation()
+    .with_lazy_shared_frame_preparation()
     .with_cancellation(cancellation.clone());
     let progress = admit_jsonl_observations(
         request,
