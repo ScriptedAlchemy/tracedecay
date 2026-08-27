@@ -2910,12 +2910,15 @@ impl LatestCompleteCodeIndexV1 {
         }
     }
 
-    /// The retained verified-snapshot projection store for interactive graph
-    /// reads, present once persistent graph activation has completed.
+    /// The retained verified-snapshot projection store for graph reads,
+    /// present once persistent graph publication has completed.
     ///
-    /// Interactive reads require the persistent Grafeo activation: unlike the
-    /// retrieval lanes there is no in-memory fallback, so a cold store is the
-    /// typed not-activated state, never an empty serve.
+    /// Occurrence-seeded adjacency reads are immediately available from the
+    /// verified snapshot. Name, file, and import lookups may still report the
+    /// typed catalog-warming state while their derived catalog builds in the
+    /// background. Unlike the retrieval lanes there is no in-memory fallback,
+    /// so an absent store is the typed not-activated state, never an empty
+    /// serve.
     pub fn interactive_graph_store(
         &self,
     ) -> Result<Arc<CodeGraphProjectionStore>, RetrievalPortError> {
@@ -2928,13 +2931,7 @@ impl LatestCompleteCodeIndexV1 {
                     "code graph projection has no persistent interactive store".to_owned(),
                 )
             })?;
-        match store.interactive_catalog_is_warm() {
-            Ok(true) => Ok(store),
-            Ok(false) => Err(RetrievalPortError::Contract(
-                "code graph interactive catalog has not completed activation".to_owned(),
-            )),
-            Err(error) => Err(RetrievalPortError::Contract(error.to_string())),
-        }
+        Ok(store)
     }
 }
 

@@ -388,18 +388,20 @@ export function GenerationAnchor() { return 1; }
     );
     let graph_store = served
         .interactive_graph_store()
-        .expect("admission returns only after persistent graph activation");
-    assert_eq!(
-        graph_store.interactive_catalog_is_warm(),
-        Ok(true),
-        "serving publication requires its generation-pinned catalog to be warm"
-    );
+        .expect("admission returns after persistent graph publication");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while graph_store.interactive_catalog_is_warm() != Ok(true) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background graph catalog warm completes");
     let graph_reader = graph_store
         .interactive_reader_with_cancellation(&outcome.generation_id, Arc::new(NeverCancelled))
         .expect("generation-pinned interactive graph reader");
     let dependency_file = graph_reader
         .file_by_logical_path("node_modules/pkg/index.d.ts", Arc::new(NeverCancelled))
-        .expect("already-warm catalog lookup")
+        .expect("warmed catalog lookup")
         .expect("admitted dependency file is in the verified graph catalog");
     assert_eq!(dependency_file.logical_path, "node_modules/pkg/index.d.ts");
     let symbols = graph_reader
