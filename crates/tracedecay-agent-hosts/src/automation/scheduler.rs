@@ -725,9 +725,31 @@ async fn lock_is_stale(path: &Path, stale_after_secs: Option<u64>, now_secs: i64
         }
     }
     let Some(created_at) = lock_created_at(path).await? else {
-        return Ok(true);
+        // `lock_created_at` yields no timestamp when the lock vanished after
+        // the contender's `create_new` failed (the holder finished and
+        // released mid-check) or when no mtime is readable. Treating that as
+        // stale let the contender "reclaim" a released lock and run a second
+        // time (the Windows double-execution flake). Report stale only for a
+        // provably old on-disk lock; a vanished lock stays contended.
+        return Ok(lock_mtime_elapsed_secs(path, now_secs)
+            .await
+            .is_some_and(|elapsed| elapsed >= stale_after_secs));
     };
     Ok(elapsed_secs(created_at, now_secs) >= stale_after_secs)
+}
+
+/// Seconds since the lock file was last modified, or `None` when the file or
+/// its timestamps cannot be read (treated as not stale by the caller).
+async fn lock_mtime_elapsed_secs(path: &Path, now_secs: i64) -> Option<u64> {
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_secs: i64 = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs()
+        .try_into()
+        .ok()?;
+    Some(elapsed_secs(modified_secs, now_secs))
 }
 
 async fn lock_pid(path: &Path) -> Result<Option<u32>> {

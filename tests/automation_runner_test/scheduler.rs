@@ -847,6 +847,72 @@ async fn task_lock_reclaims_stale_dead_pid_lock_file() {
 }
 
 #[tokio::test]
+async fn task_lock_does_not_steal_fresh_empty_lock_file() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let temp = tempdir().unwrap();
+    let lock_dir = temp.path().join("automation_locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("memory_curator.lock");
+    // A concurrent winner has created the lock file but not yet written its
+    // payload: the file exists and is empty. It must not be treated as stale.
+    std::fs::write(&lock_path, b"").unwrap();
+    let now_secs = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+
+    let lock = AutomationTaskLock::try_acquire(
+        temp.path(),
+        AgentTaskKind::MemoryCurator,
+        Some(3600),
+        now_secs,
+    )
+    .await
+    .unwrap();
+
+    assert!(lock.is_none());
+    assert!(lock_path.exists());
+}
+
+#[tokio::test]
+async fn task_lock_reclaims_empty_lock_file_older_than_stale_window() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let temp = tempdir().unwrap();
+    let lock_dir = temp.path().join("automation_locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("skill_writer.lock");
+    // An empty lock whose mtime is far outside the stale window is a crash
+    // leftover and stays reclaimable.
+    std::fs::write(&lock_path, b"").unwrap();
+    let now_secs = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+        + 7200;
+
+    let lock = AutomationTaskLock::try_acquire(
+        temp.path(),
+        AgentTaskKind::SkillWriter,
+        Some(3600),
+        now_secs,
+    )
+    .await
+    .unwrap();
+
+    assert!(lock.is_some());
+    drop(lock);
+    assert!(!lock_path.exists());
+}
+
+#[tokio::test]
 async fn task_lock_keeps_live_pid_lock_file() {
     let temp = tempdir().unwrap();
     let lock_dir = temp.path().join("automation_locks");
