@@ -552,9 +552,9 @@ impl MessageSearchInput {
             | SessionRetrievalServiceOutcome::Unavailable(_) => {
                 return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
             }
-            SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-            | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-                return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal());
+            outcome @ (SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
+            | SessionRetrievalServiceOutcome::BudgetExhausted { .. }) => {
+                return Err(super::refusal::from_session_retrieval(outcome));
             }
             SessionRetrievalServiceOutcome::Cancelled => {
                 return Err(RetainedSurfaceExecutionErrorV1::Cancelled(

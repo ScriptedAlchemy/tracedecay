@@ -23,6 +23,7 @@ mod memory_target;
 mod memory_tracking;
 mod profile;
 pub(crate) mod receipts;
+mod refusal;
 mod session;
 pub(crate) mod session_queries;
 pub(crate) mod session_refresh;

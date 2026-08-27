@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{CursorManifestLimitKindV1, UtcMicros};
 
 use super::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
@@ -577,17 +577,69 @@ fn unavailable_problem(code: &'static str, message: &'static str) -> Application
 }
 
 impl RetainedSurfaceExecutionErrorV1 {
-    /// Fail-closed structural budget refusal. True concurrent saturation stays
-    /// [`Self::Saturated`] and retryable; this path never is.
-    pub fn structural_budget_refusal() -> Self {
+    fn budget_refused(code: &'static str, message: &'static str) -> Self {
         Self::ApplicationProblem(ApplicationProblem::InvalidRequest {
-            diagnostic: diagnostic(
-                "application.retained.budget-refused",
-                "The request exceeds the admitted retrieval budget. Narrow the scope or limit.",
-            ),
+            diagnostic: diagnostic(code, message),
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
         })
+    }
+
+    /// Fail-closed structural budget refusal. True concurrent saturation stays
+    /// [`Self::Saturated`] and retryable; this path never is.
+    pub fn structural_budget_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused",
+            "The request exceeds the admitted retrieval budget. Narrow the scope or limit.",
+        )
+    }
+
+    pub fn cursor_manifest_refusal(kind: CursorManifestLimitKindV1) -> Self {
+        match kind {
+            CursorManifestLimitKindV1::Participants => Self::budget_refused(
+                "application.retained.cursor-manifest.participants",
+                "The cursor participant manifest exceeds the admitted limit.",
+            ),
+            CursorManifestLimitKindV1::CanonicalBytes => Self::budget_refused(
+                "application.retained.cursor-manifest.canonical-bytes",
+                "The cursor canonical-byte manifest exceeds the admitted limit.",
+            ),
+        }
+    }
+
+    pub fn request_budget_mismatch_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused.request-mismatch",
+            "The request budget does not match the admitted retrieval budget.",
+        )
+    }
+
+    pub fn execution_work_exhausted_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused.execution-work",
+            "The request exhausted the admitted execution-work budget.",
+        )
+    }
+
+    pub fn participant_manifest_budget_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused.participant-manifest",
+            "The request exceeded the admitted participant-manifest budget.",
+        )
+    }
+
+    pub fn hydration_bytes_budget_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused.hydration-bytes",
+            "The request exceeded the admitted hydration-bytes budget.",
+        )
+    }
+
+    pub fn context_bytes_budget_refusal() -> Self {
+        Self::budget_refused(
+            "application.retained.budget-refused.context-bytes",
+            "The request exceeded the admitted context-bytes budget.",
+        )
     }
 }
 
@@ -719,7 +771,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn structural_budget_refusal_is_non_retryable_invalid_request() {
         let problem = retained_surface_execution_problem(
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal(),
@@ -733,6 +784,57 @@ mod tests {
             Some("application.retained.budget-refused")
         );
         assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+    }
+
+    #[test]
+    fn cursor_manifest_and_budget_stage_refusals_have_distinct_non_retryable_diagnostics() {
+        let cases = [
+            (
+                RetainedSurfaceExecutionErrorV1::cursor_manifest_refusal(
+                    CursorManifestLimitKindV1::Participants,
+                ),
+                "application.retained.cursor-manifest.participants",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::cursor_manifest_refusal(
+                    CursorManifestLimitKindV1::CanonicalBytes,
+                ),
+                "application.retained.cursor-manifest.canonical-bytes",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::request_budget_mismatch_refusal(),
+                "application.retained.budget-refused.request-mismatch",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::execution_work_exhausted_refusal(),
+                "application.retained.budget-refused.execution-work",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::participant_manifest_budget_refusal(),
+                "application.retained.budget-refused.participant-manifest",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::hydration_bytes_budget_refusal(),
+                "application.retained.budget-refused.hydration-bytes",
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::context_bytes_budget_refusal(),
+                "application.retained.budget-refused.context-bytes",
+            ),
+        ];
+        let mut codes = BTreeSet::new();
+        for (error, expected) in cases {
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            let code = problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.clone())
+                .expect("refusal diagnostic");
+            assert_eq!(code, expected);
+            assert!(codes.insert(code), "refusal diagnostics must stay distinct");
+        }
+        assert!(!codes.contains("application.retained.budget-refused"));
     }
 
     #[test]

@@ -624,9 +624,9 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         | SessionRetrievalServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        outcome @ (SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
+        | SessionRetrievalServiceOutcome::BudgetExhausted { .. }) => {
+            super::super::refusal::from_session_retrieval(outcome)
         }
         SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,

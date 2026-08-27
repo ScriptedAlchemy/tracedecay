@@ -581,9 +581,9 @@ pub enum SessionRetrievalOutcome<T> {
     Cancelled,
 }
 
-/// Internal retrieval-budget stage. These are collapsed today into one
-/// retryable `Saturated` problem at the retained boundary; keep them distinct
-/// so admission versus execution can be proven without a new wire kind.
+/// Internal retrieval-budget stage. The daemon maps each stage to a distinct
+/// non-retryable `InvalidRequest` diagnostic; true concurrent saturation is a
+/// different outcome and never uses this variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRetrievalBudgetStageV1 {
     RequestBudgetMismatch,
