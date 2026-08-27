@@ -31,6 +31,46 @@ hotpath-cpu = [
 test-helpers = []
 eval-helpers = []
 
+# Opt-in tiered graph storage (never in `default`).
+#
+# Split in two on purpose, because grafeo 0.5.42 bundles two unrelated
+# things under the "tiered" name and only one of them is usable here.
+#
+# `graph-disk-tier` is the genuinely disk-backed half:
+#   * `grafeo-engine/mmap` + `compact-store` compile in
+#     `database/compact_tiered.rs`, which serializes a `CompactStore`,
+#     mmaps it, and serves reads from the mapping.
+#   * `grafeo-engine/spill` enables the buffer manager's spill loop so
+#     `Config::with_spill_path` has any effect at all.
+# It also makes `GraphDbOpen` hand grafeo a spill directory and a bounded
+# memory budget; see `crates/tracedecay-graph-db/src/location.rs`.
+graph-disk-tier = [
+    "grafeo-engine/mmap",
+    "grafeo-engine/compact-store",
+    "grafeo-engine/spill",
+]
+
+# `graph-tiered-storage` adds grafeo-core's own `tiered-storage` feature on
+# top. Despite the name that feature is NOT about disk: it swaps the LPG
+# store's `FxHashMap<Id, VersionChain<Record>>` for an arena + `VersionIndex`
+# + compressed `EpochStore`, all of which are heap-resident (the arena calls
+# `std::alloc::alloc`; `EpochStore` holds `RwLock<HashMap<EpochId, ..>>`).
+#
+# KNOWN BROKEN at grafeo 0.5.42 — do not enable outside experiments.
+# `Arena::alloc_value_with_offset` only ever allocates into `chunks.first()`,
+# because `HotVersionRef` addresses records by a u32 offset within a single
+# chunk. That primary chunk is `DEFAULT_CHUNK_SIZE` = 1 MiB and `LpgStore`
+# hardcodes `ArenaAllocator::new()`, so there is no way to raise it from
+# here. `NodeRecord` is 32 bytes, giving a hard ceiling near 32 Ki records
+# per epoch, after which `node_ops.rs` *panics* on `AllocError::
+# InsufficientSpace` rather than returning an error. See the failure
+# inventory in the commit that introduced this feature.
+graph-tiered-storage = [
+    "graph-disk-tier",
+    "grafeo-core/tiered-storage",
+    "grafeo-core/mmap",
+]
+
 [dependencies]
 grafeo-adapters.workspace = true
 grafeo-common.workspace = true
@@ -116,4 +156,10 @@ name = "semantic_vector_staging_contract"
 
 [[test]]
 name = "verified_generation_contract"
+required-features = ["test-helpers"]
+
+# Peak-RSS measurement harness for the tiered storage features. Every test in
+# it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
+[[test]]
+name = "tiered_storage_rss"
 required-features = ["test-helpers"]
