@@ -178,11 +178,28 @@ unsafe impl Sync for Chunk {}
 /// is no longer needed.
 ///
 /// Thread-safe: multiple threads can allocate concurrently using atomics.
+///
+/// # Addressing (`tiered-storage`)
+///
+/// TraceDecay patch. Every chunk in `chunks` is exactly `chunk_size` bytes,
+/// which lets [`Arena::alloc_value_with_offset`] hand out a *flat* address —
+/// `chunk_index * chunk_size + offset_in_chunk` — instead of a raw offset into
+/// one chunk. That is the whole reason `oversized` exists: a single allocation
+/// too large for a standard chunk still needs somewhere to live, but letting it
+/// sit in `chunks` would break the uniform stride the flat address depends on.
 pub struct Arena {
     /// The epoch this arena belongs to.
     epoch: EpochId,
-    /// List of memory chunks.
+    /// Uniformly sized memory chunks, each exactly `chunk_size` bytes.
+    ///
+    /// Append-only for the arena's lifetime: a chunk's index in this vector is
+    /// half of every flat address handed out by `alloc_value_with_offset`, so
+    /// entries are never removed or reordered.
     chunks: RwLock<Vec<Chunk>>,
+    /// Chunks larger than `chunk_size`, each created for one allocation that
+    /// no standard chunk could hold. Kept out of `chunks` to preserve the
+    /// uniform stride; still allocated from and still counted by `stats`.
+    oversized: RwLock<Vec<Chunk>>,
     /// Default chunk size for new allocations.
     chunk_size: usize,
     /// Total bytes allocated.
@@ -209,6 +226,7 @@ impl Arena {
         Ok(Self {
             epoch,
             chunks: RwLock::new(vec![initial_chunk]),
+            oversized: RwLock::new(Vec::new()),
             chunk_size,
             total_allocated: AtomicUsize::new(chunk_size),
         })
@@ -234,6 +252,18 @@ impl Arena {
         {
             let chunks = self.chunks.read();
             for chunk in chunks.iter().rev() {
+                if let Some(ptr) = chunk.try_alloc(size, align) {
+                    return Ok(ptr);
+                }
+            }
+        }
+
+        // Then the oversized chunks. Before the flat-addressing patch these
+        // lived in `chunks` and were scanned by the loop above; keep using
+        // their leftover space rather than growing the arena again.
+        {
+            let oversized = self.oversized.read();
+            for chunk in oversized.iter().rev() {
                 if let Some(ptr) = chunk.try_alloc(size, align) {
                     return Ok(ptr);
                 }
@@ -283,43 +313,113 @@ impl Arena {
         })
     }
 
-    /// Allocates a value and returns its offset within the primary chunk.
+    /// Splits a flat arena offset into `(chunk index, offset within chunk)`.
+    ///
+    /// TraceDecay patch. The `u32` an epoch hands out is a flat address over
+    /// the arena's uniform chunks, not an offset into a single chunk, so every
+    /// reader has to divide by the stride before touching memory.
+    #[cfg(feature = "tiered-storage")]
+    #[inline]
+    fn split_offset(&self, offset: u32) -> (usize, usize) {
+        debug_assert!(self.chunk_size > 0, "arena chunk size must be non-zero");
+        let flat = offset as usize;
+        (flat / self.chunk_size, flat % self.chunk_size)
+    }
+
+    /// Appends one standard chunk, unless another thread got there first.
+    ///
+    /// `observed` is the chunk count the caller saw while holding only a read
+    /// lock. If the vector has grown since, the caller's retry will find the
+    /// new chunk and nothing is allocated here.
+    #[cfg(feature = "tiered-storage")]
+    fn grow_uniform_chunks(&self, observed: usize) -> Result<(), AllocError> {
+        let mut chunks = self.chunks.write();
+        if chunks.len() != observed {
+            return Ok(());
+        }
+
+        // A flat address is a u32, so the arena can address at most 4 GiB of
+        // uniform chunks per epoch. Past that, report it instead of handing
+        // back an address that would alias an earlier record.
+        let max_chunks = (1_u64 << 32) / self.chunk_size as u64;
+        if chunks.len() as u64 >= max_chunks {
+            return Err(AllocError::InsufficientSpace);
+        }
+
+        let chunk = Chunk::new(self.chunk_size)?;
+        self.total_allocated
+            .fetch_add(self.chunk_size, Ordering::Relaxed);
+        chunks.push(chunk);
+        Ok(())
+    }
+
+    /// Allocates a value and returns its flat offset within the epoch's arena.
     ///
     /// This is used by tiered storage to store values in the arena and track
     /// their locations via compact u32 offsets in `HotVersionRef`.
     ///
+    /// TraceDecay patch. Upstream 0.5.42 only ever allocated into
+    /// `chunks.first()`, which capped an epoch at one `chunk_size` chunk —
+    /// about 32 Ki 32-byte node records at the default 1 MiB — and then failed
+    /// every later insert. The returned `u32` is now a flat address over all of
+    /// the arena's uniform chunks (`chunk_index * chunk_size + offset`), so an
+    /// epoch spans as many chunks as it needs, up to the 4 GiB a `u32` can
+    /// address. Chunks are appended and never moved, so an address stays valid
+    /// for the arena's lifetime exactly as before.
+    ///
     /// # Errors
     ///
-    /// Returns `AllocError::InsufficientSpace` if the primary chunk does not
-    /// have enough room. Increase the chunk size for your use case.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the arena has no chunks (should never happen in normal use).
+    /// Returns `AllocError::InsufficientSpace` if the value is too large to sit
+    /// inside a single chunk, or if the epoch has exhausted the 4 GiB flat
+    /// address space. Returns `AllocError::InvalidAlignment` if `T`'s alignment
+    /// does not divide the chunk size, because a flat address only preserves
+    /// alignment when the stride is a multiple of it.
+    /// Returns `AllocError::OutOfMemory` if a new chunk cannot be allocated.
     #[cfg(feature = "tiered-storage")]
     pub fn alloc_value_with_offset<T>(&self, value: T) -> Result<(u32, &mut T), AllocError> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
-        // Try to allocate in the first chunk to get a stable offset
-        let chunks = self.chunks.read();
-        let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
+        if self.chunk_size == 0 || size.saturating_add(align) > self.chunk_size {
+            // A value that cannot fit a chunk has nowhere to go: an allocation
+            // may not straddle two chunks, or the flat address would not
+            // describe it.
+            return Err(AllocError::InsufficientSpace);
+        }
+        if !self.chunk_size.is_multiple_of(align) {
+            return Err(AllocError::InvalidAlignment(align));
+        }
 
-        let (offset, ptr) = chunk
-            .try_alloc_with_offset(size, align)
-            .ok_or(AllocError::InsufficientSpace)?;
+        loop {
+            let (observed, allocated) = {
+                let chunks = self.chunks.read();
+                let observed = chunks.len();
+                // Bump into the newest chunk. Older ones are full by
+                // construction, so there is nothing to scan.
+                let allocated = chunks
+                    .last()
+                    .and_then(|chunk| chunk.try_alloc_with_offset(size, align))
+                    .map(|(offset, ptr)| (observed - 1, offset, ptr));
+                (observed, allocated)
+            };
 
-        // SAFETY: We've allocated the correct size and alignment
-        Ok(unsafe {
-            let typed_ptr = ptr.as_ptr().cast::<T>();
-            typed_ptr.write(value);
-            (offset, &mut *typed_ptr)
-        })
+            if let Some((index, offset, ptr)) = allocated {
+                let flat = (index as u64) * (self.chunk_size as u64) + u64::from(offset);
+                let flat = u32::try_from(flat).map_err(|_| AllocError::InsufficientSpace)?;
+
+                // SAFETY: We've allocated the correct size and alignment
+                return Ok(unsafe {
+                    let typed_ptr = ptr.as_ptr().cast::<T>();
+                    typed_ptr.write(value);
+                    (flat, &mut *typed_ptr)
+                });
+            }
+
+            self.grow_uniform_chunks(observed)?;
+        }
     }
 
-    /// Reads a value at the given offset in the primary chunk.
+    /// Reads a value at the given flat offset in the epoch's arena.
     ///
     /// # Safety
     ///
@@ -329,24 +429,30 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// Panics if the arena has no chunks (should never happen in normal use).
+    /// Panics if the offset does not name a live allocation in this arena.
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at<T>(&self, offset: u32) -> &T {
+        let (index, in_chunk) = self.split_offset(offset);
         let chunks = self.chunks.read();
-        let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
+        let chunk = chunks.get(index).unwrap_or_else(|| {
+            panic!(
+                "read_at: offset {} names chunk {} but the arena has {}",
+                offset,
+                index,
+                chunks.len()
+            )
+        });
 
         assert!(
-            (offset as usize) + std::mem::size_of::<T>() <= chunk.used(),
+            in_chunk + std::mem::size_of::<T>() <= chunk.used(),
             "read_at: offset {} + size_of::<{}>() = {} exceeds chunk used bytes {}",
             offset,
             std::any::type_name::<T>(),
-            (offset as usize) + std::mem::size_of::<T>(),
+            in_chunk + std::mem::size_of::<T>(),
             chunk.used()
         );
         assert!(
-            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            in_chunk.is_multiple_of(std::mem::align_of::<T>()),
             "read_at: offset {} is not aligned for {} (alignment {})",
             offset,
             std::any::type_name::<T>(),
@@ -355,12 +461,12 @@ impl Arena {
 
         // SAFETY: Caller guarantees offset is valid and T matches stored type
         unsafe {
-            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            let ptr = chunk.ptr.as_ptr().add(in_chunk).cast::<T>();
             &*ptr
         }
     }
 
-    /// Reads a value mutably at the given offset in the primary chunk.
+    /// Reads a value mutably at the given flat offset in the epoch's arena.
     ///
     /// # Safety
     ///
@@ -371,24 +477,30 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// Panics if the arena has no chunks (should never happen in normal use).
+    /// Panics if the offset does not name a live allocation in this arena.
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at_mut<T>(&self, offset: u32) -> &mut T {
+        let (index, in_chunk) = self.split_offset(offset);
         let chunks = self.chunks.read();
-        let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
+        let chunk = chunks.get(index).unwrap_or_else(|| {
+            panic!(
+                "read_at_mut: offset {} names chunk {} but the arena has {}",
+                offset,
+                index,
+                chunks.len()
+            )
+        });
 
         assert!(
-            (offset as usize) + std::mem::size_of::<T>() <= chunk.capacity,
+            in_chunk + std::mem::size_of::<T>() <= chunk.capacity,
             "read_at_mut: offset {} + size_of::<{}>() = {} exceeds chunk capacity {}",
             offset,
             std::any::type_name::<T>(),
-            (offset as usize) + std::mem::size_of::<T>(),
+            in_chunk + std::mem::size_of::<T>(),
             chunk.capacity
         );
         assert!(
-            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            in_chunk.is_multiple_of(std::mem::align_of::<T>()),
             "read_at_mut: offset {} is not aligned for {} (alignment {})",
             offset,
             std::any::type_name::<T>(),
@@ -397,7 +509,7 @@ impl Arena {
 
         // SAFETY: Caller guarantees offset is valid, T matches, and no aliasing
         unsafe {
-            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            let ptr = chunk.ptr.as_ptr().add(in_chunk).cast::<T>();
             &mut *ptr
         }
     }
@@ -416,8 +528,14 @@ impl Arena {
             .try_alloc(size, align)
             .expect("fresh chunk sized to fit");
 
-        let mut chunks = self.chunks.write();
-        chunks.push(chunk);
+        // A chunk that had to be grown past `chunk_size` goes to `oversized`,
+        // so that every entry in `chunks` keeps the uniform stride the flat
+        // `alloc_value_with_offset` addressing is built on.
+        if chunk_size == self.chunk_size {
+            self.chunks.write().push(chunk);
+        } else {
+            self.oversized.write().push(chunk);
+        }
 
         Ok(ptr)
     }
@@ -431,19 +549,26 @@ impl Arena {
     /// Returns the total memory used (not just allocated capacity).
     #[must_use]
     pub fn total_used(&self) -> usize {
-        let chunks = self.chunks.read();
-        chunks.iter().map(Chunk::used).sum()
+        let standard: usize = self.chunks.read().iter().map(Chunk::used).sum();
+        let oversized: usize = self.oversized.read().iter().map(Chunk::used).sum();
+        standard + oversized
     }
 
     /// Returns statistics about this arena.
+    ///
+    /// `chunk_count` and `total_used` cover both the uniform chunks and the
+    /// oversized ones, so the numbers mean the same thing they did before the
+    /// two lists were split apart.
     #[must_use]
     pub fn stats(&self) -> ArenaStats {
         let chunks = self.chunks.read();
+        let oversized = self.oversized.read();
         ArenaStats {
             epoch: self.epoch,
-            chunk_count: chunks.len(),
+            chunk_count: chunks.len() + oversized.len(),
             total_allocated: self.total_allocated.load(Ordering::Relaxed),
-            total_used: chunks.iter().map(Chunk::used).sum(),
+            total_used: chunks.iter().map(Chunk::used).sum::<usize>()
+                + oversized.iter().map(Chunk::used).sum::<usize>(),
         }
     }
 }
@@ -964,16 +1089,107 @@ mod tiered_storage_tests {
     }
 
     #[test]
-    fn test_alloc_value_with_offset_insufficient_space() {
-        // Create a tiny arena where a large allocation will fail
+    fn test_alloc_value_with_offset_spans_chunks() {
+        // TraceDecay patch: upstream 0.5.42 returned InsufficientSpace here,
+        // because it only ever allocated into the arena's first chunk. A full
+        // chunk now grows the arena instead, and the flat offset carries the
+        // chunk index.
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 64).unwrap();
 
-        // Fill up the chunk
-        let _ = arena.alloc_value_with_offset([0u8; 48]).unwrap();
+        let (first, _) = arena.alloc_value_with_offset([1u8; 48]).unwrap();
+        assert_eq!(first, 0);
 
-        // This should return InsufficientSpace, not panic
-        let result = arena.alloc_value_with_offset([0u8; 32]);
-        assert!(result.is_err());
+        // Does not fit the remaining 16 bytes, so it lands in a second chunk
+        // whose flat address starts one stride in.
+        let (second, _) = arena.alloc_value_with_offset([2u8; 32]).unwrap();
+        assert_eq!(second, 64);
+        assert_eq!(arena.stats().chunk_count, 2);
+
+        // SAFETY: both offsets were returned by alloc_value_with_offset for these types
+        unsafe {
+            assert_eq!(*arena.read_at::<[u8; 48]>(first), [1u8; 48]);
+            assert_eq!(*arena.read_at::<[u8; 32]>(second), [2u8; 32]);
+        }
+    }
+
+    #[test]
+    fn test_alloc_value_with_offset_value_larger_than_chunk() {
+        // A single value that cannot fit inside one chunk still has nowhere to
+        // go: an allocation may not straddle two chunks. This must be a typed
+        // error, never a panic.
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 64).unwrap();
+
+        let result = arena.alloc_value_with_offset([0u8; 128]);
+        assert!(matches!(result, Err(AllocError::InsufficientSpace)));
+    }
+
+    #[test]
+    fn test_alloc_value_with_offset_exhausts_flat_address_space() {
+        // The flat address is a u32, so an epoch tops out at 4 GiB. With a
+        // 1 GiB stride that is four chunks -- reached here without allocating
+        // anything, because `chunks` is only grown when a chunk fills up.
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 1 << 30).unwrap();
+        for _ in 0..3 {
+            arena.grow_uniform_chunks(arena.stats().chunk_count).unwrap();
+        }
+        assert_eq!(arena.stats().chunk_count, 4);
+
+        assert!(matches!(
+            arena.grow_uniform_chunks(4),
+            Err(AllocError::InsufficientSpace)
+        ));
+    }
+
+    #[test]
+    // reason: record counts here are far below u32::MAX
+    #[allow(clippy::cast_possible_truncation)]
+    fn test_alloc_value_with_offset_beyond_one_chunk_of_records() {
+        // Regression for the defect this fork exists to fix. A 32-byte record
+        // in a 1 MiB chunk gives 32 Ki records; upstream 0.5.42 failed every
+        // allocation past that, which is what made grafeo's tiered-storage
+        // feature unusable for a real graph. Allocate comfortably more than one
+        // chunk's worth and read every one of them back.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(C)]
+        struct Record {
+            id: u64,
+            epoch: u64,
+            flags: u64,
+            reserved: u64,
+        }
+        assert_eq!(std::mem::size_of::<Record>(), 32);
+
+        const CHUNK: usize = 1024 * 1024;
+        const COUNT: usize = (CHUNK / 32) * 3 + 17;
+
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, CHUNK).unwrap();
+
+        let mut offsets = Vec::with_capacity(COUNT);
+        for i in 0..COUNT {
+            let (offset, _) = arena
+                .alloc_value_with_offset(Record {
+                    id: i as u64,
+                    epoch: 7,
+                    flags: 0xDEAD_BEEF,
+                    reserved: 0,
+                })
+                .expect("allocation past the first chunk must succeed");
+            offsets.push(offset);
+        }
+
+        // More than one chunk was needed, and every address is distinct and
+        // increasing, so no record aliased another.
+        assert!(arena.stats().chunk_count >= 4);
+        for window in offsets.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+
+        for (i, offset) in offsets.iter().enumerate() {
+            // SAFETY: offset was returned by alloc_value_with_offset for this type and arena
+            let record: &Record = unsafe { arena.read_at(*offset) };
+            assert_eq!(record.id, i as u64);
+            assert_eq!(record.flags, 0xDEAD_BEEF);
+        }
     }
 
     #[test]
