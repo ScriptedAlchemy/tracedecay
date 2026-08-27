@@ -1,17 +1,27 @@
 # Experimental: hotpath performance CI (https://hotpath.rs/github_ci).
-# Still manually triggered while the head-vs-base numbers earn trust; the
-# workload itself is no longer a placeholder. Pinned to hotpath 0.24.0 like
-# the workspace.
+# Runs on every pull request. Pinned to hotpath 0.24.0 like the workspace.
 #
 # The profiled workload is `tracedecay-index-bench` (see
 # `benchmark_data/index-bench/README.md`): a daemon-free, socket-free,
 # deterministic indexing run over a committed fixture corpus. Head and base
 # index the same bytes in the same order, so a timing delta is attributable
 # to the diff rather than to the corpus, the clock, or the network.
+#
+# The benchmark binary does not exist on every commit line yet. Each side is
+# profiled only if its checkout carries the binary: a PR whose head predates
+# the benchmark skips profiling entirely, and a PR whose base predates it
+# uploads a head-only profile with no comparison. Both degradations are
+# recorded in the artifact rather than failing the job, so the trigger can
+# stay on pull_request while the benchmark propagates to every base.
 name: hotpath-profile
 
 on:
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: hotpath-profile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -28,6 +38,8 @@ env:
   # Hotpath binds a localhost metrics server by default; the benchmark turns
   # it off itself, and this makes that explicit at the job boundary too.
   HOTPATH_METRICS_SERVER_OFF: "1"
+  # The file whose presence marks a checkout as carrying the benchmark.
+  INDEX_BENCH_SOURCE: crates/tracedecay-query/src/bin/tracedecay_index_bench.rs
 
 jobs:
   profile:
@@ -44,13 +56,26 @@ jobs:
       - name: Create metrics directory
         run: mkdir -p /tmp/metrics
 
+      - name: Detect benchmark at head
+        id: head_bench
+        run: |
+          if [ -f "${INDEX_BENCH_SOURCE}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::head does not carry tracedecay-index-bench;" \
+                 "hotpath profiling is not applicable to this PR line yet"
+          fi
+
       # Taken from head so the base profile below indexes the same bytes.
       - name: Pin the benchmark corpus
+        if: steps.head_bench.outputs.available == 'true'
         run: |
           cp -r benchmark_data/index-bench/corpus "${TRACEDECAY_INDEX_BENCH_CORPUS}"
           find "${TRACEDECAY_INDEX_BENCH_CORPUS}" -type f | wc -l
 
       - name: Head profile (timing)
+        if: steps.head_bench.outputs.available == 'true'
         env:
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: /tmp/metrics/head_timing.json
@@ -61,14 +86,26 @@ jobs:
           timeout "${INDEX_BENCH_TIMEOUT_SECONDS}" \
             target/debug/tracedecay-index-bench | tee /tmp/metrics/head_workload.json
 
-      # The base commit must already carry `tracedecay-index-bench`. Until the
-      # commit that introduced it is an ancestor of the base, this step's
-      # build is the one that fails, and the failure is the honest signal:
-      # there is no comparable base profile yet.
       - name: Checkout base
+        if: steps.head_bench.outputs.available == 'true'
         run: git checkout ${{ github.event.pull_request.base.sha || 'origin/master' }}
 
+      # A base that predates the benchmark has no comparable profile; the
+      # head-only artifact says so instead of a red job saying nothing.
+      - name: Detect benchmark at base
+        id: base_bench
+        if: steps.head_bench.outputs.available == 'true'
+        run: |
+          if [ -f "${INDEX_BENCH_SOURCE}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::base does not carry tracedecay-index-bench;" \
+                 "uploading a head-only profile with no comparison"
+          fi
+
       - name: Base profile (timing)
+        if: steps.base_bench.outputs.available == 'true'
         env:
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: /tmp/metrics/base_timing.json
@@ -85,6 +122,7 @@ jobs:
       # is invalid - either the corpus moved or the diff changed sealed
       # output, and both need a human before any number is believed.
       - name: Compare workload identity
+        if: steps.base_bench.outputs.available == 'true'
         run: |
           head_digest=$(jq -r .sealed_state_digest /tmp/metrics/head_workload.json)
           base_digest=$(jq -r .sealed_state_digest /tmp/metrics/base_workload.json)
@@ -102,6 +140,8 @@ jobs:
           echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
           echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
           echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+          echo '${{ steps.head_bench.outputs.available }}' > /tmp/metrics/head_bench_available.txt
+          echo '${{ steps.base_bench.outputs.available }}' > /tmp/metrics/base_bench_available.txt
 
       - uses: actions/upload-artifact@v4
         with:
