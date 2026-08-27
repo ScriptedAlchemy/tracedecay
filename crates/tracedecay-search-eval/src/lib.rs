@@ -274,7 +274,7 @@ pub fn compare_direct(
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let path = workload_path.map_or_else(|| default_workload_path(repo_root), Path::to_path_buf);
     let workload = load_candidate_workload(&path)?;
-    let generated = hotpath::measure_block!("search_eval.generate_candidates", {
+    let generated = hotpath::measure_block!("search_eval.compare.generate", {
         generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root,
             workload_path: Some(&path),
@@ -292,7 +292,7 @@ pub fn compare_default_direct(
     profile_ids: Option<&[String]>,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let assets = load_authoritative_default_workload()?;
-    let generated = hotpath::measure_block!("search_eval.generate_candidates", {
+    let generated = hotpath::measure_block!("search_eval.compare.generate", {
         generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: assets.root(),
             workload_path: Some(&assets.workload_path()),
