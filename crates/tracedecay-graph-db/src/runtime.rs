@@ -615,6 +615,7 @@ impl GraphDb {
         Ok(GraphVectorIndexStatus::Available)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.close", impl_type = "GraphDb")]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         let _snapshot_gate = self.wait_snapshot_gate_write();
         let mut guard = match crate::hotpath_observe::wait_lock(

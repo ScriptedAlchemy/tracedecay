@@ -45,6 +45,7 @@ pub(crate) fn projection_mismatch(
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.reopen_decode")]
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
