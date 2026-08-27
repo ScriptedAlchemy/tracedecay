@@ -415,7 +415,8 @@ impl DirectEvaluationReportV1 {
                 profile.quality.duplicate_rate.denominator,
             );
         }
-        "pairwise candidate quality failed".to_owned()
+        crate::pairwise_candidate_failure_diagnostic(&self.profiles)
+            .unwrap_or_else(|| "pairwise candidate quality failed".to_owned())
     }
 
     /// Derive the accepted semantic resource pins from the exact selected

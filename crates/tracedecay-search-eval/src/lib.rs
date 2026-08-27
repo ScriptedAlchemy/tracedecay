@@ -1197,6 +1197,16 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
 }
 
 fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEvaluationStatusV1 {
+    pairwise_candidate_evaluation(profiles).0
+}
+
+fn pairwise_candidate_failure_diagnostic(profiles: &[DirectProfileEvaluationV1]) -> Option<String> {
+    pairwise_candidate_evaluation(profiles).1
+}
+
+fn pairwise_candidate_evaluation(
+    profiles: &[DirectProfileEvaluationV1],
+) -> (DirectEvaluationStatusV1, Option<String>) {
     let mut unavailable = false;
     for candidate in profiles.iter().filter(|profile| {
         profile.profile_id == SEMANTIC_PROFILE || profile.profile_id == RERANK_PROFILE
@@ -1227,7 +1237,17 @@ fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEv
             .saturating_sub(baseline_natural.ndcg_at_10_ppm)
             < REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
         {
-            return DirectEvaluationStatusV1::Fail;
+            return (
+                DirectEvaluationStatusV1::Fail,
+                Some(format!(
+                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}",
+                    candidate.profile_id,
+                    candidate.partition,
+                    baseline_natural.ndcg_at_10_ppm,
+                    candidate_natural.ndcg_at_10_ppm,
+                    REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM,
+                )),
+            );
         }
         for baseline_stratum in baseline
             .quality
@@ -1244,30 +1264,48 @@ fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEv
                 unavailable = true;
                 continue;
             };
-            let regressions = [
-                baseline_stratum
-                    .recall_at_10
-                    .ppm
-                    .saturating_sub(candidate_stratum.recall_at_10.ppm),
-                baseline_stratum
-                    .mean_reciprocal_rank_ppm
-                    .saturating_sub(candidate_stratum.mean_reciprocal_rank_ppm),
-                baseline_stratum
-                    .ndcg_at_10_ppm
-                    .saturating_sub(candidate_stratum.ndcg_at_10_ppm),
+            let comparisons = [
+                (
+                    "recall_at_10_ppm",
+                    baseline_stratum.recall_at_10.ppm,
+                    candidate_stratum.recall_at_10.ppm,
+                ),
+                (
+                    "mean_reciprocal_rank_ppm",
+                    baseline_stratum.mean_reciprocal_rank_ppm,
+                    candidate_stratum.mean_reciprocal_rank_ppm,
+                ),
+                (
+                    "ndcg_at_10_ppm",
+                    baseline_stratum.ndcg_at_10_ppm,
+                    candidate_stratum.ndcg_at_10_ppm,
+                ),
             ];
-            if regressions
-                .into_iter()
-                .any(|regression| regression > MAX_PROTECTED_QUALITY_REGRESSION_PPM)
-            {
-                return DirectEvaluationStatusV1::Fail;
+            for (metric, baseline_value, candidate_value) in comparisons {
+                if baseline_value.saturating_sub(candidate_value)
+                    > MAX_PROTECTED_QUALITY_REGRESSION_PPM
+                {
+                    return (
+                        DirectEvaluationStatusV1::Fail,
+                        Some(format!(
+                            "pairwise candidate quality failed: profile={} partition={} stratum={} metric={} baseline={} candidate={} maximum_regression={}",
+                            candidate.profile_id,
+                            candidate.partition,
+                            baseline_stratum.stratum,
+                            metric,
+                            baseline_value,
+                            candidate_value,
+                            MAX_PROTECTED_QUALITY_REGRESSION_PPM,
+                        )),
+                    );
+                }
             }
         }
     }
     if unavailable {
-        DirectEvaluationStatusV1::Pending
+        (DirectEvaluationStatusV1::Pending, None)
     } else {
-        DirectEvaluationStatusV1::Pass
+        (DirectEvaluationStatusV1::Pass, None)
     }
 }
 
@@ -1494,8 +1532,15 @@ mod tests {
             let candidate = passing_profile(profile_id, 500_000, 1_000_000);
 
             assert_eq!(
-                aggregate_profile_status(&[baseline, candidate]),
+                aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
                 super::DirectEvaluationStatusV1::Fail
+            );
+            let expected = format!(
+                "pairwise candidate quality failed: profile={profile_id} partition=validation stratum=natural_language metric=ndcg_at_10_ppm baseline=500000 candidate=500000 required_gain=1"
+            );
+            assert_eq!(
+                super::pairwise_candidate_failure_diagnostic(&[baseline, candidate]).as_deref(),
+                Some(expected.as_str())
             );
         }
     }
