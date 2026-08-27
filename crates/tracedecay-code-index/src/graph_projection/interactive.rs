@@ -54,10 +54,14 @@ const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
 
 enum InteractiveCatalogState {
     Cold,
-    Warming,
+    Warming {
+        owner: Option<Arc<InteractiveCatalogBuildLease>>,
+    },
     Ready(Arc<InteractiveCatalog>),
     Failed(CodeGraphProjectionError),
 }
+
+struct InteractiveCatalogBuildLease;
 
 pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
@@ -108,6 +112,9 @@ impl CodeGraphProjectionStore {
         &self,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
+        if cancellation.is_cancelled() {
+            return cancel_unowned_catalog_warm(&self.interactive_catalog);
+        }
         let reader =
             self.interactive_reader_with_cancellation(&self.generation, Arc::clone(&cancellation))?;
         reader.warm_catalog(cancellation)
@@ -124,10 +131,10 @@ impl CodeGraphProjectionStore {
             .map_err(|_| catalog_lock_poisoned())?;
         match &*state {
             InteractiveCatalogState::Cold => {
-                *state = InteractiveCatalogState::Warming;
+                *state = InteractiveCatalogState::Warming { owner: None };
                 Ok(())
             }
-            InteractiveCatalogState::Warming | InteractiveCatalogState::Ready(_) => Ok(()),
+            InteractiveCatalogState::Warming { .. } | InteractiveCatalogState::Ready(_) => Ok(()),
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
         }
     }
@@ -722,7 +729,7 @@ impl CodeGraphInteractiveReader {
                     }
                     return Ok(Arc::clone(catalog));
                 }
-                InteractiveCatalogState::Warming => {
+                InteractiveCatalogState::Warming { .. } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         "code graph interactive catalog is warming in the background".to_owned(),
                     ));
@@ -740,7 +747,7 @@ impl CodeGraphInteractiveReader {
         match &*state {
             InteractiveCatalogState::Ready(catalog) => Ok(Arc::clone(catalog)),
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
-            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming => {
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { .. } => {
                 Err(CodeGraphProjectionError::Unavailable(
                     "code graph interactive catalog is warming in the background".to_owned(),
                 ))
@@ -753,13 +760,17 @@ impl CodeGraphInteractiveReader {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
+            return cancel_unowned_catalog_warm(&self.catalog);
         }
         let _build = self
             .catalog
             .build
             .lock()
             .map_err(|_| catalog_lock_poisoned())?;
+        if cancellation.is_cancelled() {
+            return cancel_unowned_catalog_warm(&self.catalog);
+        }
+        let build_lease = Arc::new(InteractiveCatalogBuildLease);
         {
             let mut state = self
                 .catalog
@@ -774,8 +785,16 @@ impl CodeGraphInteractiveReader {
                     return Ok(());
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold | InteractiveCatalogState::Warming => {
-                    *state = InteractiveCatalogState::Warming;
+                InteractiveCatalogState::Cold
+                | InteractiveCatalogState::Warming { owner: None } => {
+                    *state = InteractiveCatalogState::Warming {
+                        owner: Some(Arc::clone(&build_lease)),
+                    };
+                }
+                InteractiveCatalogState::Warming { owner: Some(_) } => {
+                    return Err(CodeGraphProjectionError::Unavailable(
+                        "code graph interactive catalog warm already has an owner".to_owned(),
+                    ));
                 }
             }
         }
@@ -799,6 +818,16 @@ impl CodeGraphInteractiveReader {
             .state
             .write()
             .map_err(|_| catalog_lock_poisoned())?;
+        let owns_warm = matches!(
+            &*state,
+            InteractiveCatalogState::Warming { owner: Some(owner) }
+                if Arc::ptr_eq(owner, &build_lease)
+        );
+        if !owns_warm {
+            return Err(CodeGraphProjectionError::Unavailable(
+                "code graph interactive catalog warm ownership changed".to_owned(),
+            ));
+        }
         match result {
             Ok(catalog) => {
                 *state = InteractiveCatalogState::Ready(catalog);
@@ -1057,6 +1086,16 @@ fn catalog_lock_poisoned() -> CodeGraphProjectionError {
     CodeGraphProjectionError::Unavailable(
         "code graph interactive catalog lock is poisoned".to_owned(),
     )
+}
+
+fn cancel_unowned_catalog_warm(
+    catalog: &InteractiveCatalogCache,
+) -> Result<(), CodeGraphProjectionError> {
+    let mut state = catalog.state.write().map_err(|_| catalog_lock_poisoned())?;
+    if matches!(*state, InteractiveCatalogState::Warming { owner: None }) {
+        *state = InteractiveCatalogState::Cold;
+    }
+    Err(CodeGraphProjectionError::Cancelled)
 }
 
 #[cfg(test)]
