@@ -202,6 +202,7 @@ impl GraphDbRegistry {
         }
     }
 
+    #[hotpath::measure(label = "graph_db.snapshot.verified", impl_type = "GraphDbRegistry")]
     pub fn verified_snapshot(
         &self,
         registration: GraphDbRegistration,
