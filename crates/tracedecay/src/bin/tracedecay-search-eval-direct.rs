@@ -196,14 +196,18 @@ fn configure_hotpath_output() -> Result<(), String> {
             focus
                 .strip_prefix('/')
                 .and_then(|pattern| pattern.strip_suffix('/'))
-                .is_some_and(|pattern| regex::Regex::new(pattern).is_err())
+                .is_some()
         })
     }) {
         return Err(format!(
-            "{HOTPATH_FOCUS_ENV} contains an invalid /regular expression/"
+            "{HOTPATH_FOCUS_ENV} regular-expression form is unsupported; use a text focus"
         ));
     }
-    if output_path.is_none() {
+    let report_disabled = output_format
+        .as_deref()
+        .and_then(|format| format.to_str())
+        .is_some_and(|format| format.eq_ignore_ascii_case("none"));
+    if output_path.is_none() || report_disabled {
         // This evaluator writes a single JSON protocol document to stdout.
         // Profiling therefore stays silent unless the operator supplies an
         // explicit report destination.
