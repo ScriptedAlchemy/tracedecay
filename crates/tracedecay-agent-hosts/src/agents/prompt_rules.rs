@@ -4,7 +4,6 @@
 //! tracedecay rules block. Claude and Kiro keep host-specific text but reuse
 //! the block-splicing helpers here.
 
-use std::io::Write;
 use std::path::Path;
 
 use crate::errors::{Result, TraceDecayError};
@@ -105,20 +104,14 @@ pub(crate) fn strip_heading_block(contents: &str, marker: &str) -> Option<String
     Some(splice_out(contents, start, end))
 }
 
-/// Records the write intent a completed prompt-rules write just produced, so
-/// the receipt transaction's rollback-consistency check can recognize the
-/// write as its own instead of reporting a stale preview.
-fn record_prompt_rules_write_intent(path: &Path, contents: &str) -> Result<()> {
-    let metadata =
-        super::capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to capture metadata for {}: {error}", path.display()),
-        })?;
-    super::persist_host_config_write_intent(path, contents.as_bytes(), Some(&metadata))
-}
-
 /// Writes `stripped` user content plus a fresh managed `block` to `path` and
 /// reports the refresh.
-pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Result<()> {
+pub(crate) fn write_refreshed(
+    path: &Path,
+    expected_contents: &str,
+    stripped: &str,
+    block: &str,
+) -> Result<()> {
     let mut new_contents = String::with_capacity(stripped.len() + block.len() + 3);
     new_contents.push_str(stripped);
     if !new_contents.is_empty() {
@@ -126,10 +119,7 @@ pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Resul
     }
     new_contents.push_str(block);
     new_contents.push('\n');
-    std::fs::write(path, &new_contents).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    record_prompt_rules_write_intent(path, &new_contents)?;
+    super::safe_write_text_file_if_unchanged(path, Some(expected_contents), &new_contents)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
         path.display()
@@ -139,36 +129,37 @@ pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Resul
 
 /// Install or refresh the managed rules block in `path`.
 pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> Result<()> {
-    let existing = if path.exists() {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
+    let existing = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(
+            std::fs::read_to_string(path).map_err(|error| TraceDecayError::Config {
+                message: format!("failed to read {}: {error}", path.display()),
+            })?,
+        ),
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("refusing unsafe prompt-rules path {}", path.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to inspect {}: {error}", path.display()),
+            });
+        }
     };
-    if existing.contains(block) {
+    let existing_text = existing.as_deref().unwrap_or_default();
+    if existing_text.contains(block) {
         eprintln!(
             "  {} already contains tracedecay rules, skipping",
             path.display()
         );
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+    if let Some(stripped) = strip_heading_block(existing_text, marker) {
+        return write_refreshed(path, existing_text, &stripped, block);
     }
-    if let Some(stripped) = strip_heading_block(&existing, marker) {
-        return write_refreshed(path, &stripped, block);
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", path.display()),
-        })?;
-    write!(f, "\n{block}\n").map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    drop(f);
-    record_prompt_rules_write_intent(path, &format!("{existing}\n{block}\n"))?;
+    let new_contents = format!("{existing_text}\n{block}\n");
+    super::safe_write_text_file_if_unchanged(path, existing.as_deref(), &new_contents)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
         path.display()
@@ -203,6 +194,69 @@ pub(crate) fn remove_prompt_rules(path: &Path, marker: &str) {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
             path.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{PROMPT_RULE_MARKER, reconcile_prompt_rules, strip_heading_block, write_refreshed};
+
+    const ORIGINAL: &[u8] = b"operator-owned instructions\n";
+    const BLOCK: &str = "## Prefer tracedecay MCP tools\n\nmanaged instructions";
+
+    #[test]
+    fn failed_write_intent_leaves_existing_prompt_rules_byte_identical() {
+        let root = tempfile::tempdir().expect("prompt-rules fixture");
+        let prompt = root.path().join("AGENTS.md");
+        fs::write(&prompt, ORIGINAL).expect("original prompt rules");
+        let blocked_intent_root = root.path().join("blocked-intent-root");
+        fs::write(&blocked_intent_root, b"not a directory").expect("blocked intent root");
+
+        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+            reconcile_prompt_rules(&prompt, PROMPT_RULE_MARKER, BLOCK)
+        })
+        .expect_err("an unpersisted write intent must refuse the prompt-rules write");
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not create host config write intent directory"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read(&prompt).expect("prompt rules after refused write"),
+            ORIGINAL,
+            "intent failure must not expose unowned prompt-rule bytes"
+        );
+    }
+
+    #[test]
+    fn foreign_edit_after_refresh_read_is_refused_without_overwrite() {
+        let root = tempfile::tempdir().expect("prompt-rules fixture");
+        let prompt = root.path().join("AGENTS.md");
+        let original = format!(
+            "operator-owned instructions\n\n{PROMPT_RULE_MARKER}\n\nstale managed instructions\n"
+        );
+        fs::write(&prompt, &original).expect("original prompt rules");
+        let stripped = strip_heading_block(&original, PROMPT_RULE_MARKER)
+            .expect("existing managed prompt block");
+        let foreign = b"operator changed these instructions concurrently\n";
+        fs::write(&prompt, foreign).expect("foreign concurrent edit");
+
+        let error = write_refreshed(&prompt, &original, &stripped, BLOCK)
+            .expect_err("a stale refresh must refuse the foreign edit");
+
+        assert!(
+            error.to_string().contains("changed since it was read"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read(&prompt).expect("prompt rules after stale refresh"),
+            foreign,
+            "a stale refresh must not overwrite foreign bytes"
         );
     }
 }

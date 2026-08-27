@@ -730,7 +730,7 @@ fn install_steering_rules(path: &Path) -> Result<()> {
         };
         let stripped =
             super::prompt_rules::strip_heading_block(&existing, marker).unwrap_or_default();
-        return super::prompt_rules::write_refreshed(path, &stripped, &block);
+        return super::prompt_rules::write_refreshed(path, &existing, &stripped, &block);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {

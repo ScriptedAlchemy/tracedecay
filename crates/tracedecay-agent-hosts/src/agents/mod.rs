@@ -939,6 +939,20 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
     safe_write_bytes_file(path, contents.as_bytes(), backup)
 }
 
+pub(crate) fn safe_write_text_file_if_unchanged(
+    path: &Path,
+    expected_contents: Option<&str>,
+    contents: &str,
+) -> Result<()> {
+    safe_write_bytes_file_guarded(
+        path,
+        contents.as_bytes(),
+        None,
+        None,
+        HostFileWriteExpectation::Exact(expected_contents.map(str::as_bytes)),
+    )
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HostFileMetadataIdentityV1 {
     readonly: bool,
@@ -1048,6 +1062,63 @@ pub fn safe_write_bytes_file_with_metadata(
     backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
+    safe_write_bytes_file_guarded(
+        path,
+        contents,
+        backup,
+        replacement_metadata,
+        HostFileWriteExpectation::Unchecked,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum HostFileWriteExpectation<'a> {
+    Unchecked,
+    Exact(Option<&'a [u8]>),
+}
+
+fn verify_host_file_write_expectation(
+    path: &Path,
+    expectation: HostFileWriteExpectation<'_>,
+) -> std::io::Result<()> {
+    let HostFileWriteExpectation::Exact(expected) = expectation else {
+        return Ok(());
+    };
+    match (std::fs::symlink_metadata(path), expected) {
+        (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        (Ok(metadata), Some(expected)) if metadata.file_type().is_file() => {
+            if std::fs::read(path)? == expected {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "host config changed since it was read: {}",
+                    path.display()
+                )))
+            }
+        }
+        (Ok(metadata), _) if metadata.file_type().is_symlink() => Err(std::io::Error::other(
+            format!("unsafe host metadata path: {}", path.display()),
+        )),
+        (Ok(_), _) | (Err(_), Some(_)) => Err(std::io::Error::other(format!(
+            "host config changed since it was read: {}",
+            path.display()
+        ))),
+        (Err(error), None) => Err(error),
+    }
+}
+
+fn safe_write_bytes_file_guarded(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+    expectation: HostFileWriteExpectation<'_>,
+) -> Result<()> {
+    verify_host_file_write_expectation(path, expectation).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("refusing to replace {}: {error}", path.display()),
+        }
+    })?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
@@ -1078,6 +1149,7 @@ pub fn safe_write_bytes_file_with_metadata(
             let expected_metadata = capture_host_file_metadata(temporary)?;
             persist_host_config_write_intent(path, contents, Some(&expected_metadata))
                 .map_err(std::io::Error::other)?;
+            verify_host_file_write_expectation(path, expectation)?;
             Ok(())
         },
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
