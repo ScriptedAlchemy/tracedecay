@@ -278,6 +278,7 @@ impl<P> GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
+    #[hotpath::measure(label = "query.lane.graph.enforce")]
     fn enforce_batch(
         &self,
         request: &GraphLaneRequest,
@@ -348,6 +349,8 @@ where
         };
         rebuilt.validate().map_err(contract_error)?;
         check_graph_control(request, control)?;
+        hotpath::gauge!("query.graph.enforce.candidates").set(batch.candidates.len());
+        hotpath::gauge!("query.graph.enforce.results").set(rebuilt.candidates.len());
         Ok(rebuilt)
     }
 }

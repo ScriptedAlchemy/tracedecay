@@ -281,6 +281,7 @@ impl<'a> CanonicalTaskSessionCandidateExportPortV1<'a> {
 }
 
 impl TaskSessionCandidateExportPortV1 for CanonicalTaskSessionCandidateExportPortV1<'_> {
+    #[hotpath::measure(label = "query.session.export")]
     fn export_task_session_candidates(
         &self,
         request: &TaskSessionLaneRequestV1<'_>,
@@ -373,6 +374,9 @@ impl TaskSessionCandidateExportPortV1 for CanonicalTaskSessionCandidateExportPor
             }),
         };
         batch.validate().map_err(contract_error)?;
+        // This lane emits every admitted candidate unfiltered, so a separate
+        // results gauge would always mirror this one.
+        hotpath::gauge!("query.session.candidates").set(batch.candidates.len());
         Ok(RetrieverOutcome::Complete(batch))
     }
 }

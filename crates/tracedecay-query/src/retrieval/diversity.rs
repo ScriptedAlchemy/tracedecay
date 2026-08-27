@@ -46,11 +46,13 @@ pub trait DiversityCapStage {
 pub struct DeterministicDiversity;
 
 impl DeterministicDiversity {
+    #[hotpath::measure(label = "query.diversity.apply")]
     pub fn apply_caps(
         &self,
         policy: &DiversityPolicy,
         candidates: Vec<FusedCandidate>,
     ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
+        let candidate_count = candidates.len();
         let enabled = [
             policy.per_source_namespace,
             policy.per_source_instance,
@@ -113,7 +115,10 @@ impl DeterministicDiversity {
                 candidate,
                 final_ordinal: ordinal as u32,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        hotpath::gauge!("query.diversity.candidates").set(candidate_count);
+        hotpath::gauge!("query.diversity.results").set(ranked.len());
+        hotpath::gauge!("query.diversity.capped").set(decisions.len());
         Ok((ranked, decisions))
     }
 }
