@@ -464,15 +464,18 @@ impl SessionSyncProjectContext {
         let pass_cancellation = cancellation.clone();
         let pass = async {
             let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone());
-            let project = tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
-                &self.brain_id,
-                &self.profile_id,
-                &project_authority,
-                &self.project_root,
-                Some(self.project_id.clone()),
-                None,
-                true,
-                &pass_cancellation,
+            let project = hotpath::future!(
+                tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
+                    &self.brain_id,
+                    &self.profile_id,
+                    &project_authority,
+                    &self.project_root,
+                    Some(self.project_id.clone()),
+                    None,
+                    true,
+                    &pass_cancellation,
+                ),
+                label = "daemon.session_sync.ingest.project"
             )
             .await;
             let project_stats = SessionSyncStatsV1 {
@@ -481,15 +484,17 @@ impl SessionSyncProjectContext {
                 ..SessionSyncStatsV1::default()
             };
             let project_coverage = vec![source_coverage("project", project.coverage)];
-            let project_progress = service
-                .persist_progress(
+            let project_progress = hotpath::future!(
+                service.persist_progress(
                     self,
                     &project_sessions,
                     journal_key,
                     project_stats.clone(),
                     project_coverage.clone(),
-                )
-                .await;
+                ),
+                label = "daemon.session_sync.frontier_persist"
+            )
+            .await;
             let project_progress_failed = project_progress.is_err();
             let project_frontiers = project_progress.unwrap_or_default();
 
@@ -512,7 +517,7 @@ impl SessionSyncProjectContext {
                 let user_authority =
                     GlobalDbSessionIngestAuthority::new(self.user_sessions.clone());
                 let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone());
-                let user =
+                let user = hotpath::future!(
                     tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
                         &self.brain_id,
                         &self.profile_id,
@@ -521,8 +526,10 @@ impl SessionSyncProjectContext {
                         &self.profile_root,
                         None,
                         &pass_cancellation,
-                    )
-                    .await;
+                    ),
+                    label = "daemon.session_sync.ingest.profile"
+                )
+                .await;
                 (Some(user), Some(profile_sweep_started_at))
             };
             if let Some(user) = user.as_ref()
@@ -563,15 +570,17 @@ impl SessionSyncProjectContext {
                 },
                 |user| source_coverage("profile", user.coverage),
             ));
-            let source_frontiers = service
-                .persist_progress(
+            let source_frontiers = hotpath::future!(
+                service.persist_progress(
                     self,
                     &project_sessions,
                     journal_key,
                     stats.clone(),
                     coverage.clone(),
-                )
-                .await;
+                ),
+                label = "daemon.session_sync.frontier_persist"
+            )
+            .await;
             (
                 project,
                 user,
