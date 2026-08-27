@@ -1308,6 +1308,75 @@ impl RetainedCodeGraphRuntimeV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    /// Self-heals the shared project shard's graph map-owner attachment when
+    /// a prior owner was retired out from under this lease-only consumer.
+    ///
+    /// The code graph never attaches its own map owner: per the contract on
+    /// [`tracedecay_graph_db::GraphDbRegistry::resolve_owner_attachment`],
+    /// that is deliberately the only entry-creation path, and an ordinary
+    /// lease (what [`Self::retain_code_graph_runtime`] takes below) can only
+    /// resolve an entry that already exists. In production the project's
+    /// memory/journey graph mount is the one that attaches this same
+    /// physical shard (see `graph_attachment::open_session_relation_owner_for_task`
+    /// in `mounts.rs`) and normally keeps it attached for as long as the
+    /// project runtime stays mounted. But that owner can be retired
+    /// independently of code-index activity — for example by the
+    /// capacity-driven project-server reclaim in `project_composition.rs`,
+    /// which calls `retire_project_memory_graph` to admit another project.
+    /// Once that happens, every later code-graph reconcile fails permanently
+    /// with "graph runtime is not registered", and retrying the same
+    /// lease-only path can never recover it: nothing else ever re-attaches.
+    ///
+    /// This reuses the exact attach the memory/journey graph mount uses, but
+    /// only when the shard is actually missing, and it does not retain the
+    /// resulting attachment — the sole purpose is to leave the registry
+    /// entry `Ready` so the lease immediately below succeeds. Losing a race
+    /// to a concurrent attacher (or any other failure here) is swallowed:
+    /// the ordinary lease path still runs and surfaces its own, more precise
+    /// error if the shard is genuinely unavailable.
+    async fn ensure_code_graph_shard_attached(&self, project_shard: &StoreShardIdV1) {
+        match self.graph_registry.shard_is_registered(project_shard) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    event = "code_graph_shard_registration_probe_failed",
+                    shard = ?project_shard,
+                    error = %error,
+                    "could not check whether the shared code graph shard is registered"
+                );
+                return;
+            }
+        }
+        match graph_attachment::open_session_relation_owner(
+            &self.registry,
+            &self.graph_registry,
+            &self.graph_lifecycle_cancelled,
+            self.incarnation,
+            project_shard.clone(),
+        )
+        .await
+        {
+            Ok((attachment, target)) => {
+                tracing::info!(
+                    event = "code_graph_shard_reattached",
+                    shard = ?project_shard,
+                    "re-attached the shared code graph shard after its owner was retired"
+                );
+                drop(attachment);
+                drop(target);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    event = "code_graph_shard_reattach_failed",
+                    shard = ?project_shard,
+                    error = %error,
+                    "could not re-attach the shared code graph shard; the exact-lease path will report its own error"
+                );
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn retain_code_graph_runtime(
         &self,
@@ -1332,6 +1401,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
+        self.ensure_code_graph_shard_attached(&project_shard).await;
         let code_scope = match reference {
             Some(ref_id) => CodeShardScopeV1::Branch {
                 worktree_id: worktree_id.clone(),
