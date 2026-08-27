@@ -88,6 +88,9 @@ hotpath-cpu = [
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production"]
+# Opt-in tiered graph storage; not part of `production`.
+graph-disk-tier = ["tracedecay/graph-disk-tier"]
+graph-tiered-storage = ["tracedecay/graph-tiered-storage"]
 token-counting = ["tracedecay/token-counting"]
 lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]

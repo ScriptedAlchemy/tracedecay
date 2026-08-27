@@ -182,6 +182,17 @@ hotpath-cpu = [
 # Binary-only: the live query server runs in this process, so no library crate
 # needs a passthrough for it.
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+# Opt-in tiered graph storage. Never in `default` or `production`: both give
+# the graph buffer manager a spill directory and a bounded budget, so they are
+# deliberate build choices rather than silent defaults.
+#
+# `graph-disk-tier` is the usable half. `graph-tiered-storage` additionally
+# turns on grafeo-core's `tiered-storage` LPG arena, which is known broken at
+# grafeo 0.5.42 (1 MiB per-epoch record ceiling, then a panic).
+# See `crates/tracedecay-graph-db/Cargo.toml` for the detail.
+graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
+graph-tiered-storage = ["tracedecay-graph-db/graph-tiered-storage"]
+
 production = [
     "token-counting",
     "lite",
