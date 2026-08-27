@@ -415,8 +415,96 @@ impl DirectEvaluationReportV1 {
                 profile.quality.duplicate_rate.denominator,
             );
         }
-        crate::pairwise_candidate_failure_diagnostic(&self.profiles)
-            .unwrap_or_else(|| "pairwise candidate quality failed".to_owned())
+        let diagnostic = crate::pairwise_candidate_failure_diagnostic(&self.profiles)
+            .unwrap_or_else(|| "pairwise candidate quality failed".to_owned());
+        self.pairwise_query_diagnostic()
+            .map_or(diagnostic.clone(), |queries| {
+                format!("{diagnostic} queries=[{queries}]")
+            })
+    }
+
+    fn pairwise_query_diagnostic(&self) -> Option<String> {
+        for candidate in self.profiles.iter().filter(|profile| {
+            profile.profile_id == crate::SEMANTIC_PROFILE
+                || profile.profile_id == crate::RERANK_PROFILE
+        }) {
+            let baseline = self.profiles.iter().find(|profile| {
+                profile.profile_id == crate::QUERY_BASELINE_PROFILE
+                    && profile.partition == candidate.partition
+            })?;
+            let baseline_natural = baseline
+                .quality
+                .strata
+                .iter()
+                .find(|stratum| stratum.stratum == "natural_language")?;
+            let candidate_natural = candidate
+                .quality
+                .strata
+                .iter()
+                .find(|stratum| stratum.stratum == "natural_language")?;
+            if candidate_natural
+                .ndcg_at_10_ppm
+                .saturating_sub(baseline_natural.ndcg_at_10_ppm)
+                >= crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
+            {
+                continue;
+            }
+            let output = self.raw_outputs.iter().find(|output| {
+                output.profile_id == candidate.profile_id && output.partition == candidate.partition
+            })?;
+            let details = candidate
+                .queries
+                .iter()
+                .filter(|query| query.strata.iter().any(|stratum| stratum == "natural_language"))
+                .filter_map(|query| {
+                    let baseline_query = baseline
+                        .queries
+                        .iter()
+                        .find(|baseline_query| baseline_query.query_id == query.query_id)?;
+                    let raw = output
+                        .queries
+                        .iter()
+                        .find(|raw| raw.query_id == query.query_id)?;
+                    let native = raw.native.as_ref()?;
+                    let semantic_candidates = match &native.measurements.semantic {
+                        SemanticNativeStageResultV1::Complete(measurement) => {
+                            measurement.output_candidates.to_string()
+                        }
+                        SemanticNativeStageResultV1::NotRequested => "not_requested".to_owned(),
+                        SemanticNativeStageResultV1::Pending { .. } => "pending".to_owned(),
+                    };
+                    let (oracle_hits, top_distance) = match &native.exact_flat_oracle {
+                        SemanticNativeStageResultV1::Complete(oracle) => (
+                            oracle.hits.len().to_string(),
+                            oracle
+                                .hits
+                                .first()
+                                .map(|hit| hit.evidence.distance.micros().to_string())
+                                .unwrap_or_else(|| "none".to_owned()),
+                        ),
+                        SemanticNativeStageResultV1::NotRequested => {
+                            ("not_requested".to_owned(), "none".to_owned())
+                        }
+                        SemanticNativeStageResultV1::Pending { .. } => {
+                            ("pending".to_owned(), "none".to_owned())
+                        }
+                    };
+                    Some(format!(
+                        "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={}",
+                        query.query_id,
+                        baseline_query.first_useful_rank,
+                        query.first_useful_rank,
+                        semantic_candidates,
+                        oracle_hits,
+                        top_distance,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !details.is_empty() {
+                return Some(details.join(";"));
+            }
+        }
+        None
     }
 
     /// Derive the accepted semantic resource pins from the exact selected
