@@ -19,7 +19,7 @@ use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_re
 
 use super::tool_call_support::json_result;
 
-#[hotpath::measure(label = "mcp.dispatch.work")]
+#[hotpath::measure(future = true, label = "mcp.work.total")]
 pub(super) async fn handle_work(
     tool_name: &str,
     mut body: Value,
