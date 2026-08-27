@@ -270,6 +270,7 @@ fn current_cancellable_request_key(
 }
 
 impl McpServer {
+    #[hotpath::measure(label = "mcp.server.write", future = true)]
     async fn write_response_line_or_revoke(
         &self,
         transport: &mut impl crate::mcp::transport::McpTransport,
@@ -290,6 +291,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.request_cancellable", future = true)]
     async fn handle_cancellable_application_request(
         &self,
         request: &JsonRpcRequest,
@@ -447,6 +449,7 @@ impl McpServer {
     /// teardown.  A request-side EOF is only a half-close until the transport
     /// reports the peer's write side closed; this keeps one-shot CLI responses
     /// intact while dropping abandoned handlers and their admission permits.
+    #[hotpath::measure(label = "mcp.server.request_non_cancellable", future = true)]
     async fn handle_non_cancellable_application_request(
         &self,
         request: &JsonRpcRequest,
@@ -576,6 +579,7 @@ impl McpServer {
         .await
     }
 
+    #[hotpath::measure(label = "mcp.server.connection", future = true)]
     pub(crate) async fn run_with_shutdown_policy(
         self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
@@ -873,6 +877,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.shutdown", future = true)]
     pub(crate) async fn shutdown_until(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,

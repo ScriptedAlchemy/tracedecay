@@ -294,7 +294,6 @@ impl McpServer {
     }
 
     /// Returns `None` for notifications (requests without an `id`).
-    #[hotpath::measure]
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
@@ -349,7 +348,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "mcp.server.request", future = true)]
     pub(crate) async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
@@ -452,7 +451,7 @@ impl McpServer {
         result
     }
 
-    #[hotpath::measure(label = "mcp.hook_event")]
+    #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -600,6 +599,7 @@ impl McpServer {
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
     /// name field is retained — never the full `clientInfo` payload.
+    #[hotpath::measure(label = "mcp.server.initialize")]
     pub(crate) fn handle_initialize(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
         let client_name = params
             .and_then(|p| p.get("clientInfo"))
@@ -618,7 +618,7 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "mcp.server.tools_list", future = true)]
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -644,7 +644,7 @@ impl McpServer {
             }
         };
         match hotpath::measure_block!(
-            "mcp.tools_list.compose",
+            "mcp.server.tools_list.compose",
             crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
                 budget,
                 &profile_id,
@@ -655,7 +655,7 @@ impl McpServer {
         ) {
             Ok(tools) => {
                 let payload = hotpath::measure_block!(
-                    "mcp.tools_list.compose_payload",
+                    "mcp.server.tools_list.compose_payload",
                     json!({ "tools": tools })
                 );
                 JsonRpcResponse::success(id, payload)
@@ -668,12 +668,12 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.resources_list")]
+    #[hotpath::measure(label = "mcp.server.resources_list")]
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
-    #[hotpath::measure(label = "mcp.resources_read")]
+    #[hotpath::measure(label = "mcp.server.resources_read", future = true)]
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -838,7 +838,7 @@ impl McpServer {
 
     /// Applies the pre-dispatch freshness policy and records the call in the
     /// server counters and the activity lane.
-    #[hotpath::measure(label = "mcp.tools_call.begin_dispatch")]
+    #[hotpath::measure(label = "mcp.server.tools_call.begin_dispatch", future = true)]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
@@ -1124,7 +1124,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.tools_call.complete")]
+    #[hotpath::measure(label = "mcp.server.tools_call.complete", future = true)]
     async fn complete_tool_call(
         &self,
         id: Value,
@@ -1326,7 +1326,7 @@ impl McpServer {
         ))
     }
 
-    #[hotpath::measure(label = "mcp.tools_call")]
+    #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,
