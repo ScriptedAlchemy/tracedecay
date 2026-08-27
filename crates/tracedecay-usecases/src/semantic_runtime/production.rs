@@ -3648,6 +3648,84 @@ mod tests {
         candidate
     }
 
+    /// The acceptance bound must come from the generation's measurement, not
+    /// from a constant baked into the calibration constructor.
+    #[test]
+    fn canonical_calibration_carries_the_measured_bound() {
+        let source_generation = source_generation('m');
+        let source_manifest_digest = test_digest('d');
+        let capability_manifest_digest = test_digest('e');
+        let candidate = evaluation_target_pins(
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+        );
+
+        // Two different measurements of the same identity must produce two
+        // different bounds; a constant would produce one.
+        for measured in [123_456_789_i64, 987_654_321_i64] {
+            let calibration = canonical_evaluation_calibration(
+                &candidate,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+                measured,
+            )
+            .expect("canonical calibration");
+            assert_eq!(calibration.maximum_distance_micros, measured);
+        }
+    }
+
+    /// Certification binds the candidate to what its generation measures, so a
+    /// candidate carrying any other bound is rejected.
+    #[test]
+    fn preacceptance_rejects_a_bound_the_generation_did_not_measure() {
+        let source_generation = source_generation('b');
+        let source_manifest_digest = test_digest('d');
+        let capability_manifest_digest = test_digest('e');
+        let candidate = evaluation_target_pins(
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+        );
+
+        // The candidate was minted against UNCALIBRATED_MAXIMUM_DISTANCE_MICROS.
+        assert_eq!(
+            certify_evaluation_target_compatibility(
+                &candidate,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+                UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
+            )
+            .map(|certified| certified.calibration.maximum_distance_micros),
+            Ok(UNCALIBRATED_MAXIMUM_DISTANCE_MICROS)
+        );
+
+        // A generation that measures something else does not certify it.
+        assert_eq!(
+            certify_evaluation_target_compatibility(
+                &candidate,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+                UNCALIBRATED_MAXIMUM_DISTANCE_MICROS - 1,
+            ),
+            Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+    }
+
+    /// Regression guard: the unmeasured fallback must stay inside the range the
+    /// redundancy authority accepts. An out-of-range bound (the former
+    /// `i64::MAX`) silently disarms the semantic redundancy tier.
+    #[test]
+    fn the_uncalibrated_fallback_stays_in_the_redundancy_accepted_range() {
+        assert!(
+            (0..=super::super::acceptance_calibration::MAX_COSINE_DISTANCE_MICROS)
+                .contains(&UNCALIBRATED_MAXIMUM_DISTANCE_MICROS)
+        );
+    }
+
     #[test]
     fn preacceptance_rejects_foreign_fusion_revision() {
         let source_generation = source_generation('f');
