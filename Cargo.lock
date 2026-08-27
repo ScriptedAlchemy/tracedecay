@@ -6070,6 +6070,7 @@ dependencies = [
  "logo-art",
  "open",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
