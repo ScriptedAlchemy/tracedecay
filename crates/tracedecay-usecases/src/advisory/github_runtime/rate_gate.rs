@@ -83,12 +83,14 @@ impl GitHubRateLimitTrackerV1 {
             {
                 state.blocked_until = None;
             }
-            if state.blocked_until.is_some() {
-                state
-                    .checkpoint
-                    .as_ref()
-                    .cloned()
-                    .map_or(Decision::Unavailable, Decision::RateLimited)
+            if let Some(blocked_until) = state.blocked_until {
+                state.checkpoint.as_ref().cloned().map_or(
+                    Decision::Unavailable,
+                    |mut checkpoint| {
+                        checkpoint.reset_at = blocked_until;
+                        Decision::RateLimited(checkpoint)
+                    },
+                )
             } else if let Some(checkpoint) = state.checkpoint.as_ref().cloned() {
                 let available = checkpoint
                     .remaining
@@ -321,10 +323,14 @@ mod tests {
         let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
         permit.finish(Some(&checkpoint(3_999, 9_000)), Some(UtcMicros(2_000)));
 
-        assert!(matches!(
-            Arc::clone(&tracker).acquire(UtcMicros(1_999)),
-            GitHubRequestAdmissionV1::RateLimited(_)
-        ));
+        let GitHubRequestAdmissionV1::RateLimited(blocked) =
+            Arc::clone(&tracker).acquire(UtcMicros(1_999))
+        else {
+            panic!("secondary limit must block before its deadline");
+        };
+        assert_eq!(blocked.limit, 5_000);
+        assert_eq!(blocked.remaining, 3_999);
+        assert_eq!(blocked.reset_at, UtcMicros(2_000));
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(2_000)),
             GitHubRequestAdmissionV1::Granted(_)
@@ -338,10 +344,14 @@ mod tests {
         let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
         permit.finish(None, Some(UtcMicros(2_000)));
 
-        assert!(matches!(
-            Arc::clone(&tracker).acquire(UtcMicros(1_999)),
-            GitHubRequestAdmissionV1::RateLimited(_)
-        ));
+        let GitHubRequestAdmissionV1::RateLimited(blocked) =
+            Arc::clone(&tracker).acquire(UtcMicros(1_999))
+        else {
+            panic!("Retry-After must block before its deadline");
+        };
+        assert_eq!(blocked.limit, 5_000);
+        assert_eq!(blocked.remaining, 3_999);
+        assert_eq!(blocked.reset_at, UtcMicros(2_000));
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(2_000)),
             GitHubRequestAdmissionV1::Granted(_)
