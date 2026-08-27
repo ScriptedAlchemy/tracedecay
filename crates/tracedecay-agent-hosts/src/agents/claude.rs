@@ -941,7 +941,12 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     }
     if let Some(range) = claude_md_rules_block_range(&existing_md, CLAUDE_MD_RECONCILE_MARKERS) {
         let stripped = super::prompt_rules::splice_out(&existing_md, range.start, range.end);
-        return super::prompt_rules::write_refreshed(claude_md_path, &stripped, &block);
+        return super::prompt_rules::write_refreshed(
+            claude_md_path,
+            &existing_md,
+            &stripped,
+            &block,
+        );
     }
     let new_contents = format!("{existing_md}\n{block}\n");
     safe_write_text_file(claude_md_path, &new_contents, None)?;
