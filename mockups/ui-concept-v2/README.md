@@ -1,43 +1,72 @@
 # TraceDecay UI concept V2
 
-Jayse Hansen / Cantina Avengers FUI grammar applied to the fourteen dashboard channels. Steal the grammar (night glass, hairline frames, amber alert, cyan signal, measured fields). Do not copy Marvel marks.
+Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
+dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
+attention, cyan signal, and measured fields—without copying Marvel marks.
 
-These are lookbook stills, not visual-audit goldens. Do not treat them as dashboard/audit-baselines/.
+These are synthetic lookbook stills, not runtime evidence or visual-audit
+goldens. Do not use them as `dashboard/audit-baselines/`.
 
-## Layout
+## Shared authorities
 
-One folder per channel, versions stacked inside:
+- [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) owns the logo, visual tokens, shell
+  dimensions, color meaning, typography, and prompt floor.
+- [NAVIGATION.md](NAVIGATION.md) owns the fourteen workspace names, numbers,
+  order, routes, and persistent shell behavior.
+- [INTERACTION-STATES.md](INTERACTION-STATES.md) owns the semantic-state and
+  interaction coverage expected for each workspace.
+- Each `<NN>-<workspace>/README.md` owns that workspace's explicit semantic-
+  state manifest and asset history.
+- Each PNG's exact same-stem Markdown file owns that plate's intent, entry
+  condition, visible state, interactions, truth boundary, and history.
 
-```
+The more specific authority may add workspace detail but may not contradict a
+shared authority. When a proposed plate exposes behavior the shipping product
+does not, label that path unavailable or omit the control; a concept image
+cannot supply the missing integration.
+
+## Layout and lifecycle
+
+Keep every asset in its numbered workspace folder:
+
+```text
 mockups/ui-concept-v2/
-  <NN>-<channel>/
-    v<N>-<short-slug>.png
+  <NN>-<workspace>/
+    README.md
+    <image-stem>.png
+    <image-stem>.md
 ```
 
-- Add new iterations as `vN-short-slug.png` inside the channel folder (for example the next Brain synapse/hook-firing plate is `01-brain/v2-hook-synapses.png`).
-- Highest `vN` in a folder is the current plate.
-- 2026-08-27 correction: Brain current is `01-brain/v10-activity-becomes-synapse.png`; Loom current is `03-loom/v7-host-weave-overview.png` (prior versions kept). (prior versions kept).
-- Do not flatten plates into the root. Do not dump iterations into a `drafts/` folder.
-- Never overwrite an older version; add the next `vN`.
-- No git symlinks.
+Version prefixes record iteration order only. They do not declare an asset
+current, make a later asset preferable, or supersede an earlier semantic state.
+Do not flatten plates into the root, create a parallel `drafts/` tree, overwrite
+an older image, or add Git symlinks.
 
-## Canonical plates
+Every screen README declares status explicitly in two coordinated sections:
 
-Current (highest `vN`) plate per channel:
+1. **Canonical semantic-state matrix:** one row per required semantic state,
+   linking the current same-stem explainer and naming its entry condition.
+2. **Asset ledger:** every PNG in the folder exactly once, with an explicit
+   `current`, `superseded`, or `rejected` lifecycle and a short reason.
 
-| # | File | Hero |
-|---|---|---|
-| 01 |  01-brain/v10-activity-becomes-synapse.png | Admitted-activity live field. Pulse projectId/family/streamId/at. Massless hub. 1/3 hop. Shared 192px TRACEDECAY rail. CONCEPT/SYNTHETIC. |
-| 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
-| 03 |  03-loom/v7-host-weave-overview.png | Time down, hosts across, vertical strands, width=messages. OPEN/ONGOING · RECORDED · UNKNOWN. Loaded LCM page. CONCEPT/SYNTHETIC. |
-| 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
-| 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
-| 06 | 06-code/v3-lenses.png | CORTEX/TRACE/CORE with direct labels. Graph totals, symbol path, strata, freshness, diagnostic warming/stale/unavailable. CONCEPT/SYNTHETIC. |
-| 07 | 07-knowledge/v4-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks. PCA only if method=pca; otherwise unserved. Independent camera states. CONCEPT/SYNTHETIC. |
-| 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
-| 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
-| 10 | 10-observatory/v4-overview-honest.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. Each source own coverage/error. No invented heartbeat. CONCEPT/SYNTHETIC. |
-| 11 | 11-costs/v3-provider-spend.png | Actual provider spend first. Unpriced/null ≠ zero. Saved tokens ≠ dollars. CONCEPT/SYNTHETIC. |
-| 12 | 12-settings/v4-effective-only.png | Effective config only. Provenance unserved unless the server supplies it. Multi-root capability, no fake query. Remote Brain operational status. CONCEPT/SYNTHETIC. |
-| 13 | 13-work/v4-six-cameras.png | Six cameras over one immutable product-graph version. Unserved cameras unavailable, not invented graphs. CONCEPT/SYNTHETIC. |
-| 14 | 14-workflows/v3-definition-ledger.png | Definition ledger. Immutable versions, pinned digests, CAS activate/retire/reject, on-demand run lookup. No ARM/PAUSE/CANCEL. CONCEPT/SYNTHETIC. |
+An image is eligible for `current` only after both its PNG and exact same-stem
+explainer exist. A state can retain its current plate while a later-numbered
+experiment is rejected, and one workspace can have several current plates when
+they represent different semantic states.
+
+## Contribution rules
+
+1. Start from the shared prompt floor and the workspace coverage in
+   `INTERACTION-STATES.md`. Preserve the normalized shell and route order.
+2. Add the PNG and `<image-stem>.md` together. The explainer must record intent,
+   entry condition, visible state, supported interactions, production truth
+   boundary, synthetic-data disclosure, and lifecycle history.
+3. Update the screen README in the same change. Link the new explainer from the
+   canonical matrix only if it is the chosen plate for that semantic state, and
+   add the PNG exactly once to the asset ledger.
+4. When replacing a state, mark the prior asset `superseded`; when an image
+   invents behavior or fails the visual brief, mark it `rejected` and say why.
+   Never derive either result from its filename or version number.
+5. Visibly stamp fixture-based final plates `CONCEPT / SYNTHETIC`. Do not claim
+   counts, topology, freshness, health, controls, or success that no named
+   production authority supplies.
