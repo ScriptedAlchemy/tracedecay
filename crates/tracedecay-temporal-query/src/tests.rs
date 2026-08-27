@@ -399,6 +399,56 @@ fn basic_port() -> FakeReadPort {
 }
 
 #[test]
+fn candidate_export_rejects_oversized_deserialized_manifest_before_candidate_read() {
+    block_on(async {
+        let port = basic_port();
+        let mut temporal_request = request(TemporalModeV1::Current, 1);
+        let participants = (0..=256)
+            .map(|index| {
+                TemporalParticipantGeneration::new(
+                    SessionId::new("session-1").expect("session"),
+                    format!("source-{index:03}"),
+                    temporal_request.snapshot.watermarks(),
+                    temporal_request.snapshot.watermarks().projection,
+                    &temporal_request.snapshot.versions().configuration_digest,
+                    temporal_request.snapshot.access_digest(),
+                    TemporalParticipantAuthorization::Authorized,
+                    TemporalSourceAccess::Available,
+                )
+                .expect("participant")
+            })
+            .collect::<Vec<_>>();
+        let manifest: TemporalParticipantManifest = serde_json::from_value(serde_json::json!({
+            "p": participants,
+            "e": format!("sha256:{}", "0".repeat(64)),
+        }))
+        .expect("wire manifest bypasses constructor validation");
+        temporal_request.snapshot = temporal_request
+            .snapshot
+            .with_participant_manifest(manifest)
+            .expect("session-bound manifest");
+
+        let result = execute_temporal_candidate_export(
+            &temporal_request,
+            &port,
+            &authenticator("key-1", 1, 7),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(TemporalKernelError::Port(
+                TemporalPortError::ParticipantLimitExceeded {
+                    observed: 257,
+                    maximum: 256,
+                },
+            )),
+        ));
+        assert_eq!(port.candidate_pages.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn candidate_export_ranks_without_reading_payload_bytes() {
     block_on(async {
         let port = basic_port();

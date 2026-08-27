@@ -300,6 +300,28 @@ pub async fn execute_temporal_candidate_export(
         return Err(TemporalKernelError::InvalidLimit);
     }
     let snapshot = &request.snapshot;
+    if let Err(error) = hotpath::measure_block!(
+        "temporal_query.participant_manifest.validate",
+        snapshot.participant_manifest().validate()
+    ) {
+        match &error {
+            TemporalPortError::ParticipantLimitExceeded { .. } => {
+                hotpath::gauge!("temporal_query.refusal.participant_manifest.participants_total")
+                    .inc(1_u64);
+            }
+            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+                hotpath::gauge!(
+                    "temporal_query.refusal.participant_manifest.canonical_bytes_total"
+                )
+                .inc(1_u64);
+            }
+            _ => {
+                hotpath::gauge!("temporal_query.refusal.participant_manifest.invalid_total")
+                    .inc(1_u64);
+            }
+        }
+        return Err(map_port_error(error));
+    }
     check_control(snapshot)?;
     let limits = snapshot.request().limits();
     if request.limit > limits.hydration_limit {

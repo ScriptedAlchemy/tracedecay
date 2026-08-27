@@ -191,40 +191,62 @@ pub struct TemporalParticipantManifest {
 
 impl TemporalParticipantManifest {
     pub fn new(mut entries: Vec<TemporalParticipantGeneration>) -> Result<Self, TemporalPortError> {
-        if entries.is_empty() {
-            return Err(TemporalPortError::EmptyParticipantManifest);
-        }
-        if entries.len() > MAX_TEMPORAL_PARTICIPANTS {
-            return Err(TemporalPortError::ParticipantLimitExceeded {
-                observed: entries.len(),
-                maximum: MAX_TEMPORAL_PARTICIPANTS,
-            });
-        }
         entries.sort_by(|left, right| {
             left.session_id
                 .cmp(&right.session_id)
                 .then_with(|| left.source_id.cmp(&right.source_id))
         });
-        if entries.windows(2).any(|pair| {
-            pair[0].session_id == pair[1].session_id && pair[0].source_id == pair[1].source_id
-        }) {
-            return Err(TemporalPortError::DuplicateParticipant);
-        }
         let canonical = serde_json::to_vec(&entries).map_err(|error| TemporalPortError::Read {
             operation: "encode participant manifest",
             message: error.to_string(),
         })?;
+        let epoch_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
+        let manifest = Self {
+            entries,
+            epoch_digest,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Revalidates the bounded canonical manifest at an execution boundary.
+    ///
+    /// Persisted and signed wire values can be deserialized without calling
+    /// [`Self::new`]. Execution therefore treats the constructor as a
+    /// convenience, not as the authority for these bounds.
+    pub fn validate(&self) -> Result<(), TemporalPortError> {
+        if self.entries.is_empty() {
+            return Err(TemporalPortError::EmptyParticipantManifest);
+        }
+        if self.entries.len() > MAX_TEMPORAL_PARTICIPANTS {
+            return Err(TemporalPortError::ParticipantLimitExceeded {
+                observed: self.entries.len(),
+                maximum: MAX_TEMPORAL_PARTICIPANTS,
+            });
+        }
+        if self.entries.windows(2).any(|pair| {
+            pair[0].session_id == pair[1].session_id && pair[0].source_id == pair[1].source_id
+        }) {
+            return Err(TemporalPortError::DuplicateParticipant);
+        }
+        let canonical =
+            serde_json::to_vec(&self.entries).map_err(|error| TemporalPortError::Read {
+                operation: "encode participant manifest",
+                message: error.to_string(),
+            })?;
         if canonical.len() > MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES {
             return Err(TemporalPortError::ParticipantManifestBytesExceeded {
                 observed: canonical.len(),
                 maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
             });
         }
-        let epoch_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
-        Ok(Self {
-            entries,
-            epoch_digest,
-        })
+        let expected_epoch = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
+        if self.epoch_digest != expected_epoch {
+            return Err(TemporalPortError::InvalidBinding {
+                field: "participant_manifest_epoch",
+            });
+        }
+        Ok(())
     }
 
     pub fn entries(&self) -> &[TemporalParticipantGeneration] {
