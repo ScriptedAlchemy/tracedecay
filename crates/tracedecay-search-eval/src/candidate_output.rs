@@ -1020,6 +1020,12 @@ pub fn validate_workload_for_tuning(
                 profile.profile_id
             )));
         }
+        if profile.calibration_threshold_ppm > 1_000_000 {
+            return Err(CandidateOutputError::Contract(format!(
+                "profile {} calibration threshold exceeds one million ppm",
+                profile.profile_id
+            )));
+        }
         if (profile.rerank_weight_ppm == 0) != profile.rerank_policy.is_none() {
             return Err(CandidateOutputError::Contract(format!(
                 "profile {} must bind rerank weight and policy together",
@@ -3285,6 +3291,14 @@ fn fusion_profile(
     .filter(|(lane, _)| weights.contains_key(lane))
     .map(|(lane, domain)| {
         let score_domain = id::<ScoreDomainId>(domain)?;
+        let (raw_min_micros, raw_max_micros) = if lane == RetrieverKind::Semantic {
+            (
+                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
+                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+            )
+        } else {
+            (0, 1_000_000)
+        };
         Ok((
             score_domain.clone(),
             ScoreDomainCalibrationV1 {
@@ -3294,8 +3308,8 @@ fn fusion_profile(
                     profile.profile_id
                 ))?,
                 score_domain,
-                raw_min_micros: 0,
-                raw_max_micros: 1_000_000,
+                raw_min_micros,
+                raw_max_micros,
             },
         ))
     })
@@ -3308,6 +3322,10 @@ fn fusion_profile(
         ))?,
         calibrations,
         score_domain_calibrations,
+        minimum_calibrated_feature_micros: (include_semantic && profile.semantic_weight_ppm > 0)
+            .then_some((RetrieverKind::Semantic, profile.calibration_threshold_ppm))
+            .into_iter()
+            .collect(),
         weights_micros: weights,
         diversity_policy_id: id::<DiversityPolicyId>("diversity.candidate.v1")?,
         rerank_policy_id: profile
@@ -3596,13 +3614,29 @@ mod tests {
                 .weights_micros
                 .contains_key(&RetrieverKind::Semantic)
         );
-        assert!(
-            semantic.profile.score_domain_calibrations.contains_key(
-                &id::<ScoreDomainId>(
-                    tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
-                )
-                .expect("evaluation semantic score domain")
-            )
+        let semantic_score_domain = id::<ScoreDomainId>(
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+        )
+        .expect("evaluation semantic score domain");
+        let semantic_calibration = semantic
+            .profile
+            .score_domain_calibrations
+            .get(&semantic_score_domain)
+            .expect("semantic score calibration");
+        assert_eq!(
+            semantic_calibration.raw_min_micros,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1
+        );
+        assert_eq!(
+            semantic_calibration.raw_max_micros,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
+        );
+        assert_eq!(
+            semantic
+                .profile
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&700_000)
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")

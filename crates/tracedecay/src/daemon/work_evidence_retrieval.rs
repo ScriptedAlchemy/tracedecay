@@ -760,6 +760,7 @@ pub(crate) mod tests {
                 .expect("evaluation anchor"),
             calibrations,
             score_domain_calibrations,
+            minimum_calibrated_feature_micros: BTreeMap::new(),
             weights_micros: RetrieverKind::ALL_LANES
                 .into_iter()
                 .map(|lane| (lane, 100_000))

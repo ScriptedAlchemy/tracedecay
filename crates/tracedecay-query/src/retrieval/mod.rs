@@ -65,6 +65,11 @@ pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
 pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
+/// Descending-score bounds for canonical cosine distance in `[0, 2]`, scaled
+/// by one billion. These bounds calibrate cosine similarity from `[-1, 1]`
+/// into the common `[0, 1_000_000]` fusion feature domain.
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1: u64 = i64::MAX as u64 - 2_000_000_000;
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1: u64 = i64::MAX as u64;
 
 #[cfg(test)]
 mod tests;

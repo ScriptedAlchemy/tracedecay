@@ -1191,6 +1191,7 @@ fn shared_fusion_profile() -> FusionProfile {
             .expect("evaluation anchor"),
         calibrations,
         score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
         diversity_policy_id: id("diversity.semantic.v1"),
         rerank_policy_id: None,

@@ -396,6 +396,11 @@ impl AcceptedRetrievalProfileV1 {
             || !lanes.contains(&RetrieverKind::ExactLiteral)
             || !lanes.contains(&RetrieverKind::Lexical)
             || lanes.contains(&RetrieverKind::Semantic) != self.compatibility.semantic.is_some()
+            || self
+                .profile
+                .minimum_calibrated_feature_micros
+                .iter()
+                .any(|(lane, threshold)| !lanes.contains(lane) || *threshold > 1_000_000)
             || self.profile.rerank_policy_id.as_ref()
                 != self.rerank.as_ref().map(|policy| &policy.policy_id)
             || self.rerank.is_some() != self.compatibility.rerank.is_some()

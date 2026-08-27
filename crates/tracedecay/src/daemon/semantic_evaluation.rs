@@ -366,6 +366,10 @@ fn daemon_semantic_evaluation_candidate(
             profile_id: material.profile.profile_id.clone(),
             calibrations: material.profile.calibrations.clone(),
             score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
+            minimum_calibrated_feature_micros: material
+                .profile
+                .minimum_calibrated_feature_micros
+                .clone(),
             weights_micros: material.profile.weights_micros.clone(),
             diversity_policy_id: material.profile.diversity_policy_id.clone(),
             rerank_policy_id: material.profile.rerank_policy_id.clone(),

@@ -468,6 +468,9 @@ fn ablated_profile(profile: &FusionProfile, admitted: &BTreeSet<RetrieverKind>) 
     profile
         .calibrations
         .retain(|lane, _| admitted.contains(lane));
+    profile
+        .minimum_calibrated_feature_micros
+        .retain(|lane, _| admitted.contains(lane));
     profile.rerank_policy_id = None;
     profile
 }
