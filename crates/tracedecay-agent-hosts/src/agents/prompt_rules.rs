@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
 /// Marker heading shared by every standard prompt-rules host.
 pub(crate) const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
@@ -104,14 +104,8 @@ pub(crate) fn strip_heading_block(contents: &str, marker: &str) -> Option<String
     Some(splice_out(contents, start, end))
 }
 
-/// Writes `stripped` user content plus a fresh managed `block` to `path` and
-/// reports the refresh.
-pub(crate) fn write_refreshed(
-    path: &Path,
-    expected_contents: &str,
-    stripped: &str,
-    block: &str,
-) -> Result<()> {
+/// Render preserved operator text followed by exactly one managed block.
+pub(crate) fn refreshed_contents(stripped: &str, block: &str) -> String {
     let mut new_contents = String::with_capacity(stripped.len() + block.len() + 3);
     new_contents.push_str(stripped);
     if !new_contents.is_empty() {
@@ -119,52 +113,77 @@ pub(crate) fn write_refreshed(
     }
     new_contents.push_str(block);
     new_contents.push('\n');
-    super::safe_write_text_file_if_unchanged(path, Some(expected_contents), &new_contents)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
-        path.display()
-    );
+    new_contents
+}
+
+/// Result of reconciling one host's prompt-rule syntax under the path lock.
+pub(crate) enum PromptRulesEdit {
+    Unchanged,
+    Refreshed(String),
+    Added(String),
+}
+
+#[derive(Clone, Copy)]
+enum PromptRulesEditOutcome {
+    Unchanged,
+    Refreshed,
+    Added,
+}
+
+/// Read, reconcile, and publish host-specific prompt rules in one transaction.
+///
+/// The callback runs while the stable per-path lock is held, so no host branch
+/// can compute replacement bytes from an observation made outside the write
+/// authority.
+pub(crate) fn reconcile_prompt_rules_with(
+    path: &Path,
+    reconcile: impl FnOnce(&str) -> Result<PromptRulesEdit>,
+) -> Result<()> {
+    let outcome = super::update_text_file_transactionally(path, |existing| {
+        Ok(match reconcile(existing)? {
+            PromptRulesEdit::Unchanged => (PromptRulesEditOutcome::Unchanged, None),
+            PromptRulesEdit::Refreshed(contents) => {
+                (PromptRulesEditOutcome::Refreshed, Some(contents))
+            }
+            PromptRulesEdit::Added(contents) => (PromptRulesEditOutcome::Added, Some(contents)),
+        })
+    })?;
+    match outcome {
+        PromptRulesEditOutcome::Unchanged => {
+            eprintln!(
+                "  {} already contains tracedecay rules, skipping",
+                path.display()
+            );
+        }
+        PromptRulesEditOutcome::Refreshed => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
+                path.display()
+            );
+        }
+        PromptRulesEditOutcome::Added => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
+                path.display()
+            );
+        }
+    }
     Ok(())
 }
 
 /// Install or refresh the managed rules block in `path`.
 pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> Result<()> {
-    let existing = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Some(
-            std::fs::read_to_string(path).map_err(|error| TraceDecayError::Config {
-                message: format!("failed to read {}: {error}", path.display()),
-            })?,
-        ),
-        Ok(_) => {
-            return Err(TraceDecayError::Config {
-                message: format!("refusing unsafe prompt-rules path {}", path.display()),
-            });
+    reconcile_prompt_rules_with(path, |existing| {
+        if existing.contains(block) {
+            return Ok(PromptRulesEdit::Unchanged);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to inspect {}: {error}", path.display()),
-            });
+        if let Some(stripped) = strip_heading_block(existing, marker) {
+            return Ok(PromptRulesEdit::Refreshed(refreshed_contents(
+                &stripped, block,
+            )));
         }
-    };
-    let existing_text = existing.as_deref().unwrap_or_default();
-    if existing_text.contains(block) {
-        eprintln!(
-            "  {} already contains tracedecay rules, skipping",
-            path.display()
-        );
-        return Ok(());
-    }
-    if let Some(stripped) = strip_heading_block(existing_text, marker) {
-        return write_refreshed(path, existing_text, &stripped, block);
-    }
-    let new_contents = format!("{existing_text}\n{block}\n");
-    super::safe_write_text_file_if_unchanged(path, existing.as_deref(), &new_contents)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
-        path.display()
-    );
-    Ok(())
+        Ok(PromptRulesEdit::Added(format!("{existing}\n{block}\n")))
+    })
 }
 
 /// Shared uninstall for the standard hosts: strips the managed block and
@@ -202,7 +221,7 @@ pub(crate) fn remove_prompt_rules(path: &Path, marker: &str) {
 mod tests {
     use std::fs;
 
-    use super::{PROMPT_RULE_MARKER, reconcile_prompt_rules, strip_heading_block, write_refreshed};
+    use super::{PROMPT_RULE_MARKER, reconcile_prompt_rules};
 
     const ORIGINAL: &[u8] = b"operator-owned instructions\n";
     const BLOCK: &str = "## Prefer tracedecay MCP tools\n\nmanaged instructions";
@@ -241,12 +260,19 @@ mod tests {
             "operator-owned instructions\n\n{PROMPT_RULE_MARKER}\n\nstale managed instructions\n"
         );
         fs::write(&prompt, &original).expect("original prompt rules");
-        let stripped = strip_heading_block(&original, PROMPT_RULE_MARKER)
-            .expect("existing managed prompt block");
+        let pause = crate::agents::pause_next_host_config_write_after_validation(&prompt);
+        let writer_prompt = prompt.clone();
+        let writer = std::thread::spawn(move || {
+            reconcile_prompt_rules(&writer_prompt, PROMPT_RULE_MARKER, BLOCK)
+                .map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
         let foreign = b"operator changed these instructions concurrently\n";
         fs::write(&prompt, foreign).expect("foreign concurrent edit");
-
-        let error = write_refreshed(&prompt, &original, &stripped, BLOCK)
+        pause.resume();
+        let error = writer
+            .join()
+            .expect("prompt-rules writer")
             .expect_err("a stale refresh must refuse the foreign edit");
 
         assert!(

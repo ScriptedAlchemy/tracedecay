@@ -944,20 +944,6 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
     safe_write_bytes_file(path, contents.as_bytes(), backup)
 }
 
-pub(crate) fn safe_write_text_file_if_unchanged(
-    path: &Path,
-    expected_contents: Option<&str>,
-    contents: &str,
-) -> Result<()> {
-    safe_write_bytes_file_guarded(
-        path,
-        contents.as_bytes(),
-        None,
-        None,
-        HostFileWriteExpectation::Exact(expected_contents.map(str::as_bytes)),
-    )
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HostFileMetadataIdentityV1 {
     readonly: bool,
@@ -1067,21 +1053,10 @@ pub fn safe_write_bytes_file_with_metadata(
     backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
-    safe_write_bytes_file_guarded(
-        path,
-        contents,
-        backup,
-        replacement_metadata,
-        HostFileWriteExpectation::Unchecked,
-    )
+    safe_write_bytes_file_guarded(path, contents, backup, replacement_metadata)
 }
 
-#[derive(Clone, Copy)]
-enum HostFileWriteExpectation<'a> {
-    Unchecked,
-    Exact(Option<&'a [u8]>),
-}
-
+/// Stable sibling lock held across host-file observation, intent, and rename.
 struct HostFileWriteLock(File);
 
 impl Drop for HostFileWriteLock {
@@ -1378,24 +1353,6 @@ fn test_pause_host_config_write_after_validation(path: &Path) {
     }
 }
 
-fn verify_host_file_write_expectation(
-    snapshot: &HostFileSnapshot,
-    path: &Path,
-    expectation: HostFileWriteExpectation<'_>,
-) -> std::io::Result<()> {
-    let HostFileWriteExpectation::Exact(expected) = expectation else {
-        return Ok(());
-    };
-    if snapshot.contents() == expected {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "host config changed since it was read: {}",
-            path.display()
-        )))
-    }
-}
-
 fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::io::Result<()> {
     let observed = capture_host_file_snapshot(path)?;
     if &observed == expected {
@@ -1413,17 +1370,49 @@ fn safe_write_bytes_file_guarded(
     contents: &[u8],
     backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
-    expectation: HostFileWriteExpectation<'_>,
 ) -> Result<()> {
     let _lock = lock_host_file_write(path)?;
     let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
         message: format!("failed to capture metadata for {}: {error}", path.display()),
     })?;
-    verify_host_file_write_expectation(&observed, path, expectation).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("refusing to replace {}: {error}", path.display()),
-        }
+    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
+}
+
+/// Run a strict UTF-8 read-transform-write while holding the host-file lock.
+///
+/// `None` means the transform observed no semantic change. A replacement is
+/// published only after its write intent and exact source snapshot remain
+/// valid, including content, permissions, ACLs, and filesystem identity.
+pub(crate) fn update_text_file_transactionally<T>(
+    path: &Path,
+    update: impl FnOnce(&str) -> Result<(T, Option<String>)>,
+) -> Result<T> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to read {}: {error}", path.display()),
     })?;
+    let existing = match observed.contents() {
+        Some(contents) => {
+            std::str::from_utf8(contents).map_err(|error| TraceDecayError::Config {
+                message: format!("failed to read {} as UTF-8: {error}", path.display()),
+            })?
+        }
+        None => "",
+    };
+    let (output, replacement) = update(existing)?;
+    if let Some(replacement) = replacement {
+        safe_write_bytes_file_from_snapshot(path, replacement.as_bytes(), None, None, &observed)?;
+    }
+    Ok(output)
+}
+
+fn safe_write_bytes_file_from_snapshot(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+    observed: &HostFileSnapshot,
+) -> Result<()> {
     let publish_metadata = replacement_metadata.or(observed.metadata());
     if let Err(e) = tracedecay_private_fs::framed_log::atomic_write_prepared(
         path,
@@ -1436,10 +1425,10 @@ fn safe_write_bytes_file_guarded(
             let expected_metadata = capture_host_file_metadata(temporary)?;
             persist_host_config_write_intent(path, contents, Some(&expected_metadata))
                 .map_err(std::io::Error::other)?;
-            verify_host_file_snapshot(path, &observed)?;
+            verify_host_file_snapshot(path, observed)?;
             #[cfg(test)]
             test_pause_host_config_write_after_validation(path);
-            verify_host_file_snapshot(path, &observed)?;
+            verify_host_file_snapshot(path, observed)?;
             Ok(())
         },
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,

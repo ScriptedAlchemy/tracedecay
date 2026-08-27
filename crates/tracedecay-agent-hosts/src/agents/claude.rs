@@ -928,33 +928,20 @@ fn claude_md_rules_text() -> String {
 /// Install or refresh the CLAUDE.md rules block.
 fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     let block = claude_md_rules_text();
-    let existing_md = if claude_md_path.is_file() {
-        std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {}: {e}", claude_md_path.display()),
-        })?
-    } else {
-        String::new()
-    };
-    if existing_md.contains(&block) {
-        eprintln!("  CLAUDE.md already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    if let Some(range) = claude_md_rules_block_range(&existing_md, CLAUDE_MD_RECONCILE_MARKERS) {
-        let stripped = super::prompt_rules::splice_out(&existing_md, range.start, range.end);
-        return super::prompt_rules::write_refreshed(
-            claude_md_path,
-            &existing_md,
-            &stripped,
-            &block,
-        );
-    }
-    let new_contents = format!("{existing_md}\n{block}\n");
-    safe_write_text_file(claude_md_path, &new_contents, None)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
-        claude_md_path.display()
-    );
-    Ok(())
+    super::prompt_rules::reconcile_prompt_rules_with(claude_md_path, |existing| {
+        if existing.contains(&block) {
+            return Ok(super::prompt_rules::PromptRulesEdit::Unchanged);
+        }
+        if let Some(range) = claude_md_rules_block_range(existing, CLAUDE_MD_RECONCILE_MARKERS) {
+            let stripped = super::prompt_rules::splice_out(existing, range.start, range.end);
+            return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
+                super::prompt_rules::refreshed_contents(&stripped, &block),
+            ));
+        }
+        Ok(super::prompt_rules::PromptRulesEdit::Added(format!(
+            "{existing}\n{block}\n"
+        )))
+    })
 }
 
 /// Remove tracedecay rules from CLAUDE.md.
