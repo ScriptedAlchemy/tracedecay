@@ -112,7 +112,7 @@ impl AgentIntegration for OpenCodeIntegration {
             &agents_md,
             crate::automation::skill_targets::SkillInstallTarget::OpenCode,
         )?;
-        uninstall_prompt_rules(&agents_md);
+        uninstall_prompt_rules(&agents_md)?;
         Ok(())
     }
 
@@ -288,7 +288,7 @@ impl AgentIntegration for OpenCodeIntegration {
                 &prompt,
                 crate::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
-            uninstall_prompt_rules(&prompt);
+            uninstall_prompt_rules(&prompt)?;
         }
         remove_external_opencode_assets(&ctx.home, components)?;
         Ok(())
@@ -898,8 +898,24 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
-fn uninstall_prompt_rules(prompt_path: &Path) {
-    super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
+fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
+    super::prompt_rules::remove_prompt_rules_with(prompt_path, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(new_contents) =
+            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
+        else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,5 +1159,143 @@ mod tests {
                 std::fs::read(home.path().join(".config/opencode").join(relative)).unwrap()
             );
         }
+    }
+
+    fn installed_prompt(path: &Path, operator_contents: Option<&[u8]>) {
+        if let Some(contents) = operator_contents {
+            std::fs::write(path, contents).unwrap();
+        }
+        install_prompt_rules(path).unwrap();
+    }
+
+    fn start_paused_uninstall(
+        path: &Path,
+    ) -> (
+        crate::agents::TestHostConfigWritePauseController,
+        std::thread::JoinHandle<std::result::Result<(), String>>,
+    ) {
+        let pause = crate::agents::pause_next_host_config_write_at_publication(path);
+        let writer_path = path.to_path_buf();
+        let remover = std::thread::spawn(move || {
+            uninstall_prompt_rules(&writer_path).map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        (pause, remover)
+    }
+
+    #[test]
+    fn opencode_prompt_uninstall_refuses_a_concurrent_nonempty_rewrite() {
+        let root = tempfile::tempdir().unwrap();
+        let prompt = root.path().join("AGENTS.md");
+        installed_prompt(&prompt, Some(b"operator rules\n"));
+        let (pause, remover) = start_paused_uninstall(&prompt);
+
+        let foreign = b"foreign OpenCode edit\n";
+        std::fs::write(&prompt, foreign).unwrap();
+        pause.resume();
+        let error = remover.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&prompt).unwrap(), foreign);
+    }
+
+    #[test]
+    fn opencode_prompt_uninstall_refuses_a_concurrent_empty_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let prompt = root.path().join("AGENTS.md");
+        installed_prompt(&prompt, None);
+        let (pause, remover) = start_paused_uninstall(&prompt);
+
+        let foreign = b"foreign OpenCode edit\n";
+        std::fs::write(&prompt, foreign).unwrap();
+        pause.resume();
+        let error = remover.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&prompt).unwrap(), foreign);
+    }
+
+    #[test]
+    fn opencode_prompt_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
+        let root = tempfile::tempdir().unwrap();
+        let nonempty = root.path().join("nonempty.md");
+        installed_prompt(&nonempty, Some(b"operator rules\n"));
+
+        uninstall_prompt_rules(&nonempty).unwrap();
+
+        assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
+
+        let empty = root.path().join("empty.md");
+        installed_prompt(&empty, None);
+
+        uninstall_prompt_rules(&empty).unwrap();
+
+        assert!(!empty.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_prompt_uninstall_refuses_a_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let prompt = root.path().join("AGENTS.md");
+        let outside = root.path().join("outside.md");
+        installed_prompt(&prompt, None);
+        std::fs::write(&outside, b"outside OpenCode rules\n").unwrap();
+        let (pause, remover) = start_paused_uninstall(&prompt);
+
+        std::fs::remove_file(&prompt).unwrap();
+        symlink(&outside, &prompt).unwrap();
+        pause.resume();
+        let error = remover.join().unwrap().unwrap_err();
+
+        assert!(error.contains("unsafe host metadata path"), "{error}");
+        assert!(
+            std::fs::symlink_metadata(&prompt)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"outside OpenCode rules\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_prompt_uninstall_refuses_a_metadata_change() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let prompt = root.path().join("AGENTS.md");
+        installed_prompt(&prompt, Some(b"operator rules\n"));
+        let before = std::fs::read(&prompt).unwrap();
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (pause, remover) = start_paused_uninstall(&prompt);
+
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o640)).unwrap();
+        pause.resume();
+        let error = remover.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&prompt).unwrap(), before);
+        assert_eq!(std::fs::metadata(&prompt).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn opencode_prompt_uninstall_refuses_a_missing_file_race() {
+        let root = tempfile::tempdir().unwrap();
+        let prompt = root.path().join("AGENTS.md");
+        installed_prompt(&prompt, None);
+        let (pause, remover) = start_paused_uninstall(&prompt);
+
+        std::fs::remove_file(&prompt).unwrap();
+        pause.resume();
+        let error = remover.join().unwrap().unwrap_err();
+
+        assert!(error.contains("failed to conditionally remove"), "{error}");
+        assert!(!prompt.exists());
     }
 }
