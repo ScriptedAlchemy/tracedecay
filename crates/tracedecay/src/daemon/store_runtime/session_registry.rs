@@ -88,8 +88,8 @@ const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 /// profile-wide owners take their slots first: a hand-picked number is short by
 /// exactly that many, and the last project then fails inside the graph registry
 /// before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
-pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize =
-    PROFILE_WIDE_GRAPH_DB_OWNERS + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
+pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
+    + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
 /// Remote Brain node ceiling, taken from the credential registry rather than
 /// declared independently. Owner admission refuses before anything is
