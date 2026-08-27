@@ -26,10 +26,10 @@ pub use backup::GraphBackupReceipt;
 pub use error::{GraphBudgetKind, GraphDbError};
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
-    GraphGenerationManifestProvider, GraphGenerationRelation, GraphGenerationReplayMetadata,
-    GraphGenerationReplaySource, GraphProjectionIdentity, GraphProjectorRevision, GraphRelationRef,
-    GraphReplayCollectionOutcome, SealedCodeGenerationReplay, SealedGraphStateDigest,
-    SemanticVectorGenerationReplay,
+    GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
+    GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
+    GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
+    SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
 };
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
 pub use limits::{

@@ -19,10 +19,11 @@ use tracedecay_store::runtime::{
 use crate::generation::physical_namespace;
 use crate::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
-    GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectionPage,
-    GraphProjectionReadRequest, GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
-    GraphRelationId, GraphRelationRef, TraversalRequest, VectorSearchRequest, VectorSearchResult,
+    GraphGenerationDependency, GraphGenerationId, GraphGenerationManifestIdentity,
+    GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
+    GraphProjectionTelemetryRequest, GraphRelationId, GraphRelationRef, TraversalRequest,
+    VectorSearchRequest, VectorSearchResult,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -185,7 +186,7 @@ impl VerifiedGraphSnapshot {
     /// must use [`crate::GraphDbRegistry::publish_verified`].
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub fn memory(
-        manifest: GraphGenerationManifest,
+        manifest: crate::GraphGenerationManifest,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GraphDbError> {
         let owner = crate::GraphDbOwner::memory(Arc::clone(&cancellation))?;
@@ -231,7 +232,7 @@ impl VerifiedGraphSnapshot {
             dependency_generation_closure_digest: manifest.dependency_closure_digest(&check)?,
             recovered_digest,
         };
-        let lease = generation_lease(&manifest, head, BTreeMap::new());
+        let lease = generation_lease(&manifest.identity(), head, BTreeMap::new());
         database.install_verified_generation(Arc::clone(&lease))?;
         Ok(Self::new(
             database,
@@ -435,14 +436,14 @@ pub struct VerifiedTraversalResult {
 }
 
 pub(crate) fn generation_lease(
-    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
     head: GraphVerifiedHeadV1,
     dependencies: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
 ) -> Arc<VerifiedGenerationLease> {
     Arc::new(VerifiedGenerationLease {
-        locator: GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone()),
+        locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
         head,
-        dependency_identities: manifest.dependencies.clone(),
+        dependency_identities: identity.dependencies.clone(),
         dependencies,
     })
 }

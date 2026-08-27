@@ -295,7 +295,11 @@ impl GraphDb {
                 }
                 let recovered = GraphRecoveredGenerationDigestV1::new(format!(
                     "sha256:{}",
-                    recovered_generation_digest_from_database(database, &manifest, check)?
+                    recovered_generation_digest_from_database(
+                        database,
+                        &manifest.identity(),
+                        check
+                    )?
                 ))
                 .map_err(|error| GraphDbError::Corrupt {
                     message: error.to_string(),
