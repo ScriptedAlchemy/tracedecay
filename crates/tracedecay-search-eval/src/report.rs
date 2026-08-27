@@ -238,6 +238,12 @@ impl DirectEvaluationReportV1 {
         workload: &CandidateWorkloadV1,
         vector_generation_evidence: NativeVectorGenerationEvidence,
     ) -> Result<(), SearchEvalError> {
+        if self.status == DirectEvaluationStatusV1::Fail {
+            return Err(SearchEvalError::Contract(format!(
+                "native activation direct evaluation report failed: {}",
+                self.failure_diagnostic()
+            )));
+        }
         if self.status != DirectEvaluationStatusV1::Pass {
             return Err(SearchEvalError::Contract(
                 "only a passing direct evaluation report can activate semantics".to_owned(),
@@ -345,6 +351,71 @@ impl DirectEvaluationReportV1 {
             }
         }
         Ok(())
+    }
+
+    fn failure_diagnostic(&self) -> String {
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.status == DirectEvaluationStatusV1::Fail)
+        {
+            if let Some(query) = profile
+                .queries
+                .iter()
+                .find(|query| query.status == DirectEvaluationStatusV1::Fail)
+            {
+                return format!(
+                    "{}:{} query {} failed: first_useful_rank={:?} returned_candidates={} wrong_scope_hits={} forbidden_hits={} expected_no_result={} protected={} recall={}/{} duplicates={}/{}",
+                    profile.profile_id,
+                    profile.partition,
+                    query.query_id,
+                    query.first_useful_rank,
+                    query.returned_candidates,
+                    query.wrong_scope_hits,
+                    query.forbidden_hits,
+                    query.expected_no_result,
+                    query.protected,
+                    query.quality.recall_at_10.numerator,
+                    query.quality.recall_at_10.denominator,
+                    query.quality.duplicate_rate.numerator,
+                    query.quality.duplicate_rate.denominator,
+                );
+            }
+            if !profile.fallback_stable {
+                return format!(
+                    "{}:{} fallback bytes changed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if !profile.cancellation_bounded {
+                return format!(
+                    "{}:{} cancellation contract failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if !profile.offline {
+                return format!(
+                    "{}:{} offline contract failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            if profile.resource_status == DirectEvaluationStatusV1::Fail {
+                return format!(
+                    "{}:{} resource budget failed",
+                    profile.profile_id, profile.partition
+                );
+            }
+            return format!(
+                "{}:{} aggregate quality failed: protected_recall={}/{} duplicates={}/{}",
+                profile.profile_id,
+                profile.partition,
+                profile.quality.protected_recall_at_10.numerator,
+                profile.quality.protected_recall_at_10.denominator,
+                profile.quality.duplicate_rate.numerator,
+                profile.quality.duplicate_rate.denominator,
+            );
+        }
+        "pairwise candidate quality failed".to_owned()
     }
 
     /// Derive the accepted semantic resource pins from the exact selected
