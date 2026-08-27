@@ -2125,11 +2125,6 @@ impl PreparedSemanticEvaluationGenerationV1 {
             .ok_or(SemanticRuntimeScheduleFailureV1::Projection)?;
         let source_manifest_digest = prepared.prepared.request.changes.manifest_digest.clone();
         let source_generation = code.manifest().generation_id.clone();
-        let cold_model_load_micros = prepared
-            .query_factory
-            .cold_load_micros()
-            .filter(|elapsed| *elapsed != 0)
-            .ok_or(SemanticRuntimeScheduleFailureV1::Runtime)?;
         let sequence_length = prepared
             .prepared
             .embedding_key
@@ -2154,7 +2149,11 @@ impl PreparedSemanticEvaluationGenerationV1 {
             batch_size: execution.max_batch_size,
             sequence_length,
             load_deadline_ms: execution.load_deadline_ms,
-            cold_model_load_micros,
+            // A shared projection-batch cache can prepare this generation
+            // without opening its fresh query runtime. The genuine query pass
+            // below opens it; `generation_resources` observes the resulting
+            // cold-load duration before publication evidence is accepted.
+            cold_model_load_micros: 0,
             vector_bytes,
             index_bytes: 0,
             cache_bytes: 0,
@@ -2212,6 +2211,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
     pub(crate) fn generation_resources(&self) -> ProductionCandidateNativeGenerationResourcesV1 {
         let mut resources = self.resources.clone();
         resources.cache_bytes = self.query_factory.resident_cache_bytes();
+        resources.cold_model_load_micros = self.query_factory.cold_load_micros().unwrap_or(0);
         resources
     }
 
