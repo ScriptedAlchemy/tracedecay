@@ -1020,33 +1020,50 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         self.control.checkpoint().map_err(|_| {
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
-        if resources.source_generation != *context.code_generation
-            || resources.source_manifest_digest
-                != context.code.projection().request().changes.manifest_digest
-            || resources.incremental_source_generation
-                != context.incremental_code.manifest().generation_id
-            || resources.incremental_source_manifest_digest
-                != context
-                    .incremental_code
-                    .projection()
-                    .request()
-                    .changes
-                    .manifest_digest
-            || (semantic_resources.is_some()
-                && (resources.model_bytes == 0
-                    || resources.tokenizer_bytes == 0
-                    || resources.threads == 0
-                    || resources.batch_size == 0
-                    || resources.sequence_length == 0
-                    || resources.load_deadline_ms == 0
-                    || resources.cold_model_load_micros == 0
-                    || resources.vector_bytes == 0
-                    || resources.projection_cases.len() != 7))
+        let mismatch = if resources.source_generation != *context.code_generation {
+            Some("source_generation")
+        } else if resources.source_manifest_digest
+            != context.code.projection().request().changes.manifest_digest
         {
-            return Err(CandidateOutputError::Contract(
-                "semantic resource measurement is not bound to the exact prepared generation"
-                    .to_owned(),
-            ));
+            Some("source_manifest_digest")
+        } else if resources.incremental_source_generation
+            != context.incremental_code.manifest().generation_id
+        {
+            Some("incremental_source_generation")
+        } else if resources.incremental_source_manifest_digest
+            != context
+                .incremental_code
+                .projection()
+                .request()
+                .changes
+                .manifest_digest
+        {
+            Some("incremental_source_manifest_digest")
+        } else if semantic_resources.is_some() && resources.model_bytes == 0 {
+            Some("model_bytes")
+        } else if semantic_resources.is_some() && resources.tokenizer_bytes == 0 {
+            Some("tokenizer_bytes")
+        } else if semantic_resources.is_some() && resources.threads == 0 {
+            Some("threads")
+        } else if semantic_resources.is_some() && resources.batch_size == 0 {
+            Some("batch_size")
+        } else if semantic_resources.is_some() && resources.sequence_length == 0 {
+            Some("sequence_length")
+        } else if semantic_resources.is_some() && resources.load_deadline_ms == 0 {
+            Some("load_deadline_ms")
+        } else if semantic_resources.is_some() && resources.cold_model_load_micros == 0 {
+            Some("cold_model_load_micros")
+        } else if semantic_resources.is_some() && resources.vector_bytes == 0 {
+            Some("vector_bytes")
+        } else if semantic_resources.is_some() && resources.projection_cases.len() != 7 {
+            Some("projection_cases")
+        } else {
+            None
+        };
+        if let Some(mismatch) = mismatch {
+            return Err(CandidateOutputError::Contract(format!(
+                "semantic resource measurement is not bound to the exact prepared generation: {mismatch}"
+            )));
         }
         let Some((cpu_time_us, peak_rss_bytes)) = process_resources else {
             return Ok(SemanticNativeStageResultV1::Pending {
