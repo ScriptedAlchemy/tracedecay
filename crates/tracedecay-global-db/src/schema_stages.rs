@@ -215,6 +215,8 @@ const TRANSCRIPT_SCHEMA: &str = "
         PRIMARY KEY(provider, session_id)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(provider, project_key);
+    CREATE INDEX IF NOT EXISTS idx_sessions_project_provider_session
+        ON sessions(project_key, provider, session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_active_project_path
         ON sessions(project_path, provider, session_id)
@@ -1050,7 +1052,7 @@ mod tests {
 
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-    use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
+    use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection, params};
 
     async fn install_registered_schema(database_path: &std::path::Path) {
         drop(
@@ -1075,6 +1077,69 @@ mod tests {
             Ok(_) => panic!("incompatible registered schema must not be admitted"),
             Err(error) => error,
         }
+    }
+
+    #[tokio::test]
+    async fn existing_store_reinstalls_the_project_leading_session_lookup_index() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_schema(&database_path).await;
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP INDEX idx_sessions_project_provider_session;
+                     INSERT INTO sessions(provider, session_id, project_key, project_path)
+                     VALUES
+                       ('claude', 'session-a', 'project-a', '/project-a'),
+                       ('codex', 'session-b', 'project-b', '/project-b');",
+                )
+                .expect("shape an admissible existing store without the lookup index");
+        }
+
+        install_registered_schema(&database_path).await;
+
+        let connection = TestConnection::open(&database_path);
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'index' AND name = 'idx_sessions_project_provider_session'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_some(),
+            "attached-store admission must re-ensure the idempotent transcript index"
+        );
+        drop(rows);
+
+        let mut rows = connection
+            .query(
+                "EXPLAIN QUERY PLAN
+                 SELECT session_id
+                 FROM sessions
+                 WHERE project_key = ?1 AND provider = ?2
+                 ORDER BY session_id
+                 LIMIT 32",
+                params!["project-a", "claude"],
+            )
+            .await
+            .unwrap();
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            details.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_sessions_project_provider_session")),
+            "project/provider session lookup did not use the project-leading index: {details:?}"
+        );
+        assert!(
+            !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "project/provider session lookup regressed to an explicit sort: {details:?}"
+        );
     }
 
     #[tokio::test]
