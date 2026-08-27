@@ -45,7 +45,7 @@ use crate::timeutil::SearchTimeBound;
 const MAX_RESULTS: usize = 100;
 const EXPAND_QUERY_CONCURRENCY: usize = 8;
 // The admitted retrieval ceiling. Default ExecutionLimits are multi-MiB and
-// fail within_request_budgets as a persistent BudgetExhausted / Saturated, so
+// fail within_request_budgets as a persistent structural budget refusal, so
 // every query built here is sized against the one shared constant.
 const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize =
     crate::daemon::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
@@ -57,7 +57,7 @@ const MAX_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_QUERY_QUERY_CHARS: usize = 1_024;
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.store_runtime.lcm.load_session")]
 pub(super) async fn execute_load_session(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -115,13 +115,15 @@ pub(super) async fn execute_load_session(
         GitScopeFilter::default(),
     )?;
     let (results, temporal, status, omitted) = retrieval_page(
-        service
-            .retrieve_admitted_with_cancellation(
+        hotpath::future!(
+            service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 query,
-            )
-            .await,
+            ),
+            label = "daemon.store_runtime.lcm.load_session.retrieve"
+        )
+        .await,
     )?;
     let messages = results
         .into_iter()
@@ -146,7 +148,7 @@ pub(super) async fn execute_load_session(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.store_runtime.lcm.grep")]
 pub(super) async fn execute_grep(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -212,13 +214,15 @@ pub(super) async fn execute_grep(
         git_filter,
     )?;
     let (results, temporal, status, omitted) = retrieval_page(
-        service
-            .retrieve_admitted_with_cancellation(
+        hotpath::future!(
+            service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 query,
-            )
-            .await,
+            ),
+            label = "daemon.store_runtime.lcm.grep.retrieve"
+        )
+        .await,
     )?;
     let hits = results
         .into_iter()
@@ -245,7 +249,7 @@ pub(super) async fn execute_grep(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.store_runtime.lcm.describe")]
 pub(super) async fn execute_describe(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -271,8 +275,8 @@ pub(super) async fn execute_describe(
             RetrievalGrainV1::Occurrence,
         ),
     };
-    let outcome = service
-        .describe_lcm_admitted(
+    let outcome = hotpath::future!(
+        service.describe_lcm_admitted(
             context.request_context,
             context.cancellation_signal,
             LcmDescribeServiceCommand::new(
@@ -282,8 +286,10 @@ pub(super) async fn execute_describe(
                 grain,
                 SessionRetrievalStoreScope::Profile,
             ),
-        )
-        .await;
+        ),
+        label = "daemon.store_runtime.lcm.describe.retrieve"
+    )
+    .await;
     let result = match outcome {
         LcmDescribeServiceOutcome::Complete {
             description,
@@ -356,7 +362,7 @@ pub(super) async fn execute_describe(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.store_runtime.lcm.expand")]
 pub(super) async fn execute_expand(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -396,8 +402,8 @@ pub(super) async fn execute_expand(
     let source_limit = summary
         .then(|| bounded_limit(request.source_limit, 50))
         .transpose()?;
-    let outcome = service
-        .expand_lcm_admitted(
+    let outcome = hotpath::future!(
+        service.expand_lcm_admitted(
             context.request_context,
             context.cancellation_signal,
             LcmExpandServiceCommand::new(
@@ -417,8 +423,10 @@ pub(super) async fn execute_expand(
                 cursor(request.cursor.as_deref())?,
                 SessionRetrievalStoreScope::Profile,
             ),
-        )
-        .await;
+        ),
+        label = "daemon.store_runtime.lcm.expand.retrieve"
+    )
+    .await;
     let result = expand_result(outcome, provider, &session_id)?;
     evidence_outcome(
         context,
@@ -427,7 +435,7 @@ pub(super) async fn execute_expand(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.store_runtime.lcm.expand_query")]
 pub(super) async fn execute_expand_query(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -617,8 +625,8 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalServiceOutcome::BudgetExhausted => {
-            RetainedSurfaceExecutionErrorV1::Saturated
+        | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
         SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
@@ -645,7 +653,9 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         | LcmDescribeServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmDescribeServiceOutcome::BudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
+        LcmDescribeServiceOutcome::BudgetExhausted => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        }
         LcmDescribeServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
@@ -666,7 +676,9 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         | LcmExpandServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        LcmExpandServiceOutcome::BudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
+        LcmExpandServiceOutcome::BudgetExhausted => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        }
         LcmExpandServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
@@ -793,13 +805,15 @@ async fn expand_query_from_search(
         GitScopeFilter::default(),
     )?;
     let (results, temporal, mut status, service_omitted) = retrieval_page(
-        service
-            .retrieve_admitted_with_cancellation(
+        hotpath::future!(
+            service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 temporal_query,
-            )
-            .await,
+            ),
+            label = "daemon.store_runtime.lcm.expand_query.retrieve"
+        )
+        .await,
     )?;
     let sources = results
         .into_iter()
@@ -843,12 +857,12 @@ async fn expand_query_from_nodes(
     // captures `&String` leaves the closure's return type tied to the input
     // lifetime, so it is not higher-ranked and `buffer_unordered` rejects it.
     // `selected` is not read after this, so moving is also one clone cheaper.
-    let mut expansions = stream::iter(selected.into_iter().enumerate())
+    let expansions = stream::iter(selected.into_iter().enumerate())
         .map(|(index, node_id)| {
             let cursor = cursor.clone();
             async move {
-                let outcome = service
-                    .expand_lcm_admitted(
+                let outcome = hotpath::future!(
+                    service.expand_lcm_admitted(
                         context.request_context,
                         context.cancellation_signal,
                         LcmExpandServiceCommand::new(
@@ -866,14 +880,20 @@ async fn expand_query_from_nodes(
                             cursor,
                             SessionRetrievalStoreScope::Profile,
                         ),
-                    )
-                    .await;
+                    ),
+                    label = "daemon.store_runtime.lcm.expand_query.node"
+                )
+                .await;
                 (index, node_id, outcome)
             }
         })
         .buffer_unordered(EXPAND_QUERY_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+        .collect::<Vec<_>>();
+    let mut expansions = hotpath::future!(
+        expansions,
+        label = "daemon.store_runtime.lcm.expand_query.nodes"
+    )
+    .await;
     expansions.sort_unstable_by_key(|(index, _, _)| *index);
     let mut sources = Vec::new();
     let mut pagination = Vec::new();
@@ -942,7 +962,7 @@ async fn expand_query_from_nodes(
 ///
 /// The admitted daemon retrieval service rejects any query whose
 /// `ContextBudget::max_bytes` exceeds `APPLICATION_RETRIEVAL_MAX_BYTES`, and
-/// that rejection is terminal (`BudgetExhausted` -> `Saturated`), not a partial
+/// that rejection is terminal (`BudgetExhausted` -> budget-refused), not a partial
 /// answer. A caller-supplied assembly budget therefore must not be forwarded to
 /// retrieval unclamped: `context_max_tokens` defaults to `32_000` tokens, which
 /// is `128_000` estimated bytes and twice the admitted ceiling, so every default

@@ -28,8 +28,8 @@ use crate::session::ports::{
 };
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
-    SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRequestBinding, SessionRetrievalBudgetStageV1, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 
 mod task_session;
@@ -293,6 +293,7 @@ where
     P: SessionTemporalExecutionPort,
     E: VersionedTokenEstimator + Sync,
 {
+    #[hotpath::measure(label = "usecases.session.retrieve")]
     pub async fn retrieve(
         &self,
         context: &RequestContext,
@@ -304,13 +305,16 @@ where
             Err(failure) => return failure.into_outcome(),
         };
         let expected_execution = admitted.execution.clone();
-        let Ok(result) = run_application_request_interruptible(
-            context,
-            binding.cancellation(),
-            self.execution.execute(admitted.execution, &self.estimator),
-            || {
-                admitted.cancellation_control.cancel();
-            },
+        let Ok(result) = hotpath::future!(
+            run_application_request_interruptible(
+                context,
+                binding.cancellation(),
+                self.execution.execute(admitted.execution, &self.estimator),
+                || {
+                    admitted.cancellation_control.cancel();
+                },
+            ),
+            label = "usecases.session.execute"
         )
         .await
         else {
@@ -335,6 +339,11 @@ fn execution_deadline(context: &RequestContext) -> std::time::Instant {
     let remaining_micros =
         u64::try_from(terminal_at.saturating_sub(application_observed_at().0)).unwrap_or(0);
     std::time::Instant::now() + std::time::Duration::from_micros(remaining_micros)
+}
+
+fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrievalOutcome<T> {
+    crate::hotpath_observe::session_retrieval_budget_stage(stage);
+    SessionRetrievalOutcome::BudgetExhausted { stage }
 }
 
 fn within_request_budgets(binding: &SessionRequestBinding, query: &SessionTemporalQuery) -> bool {
@@ -463,7 +472,7 @@ fn map_report(
                 ContextOmissionReasonV1::ByteBudget | ContextOmissionReasonV1::TokenBudget
             )
         }) {
-            return SessionRetrievalOutcome::BudgetExhausted;
+            return budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes);
         }
         if !freshness_policy.accepts(freshness) {
             return SessionRetrievalOutcome::Stale { freshness };
@@ -523,7 +532,9 @@ fn map_execution_error(
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
-        SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
+        SessionTemporalExecutionError::BudgetExhausted => {
+            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
+        }
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
     }
@@ -532,7 +543,7 @@ fn map_execution_error(
 fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
     match error {
         TemporalKernelError::InvalidLimit | TemporalKernelError::BudgetExceeded => {
-            SessionRetrievalOutcome::BudgetExhausted
+            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
         }
         TemporalKernelError::Cancelled | TemporalKernelError::DeadlineExceeded => {
             SessionRetrievalOutcome::Cancelled
@@ -541,8 +552,13 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
                 SessionRetrievalOutcome::Cancelled
             }
-            TemporalPortError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            TemporalPortError::BudgetExceeded { .. } => {
+                budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
+            }
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
+                crate::hotpath_observe::session_retrieval_budget_stage(
+                    SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
+                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::Participants,
                     observed,
@@ -550,6 +566,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
+                crate::hotpath_observe::session_retrieval_budget_stage(
+                    SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
+                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::CanonicalBytes,
                     observed,
@@ -594,12 +613,14 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable,
         },
         TemporalKernelError::Hydration(error) => match error {
-            HydrationError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            HydrationError::BudgetExceeded { .. } => {
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
+            }
             HydrationError::Interrupted(
                 TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
             ) => SessionRetrievalOutcome::Cancelled,
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                SessionRetrievalOutcome::BudgetExhausted
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
             }
             HydrationError::ResetRequired { .. }
             | HydrationError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
@@ -610,12 +631,14 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
         },
         TemporalKernelError::Context(error) => match error {
-            ContextError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            ContextError::BudgetExceeded { .. } => {
+                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
+            }
             ContextError::Interrupted(
                 TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
             ) => SessionRetrievalOutcome::Cancelled,
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                SessionRetrievalOutcome::BudgetExhausted
+                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
             }
             ContextError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
                 SessionRetrievalOutcome::ResetRequired

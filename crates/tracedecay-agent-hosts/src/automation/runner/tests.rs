@@ -300,7 +300,9 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         ),
         (SessionRetrievalOutcome::Denied, "session_evidence_denied"),
         (
-            SessionRetrievalOutcome::BudgetExhausted,
+            SessionRetrievalOutcome::BudgetExhausted {
+                stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            },
             "session_evidence_budget_exhausted",
         ),
         (

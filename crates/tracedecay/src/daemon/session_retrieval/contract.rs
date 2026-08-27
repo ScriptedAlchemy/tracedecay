@@ -461,6 +461,8 @@ pub(crate) enum SessionRetrievalServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
+    },
     Cancelled,
 }

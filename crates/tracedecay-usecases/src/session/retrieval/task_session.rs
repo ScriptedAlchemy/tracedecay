@@ -9,6 +9,8 @@ use tracedecay_global_db::session_temporal::execution::{
 };
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 
+use crate::session::SessionRetrievalBudgetStageV1;
+
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,10 +19,14 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     Omitted(TaskSessionExecutionOmissionV1),
     WrongScope,
     Denied,
-    Stale { freshness: SessionDataFreshness },
+    Stale {
+        freshness: SessionDataFreshness,
+    },
     Unavailable,
     ResetRequired,
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     Cancelled,
 }
 
@@ -34,7 +40,9 @@ pub(super) enum SessionExecutionAdmissionFailure {
     WrongScope,
     Denied,
     Unavailable,
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     Cancelled,
 }
 
@@ -44,7 +52,7 @@ impl SessionExecutionAdmissionFailure {
             Self::WrongScope => SessionRetrievalOutcome::WrongScope,
             Self::Denied => SessionRetrievalOutcome::Denied,
             Self::Unavailable => SessionRetrievalOutcome::Unavailable,
-            Self::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
+            Self::BudgetExhausted { stage } => super::budget_exhausted(stage),
             Self::Cancelled => SessionRetrievalOutcome::Cancelled,
         }
     }
@@ -55,6 +63,7 @@ where
     A: SessionScopeAuthorizer,
     E: VersionedTokenEstimator + Sync,
 {
+    #[hotpath::measure(label = "usecases.session.admit")]
     pub(super) fn admit_execution(
         &self,
         context: &RequestContext,
@@ -85,7 +94,9 @@ where
         if !within_request_budgets(binding, query)
             || self.estimator.version() != query.context_budget.estimator_version
         {
-            return Err(SessionExecutionAdmissionFailure::BudgetExhausted);
+            return Err(SessionExecutionAdmissionFailure::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+            });
         }
         if application_request_interruption(context, binding.cancellation()).is_some() {
             return Err(SessionExecutionAdmissionFailure::Cancelled);
@@ -180,6 +191,7 @@ where
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.session.task_session")]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,
@@ -210,12 +222,15 @@ where
             Ok(request) => request,
             Err(error) => return map_task_session_callback_error(error),
         };
-        let Ok(result) = run_application_request_interruptible(
-            context,
-            session_binding.cancellation(),
-            self.execution
-                .execute_task_session(request, selector, &self.estimator),
-            || admitted.cancellation_control.cancel(),
+        let Ok(result) = hotpath::future!(
+            run_application_request_interruptible(
+                context,
+                session_binding.cancellation(),
+                self.execution
+                    .execute_task_session(request, selector, &self.estimator),
+                || admitted.cancellation_control.cancel(),
+            ),
+            label = "usecases.session.task_session.execute"
         )
         .await
         else {
@@ -254,8 +269,8 @@ fn task_session_admission_failure(
         SessionExecutionAdmissionFailure::WrongScope => TaskSessionRetrievalOutcomeV1::WrongScope,
         SessionExecutionAdmissionFailure::Denied => TaskSessionRetrievalOutcomeV1::Denied,
         SessionExecutionAdmissionFailure::Unavailable => TaskSessionRetrievalOutcomeV1::Unavailable,
-        SessionExecutionAdmissionFailure::BudgetExhausted => {
-            TaskSessionRetrievalOutcomeV1::BudgetExhausted
+        SessionExecutionAdmissionFailure::BudgetExhausted { stage } => {
+            TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
         SessionExecutionAdmissionFailure::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
     }
@@ -283,7 +298,9 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::Stale { freshness } => {
             TaskSessionRetrievalOutcomeV1::Stale { freshness }
         }
-        SessionRetrievalOutcome::BudgetExhausted => TaskSessionRetrievalOutcomeV1::BudgetExhausted,
+        SessionRetrievalOutcome::BudgetExhausted { stage } => {
+            TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
+        }
         SessionRetrievalOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
         SessionRetrievalOutcome::Unavailable

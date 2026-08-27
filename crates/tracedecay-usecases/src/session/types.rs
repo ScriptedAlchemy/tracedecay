@@ -570,8 +570,27 @@ pub enum SessionRetrievalOutcome<T> {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    /// Bounded retrieval refusal. The stage stays internal so callers can
+    /// distinguish request-budget mismatch, execution work, hydration, and
+    /// context exhaustion. The application surface maps every stage to one
+    /// fail-closed non-retryable problem; true concurrent saturation is a
+    /// different outcome and never uses this variant.
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     Cancelled,
+}
+
+/// Internal retrieval-budget stage. These are collapsed today into one
+/// retryable `Saturated` problem at the retained boundary; keep them distinct
+/// so admission versus execution can be proven without a new wire kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalBudgetStageV1 {
+    RequestBudgetMismatch,
+    ExecutionWorkExhausted,
+    ParticipantManifestLimit,
+    HydrationBytes,
+    ContextBytes,
 }
 
 impl<T> SessionRetrievalOutcome<T> {
@@ -1513,7 +1532,9 @@ mod tests {
                 observed: 257,
                 maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
             },
-            SessionRetrievalOutcome::BudgetExhausted,
+            SessionRetrievalOutcome::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+            },
             SessionRetrievalOutcome::Cancelled,
         ];
 

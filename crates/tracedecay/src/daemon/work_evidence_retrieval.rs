@@ -146,78 +146,81 @@ impl WorkTaskSessionPortV1 for DaemonWorkEvidenceRetrievalV1 {
         request: WorkTaskSessionRequestV1,
         reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
     ) -> WorkTaskSessionFuture<'a> {
-        Box::pin(async move {
-            if request.continuation.as_ref().is_some_and(|continuation| {
-                continuation.verified_version != request.verified_version
-                    || continuation.attempt != request.attempt
-                    || continuation.source != request.source
-            }) {
-                return Err(WorkEvidenceHydrationErrorV1::Stale);
-            }
-            let authority_port = self
-                .federated_authority
-                .as_ref()
-                .ok_or(WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let authority = authority_port
-                .authority_for(context.scope())
-                .await
-                .ok_or(WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let task_binding = TaskSessionBindingV1::new(
-                request.task_id.clone(),
-                request.verified_version.clone(),
-                &request.accepted_attempts,
-                request.attempt.clone(),
-                request.source.clone(),
-            )
-            .map_err(|_| WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized)?;
-            let temporal_query = self.temporal_query(&request)?;
-            let retrieval_request = retrieval_request(context, &request, authority.as_ref())?;
-            let query = EphemeralSanitizedQueryViewV1::sanitize(
-                task_session_query_text(&request),
-                SanitizerRevision::new(WORK_TASK_SESSION_SANITIZER_REVISION)
-                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
-                QueryNormalizationRevision::new(WORK_TASK_SESSION_NORMALIZATION_REVISION)
-                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
-            )
-            .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let score_domain = authority
-                .task_session_score_domain()
-                .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let policy_revision =
-                ComponentRevision::new(authority.profile().evaluation_result_anchor.as_str())
-                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let ranking_cursor = request
-                .continuation
-                .as_ref()
-                .and_then(|continuation| continuation.ranking_cursor.as_ref())
-                .map(|cursor| serde_json::from_str::<RetrievalCursor>(cursor.as_str()))
-                .transpose()
-                .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
-            let selector = WorkTaskSessionSelectorV1 {
-                authority: authority.as_ref(),
-                context,
-                request: &request,
-                reauthorization,
-                page_size: usize::try_from(request.page_size)
-                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
-                ranking_cursor,
-            };
-            let outcome = self
-                .retrieval
-                .retrieve_task_session_admitted(
-                    context,
-                    temporal_query,
-                    task_binding,
-                    retrieval_request,
-                    query,
-                    authority.ranking_revision().clone(),
-                    score_domain,
-                    policy_revision,
-                    &selector,
+        Box::pin(hotpath::future!(
+            async move {
+                if request.continuation.as_ref().is_some_and(|continuation| {
+                    continuation.verified_version != request.verified_version
+                        || continuation.attempt != request.attempt
+                        || continuation.source != request.source
+                }) {
+                    return Err(WorkEvidenceHydrationErrorV1::Stale);
+                }
+                let authority_port = self
+                    .federated_authority
+                    .as_ref()
+                    .ok_or(WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let authority = authority_port
+                    .authority_for(context.scope())
+                    .await
+                    .ok_or(WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let task_binding = TaskSessionBindingV1::new(
+                    request.task_id.clone(),
+                    request.verified_version.clone(),
+                    &request.accepted_attempts,
+                    request.attempt.clone(),
+                    request.source.clone(),
                 )
-                .await;
-            task_session_evidence(&request, outcome, &selector)
-        })
+                .map_err(|_| WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized)?;
+                let temporal_query = self.temporal_query(&request)?;
+                let retrieval_request = retrieval_request(context, &request, authority.as_ref())?;
+                let query = EphemeralSanitizedQueryViewV1::sanitize(
+                    task_session_query_text(&request),
+                    SanitizerRevision::new(WORK_TASK_SESSION_SANITIZER_REVISION)
+                        .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
+                    QueryNormalizationRevision::new(WORK_TASK_SESSION_NORMALIZATION_REVISION)
+                        .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
+                )
+                .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let score_domain = authority
+                    .task_session_score_domain()
+                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let policy_revision =
+                    ComponentRevision::new(authority.profile().evaluation_result_anchor.as_str())
+                        .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let ranking_cursor = request
+                    .continuation
+                    .as_ref()
+                    .and_then(|continuation| continuation.ranking_cursor.as_ref())
+                    .map(|cursor| serde_json::from_str::<RetrievalCursor>(cursor.as_str()))
+                    .transpose()
+                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+                let selector = WorkTaskSessionSelectorV1 {
+                    authority: authority.as_ref(),
+                    context,
+                    request: &request,
+                    reauthorization,
+                    page_size: usize::try_from(request.page_size)
+                        .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
+                    ranking_cursor,
+                };
+                let outcome = self
+                    .retrieval
+                    .retrieve_task_session_admitted(
+                        context,
+                        temporal_query,
+                        task_binding,
+                        retrieval_request,
+                        query,
+                        authority.ranking_revision().clone(),
+                        score_domain,
+                        policy_revision,
+                        &selector,
+                    )
+                    .await;
+                task_session_evidence(&request, outcome, &selector)
+            },
+            label = "daemon.session_retrieval.evidence",
+        ))
     }
 }
 
@@ -392,7 +395,7 @@ fn task_session_evidence(
             return Err(WorkEvidenceHydrationErrorV1::ResetRequired);
         }
         TaskSessionRetrievalOutcomeV1::Unavailable
-        | TaskSessionRetrievalOutcomeV1::BudgetExhausted => {
+        | TaskSessionRetrievalOutcomeV1::BudgetExhausted { .. } => {
             return Err(WorkEvidenceHydrationErrorV1::Unavailable);
         }
     };

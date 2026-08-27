@@ -90,6 +90,7 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
         Self { registry, identity }
     }
 
+    #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
     async fn execute_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -99,7 +100,13 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
         let input = MessageSearchInput::parse(request)?;
         let query = input.query()?;
         let database = self
-            .bounded(context, self.registry.profile_sessions())
+            .bounded(
+                context,
+                hotpath::future!(
+                    self.registry.profile_sessions(),
+                    label = "daemon.store_runtime.session.profile_sessions"
+                ),
+            )
             .await?;
         let retrieval =
             DaemonSessionRetrievalService::new_admitted_profile(database, self.identity.clone())
@@ -134,6 +141,7 @@ impl DirectRetainedSessionPortV1 {
         Self { authorities }
     }
 
+    #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
     async fn execute_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -151,6 +159,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.store_runtime.session.refresh")]
     async fn execute_session_refresh(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -170,7 +179,13 @@ impl DirectRetainedSessionPortV1 {
         if operation == RetainedSurfaceOperation::SessionRefreshStatus {
             let handled = self
                 .bounded(context, async {
-                    Ok::<_, TraceDecayError>(self.authorities.refresh.execute(command).await)
+                    Ok::<_, TraceDecayError>(
+                        hotpath::future!(
+                            self.authorities.refresh.execute(command),
+                            label = "daemon.store_runtime.session.refresh.status"
+                        )
+                        .await,
+                    )
                 })
                 .await?;
             return evidence_outcome(context, operation, refresh::status_result(handled)?);
@@ -185,7 +200,11 @@ impl DirectRetainedSessionPortV1 {
                 tracedecay_application::CancellationStage::BeforeEffect,
             ));
         }
-        let handled = self.authorities.refresh.execute(command).await;
+        let handled = hotpath::future!(
+            self.authorities.refresh.execute(command),
+            label = "daemon.store_runtime.session.refresh.execute"
+        )
+        .await;
         let projected = match operation {
             RetainedSurfaceOperation::SessionRefreshBegin => refresh::begin_result(handled)?,
             RetainedSurfaceOperation::SessionRefreshCancel => {
@@ -204,6 +223,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.store_runtime.session.sessions_for")]
     async fn execute_sessions_for(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -228,6 +248,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.store_runtime.session.workflows")]
     async fn execute_workflows(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -463,7 +484,7 @@ impl MessageSearchInput {
                 // Without this the query carries the multi-MiB
                 // `ExecutionLimits::default()`, which the admitted binding
                 // refuses terminally — every message search would answer
-                // `Saturated` instead of searching.
+                // a structural budget refusal instead of searching.
                 .with_execution_limits(crate::daemon::session_retrieval::admitted_execution_limits(
                     self.limit,
                 ))
@@ -532,8 +553,8 @@ impl MessageSearchInput {
                 return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
             }
             SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-            | SessionRetrievalServiceOutcome::BudgetExhausted => {
-                return Err(RetainedSurfaceExecutionErrorV1::Saturated);
+            | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
+                return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal());
             }
             SessionRetrievalServiceOutcome::Cancelled => {
                 return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
@@ -714,6 +735,7 @@ fn time_filter(
     Ok(Some(value))
 }
 
+#[hotpath::measure(label = "daemon.store_runtime.session.retrieve")]
 async fn retrieve_bounded(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     service: &dyn SessionApplicationRetrievalPortV1,
@@ -745,10 +767,13 @@ async fn retrieve_bounded(
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_application::CancellationStage::BeforeRead,
         ))?;
-    let retrieval = service.retrieve_admitted_with_cancellation(
-        context.request_context,
-        context.cancellation_signal,
-        query,
+    let retrieval = hotpath::future!(
+        service.retrieve_admitted_with_cancellation(
+            context.request_context,
+            context.cancellation_signal,
+            query,
+        ),
+        label = "daemon.store_runtime.session.retrieve.wait"
     );
     tokio::select! {
         () = context.cancellation_signal.cancelled() => {
