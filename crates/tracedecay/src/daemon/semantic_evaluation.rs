@@ -328,7 +328,12 @@ fn daemon_semantic_evaluation_candidate(
         projection_key: vector.projection_key().clone(),
         vector_generation: vector_generation_id.clone(),
         capability_manifest_digest: code.capability().manifest_digest.clone(),
-        maximum_distance_micros: i64::MAX,
+        // Measured from this generation's own vectors rather than guessed. The
+        // certifying reader recomputes the identical bound from the same
+        // immutable generation, so exact-equality certification still holds.
+        maximum_distance_micros:
+            tracedecay_usecases::semantic_runtime::measure_acceptance_calibration(vector.vectors())
+                .maximum_distance_micros,
         minimum_margin_micros: 0,
     };
     Ok(SemanticEvaluationProfileCandidateV1 {

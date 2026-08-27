@@ -152,8 +152,7 @@ pub fn measure_acceptance_calibration_from_values(
     distances.sort_unstable();
     let sampled_pairs = distances.len();
     // Nearest-rank upper tail over the sorted sample.
-    let rank = (sampled_pairs - 1)
-        .saturating_mul(ACCEPTANCE_PERCENTILE_NUMERATOR)
+    let rank = (sampled_pairs - 1).saturating_mul(ACCEPTANCE_PERCENTILE_NUMERATOR)
         / ACCEPTANCE_PERCENTILE_DENOMINATOR;
     let maximum_distance_micros = distances[rank].clamp(0, MAX_COSINE_DISTANCE_MICROS);
 

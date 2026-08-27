@@ -85,6 +85,9 @@ use vector_projection_support::{
     BatchCommitStateV1, commit_evaluation_prepared_generation, projection_input_bytes,
 };
 
+use super::acceptance_calibration::{
+    UNCALIBRATED_MAXIMUM_DISTANCE_MICROS, measure_acceptance_calibration,
+};
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
 };
@@ -1174,11 +1177,14 @@ impl ProductionSemanticRuntimeV1 {
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<SemanticVerifiedEvaluationTargetSnapshotV1, SemanticRuntimeBackendErrorV1> {
         check_evaluation_cancellation(cancellation.as_ref())?;
+        let measured_maximum_distance_micros =
+            self.measured_acceptance_distance_micros(candidate).await;
         let certified = certify_evaluation_target_compatibility(
             candidate,
             source_generation,
             source_manifest_digest,
             capability_manifest_digest,
+            measured_maximum_distance_micros,
         )?;
         validate_evaluation_target_search_index(&certified.search_index_key)?;
         let verified = self
@@ -1217,11 +1223,15 @@ impl ProductionSemanticRuntimeV1 {
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<(), SemanticRuntimeBackendErrorV1> {
         check_evaluation_cancellation(cancellation.as_ref())?;
+        let measured_maximum_distance_micros = self
+            .measured_acceptance_distance_micros(&verification.compatibility)
+            .await;
         let certified = certify_evaluation_target_compatibility(
             &verification.compatibility,
             &verification.source_generation,
             &verification.source_manifest_digest,
             &verification.capability_manifest_digest,
+            measured_maximum_distance_micros,
         )
         .map_err(revalidation_error)?;
         if verification.compatibility != certified {
@@ -1411,6 +1421,25 @@ impl ProductionSemanticRuntimeV1 {
             .await
             .ok()
             .flatten()
+    }
+
+    /// Measure the semantic acceptance bound of the generation named by
+    /// `pins`.
+    ///
+    /// A generation that cannot be read, or that carries too few usable
+    /// vectors to support a distribution, measures nothing and falls back to
+    /// admitting every candidate. Abstention is the job of a measured bound,
+    /// never of a missing one.
+    async fn measured_acceptance_distance_micros(
+        &self,
+        pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+    ) -> i64 {
+        match self.active_vector_generation(pins).await {
+            Some(generation) => {
+                measure_acceptance_calibration(generation.vectors()).maximum_distance_micros
+            }
+            None => UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
+        }
     }
 
     pub fn cache_ready_for(
@@ -2319,14 +2348,22 @@ fn validate_evaluation_target_search_index(
 const EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1: &str = "calibration.semantic.runtime.v1";
 const EVALUATION_SEMANTIC_CALIBRATION_COHORT_DOMAIN_V1: &str =
     "tracedecay.semantic.evaluation-calibration-cohort.v1";
-const EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1: i64 = i64::MAX;
 const EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1: u64 = 0;
 
+/// Certify a candidate against the calibration its generation actually
+/// measures.
+///
+/// `measured_maximum_distance_micros` comes from
+/// [`measure_acceptance_calibration`] over the committed generation named by
+/// `candidate`. Because that measurement is deterministic in an immutable
+/// generation, the proposing writer and this certifying reader derive the same
+/// bound and exact equality still certifies the candidate.
 fn certify_evaluation_target_compatibility(
     candidate: &crate::config::retrieval::SemanticCompatibilityPinsV1,
     source_generation: &CodeGenerationId,
     source_manifest_digest: &ManifestDigest,
     capability_manifest_digest: &ManifestDigest,
+    measured_maximum_distance_micros: i64,
 ) -> Result<crate::config::retrieval::SemanticCompatibilityPinsV1, SemanticRuntimeBackendErrorV1> {
     let fusion_revision =
         ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
@@ -2336,6 +2373,7 @@ fn certify_evaluation_target_compatibility(
         source_generation,
         source_manifest_digest,
         capability_manifest_digest,
+        measured_maximum_distance_micros,
     )?;
     if candidate.fusion_revision != fusion_revision || candidate.calibration != calibration {
         return Err(SemanticRuntimeBackendErrorV1::Rejected);
@@ -2351,6 +2389,7 @@ fn canonical_evaluation_calibration(
     source_generation: &CodeGenerationId,
     source_manifest_digest: &ManifestDigest,
     capability_manifest_digest: &ManifestDigest,
+    measured_maximum_distance_micros: i64,
 ) -> Result<SemanticCalibrationProfileV1, SemanticRuntimeBackendErrorV1> {
     source_generation
         .validate()
@@ -2380,7 +2419,7 @@ fn canonical_evaluation_calibration(
         projection_key: candidate.projection.projection_key().clone(),
         vector_generation: candidate.vector_generation_id.clone(),
         capability_manifest_digest: capability_manifest_digest.clone(),
-        maximum_distance_micros: EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1,
+        maximum_distance_micros: measured_maximum_distance_micros,
         minimum_margin_micros: EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1,
     })
 }
@@ -3584,7 +3623,7 @@ mod tests {
                 projection_key: projection_key(),
                 vector_generation: vector_generation_id,
                 capability_manifest_digest: capability_manifest_digest.clone(),
-                maximum_distance_micros: EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1,
+                maximum_distance_micros: UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
                 minimum_margin_micros: EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1,
             },
             resources: crate::config::retrieval::SemanticResourceRequirementV1 {
@@ -3603,6 +3642,7 @@ mod tests {
             source_generation,
             source_manifest_digest,
             capability_manifest_digest,
+            UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
         )
         .expect("canonical calibration");
         candidate
@@ -3627,6 +3667,7 @@ mod tests {
                 &source_generation,
                 &source_manifest_digest,
                 &capability_manifest_digest,
+                UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
             ),
             Err(SemanticRuntimeBackendErrorV1::Rejected)
         );
@@ -3651,6 +3692,7 @@ mod tests {
                 &source_generation,
                 &source_manifest_digest,
                 &capability_manifest_digest,
+                UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
             ),
             Err(SemanticRuntimeBackendErrorV1::Rejected)
         );
@@ -3663,6 +3705,7 @@ mod tests {
                 &source_generation,
                 &source_manifest_digest,
                 &capability_manifest_digest,
+                UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
             ),
             Err(SemanticRuntimeBackendErrorV1::Rejected)
         );
