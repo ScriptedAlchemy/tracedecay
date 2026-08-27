@@ -61,6 +61,19 @@ separate MCP server defaults to `http://127.0.0.1:6771/mcp`; override them with
 `HOTPATH_METRICS_PORT` and `HOTPATH_MCP_PORT`. These are profiler endpoints,
 not TraceDecay's product MCP transport.
 
+Coding agents attach to that MCP endpoint for live interrogation
+(`profiler_status`, `functions_timing`, lock/channel/I/O lanes). Claude Code
+picks it up automatically from the repo's `.mcp.json`. Codex needs a one-time
+global registration:
+
+```sh
+codex mcp add hotpath --url http://127.0.0.1:6771/mcp
+```
+
+Both agents then talk to whichever Hotpath-enabled process currently owns the
+port; the first process wins the bind, and a second profiled process must take
+an alternate `HOTPATH_MCP_PORT` and be queried directly.
+
 The CPU feature is not a self-contained sampling executable. On Linux or
 macOS, install both `hotpath-samply` and `samply` on `PATH` before requesting
 CPU profiling. `HOTPATH_SAMPLY_WRAPPER_BIN` and `HOTPATH_SAMPLY_BIN` may point
