@@ -784,7 +784,7 @@ impl CodeIndexSchedulerRegistryV1 {
             })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.registry.register_activation")]
     pub(in crate::daemon) fn register_activation(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -1545,7 +1545,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Atomically marks the exact current serving generation as owned by one
     /// branch publication. A subsequent serving-slot replacement invalidates
     /// this token before rollback can observe it.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.registry.install_serving", future = true)]
     pub(in crate::daemon) async fn install_exact_serving_generation(
         &self,
         project_root: &Path,
@@ -1826,10 +1826,10 @@ impl CodeIndexSchedulerRegistryV1 {
         // fabricating a zero-latency sample.
         #[cfg(feature = "hotpath")]
         if let Some(ttfq_micros) = receipt.event_to_ready_micros() {
-            hotpath::gauge!("code_index_reconcile_wake_to_queryable_micros")
+            hotpath::gauge!("daemon.code_index.reconcile.wake_to_queryable_micros")
                 .set(ttfq_micros as f64);
         } else {
-            hotpath::gauge!("code_index_reconcile_wake_without_arrival_total").inc(1_u64);
+            hotpath::gauge!("daemon.code_index.reconcile.wake_without_arrival_total").inc(1_u64);
         }
         // A successful publication is the terminal outcome operators need to see
         // to know a rebuild window actually closed, so it is `info`, not `debug`:
@@ -2340,16 +2340,21 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
             let mut next_seat_attempt_at: Option<Instant> = None;
             loop {
-                worker_wake.notified().await;
+                hotpath::future!(
+                    worker_wake.notified(),
+                    label = "daemon.code_index.wake_wait"
+                )
+                .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
                 let _semantic_evaluation_publication =
                     worker_semantic_evaluation_publication_gate.lock().await;
-                let Ok(_background_reconcile_admission) =
-                    Arc::clone(&worker_background_reconcile_admission)
-                        .acquire_owned()
-                        .await
+                let Ok(_background_reconcile_admission) = hotpath::future!(
+                    Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
+                    label = "daemon.code_index.admission_wait"
+                )
+                .await
                 else {
                     return;
                 };
@@ -2371,9 +2376,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     && latest.text_serving_needs_work()
                 {
                     let failed_latest = latest.clone();
-                    let build = tokio::task::spawn_blocking(move || {
-                        latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
-                    })
+                    let build = hotpath::future!(
+                        tokio::task::spawn_blocking(move || {
+                            latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
+                        }),
+                        label = "daemon.code_index.text_projection"
+                    )
                     .await;
                     match build {
                         Ok(Ok(true)) => {}
@@ -2418,16 +2426,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 if text_slice_incomplete {
                     if !graph_activation_enabled {
                         #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("query.artifact.slice.continue_total").inc(1_u64);
+                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
+                            .inc(1_u64);
                         continue;
                     }
                     if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
                         #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("query.artifact.slice.continue_total").inc(1_u64);
+                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
+                            .inc(1_u64);
                         continue;
                     }
                     #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("query.artifact.slice.yield_to_reconcile_total").inc(1_u64);
+                    hotpath::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
+                        .inc(1_u64);
                 }
                 if worker_text_generation
                     .read()
@@ -2435,12 +2446,15 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_none()
                 {
                     let text_scheduler = Arc::clone(&scheduler);
-                    let retained_text = tokio::task::spawn_blocking(move || {
-                        text_scheduler
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .servable_retained_text_generation()
-                    })
+                    let retained_text = hotpath::future!(
+                        tokio::task::spawn_blocking(move || {
+                            text_scheduler
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .servable_retained_text_generation()
+                        }),
+                        label = "daemon.code_index.text_restore"
+                    )
                     .await;
                     if let Ok(Some(retained_text)) = retained_text {
                         *worker_text_generation
@@ -2476,25 +2490,28 @@ impl CodeIndexSchedulerRegistryV1 {
                     .clone();
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
-                let source_result = tokio::task::spawn_blocking(move || {
-                    let mut scheduler = scheduler
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(metadata) = retained_text_metadata {
-                        match scheduler.reconcile_retained_text_generation(&metadata) {
-                            Ok(Some(outcome)) => Ok(outcome),
-                            Ok(None) if graph_activation_enabled => {
-                                scheduler.activate_or_reconcile()
+                let source_result = hotpath::future!(
+                    tokio::task::spawn_blocking(move || {
+                        let mut scheduler = scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(metadata) = retained_text_metadata {
+                            match scheduler.reconcile_retained_text_generation(&metadata) {
+                                Ok(Some(outcome)) => Ok(outcome),
+                                Ok(None) if graph_activation_enabled => {
+                                    scheduler.activate_or_reconcile()
+                                }
+                                Ok(None) => scheduler.reconcile_now(),
+                                Err(error) => Err(error),
                             }
-                            Ok(None) => scheduler.reconcile_now(),
-                            Err(error) => Err(error),
+                        } else if graph_activation_enabled {
+                            scheduler.activate_or_reconcile()
+                        } else {
+                            scheduler.reconcile_now()
                         }
-                    } else if graph_activation_enabled {
-                        scheduler.activate_or_reconcile()
-                    } else {
-                        scheduler.reconcile_now()
-                    }
-                })
+                    }),
+                    label = "daemon.code_index.reconcile"
+                )
                 .await;
                 // A publication must first reopen and finish its own
                 // lightweight text owner. Only a Noop proves that the retained
@@ -2513,32 +2530,54 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok(mut outcome) if prepare_graph => {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = retained_text.clone();
-                        match tokio::task::spawn_blocking(move || {
-                            let decoder = graph_scheduler
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .active_generation_decoder();
-                            let generation = decoder
-                                .and_then(|decoder| decoder.load_active_shared().ok().flatten());
-                            let latest = generation.and_then(|generation| {
-                                graph_scheduler
+                        match hotpath::future!(
+                            tokio::task::spawn_blocking(move || {
+                                let decoder = graph_scheduler
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .servable_decoded_retained_generation(
-                                        generation,
-                                        graph_text.as_ref(),
-                                    )
-                            });
-                            let replay_binding = latest.as_ref().map(|latest| {
-                                graph_scheduler
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .code_graph_replay_binding(
-                                        &latest.generation().manifest().generation_id,
-                                    )
-                            });
-                            replay_binding.transpose().map(|binding| (latest, binding))
-                        })
+                                    .active_generation_decoder();
+                                if decoder.is_none() {
+                                    tracing::warn!(
+                                        event = "code_index_graph_prepare_no_decoder",
+                                        "graph prepare found no active generation decoder; \
+                                         the sealed generation cannot seat"
+                                    );
+                                }
+                                let generation = decoder.and_then(|decoder| {
+                                    match decoder.load_active_shared() {
+                                        Ok(generation) => generation,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                event = "code_index_graph_prepare_load_failed",
+                                                error = %error,
+                                                "active generation decode failed; \
+                                                 the sealed generation cannot seat"
+                                            );
+                                            None
+                                        }
+                                    }
+                                });
+                                let latest = generation.and_then(|generation| {
+                                    graph_scheduler
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .servable_decoded_retained_generation(
+                                            generation,
+                                            graph_text.as_ref(),
+                                        )
+                                });
+                                let replay_binding = latest.as_ref().map(|latest| {
+                                    graph_scheduler
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .code_graph_replay_binding(
+                                            &latest.generation().manifest().generation_id,
+                                        )
+                                });
+                                replay_binding.transpose().map(|binding| (latest, binding))
+                            }),
+                            label = "daemon.code_index.graph_prepare"
+                        )
                         .await
                         {
                             Ok(Ok((latest, replay_binding))) => {
@@ -2660,7 +2699,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
-                    let serving_swap = tokio::task::spawn_blocking(move || {
+                    let serving_swap = hotpath::future!(
+                        tokio::task::spawn_blocking(move || {
                         let scheduler = scheduler
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2687,7 +2727,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         // serving generation again without reinstalling it.
                         let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
                         Ok::<_, CodeIndexSchedulerErrorV1>(())
-                    })
+                        }),
+                        label = "daemon.code_index.serving_swap"
+                    )
                     .await;
                     match serving_swap {
                         Ok(Ok(())) => {
@@ -2953,7 +2995,10 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(
+        label = "daemon.code_index.registry.install_query_authorities",
+        future = true
+    )]
     pub(in crate::daemon) async fn install_committed_query_authorities(
         &self,
         project_root: &Path,
@@ -3106,7 +3151,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(false)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.registry.query_authority", future = true)]
     pub(in crate::daemon) async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -3344,7 +3389,7 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.registry.install_semantic", future = true)]
     pub(in crate::daemon) async fn install_semantic_vector_graph_provider(
         &self,
         project_root: &Path,
@@ -3453,7 +3498,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         tokio::task::spawn_blocking(move || {
-            let progress = hotpath::measure_block!("dashboard.code_index.progress", {
+            let progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
                 let progress = build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3465,7 +3510,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .0
                         .saturating_sub(progress.last_progress_micros)
                         .max(0);
-                    hotpath::gauge!("dashboard.code_index.progress_age_micros")
+                    hotpath::gauge!("daemon.code_index.dashboard.progress_age_micros")
                         .set(u64::try_from(age_micros).unwrap_or(u64::MAX));
                 }
                 progress
@@ -3586,6 +3631,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Query-admission entry point: serve only an already-decoded generation
     /// whose exact identity authority still resolves. Freshness verification and
     /// any rebuild remain retained background work.
+    #[hotpath::measure(label = "daemon.code_index.query.latest_fresh", future = true)]
     pub(in crate::daemon) async fn latest_complete_fresh(
         &self,
         project_root: &Path,
@@ -3729,6 +3775,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// [`Self::latest_complete_ready`] under an explicit decode admission.
+    #[hotpath::measure(label = "daemon.code_index.query.latest_ready", future = true)]
     async fn latest_complete_ready_with(
         &self,
         project_root: &Path,
