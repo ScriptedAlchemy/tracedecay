@@ -334,18 +334,15 @@ fn task_session_binding_outcome(
         SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
-        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
-            TaskSessionRetrievalOutcomeV1::BudgetExhausted {
-                stage: match kind {
-                    tracedecay_domain::CursorManifestLimitKindV1::Participants => {
-                        tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ParticipantManifestParticipants
-                    }
-                    tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes => {
-                        tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes
-                    }
-                },
-            }
-        }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
         _ => TaskSessionRetrievalOutcomeV1::Unavailable,
     }
 }

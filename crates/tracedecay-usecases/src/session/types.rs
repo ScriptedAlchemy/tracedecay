@@ -1,6 +1,7 @@
 use std::fmt;
 
 use tracedecay_application::RequestContext;
+use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{
     ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
@@ -580,27 +581,6 @@ pub enum SessionRetrievalOutcome<T> {
     },
     TimedOut,
     Cancelled,
-}
-
-/// Internal retrieval-budget stage. These are collapsed today into one
-/// retryable `Saturated` problem at the retained boundary; keep them distinct
-/// so admission versus execution can be proven without a new wire kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionRetrievalBudgetStageV1 {
-    RequestResultLimit,
-    RequestHydrationLimit,
-    RequestContextBytes,
-    RequestCandidateBytes,
-    RequestRecordBytes,
-    RequestHydrationBytes,
-    EstimatorVersionMismatch,
-    ExecutionWorkExhausted,
-    KernelResultLimit,
-    ParticipantManifestParticipants,
-    ParticipantManifestCanonicalBytes,
-    HydrationBytes,
-    ContextBytes,
-    ContextTokens,
 }
 
 impl<T> SessionRetrievalOutcome<T> {

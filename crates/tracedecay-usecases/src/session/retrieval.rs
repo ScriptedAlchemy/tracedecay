@@ -3,6 +3,7 @@ use std::fmt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
+use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
@@ -29,8 +30,8 @@ use crate::session::ports::{
 };
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
-    SessionRequestBinding, SessionRetrievalBudgetStageV1, SessionRetrievalOutcome,
-    SessionRetrievalScope, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 
 mod task_session;

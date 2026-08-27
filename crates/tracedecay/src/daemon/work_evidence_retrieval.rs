@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_application::{
     OpaqueCursor, RequestContext, ResolvedScope, WorkAnchorHydrationFuture,
     WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkEvidenceCoverageStateV1,
@@ -397,8 +398,25 @@ fn task_session_evidence(
         TaskSessionRetrievalOutcomeV1::ResetRequired => {
             return Err(WorkEvidenceHydrationErrorV1::ResetRequired);
         }
-        TaskSessionRetrievalOutcomeV1::Unavailable
-        | TaskSessionRetrievalOutcomeV1::BudgetExhausted { .. } => {
+        TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => {
+            return Err(WorkEvidenceHydrationErrorV1::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                    kind,
+                    observed,
+                    maximum,
+                },
+            ));
+        }
+        TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage } => {
+            return Err(WorkEvidenceHydrationErrorV1::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+            ));
+        }
+        TaskSessionRetrievalOutcomeV1::Unavailable => {
             return Err(WorkEvidenceHydrationErrorV1::Unavailable);
         }
     };
