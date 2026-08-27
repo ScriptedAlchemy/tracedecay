@@ -8,6 +8,20 @@ mod response_delivery;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
+#[hotpath::measure(label = "mcp.server.connection.read", future = true)]
+async fn read_connection_line(
+    transport: &mut impl crate::mcp::transport::McpTransport,
+) -> std::io::Result<Option<String>> {
+    transport.read_line().await
+}
+
+#[hotpath::measure(label = "mcp.server.connection.inflight_read", future = true)]
+async fn read_inflight_connection_line(
+    transport: &mut impl crate::mcp::transport::McpTransport,
+) -> std::io::Result<Option<String>> {
+    transport.read_line().await
+}
+
 pub(in crate::mcp::server) struct McpShutdownCompletion {
     state: Arc<McpShutdownState>,
 }
@@ -455,10 +469,7 @@ impl McpServer {
                     current_cancellation = None;
                 }
                 response = &mut handling => return Ok((response, false)),
-                incoming = hotpath::future!(
-                    transport.read_line(),
-                    label = "mcp.server.connection.inflight_read"
-                ) => {
+                incoming = read_inflight_connection_line(transport) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -586,10 +597,7 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = hotpath::future!(
-                    transport.read_line(),
-                    label = "mcp.server.connection.inflight_read"
-                ) => {
+                incoming = read_inflight_connection_line(transport) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -692,10 +700,7 @@ impl McpServer {
                 queued.into_line()
             } else {
                 let read = {
-                    let transport_read = hotpath::future!(
-                        transport.read_line(),
-                        label = "mcp.server.connection.read"
-                    );
+                    let transport_read = read_connection_line(transport);
                     tokio::pin!(transport_read);
                     #[cfg(unix)]
                     {
