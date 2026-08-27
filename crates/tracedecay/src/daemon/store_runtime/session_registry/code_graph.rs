@@ -48,16 +48,16 @@ use seals::{
 };
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Effectively-unbounded budget for background graph work (sealed projection
+/// and generation publication); cancellation is the governing mechanism.
+const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
-/// Sealed-generation projection replays the whole sealed artifact into the
-/// native graph, so its ceiling scales with the sealed byte size instead of
-/// reusing the ordinary 30-second graph-operation budget. The floor keeps the
-/// small-generation behavior; the throughput divisor is a conservative
-/// decode+apply rate; the ceiling matches the evaluation-runtime projection
-/// bound so a pathological artifact still terminates.
+/// The size-scaled projection model no longer bounds the projection (see
+/// [`sealed_projection_deadline`]); it survives only as the heuristic that
+/// decides when stage boundaries are worth recording.
 const SEALED_PROJECTION_DEADLINE_FLOOR: Duration = GRAPH_OPERATION_DEADLINE;
 const SEALED_PROJECTION_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
-const SEALED_PROJECTION_DEADLINE_CEILING: Duration = Duration::from_mins(15);
 /// How many orphaned pending predecessors one publication attempt will
 /// complete before reporting Conflict. Each completion advances the verified
 /// head by one, so even a journal wedged across many interrupted boots drains
@@ -109,10 +109,18 @@ fn observe_code_graph_publication<T>(
 }
 
 fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
-    let scaled = sealed_projection_scaled_deadline(sealed_bytes);
-    SEALED_PROJECTION_DEADLINE_FLOOR
-        .saturating_add(scaled)
-        .min(SEALED_PROJECTION_DEADLINE_CEILING)
+    // The background projection has no wall-clock bail-out. It is bounded by
+    // cancellation (request and lifecycle), which is the mechanism that
+    // reclaims a genuinely wedged projection; a wall clock cannot tell
+    // "wedged" from "slower than a modeled throughput", and killing a
+    // progressing projection only re-runs the same work into the same wall,
+    // turning slow into never. The registration API wants an `Instant`, so
+    // "no deadline" is expressed as a far-future one. Projection latency
+    // itself is the number to fix (see the code_graph hotpath spans), not a
+    // policy to tune. The size-scaled model remains only for the
+    // stage-boundary heuristic in [`sealed_projection_requires_stage_boundary`].
+    let _ = sealed_bytes;
+    GRAPH_BACKGROUND_OPERATION_BUDGET
 }
 
 fn sealed_projection_scaled_deadline(sealed_bytes: u64) -> Duration {
@@ -348,6 +356,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_manifest")]
     pub(crate) fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -368,7 +377,13 @@ impl RetainedVerifiedGraphRuntimeV1 {
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let graph = self.graph.issue_lease()?;
-        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        // Publication of a staged generation is background reconcile work
+        // bounded by the request/lifecycle cancellation in this same probe,
+        // not by wall clock: a 30s wall killed ~6-minute publishes on large
+        // graphs and the reconcile retried the identical work forever (see
+        // sealed_projection_deadline). Foreground graph reads keep
+        // GRAPH_OPERATION_DEADLINE.
+        let deadline_at = Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET;
         let identity = manifest.generation.as_str();
         let cancellation_identity = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!("graph-publish:{identity}"))
@@ -736,6 +751,7 @@ impl RetainedCodeGraphRuntimeV1 {
         (&self.code_shard, self.authority.binding())
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
     pub(crate) fn publish_verified_snapshot(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
@@ -1292,6 +1308,75 @@ impl RetainedCodeGraphRuntimeV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    /// Self-heals the shared project shard's graph map-owner attachment when
+    /// a prior owner was retired out from under this lease-only consumer.
+    ///
+    /// The code graph never attaches its own map owner: per the contract on
+    /// [`tracedecay_graph_db::GraphDbRegistry::resolve_owner_attachment`],
+    /// that is deliberately the only entry-creation path, and an ordinary
+    /// lease (what [`Self::retain_code_graph_runtime`] takes below) can only
+    /// resolve an entry that already exists. In production the project's
+    /// memory/journey graph mount is the one that attaches this same
+    /// physical shard (see `graph_attachment::open_session_relation_owner_for_task`
+    /// in `mounts.rs`) and normally keeps it attached for as long as the
+    /// project runtime stays mounted. But that owner can be retired
+    /// independently of code-index activity — for example by the
+    /// capacity-driven project-server reclaim in `project_composition.rs`,
+    /// which calls `retire_project_memory_graph` to admit another project.
+    /// Once that happens, every later code-graph reconcile fails permanently
+    /// with "graph runtime is not registered", and retrying the same
+    /// lease-only path can never recover it: nothing else ever re-attaches.
+    ///
+    /// This reuses the exact attach the memory/journey graph mount uses, but
+    /// only when the shard is actually missing, and it does not retain the
+    /// resulting attachment — the sole purpose is to leave the registry
+    /// entry `Ready` so the lease immediately below succeeds. Losing a race
+    /// to a concurrent attacher (or any other failure here) is swallowed:
+    /// the ordinary lease path still runs and surfaces its own, more precise
+    /// error if the shard is genuinely unavailable.
+    async fn ensure_code_graph_shard_attached(&self, project_shard: &StoreShardIdV1) {
+        match self.graph_registry.shard_is_registered(project_shard) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    event = "code_graph_shard_registration_probe_failed",
+                    shard = ?project_shard,
+                    error = %error,
+                    "could not check whether the shared code graph shard is registered"
+                );
+                return;
+            }
+        }
+        match graph_attachment::open_session_relation_owner(
+            &self.registry,
+            &self.graph_registry,
+            &self.graph_lifecycle_cancelled,
+            self.incarnation,
+            project_shard.clone(),
+        )
+        .await
+        {
+            Ok((attachment, target)) => {
+                tracing::info!(
+                    event = "code_graph_shard_reattached",
+                    shard = ?project_shard,
+                    "re-attached the shared code graph shard after its owner was retired"
+                );
+                drop(attachment);
+                drop(target);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    event = "code_graph_shard_reattach_failed",
+                    shard = ?project_shard,
+                    error = %error,
+                    "could not re-attach the shared code graph shard; the exact-lease path will report its own error"
+                );
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn retain_code_graph_runtime(
         &self,
@@ -1316,6 +1401,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
+        self.ensure_code_graph_shard_attached(&project_shard).await;
         let code_scope = match reference {
             Some(ref_id) => CodeShardScopeV1::Branch {
                 worktree_id: worktree_id.clone(),
@@ -1656,28 +1742,21 @@ impl Drop for DaemonSessionRuntimeRegistryV1 {
 
 #[cfg(test)]
 mod sealed_projection_deadline_tests {
-    use super::{
-        SEALED_PROJECTION_DEADLINE_CEILING, SEALED_PROJECTION_DEADLINE_FLOOR,
-        sealed_projection_deadline,
-    };
+    use super::{GRAPH_BACKGROUND_OPERATION_BUDGET, sealed_projection_deadline};
 
     #[test]
-    fn sealed_projection_deadline_scales_with_artifact_size_between_floor_and_ceiling() {
-        assert_eq!(
-            sealed_projection_deadline(0),
-            SEALED_PROJECTION_DEADLINE_FLOOR
-        );
-        let small = sealed_projection_deadline(8 * 1024 * 1024);
-        assert!(small > SEALED_PROJECTION_DEADLINE_FLOOR);
-        assert!(small < SEALED_PROJECTION_DEADLINE_CEILING);
-        // The live incident shape: a ~1.6 GB sealed generation must get far
-        // more than the ordinary 30-second graph-operation budget.
-        let incident = sealed_projection_deadline(1_603_803_371);
-        assert!(incident >= std::time::Duration::from_mins(5));
-        assert!(incident <= SEALED_PROJECTION_DEADLINE_CEILING);
-        assert_eq!(
-            sealed_projection_deadline(u64::MAX),
-            SEALED_PROJECTION_DEADLINE_CEILING
-        );
+    fn sealed_projection_has_no_wall_clock_bail_out() {
+        // Background projection is bounded by cancellation, not wall clock:
+        // any artifact size gets the effectively-unbounded background budget.
+        // The live incident shape (a ~1.6 GB sealed generation died at a
+        // 30-second wall, then at a size-scaled wall) must never be budgeted
+        // below hours again.
+        for sealed_bytes in [0, 8 * 1024 * 1024, 1_603_803_371, u64::MAX] {
+            assert_eq!(
+                sealed_projection_deadline(sealed_bytes),
+                GRAPH_BACKGROUND_OPERATION_BUDGET
+            );
+        }
+        assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_secs(24 * 60 * 60));
     }
 }

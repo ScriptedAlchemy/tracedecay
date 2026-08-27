@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, Weak};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
+
 /// Conservative fallback when the host cannot report physical memory.
 ///
 /// Production normally derives the authority from the machine. This fallback
@@ -16,6 +18,13 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
     NonZeroU64::MIN.saturating_add(6 * 1024 * 1024 * 1024 - 1);
 
+/// Environment override for the process resident-memory admission limit, in
+/// bytes. Unset, unparseable, or zero values fall back to the RAM-derived
+/// authority. The code-index worker pool derives its reservation from this
+/// same limit, so on hosts with plenty of RAM raising it both admits and
+/// widens indexing.
+pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES";
+
 /// Derive the concurrent resident-allocation authority for a known host size.
 #[must_use]
 pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> NonZeroU64 {
@@ -23,14 +32,32 @@ pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> N
         .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
 }
 
-/// Size the shared resident-allocation authority from this machine.
+/// Read the operator override for the resident-allocation authority.
 ///
+/// Unset, unparseable, and zero values yield `None` so the caller keeps the
+/// RAM-derived authority.
+#[must_use]
+fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
+    std::env::var(PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(NonZeroU64::new)
+}
+
+/// Size the shared resident-allocation authority for this process.
+///
+/// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
+/// so operators can raise or lower the authority without rebuilding. Otherwise
 /// TraceDecay retains one quarter of physical RAM outside its modeled
 /// concurrent allocations for the OS, agent hosts, and allocations that do
 /// not yet participate in this authority. The remaining authority throttles
 /// simultaneous scratch ownership; it never limits repository bytes on disk.
 #[must_use]
 pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
+    if let Some(limit) = process_resident_memory_limit_override_v1() {
+        hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
+        return limit;
+    }
     let system = System::new_with_specifics(
         RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
     );
@@ -162,7 +189,7 @@ struct ResidentMemoryStateV1 {
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
-    state: Mutex<ResidentMemoryStateV1>,
+    state: ProfiledMutex<ResidentMemoryStateV1>,
 }
 
 impl fmt::Debug for ProcessResidentMemoryV1 {
@@ -180,11 +207,14 @@ impl ProcessResidentMemoryV1 {
     pub fn new(limit_bytes: NonZeroU64) -> Self {
         Self {
             limit_bytes,
-            state: Mutex::new(ResidentMemoryStateV1::default()),
+            state: hotpath::mutex!(
+                Mutex::new(ResidentMemoryStateV1::default()),
+                label = "runtime_core.resident.state"
+            ),
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.resident.reserve")]
     pub fn reserve(
         self: &Arc<Self>,
         key: ResidentMemoryKeyV1,
@@ -210,7 +240,7 @@ impl ProcessResidentMemoryV1 {
     /// Reserves one process-shared component without fabricating a project,
     /// worktree, or code-generation owner. These reservations use the same
     /// process ceiling and RAII release authority as project generations.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.resident.reserve_shared")]
     pub fn reserve_process_shared(
         self: &Arc<Self>,
         component: ResidentMemoryComponentIdV1,
@@ -279,7 +309,7 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryStateV1> {
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

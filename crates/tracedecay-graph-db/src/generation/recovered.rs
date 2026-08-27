@@ -10,66 +10,39 @@ use crate::state::{
 };
 
 use super::{
-    CheckedDigestWriter, CheckedVecWriter, GraphGenerationManifest, GraphGenerationRelation,
-    physical_namespace_projection_map, recovered_entity_ref, write_canonical_frame,
+    CheckedDigestWriter, CheckedVecWriter, GraphGenerationManifestIdentity,
+    GraphGenerationRelation, physical_namespace_projection_map, recovered_entity_ref,
+    write_canonical_frame, write_generation_identity_frames,
 };
 
+/// Rebuilds the recovered-generation digest by streaming the stored rows.
+///
+/// Takes only the manifest's identity: every entity and relation frame comes
+/// from the database, never from an in-memory manifest row. That is what lets
+/// publication release the staged bulk rows before this proof runs.
 pub(crate) fn recovered_generation_digest_from_database(
     database: &GrafeoDB,
-    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<String, GraphDbError> {
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
     let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
-    write_canonical_frame(
+    write_generation_identity_frames(
         &mut writer,
         &mut canonical,
-        "format",
-        "tracedecay.graph-generation.v1",
-        "recovered generation format",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "projection",
-        &manifest.projection,
-        "recovered generation projection",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "generation",
-        &manifest.generation,
-        "recovered generation identity",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "source_generation",
-        &manifest.source_generation,
-        "recovered source generation",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "watermark",
-        &manifest.watermark,
-        "recovered generation watermark",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "dependencies",
-        &manifest.dependencies,
-        "recovered generation dependencies",
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
     )?;
 
-    let physical_namespace = manifest.physical_namespace()?;
+    let physical_namespace = identity.physical_namespace()?;
     for (_, node) in projection_entity_nodes_sorted_checked(
         database,
         &physical_namespace,
-        &manifest.projection.projection,
+        &identity.projection.projection,
         check,
     )? {
         check()?;
@@ -83,13 +56,13 @@ pub(crate) fn recovered_generation_digest_from_database(
         )?;
     }
 
-    let namespace_projection = physical_namespace_projection_map(manifest)?;
+    let namespace_projection = physical_namespace_projection_map(identity)?;
     let store = database.graph_store();
     let mut endpoints = EndpointIdentityCache::default();
     for (_, locator) in projection_relation_nodes_sorted_checked(
         database,
         &physical_namespace,
-        &manifest.projection.projection,
+        &identity.projection.projection,
         check,
     )? {
         check()?;

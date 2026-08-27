@@ -491,7 +491,7 @@ fn classify_daemon_delivery_ack_wait(
 }
 
 async fn await_daemon_delivery_ack<F>(
-    transport: &mut impl McpTransport,
+    transport: &mut (impl McpTransport + Send),
     timeout: Duration,
     cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     draining: F,
@@ -518,542 +518,228 @@ where
 }
 
 #[hotpath::measure(label = "daemon.engine.transport.await_owner", future = true)]
-pub(super) async fn await_project_owner_or_disconnect<T>(
-    transport: &mut impl McpTransport,
-    open: impl std::future::Future<Output = Result<T>>,
+pub(super) async fn await_project_owner_or_disconnect<T: Send>(
+    transport: &mut (impl McpTransport + Send),
+    open: impl std::future::Future<Output = Result<T>> + Send,
 ) -> Result<Option<(T, VecDeque<String>)>> {
-    tokio::pin!(open);
-    let mut pending_lines = VecDeque::new();
-    loop {
-        // This loop continues after the read branch, so unlike the one-shot
-        // selects below it drops an in-flight read every time `open` wins the
-        // race — and the same transport is then handed to the routed server.
-        // That is only safe because the transport's read half keeps its
-        // partial-frame accumulator (`host_admission::BoundedLineReader`), so a
-        // dropped read resumes mid-frame instead of losing the bytes it already
-        // consumed and desynchronizing JSON-RPC framing for the connection.
-        tokio::select! {
-            result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
-            incoming = transport.read_line() => {
-                let Some(line) = incoming? else {
-                    // EOF closes only the client's request half. It may still
-                    // be reading the response, as one-shot CLI clients do.
-                    // Give a bounded owner lookup enough time to produce its
-                    // warming response, but do not retain a connection permit
-                    // indefinitely when the peer fully disappeared.
-                    let peer_full_close = transport.peer_fully_closed_after_eof();
-                    tokio::pin!(peer_full_close);
-                    return tokio::select! {
-                        result = &mut open =>
-                            result.map(|owner| Some((owner, pending_lines))),
-                        () = &mut peer_full_close => Ok(None),
-                        () = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
-                            Err(TraceDecayError::Config {
-                                message: format!(
-                                    "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
-                                ),
-                            }),
+    await_project_owner_or_disconnect_inner(transport, open).await
+}
+
+fn await_project_owner_or_disconnect_inner<'a, T, O>(
+    transport: &'a mut (impl McpTransport + Send),
+    open: O,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
+>
+where
+    T: Send,
+    O: std::future::Future<Output = Result<T>> + Send + 'a,
+{
+    // Erase the deeply nested project-owner await future before it reaches
+    // the measured wrapper so every profiling feature can compute its
+    // layout.
+    Box::pin(async move {
+        tokio::pin!(open);
+        let mut pending_lines = VecDeque::new();
+        loop {
+            // This loop continues after the read branch, so unlike the one-shot
+            // selects below it drops an in-flight read every time `open` wins the
+            // race — and the same transport is then handed to the routed server.
+            // That is only safe because the transport's read half keeps its
+            // partial-frame accumulator (`host_admission::BoundedLineReader`), so a
+            // dropped read resumes mid-frame instead of losing the bytes it already
+            // consumed and desynchronizing JSON-RPC framing for the connection.
+            tokio::select! {
+                result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
+                incoming = transport.read_line() => {
+                    let Some(line) = incoming? else {
+                        // EOF closes only the client's request half. It may still
+                        // be reading the response, as one-shot CLI clients do.
+                        // Give a bounded owner lookup enough time to produce its
+                        // warming response, but do not retain a connection permit
+                        // indefinitely when the peer fully disappeared.
+                        let peer_full_close = transport.peer_fully_closed_after_eof();
+                        tokio::pin!(peer_full_close);
+                        return tokio::select! {
+                            result = &mut open =>
+                                result.map(|owner| Some((owner, pending_lines))),
+                            () = &mut peer_full_close => Ok(None),
+                            () = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
+                                Err(TraceDecayError::Config {
+                                    message: format!(
+                                        "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
+                                    ),
+                                }),
+                        };
                     };
-                };
-                if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
-                    return Err(TraceDecayError::Config {
-                        message: "daemon client pipelined too many requests while the project owner was opening"
-                            .to_owned(),
-                    });
+                    if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
+                        return Err(TraceDecayError::Config {
+                            message: "daemon client pipelined too many requests while the project owner was opening"
+                                .to_owned(),
+                        });
+                    }
+                    pending_lines.push_back(line);
                 }
-                pending_lines.push_back(line);
             }
         }
-    }
+    })
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
+#[hotpath::measure(label = "daemon.engine.transport.broker", future = true)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
     auth_token: Option<String>,
     admission_class: DaemonClientAdmissionClass,
 ) -> Result<()> {
-    let mut transport = BrokerStreamTransport::new(stream);
-    if let Some(expected_token) = auth_token.as_deref() {
-        let preface_line = tokio::select! {
+    serve_broker_socket_client_inner(stream, engine, auth_token, admission_class).await
+}
+
+#[cfg(unix)]
+fn serve_broker_socket_client_inner(
+    stream: BrokerStream,
+    engine: DaemonEngine,
+    auth_token: Option<String>,
+    admission_class: DaemonClientAdmissionClass,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    // Erase the deeply nested broker connection future before it reaches the
+    // measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let mut transport = BrokerStreamTransport::new(stream);
+        if let Some(expected_token) = auth_token.as_deref() {
+            let preface_line = tokio::select! {
+                result = read_line_handling_wire_oversized(&mut transport) => result?,
+                () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            };
+            let Some(preface_line) = preface_line else {
+                return Ok(());
+            };
+            let preface = DaemonAuthPreface::from_line(&preface_line).map_err(|_| {
+                TraceDecayError::Config {
+                    message: "daemon client authentication failed".to_string(),
+                }
+            })?;
+            if !preface.authenticate(expected_token) {
+                return Err(TraceDecayError::Config {
+                    message: "daemon client authentication failed".to_string(),
+                });
+            }
+        }
+        let line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
             () = engine.lifecycle.wait_for_draining() => return Ok(()),
         };
-        let Some(preface_line) = preface_line else {
+        let Some(line) = line else {
             return Ok(());
         };
-        let preface =
-            DaemonAuthPreface::from_line(&preface_line).map_err(|_| TraceDecayError::Config {
-                message: "daemon client authentication failed".to_string(),
-            })?;
-        if !preface.authenticate(expected_token) {
-            return Err(TraceDecayError::Config {
-                message: "daemon client authentication failed".to_string(),
-            });
-        }
-    }
-    let line = tokio::select! {
-        result = read_line_handling_wire_oversized(&mut transport) => result?,
-        () = engine.lifecycle.wait_for_draining() => return Ok(()),
-    };
-    let Some(line) = line else {
-        return Ok(());
-    };
-    let Some(setup_activity) = engine.lifecycle.try_enter() else {
-        return Ok(());
-    };
-    let mut handshake = DaemonHandshake::from_line(&line)?;
-    let peer_full_close = transport.peer_fully_closed_after_eof();
-    tokio::pin!(peer_full_close);
-    let store_administration = tokio::select! {
-        result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
-        () = &mut peer_full_close => return Ok(()),
-    };
-    let mut engine = engine;
-    engine.store_administration = store_administration;
-    let first_request_line = tokio::select! {
-        result = read_line_handling_wire_oversized(&mut transport) => result?,
-        () = engine.lifecycle.wait_for_draining() => return Ok(()),
-    };
-    let Some(first_request_line) = first_request_line else {
-        return Ok(());
-    };
-    let reserved_control_request = is_reserved_control_request(&first_request_line);
-    if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
-        drop(setup_activity);
-        reject_reserved_bulk_request(
-            &mut transport,
-            &first_request_line,
-            MAX_CONCURRENT_DAEMON_CLIENTS,
-        )
-        .await?;
-        return Ok(());
-    }
-    let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
-        match engine
-            .per_client_admission
-            .try_admit_request(&handshake, &first_request_line)
+        let Some(setup_activity) = engine.lifecycle.try_enter() else {
+            return Ok(());
+        };
+        let mut handshake = DaemonHandshake::from_line(&line)?;
+        let peer_full_close = transport.peer_fully_closed_after_eof();
+        tokio::pin!(peer_full_close);
+        let store_administration = tokio::select! {
+            result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
+            () = &mut peer_full_close => return Ok(()),
+        };
+        let mut engine = engine;
+        engine.store_administration = store_administration;
+        let first_request_line = tokio::select! {
+            result = read_line_handling_wire_oversized(&mut transport) => result?,
+            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+        };
+        let Some(first_request_line) = first_request_line else {
+            return Ok(());
+        };
+        let reserved_control_request = is_reserved_control_request(&first_request_line);
+        if admission_class == DaemonClientAdmissionClass::ReservedControl
+            && !reserved_control_request
         {
-            Ok(permit) => Some(permit),
-            Err(response) => {
-                drop(setup_activity);
-                reject_admitted_request(&mut transport, &first_request_line, response).await?;
-                return Ok(());
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(cancellation) =
-        crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
-    {
-        hotpath::measure_block!("daemon.engine.transport.cancel", {
-            crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
-        });
-        drop(setup_activity);
-        return Ok(());
-    }
-    let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
-        Some(
-            engine
-                .git_watcher_health(handshake.project_path.as_deref())
-                .await,
-        )
-    } else {
-        None
-    };
-    let Some(setup_activity) = serve_core_doctor_runtime_request(
-        &mut transport,
-        &handshake,
-        &engine.store_administration,
-        setup_activity,
-        &first_request_line,
-        git_watcher_health,
-        || async {
-            Ok(engine
-                .cached_project_server(&handshake)
-                .await?
-                .is_some_and(|server| server.doctor_report_ready()))
-        },
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    engine.log_client_version_skew(&handshake).await;
-    report_profile_host_admission_bootstrap_status(
-        schedule_user_profile_host_admission_replay_for_identity(
-            &engine.store_administration,
-            &handshake.client_identity,
-        )
-        .await,
-    );
-    // Resolve initialize roots only after authentication and inside daemon
-    // authority. The proxy process never opens the registry database.
-    // Resolution failures (deferred repository discovery, registry refusals)
-    // are answered as typed responses: dropping the connection here would
-    // surface as a hard host failure and leave the client without the
-    // retryable state the deferral carries.
-    let initialize_route = match apply_daemon_initialize_route(
-        &mut handshake,
-        &first_request_line,
-        &engine.store_administration,
-    )
-    .await
-    {
-        Ok(route) => route,
-        Err(error) => {
             drop(setup_activity);
-            write_project_open_error(
+            reject_reserved_bulk_request(
                 &mut transport,
                 &first_request_line,
-                &handshake.client_instance_id,
-                &error,
+                MAX_CONCURRENT_DAEMON_CLIENTS,
             )
             .await?;
             return Ok(());
         }
-    };
-    if let Some(request) = parse_branch_admin_request(&first_request_line) {
-        let result = match request.action.clone() {
-            Ok(action) => engine.execute_branch_admin(&handshake, action).await,
-            Err(message) => Err(TraceDecayError::Config { message }),
-        };
-        drop(setup_activity);
-        write_branch_admin_response(&mut transport, request, result).await?;
-        return Ok(());
-    }
-    if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match await_project_owner_or_disconnect(
-            &mut transport,
-            engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
-        )
-        .await
-        {
-            Ok(Some(_)) => {
-                branch_add_response(
-                    &engine.store_administration,
-                    Some(&engine.invocation.code_index_schedulers),
-                    &handshake,
-                    &request,
-                )
-                .await
-            }
-            Ok(None) => return Ok(()),
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
-        };
-        drop(setup_activity);
-        write_json_rpc_response(&mut transport, &response).await?;
-        return Ok(());
-    }
-    if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
-        let mut invocation = invocation;
-        let mut owned_lsp_sessions = HashMap::new();
-        let mut pending_line = None;
-        let result = async {
-            loop {
-                let delivery = invocation.as_ref().ok().and_then(|request| {
-                    DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
-                });
-                let request_id = invocation
-                    .as_ref()
-                    .ok()
-                    .map(|request| request.request_id.clone());
-                let ack_deadline = invocation
-                    .as_ref()
-                    .ok()
-                    .and_then(|request| request.delivery_ack_deadline())
-                    .cloned();
-                let session_transition = invocation
-                    .as_ref()
-                    .ok()
-                    .and_then(invocation_lsp_session_transition);
-                let response = match invocation {
-                    Ok(request) => {
-                        Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
-                    }
-                    Err(response) => response,
-                };
-                update_connection_lsp_sessions(
-                    &mut owned_lsp_sessions,
-                    session_transition.as_ref(),
-                    &response,
-                );
-                let delivery =
-                    delivery.filter(|delivery| delivery.is_successful_delivery(&response));
-                // Resolve fan-out bindings before the socket response crosses
-                // the wire. The same immutable attempts are used for a
-                // Delivered or Dropped ACK; no mutable Work lookup occurs at
-                // terminal-ACK time.
-                let delivery_attempts = if let Some(delivery) = delivery {
-                    Some(
-                        delivery
-                            .attempts(
-                                &engine.invocation.service,
-                                handshake.project_path.as_deref(),
-                                &response,
-                            )
-                            .await,
-                    )
-                } else {
-                    None
-                };
-                let write_result =
-                    write_daemon_invocation_response(&mut transport, &response).await;
-                if let Err(error) = write_result {
-                    let recorder = engine
-                        .invocation
-                        .service
-                        .delivery_settlement_recorder(handshake.project_path.as_deref())
-                        .await;
-                    let _ = settle_daemon_work_delivery(
-                        delivery_attempts.as_deref(),
-                        recorder.as_ref(),
-                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                    );
-                    return Err(error);
-                }
-                if delivery_attempts.is_some() {
-                    let recorder = engine
-                        .invocation
-                        .service
-                        .delivery_settlement_recorder(handshake.project_path.as_deref())
-                        .await;
-                    let ack_timeout = ack_deadline
-                        .as_ref()
-                        .and_then(crate::daemon_client::deadline_remaining);
-                    let Some(ack_timeout) = ack_timeout else {
-                        let _ = settle_daemon_work_delivery(
-                            delivery_attempts.as_deref(),
-                            recorder.as_ref(),
-                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                            Some(tracedecay_domain::DeliveryDropReasonV1::Deadline),
-                        );
-                        return Ok(());
-                    };
-                    let delivery_cancellation = request_id
-                        .as_deref()
-                        .and_then(crate::daemon::request_cancellation::register);
-                    let cancellation = delivery_cancellation
-                        .as_ref()
-                        .map(super::request_cancellation::Lease::token);
-                    let ack_line = match await_daemon_delivery_ack(
-                        &mut transport,
-                        ack_timeout,
-                        cancellation,
-                        engine.lifecycle.wait_for_draining(),
-                    )
-                    .await
-                    {
-                        Ok(wait) => match classify_daemon_delivery_ack_wait(wait) {
-                            Ok(line) => line,
-                            Err(reason) => {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(reason),
-                                );
-                                return Ok(());
-                            }
-                        },
-                        Err(error) => {
-                            let _ = settle_daemon_work_delivery(
-                                delivery_attempts.as_deref(),
-                                recorder.as_ref(),
-                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                            );
-                            return Err(error);
-                        }
-                    };
-                    match ack_line {
-                        Some(line) => {
-                            let ack = crate::daemon_contract::parse_daemon_invocation_delivery_ack_request(
-                                &line,
-                            );
-                            if let Some(ack) = ack.filter(|ack| {
-                                request_id
-                                    .as_deref()
-                                    .is_some_and(|request_id| ack.target_request_id() == request_id)
-                            }) {
-                                let target_request_id = ack.target_request_id().to_owned();
-                                let (outcome, drop_reason) = ack.outcome();
-                                let settlement_result = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    outcome,
-                                    drop_reason,
-                                );
-                                let ack_response = match &settlement_result {
-                                    Ok(()) => {
-                                        crate::daemon_contract::DaemonInvocationDeliveryAckResponse::accepted(
-                                            target_request_id.clone(),
-                                        )
-                                    }
-                                    Err(reason) => {
-                                        crate::daemon_contract::DaemonInvocationDeliveryAckResponse::rejected(
-                                            target_request_id.clone(),
-                                            *reason,
-                                        )
-                                    }
-                                };
-                                write_daemon_delivery_ack_response(&mut transport, &ack_response)
-                                    .await?;
-                                if let Err(reason) = settlement_result {
-                                    return Err(TraceDecayError::Config {
-                                        message: format!(
-                                            "daemon could not durably record Work delivery ACK: {reason:?}"
-                                        ),
-                                    });
-                                }
-                            } else {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(tracedecay_domain::DeliveryDropReasonV1::Invalid),
-                                );
-                                pending_line = Some(line);
-                            }
-                        }
-                        None => {
-                            let _ = settle_daemon_work_delivery(
-                                delivery_attempts.as_deref(),
-                                recorder.as_ref(),
-                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                            );
-                            return Ok(())
-                        }
-                    }
-                }
-                let next_line = if let Some(line) = pending_line.take() {
-                    Some(line)
-                } else {
-                    tokio::select! {
-                        result = read_line_handling_wire_oversized(&mut transport) => result?,
-                        () = engine.lifecycle.wait_for_draining() => return Ok(()),
-                    }
-                };
-                let Some(next_line) = next_line else {
-                    return Ok(());
-                };
-                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                    return Ok(());
-                };
-                invocation = next_invocation;
-            }
-        }
-        .await;
-        cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
-        return result;
-    }
-    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
-        let initialized_project_server_ready =
-            matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                && handshake.project_path.is_some()
-                && engine.cached_project_server(&handshake).await?.is_some();
-        let project_node_count =
-            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
-                if handshake.project_path.is_some() {
-                    cached_project_node_count(&engine.store_administration, &handshake).await
-                } else {
-                    Some(0)
-                }
-            } else {
-                None
-            };
-        if !initialized_project_server_ready
-            && let Some(mut response) =
-                daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
-        {
-            let project_open_error = if handshake.project_path.is_some()
-                && matches!(
-                    classify_mcp_method(&request.method),
-                    McpMethod::Initialize | McpMethod::ToolsList
-                ) {
-                match engine.cached_project_open_failure(&handshake).await {
-                    Ok(Some(failure)) => Some(failure.to_error()),
-                    Ok(None)
-                        if matches!(
-                            classify_mcp_method(&request.method),
-                            McpMethod::Initialize
-                        ) =>
-                    {
-                        Box::pin(
-                            engine
-                                .schedule_project_server_warmup(handshake.clone(), request.clone()),
-                        )
-                        .await
-                        .err()
-                    }
-                    Ok(None) => None,
-                    Err(error) => Some(error),
-                }
-            } else {
-                None
-            };
-            if let Some(error) = project_open_error {
-                response = request
-                    .id
-                    .clone()
-                    .map(|id| project_open_error_response(id, &error));
-            }
-            // Keep catalog-refresh bookkeeping consistent with the regular MCP
-            // server path. Only a warming `tools/list` (no published node count)
-            // or an initialize answered while a project graph is still opening
-            // is provisional. `project_node_count` is computed only for
-            // `tools/list`, so treating every `None` as provisional also
-            // skipped projectless initialize (must mark current) and
-            // `notifications/initialized` (must emit a pending refresh).
-            let catalog_is_provisional = match classify_mcp_method(&request.method) {
-                McpMethod::ToolsList => project_node_count.is_none(),
-                McpMethod::Initialize => handshake.project_path.is_some(),
-                _ => false,
-            };
-            if let Some(key) = engine
-                .claim_catalog_refresh(&handshake, &first_request_line, catalog_is_provisional)
-                .await
-                && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+        let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+            match engine
+                .per_client_admission
+                .try_admit_request(&handshake, &first_request_line)
             {
-                engine.release_catalog_refresh(key).await;
-                return Err(error);
+                Ok(permit) => Some(permit),
+                Err(response) => {
+                    drop(setup_activity);
+                    reject_admitted_request(&mut transport, &first_request_line, response).await?;
+                    return Ok(());
+                }
             }
+        } else {
+            None
+        };
+        if let Some(cancellation) =
+            crate::daemon_contract::parse_daemon_invocation_cancellation_request(
+                &first_request_line,
+            )
+        {
+            hotpath::measure_block!("daemon.engine.transport.cancel", {
+                crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+            });
             drop(setup_activity);
-            if let Some(response) = response {
-                write_json_rpc_response(&mut transport, &response).await?;
-            }
             return Ok(());
         }
-    }
-    let user_session_request = projectless_user_session_request(&first_request_line);
-    let mut pending_project_open_lines = VecDeque::new();
-    let server = if handshake.project_path.is_some() && !user_session_request {
-        match await_project_owner_or_disconnect(
+        let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
+            Some(
+                engine
+                    .git_watcher_health(handshake.project_path.as_deref())
+                    .await,
+            )
+        } else {
+            None
+        };
+        let Some(setup_activity) = serve_core_doctor_runtime_request(
             &mut transport,
-            engine.project_server_for_request(
-                &handshake,
-                project_server_requirement(&first_request_line),
-            ),
+            &handshake,
+            &engine.store_administration,
+            setup_activity,
+            &first_request_line,
+            git_watcher_health,
+            || async {
+                Ok(engine
+                    .cached_project_server(&handshake)
+                    .await?
+                    .is_some_and(|server| server.doctor_report_ready()))
+            },
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        engine.log_client_version_skew(&handshake).await;
+        report_profile_host_admission_bootstrap_status(
+            schedule_user_profile_host_admission_replay_for_identity(
+                &engine.store_administration,
+                &handshake.client_identity,
+            )
+            .await,
+        );
+        // Resolve initialize roots only after authentication and inside daemon
+        // authority. The proxy process never opens the registry database.
+        // Resolution failures (deferred repository discovery, registry refusals)
+        // are answered as typed responses: dropping the connection here would
+        // surface as a hard host failure and leave the client without the
+        // retryable state the deferral carries.
+        let initialize_route = match apply_daemon_initialize_route(
+            &mut handshake,
+            &first_request_line,
+            &engine.store_administration,
         )
         .await
         {
-            Ok(Some((server, pending_lines))) => {
-                pending_project_open_lines = pending_lines;
-                Some(server)
-            }
-            Ok(None) => {
-                drop(setup_activity);
-                return Ok(());
-            }
+            Ok(route) => route,
             Err(error) => {
                 drop(setup_activity);
                 write_project_open_error(
@@ -1065,72 +751,431 @@ async fn serve_broker_socket_client(
                 .await?;
                 return Ok(());
             }
+        };
+        if let Some(request) = parse_branch_admin_request(&first_request_line) {
+            let result = match request.action.clone() {
+                Ok(action) => engine.execute_branch_admin(&handshake, action).await,
+                Err(message) => Err(TraceDecayError::Config { message }),
+            };
+            drop(setup_activity);
+            write_branch_admin_response(&mut transport, request, result).await?;
+            return Ok(());
         }
-    } else {
-        None
-    };
-    drop(setup_activity);
-    if !engine.lifecycle.accepting() {
-        return Ok(());
-    }
-
-    // The stdio proxy creates one daemon connection per request. The request
-    // was peeked above so initialize-root routing happens before project open.
-    if let Some(key) = engine
-        .claim_catalog_refresh(&handshake, &first_request_line, false)
-        .await
-        && let Err(error) = write_tool_list_changed_notification(&mut transport).await
-    {
-        engine.release_catalog_refresh(key).await;
-        return Err(error);
-    }
-    if let Some(server) = server {
-        if is_mcp_initialize_request(&first_request_line) {
-            #[cfg(test)]
-            tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
-            serve_routed_rmcp_connection(
-                server,
-                transport,
-                first_request_line,
-                pending_project_open_lines,
-                initialize_route,
-                handshake.timings,
-                &engine.lifecycle,
+        if let Some(request) = parse_branch_add_request(&first_request_line) {
+            let response = match await_project_owner_or_disconnect(
+                &mut transport,
+                engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
             )
-            .await?;
+            .await
+            {
+                Ok(Some(_)) => {
+                    branch_add_response(
+                        &engine.store_administration,
+                        Some(&engine.invocation.code_index_schedulers),
+                        &handshake,
+                        &request,
+                    )
+                    .await
+                }
+                Ok(None) => return Ok(()),
+                Err(error) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    ErrorCode::InternalError,
+                    error.to_string(),
+                ),
+            };
+            drop(setup_activity);
+            write_json_rpc_response(&mut transport, &response).await?;
+            return Ok(());
+        }
+        if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
+            let mut invocation = invocation;
+            let mut owned_lsp_sessions = HashMap::new();
+            let mut pending_line = None;
+            let result = async {
+                loop {
+                    let delivery = invocation.as_ref().ok().and_then(|request| {
+                        DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
+                    });
+                    let request_id = invocation
+                        .as_ref()
+                        .ok()
+                        .map(|request| request.request_id.clone());
+                    let ack_deadline = invocation
+                        .as_ref()
+                        .ok()
+                        .and_then(|request| request.delivery_ack_deadline())
+                        .cloned();
+                    let session_transition = invocation
+                        .as_ref()
+                        .ok()
+                        .and_then(invocation_lsp_session_transition);
+                    let response = match invocation {
+                        Ok(request) => {
+                            Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
+                        }
+                        Err(response) => response,
+                    };
+                    update_connection_lsp_sessions(
+                        &mut owned_lsp_sessions,
+                        session_transition.as_ref(),
+                        &response,
+                    );
+                    let delivery =
+                        delivery.filter(|delivery| delivery.is_successful_delivery(&response));
+                    // Resolve fan-out bindings before the socket response crosses
+                    // the wire. The same immutable attempts are used for a
+                    // Delivered or Dropped ACK; no mutable Work lookup occurs at
+                    // terminal-ACK time.
+                    let delivery_attempts = if let Some(delivery) = delivery {
+                        Some(
+                            delivery
+                                .attempts(
+                                    &engine.invocation.service,
+                                    handshake.project_path.as_deref(),
+                                    &response,
+                                )
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
+                    let write_result =
+                        write_daemon_invocation_response(&mut transport, &response).await;
+                    if let Err(error) = write_result {
+                        let recorder = engine
+                            .invocation
+                            .service
+                            .delivery_settlement_recorder(handshake.project_path.as_deref())
+                            .await;
+                        let _ = settle_daemon_work_delivery(
+                            delivery_attempts.as_deref(),
+                            recorder.as_ref(),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                            Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                        );
+                        return Err(error);
+                    }
+                    if delivery_attempts.is_some() {
+                        let recorder = engine
+                            .invocation
+                            .service
+                            .delivery_settlement_recorder(handshake.project_path.as_deref())
+                            .await;
+                        let ack_timeout = ack_deadline
+                            .as_ref()
+                            .and_then(crate::daemon_client::deadline_remaining);
+                        let Some(ack_timeout) = ack_timeout else {
+                            let _ = settle_daemon_work_delivery(
+                                delivery_attempts.as_deref(),
+                                recorder.as_ref(),
+                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                                Some(tracedecay_domain::DeliveryDropReasonV1::Deadline),
+                            );
+                            return Ok(());
+                        };
+                        let delivery_cancellation = request_id
+                            .as_deref()
+                            .and_then(crate::daemon::request_cancellation::register);
+                        let cancellation = delivery_cancellation
+                            .as_ref()
+                            .map(super::request_cancellation::Lease::token);
+                        let ack_line = match await_daemon_delivery_ack(
+                            &mut transport,
+                            ack_timeout,
+                            cancellation,
+                            engine.lifecycle.wait_for_draining(),
+                        )
+                        .await
+                        {
+                            Ok(wait) => match classify_daemon_delivery_ack_wait(wait) {
+                                Ok(line) => line,
+                                Err(reason) => {
+                                    let _ = settle_daemon_work_delivery(
+                                        delivery_attempts.as_deref(),
+                                        recorder.as_ref(),
+                                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                                        Some(reason),
+                                    );
+                                    return Ok(());
+                                }
+                            },
+                            Err(error) => {
+                                let _ = settle_daemon_work_delivery(
+                                    delivery_attempts.as_deref(),
+                                    recorder.as_ref(),
+                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                                    Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                                );
+                                return Err(error);
+                            }
+                        };
+                        match ack_line {
+                            Some(line) => {
+                                let ack = crate::daemon_contract::parse_daemon_invocation_delivery_ack_request(
+                                    &line,
+                                );
+                                if let Some(ack) = ack.filter(|ack| {
+                                    request_id
+                                        .as_deref()
+                                        .is_some_and(|request_id| ack.target_request_id() == request_id)
+                                }) {
+                                    let target_request_id = ack.target_request_id().to_owned();
+                                    let (outcome, drop_reason) = ack.outcome();
+                                    let settlement_result = settle_daemon_work_delivery(
+                                        delivery_attempts.as_deref(),
+                                        recorder.as_ref(),
+                                        outcome,
+                                        drop_reason,
+                                    );
+                                    let ack_response = match &settlement_result {
+                                        Ok(()) => {
+                                            crate::daemon_contract::DaemonInvocationDeliveryAckResponse::accepted(
+                                                target_request_id.clone(),
+                                            )
+                                        }
+                                        Err(reason) => {
+                                            crate::daemon_contract::DaemonInvocationDeliveryAckResponse::rejected(
+                                                target_request_id.clone(),
+                                                *reason,
+                                            )
+                                        }
+                                    };
+                                    write_daemon_delivery_ack_response(&mut transport, &ack_response)
+                                        .await?;
+                                    if let Err(reason) = settlement_result {
+                                        return Err(TraceDecayError::Config {
+                                            message: format!(
+                                                "daemon could not durably record Work delivery ACK: {reason:?}"
+                                            ),
+                                        });
+                                    }
+                                } else {
+                                    let _ = settle_daemon_work_delivery(
+                                        delivery_attempts.as_deref(),
+                                        recorder.as_ref(),
+                                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                                        Some(tracedecay_domain::DeliveryDropReasonV1::Invalid),
+                                    );
+                                    pending_line = Some(line);
+                                }
+                            }
+                            None => {
+                                let _ = settle_daemon_work_delivery(
+                                    delivery_attempts.as_deref(),
+                                    recorder.as_ref(),
+                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                                    Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                                );
+                                return Ok(())
+                            }
+                        }
+                    }
+                    let next_line = if let Some(line) = pending_line.take() {
+                        Some(line)
+                    } else {
+                        tokio::select! {
+                            result = read_line_handling_wire_oversized(&mut transport) => result?,
+                            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+                        }
+                    };
+                    let Some(next_line) = next_line else {
+                        return Ok(());
+                    };
+                    let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                        return Ok(());
+                    };
+                    invocation = next_invocation;
+                }
+            }
+            .await;
+            cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
+            return result;
+        }
+        if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+            let initialized_project_server_ready =
+                matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                    && handshake.project_path.is_some()
+                    && engine.cached_project_server(&handshake).await?.is_some();
+            let project_node_count =
+                if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                    if handshake.project_path.is_some() {
+                        cached_project_node_count(&engine.store_administration, &handshake).await
+                    } else {
+                        Some(0)
+                    }
+                } else {
+                    None
+                };
+            if !initialized_project_server_ready
+                && let Some(mut response) = daemon_bootstrap_response(
+                    &request,
+                    initialize_route.as_ref(),
+                    project_node_count,
+                )
+            {
+                let project_open_error = if handshake.project_path.is_some()
+                    && matches!(
+                        classify_mcp_method(&request.method),
+                        McpMethod::Initialize | McpMethod::ToolsList
+                    ) {
+                    match engine.cached_project_open_failure(&handshake).await {
+                        Ok(Some(failure)) => Some(failure.to_error()),
+                        Ok(None)
+                            if matches!(
+                                classify_mcp_method(&request.method),
+                                McpMethod::Initialize
+                            ) =>
+                        {
+                            Box::pin(
+                                engine.schedule_project_server_warmup(
+                                    handshake.clone(),
+                                    request.clone(),
+                                ),
+                            )
+                            .await
+                            .err()
+                        }
+                        Ok(None) => None,
+                        Err(error) => Some(error),
+                    }
+                } else {
+                    None
+                };
+                if let Some(error) = project_open_error {
+                    response = request
+                        .id
+                        .clone()
+                        .map(|id| project_open_error_response(id, &error));
+                }
+                // Keep catalog-refresh bookkeeping consistent with the regular MCP
+                // server path. Only a warming `tools/list` (no published node count)
+                // or an initialize answered while a project graph is still opening
+                // is provisional. `project_node_count` is computed only for
+                // `tools/list`, so treating every `None` as provisional also
+                // skipped projectless initialize (must mark current) and
+                // `notifications/initialized` (must emit a pending refresh).
+                let catalog_is_provisional = match classify_mcp_method(&request.method) {
+                    McpMethod::ToolsList => project_node_count.is_none(),
+                    McpMethod::Initialize => handshake.project_path.is_some(),
+                    _ => false,
+                };
+                if let Some(key) = engine
+                    .claim_catalog_refresh(&handshake, &first_request_line, catalog_is_provisional)
+                    .await
+                    && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+                {
+                    engine.release_catalog_refresh(key).await;
+                    return Err(error);
+                }
+                drop(setup_activity);
+                if let Some(response) = response {
+                    write_json_rpc_response(&mut transport, &response).await?;
+                }
+                return Ok(());
+            }
+        }
+        let user_session_request = projectless_user_session_request(&first_request_line);
+        let mut pending_project_open_lines = VecDeque::new();
+        let server = if handshake.project_path.is_some() && !user_session_request {
+            match await_project_owner_or_disconnect(
+                &mut transport,
+                engine.project_server_for_request(
+                    &handshake,
+                    project_server_requirement(&first_request_line),
+                ),
+            )
+            .await
+            {
+                Ok(Some((server, pending_lines))) => {
+                    pending_project_open_lines = pending_lines;
+                    Some(server)
+                }
+                Ok(None) => {
+                    drop(setup_activity);
+                    return Ok(());
+                }
+                Err(error) => {
+                    drop(setup_activity);
+                    write_project_open_error(
+                        &mut transport,
+                        &first_request_line,
+                        &handshake.client_instance_id,
+                        &error,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
         } else {
-            #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Legacy,
-            );
+            None
+        };
+        drop(setup_activity);
+        if !engine.lifecycle.accepting() {
+            return Ok(());
+        }
+
+        // The stdio proxy creates one daemon connection per request. The request
+        // was peeked above so initialize-root routing happens before project open.
+        if let Some(key) = engine
+            .claim_catalog_refresh(&handshake, &first_request_line, false)
+            .await
+            && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+        {
+            engine.release_catalog_refresh(key).await;
+            return Err(error);
+        }
+        if let Some(server) = server {
+            if is_mcp_initialize_request(&first_request_line) {
+                #[cfg(test)]
+                tests::record_mcp_route(
+                    &handshake.client_instance_id,
+                    tests::ObservedMcpRoute::Rmcp,
+                );
+                serve_routed_rmcp_connection(
+                    server,
+                    transport,
+                    first_request_line,
+                    pending_project_open_lines,
+                    initialize_route,
+                    handshake.timings,
+                    &engine.lifecycle,
+                )
+                .await?;
+            } else {
+                #[cfg(test)]
+                tests::record_mcp_route(
+                    &handshake.client_instance_id,
+                    tests::ObservedMcpRoute::Legacy,
+                );
+                let mut transport = ReplayTransport::new(transport);
+                transport.push_replay(first_request_line)?;
+                for line in pending_project_open_lines {
+                    transport.push_replay(line)?;
+                }
+                Box::pin(server.run_daemon_connection_with_timings(
+                    &mut transport,
+                    handshake.timings,
+                    &engine.lifecycle,
+                ))
+                .await?;
+            }
+        } else {
             let mut transport = ReplayTransport::new(transport);
             transport.push_replay(first_request_line)?;
             for line in pending_project_open_lines {
                 transport.push_replay(line)?;
             }
-            Box::pin(server.run_daemon_connection_with_timings(
+            serve_projectless_client(
                 &mut transport,
-                handshake.timings,
+                &handshake.client_identity,
                 &engine.lifecycle,
-            ))
+                &engine.store_administration,
+            )
             .await?;
         }
-    } else {
-        let mut transport = ReplayTransport::new(transport);
-        transport.push_replay(first_request_line)?;
-        for line in pending_project_open_lines {
-            transport.push_replay(line)?;
-        }
-        serve_projectless_client(
-            &mut transport,
-            &handshake.client_identity,
-            &engine.lifecycle,
-            &engine.store_administration,
-        )
-        .await?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]

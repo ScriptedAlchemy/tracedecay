@@ -104,15 +104,19 @@ hotpath = [
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-lsp/hotpath",
+    "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-sdk/hotpath",
+    "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
+    "tracedecay-tool-catalog/hotpath",
     "tracedecay-usecases/hotpath",
 ]
 hotpath-alloc = [
@@ -130,15 +134,19 @@ hotpath-alloc = [
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-sdk/hotpath-alloc",
+    "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
     "tracedecay-usecases/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -156,20 +164,35 @@ hotpath-cpu = [
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-sdk/hotpath-cpu",
+    "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
 # Binary-only: the live query server runs in this process, so no library crate
 # needs a passthrough for it.
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+# Opt-in tiered graph storage. Never in `default` or `production`: both give
+# the graph buffer manager a spill directory and a bounded budget, so they are
+# deliberate build choices rather than silent defaults.
+#
+# `graph-disk-tier` is the usable half. `graph-tiered-storage` additionally
+# turns on grafeo-core's `tiered-storage` LPG arena, which is known broken at
+# grafeo 0.5.42 (1 MiB per-epoch record ceiling, then a panic).
+# See `crates/tracedecay-graph-db/Cargo.toml` for the detail.
+graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
+graph-tiered-storage = ["tracedecay-graph-db/graph-tiered-storage"]
+
 production = [
     "token-counting",
     "lite",
@@ -267,6 +290,19 @@ test-transport = [
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
+]
+# Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
+# request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
+# default build, and a GPU-featured build left at the runtime default
+# (`TRACEDECAY_EMBED_EXECUTION_PROVIDER` unset), stay byte-identical to the
+# CPU-only adapter. See `tracedecay-semantic/src/execution_provider.rs`.
+semantic-gpu-coreml = [
+    "tracedecay-semantic/semantic-gpu-coreml",
+    "tracedecay-usecases/semantic-gpu-coreml",
+]
+semantic-gpu-cuda = [
+    "tracedecay-semantic/semantic-gpu-cuda",
+    "tracedecay-usecases/semantic-gpu-cuda",
 ]
 
 [lib]

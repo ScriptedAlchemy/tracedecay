@@ -9,6 +9,21 @@ Use Hotpath as a measurement system, not as acceptance by itself. Start from one
 
 TraceDecay is pinned to Hotpath 0.24.0. Read [references/hotpath-0.24.md](references/hotpath-0.24.md) before changing features, using the CLI/MCP wire contract, or interpreting nested spans. The pinned crate source is authoritative when upstream prose disagrees.
 
+## Limits are symptoms, not knobs
+
+A tripped deadline, admission refusal, memory budget, or backoff ceiling is a
+measurement arriving through a policy surface. Never raise, remove, or
+env-override the limit as the fix. Use the lanes below to decompose where the
+time or memory actually goes, then compare against what the operation should
+cost for its inputs. Mis-sized work — an N+1 query storm, an unbatched writer,
+a serial phase that should use every core, an inlined mega-future — is the
+defect; fix it and keep the limit. Change the budget only when the measured
+cost is genuinely irreducible, in its own commit, with the measurement
+attached. Overrides that keep an investigation moving are scaffolding: label
+them and remove them before merge. (Case study: the 2026-08-27 graph
+activation "deadline exceeded" loop — the wall retried identical work forever;
+the real defects were projection throughput and writer contention.)
+
 ## Workflow
 
 1. Record the exact commit, build profile, feature set, corpus, cold/warm state, and workload.

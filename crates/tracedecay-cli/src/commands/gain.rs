@@ -29,98 +29,114 @@ pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
     Some((saved_tokens as f64) * price.prompt_per_mtok / 1_000_000.0)
 }
 
+#[hotpath::measure(label = "cli.gain.read", future = true)]
 pub async fn handle_gain(
     all: bool,
     history: bool,
     range: &str,
     json_output: bool,
 ) -> tracedecay::errors::Result<()> {
-    let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
-        .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
-    let since = i64::try_from(since).map_err(|_| tracedecay::errors::TraceDecayError::Config {
-        message: "savings range exceeds the supported timestamp domain".to_owned(),
-    })?;
-    let project_filter: Option<String> = if all {
-        None
-    } else {
-        std::env::current_dir()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-    };
+    handle_gain_inner(all, history, range, json_output).await
+}
 
-    let result = daemon_tool_json(
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "gain_query",
-            "project_arg": project_filter,
-            "since": since,
-            "history": history,
-        }),
-    )
-    .await?;
-    if history {
-        let rows = result
-            .get("history")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: "daemon gain history response is missing history rows".to_owned(),
+fn handle_gain_inner(
+    all: bool,
+    history: bool,
+    range: &str,
+    json_output: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + '_>>
+{
+    // Erase the deeply nested gain-read future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
+            .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+        let since =
+            i64::try_from(since).map_err(|_| tracedecay::errors::TraceDecayError::Config {
+                message: "savings range exceeds the supported timestamp domain".to_owned(),
             })?;
-        let rows = rows
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<SavingsDayPayload>)
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|row| tracedecay::global_db::SavingsDay {
-                day: row.day,
-                saved_tokens: row.saved_tokens,
-                calls: row.calls,
-            })
-            .collect::<Vec<_>>();
-        if json_output {
-            let arr: Vec<_> = rows
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "day": r.day,
-                        "saved_tokens": r.saved_tokens,
-                        "calls": r.calls,
-                        "usd": estimate_dollars_saved(r.saved_tokens),
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&arr)?);
+        let project_filter: Option<String> = if all {
+            None
         } else {
-            tracedecay::display::print_gain_history(&rows, estimate_dollars_saved);
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+
+        let result = daemon_tool_json(
+            None,
+            "tracedecay_admin_cli",
+            serde_json::json!({
+                "action": "gain_query",
+                "project_arg": project_filter,
+                "since": since,
+                "history": history,
+            }),
+        )
+        .await?;
+        if history {
+            let rows = result
+                .get("history")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon gain history response is missing history rows".to_owned(),
+                })?;
+            let rows = rows
+                .iter()
+                .cloned()
+                .map(serde_json::from_value::<SavingsDayPayload>)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|row| tracedecay::global_db::SavingsDay {
+                    day: row.day,
+                    saved_tokens: row.saved_tokens,
+                    calls: row.calls,
+                })
+                .collect::<Vec<_>>();
+            if json_output {
+                let arr: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "day": r.day,
+                            "saved_tokens": r.saved_tokens,
+                            "calls": r.calls,
+                            "usd": estimate_dollars_saved(r.saved_tokens),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+            } else {
+                tracedecay::display::print_gain_history(&rows, estimate_dollars_saved);
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
 
-    let total: SavingsTotalPayload = serde_json::from_value(result)?;
-    let saved_tokens = total.saved_tokens;
-    let calls = total.calls;
-    let usd = estimate_dollars_saved(saved_tokens);
+        let total: SavingsTotalPayload = serde_json::from_value(result)?;
+        let saved_tokens = total.saved_tokens;
+        let calls = total.calls;
+        let usd = estimate_dollars_saved(saved_tokens);
 
-    if json_output {
-        let out = serde_json::json!({
-            "range": range,
-            "project": project_filter.clone().unwrap_or_else(|| "ALL".to_string()),
-            "saved_tokens": saved_tokens,
-            "calls": calls,
-            "usd": usd,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        tracedecay::display::print_gain_total(
-            project_filter.as_deref().unwrap_or("ALL projects"),
-            range,
-            saved_tokens,
-            calls,
-            usd,
-        );
-    }
-    Ok(())
+        if json_output {
+            let out = serde_json::json!({
+                "range": range,
+                "project": project_filter.clone().unwrap_or_else(|| "ALL".to_string()),
+                "saved_tokens": saved_tokens,
+                "calls": calls,
+                "usd": usd,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            tracedecay::display::print_gain_total(
+                project_filter.as_deref().unwrap_or("ALL projects"),
+                range,
+                saved_tokens,
+                calls,
+                usd,
+            );
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

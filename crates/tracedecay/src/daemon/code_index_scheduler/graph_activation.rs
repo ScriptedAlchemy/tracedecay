@@ -271,7 +271,9 @@ impl CodeGraphActivationAuthorityV1 {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::BudgetExhausted {
                             budget: "resident_memory".to_owned(),
-                            limit: tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+                            limit:
+                                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
+                                    .get(),
                         },
                     ));
                 }

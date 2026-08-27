@@ -40,6 +40,8 @@ use self::session_pool::{
 
 mod artifact_store;
 pub mod embedding_parallelism;
+#[cfg(feature = "semantic-fastembed")]
+mod execution_provider;
 mod fastembed_adapter;
 pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
 mod generation_resume;
@@ -1104,7 +1106,8 @@ where
     // The one copy between canonical chunks and tensor input: every chunk's
     // sanitized text is cloned into an owned String. Timed separately so it
     // cannot hide inside `semantic.embed.infer`.
-    let batch = hotpath::measure_block!("semantic.embed.batch_assembly", {
+    let batch = hotpath::measure_block!(
+        "semantic.embed.batch_assembly",
         BoundedSanitizedTextBatchV1::try_new(
             chunks
                 .iter()
@@ -1113,7 +1116,7 @@ where
             max_texts,
             max_bytes,
         )
-    })
+    )
     .map_err(|error| error.to_string())?;
     let vectors = session
         .embed_batch(&batch, progress)
@@ -1124,7 +1127,8 @@ where
     // Per-vector dimension/finite validation plus the move out of the
     // adapter's vector type. Also timed separately: a regression here would
     // otherwise be read as slower inference.
-    let encoded = hotpath::measure_block!("semantic.embed.vector_writeback", {
+    let encoded = hotpath::measure_block!(
+        "semantic.embed.vector_writeback",
         vectors
             .into_iter()
             .map(|vector| {
@@ -1132,7 +1136,7 @@ where
                 Ok(vector.values)
             })
             .collect::<Result<Vec<_>, String>>()
-    })?;
+    )?;
     Ok((encoded, chunks.len() as u64))
 }
 

@@ -79,6 +79,17 @@ compiles.
 
 ## Engineering Hygiene
 
+- Limits are symptoms, not knobs. When an operation trips a deadline,
+  admission limit, memory budget, or backoff ceiling, do not raise, remove, or
+  env-override the limit as the fix. Instrument the operation with Hotpath
+  (see the `using-hotpath` skill), decompose where the time or memory actually
+  goes, and compare against what the operation should cost for its inputs. If
+  the cost is mis-sized — an N+1 query pattern, an unbatched writer, a serial
+  phase that should use every core, an inlined mega-future — fix that defect
+  and keep the limit. Change a budget only when the measured cost is genuinely
+  irreducible, in its own commit, with the measurement attached. A temporary
+  override that keeps an investigation moving is scaffolding: label it and
+  remove it before the work merges.
 - Reuse canonical TraceDecay authorities and maintained libraries first.
   Custom parsers, cursors, caches, retries, transports, registries, schedulers,
   crypto/auth/policy stores, or filesystem durability layers require a concrete

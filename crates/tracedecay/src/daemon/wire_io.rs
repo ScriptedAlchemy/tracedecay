@@ -31,17 +31,31 @@ pub(super) async fn write_daemon_invocation_response(
 
 /// Read one newline-delimited frame. Oversized input gets a typed non-durable
 /// rejection and returns `Ok(None)` without retaining payload bytes.
+#[hotpath::measure(label = "daemon.wire.read_line", future = true)]
 pub(super) async fn read_line_handling_wire_oversized(
-    transport: &mut impl McpTransport,
+    transport: &mut (impl McpTransport + Send),
 ) -> Result<Option<String>> {
-    match transport.read_line().await {
-        Ok(line) => Ok(line),
-        Err(error) if tracedecay_usecases::host_admission::is_wire_oversized_io_error(&error) => {
-            let _ = crate::mcp::transport::write_wire_oversized_rejection(transport, &error).await;
-            Ok(None)
+    read_line_handling_wire_oversized_inner(transport).await
+}
+
+fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
+    transport: &mut T,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + '_>> {
+    // Erase the deeply nested future before it reaches the measured wrapper
+    // so every profiling feature can compute its layout.
+    Box::pin(async move {
+        match transport.read_line().await {
+            Ok(line) => Ok(line),
+            Err(error)
+                if tracedecay_usecases::host_admission::is_wire_oversized_io_error(&error) =>
+            {
+                let _ =
+                    crate::mcp::transport::write_wire_oversized_rejection(transport, &error).await;
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
         }
-        Err(error) => Err(error.into()),
-    }
+    })
 }
 
 #[cfg(test)]

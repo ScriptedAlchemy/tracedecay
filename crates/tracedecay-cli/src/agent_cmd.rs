@@ -238,6 +238,7 @@ fn ensure_artifact_only_restore_boundary(
     })
 }
 
+#[hotpath::measure(label = "cli.agent.artifact")]
 fn apply_host_bundle_artifact_action_at(
     action: crate::cli::HostBundleAction,
     options: crate::cli::HostBundleCliOptions,
@@ -654,6 +655,7 @@ impl ComponentSetApplyContext {
     }
 }
 
+#[hotpath::measure(label = "cli.agent.component.apply")]
 fn apply_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -1938,6 +1940,7 @@ fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.feedback")]
 fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::errors::Result<()> {
     let dashboard_enabled =
         load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(agent_id);
@@ -2095,6 +2098,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.feedback")]
 fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()> {
     let bytes =
         fs::read(state_path).map_err(|error| tracedecay::errors::TraceDecayError::Config {
@@ -2432,107 +2436,126 @@ fn host_bundle_component(
 /// This is the supported replacement for hand-deleting
 /// `~/.tracedecay/host-components/.tracedecay-host-bundle-v1/component-set-journal.*.json`,
 /// which used to be the only way out of a wedged host lifecycle.
+#[hotpath::measure(future = true, label = "cli.agent.recovery")]
 pub(crate) async fn handle_host_bundle_recovery_command(
     action: crate::cli::HostBundleAction,
     dry_run: bool,
     yes: bool,
 ) -> tracedecay::errors::Result<()> {
-    let home = tracedecay::agents::home_dir().ok_or_else(|| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: "could not determine home directory".to_string(),
-        }
-    })?;
-    let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not resolve host lifecycle root: {error}"),
-        })?;
-    let mut writer =
-        tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
-            &home,
-            &lifecycle_root,
-        )
-        .map_err(host_bundle_error)?;
+    handle_host_bundle_recovery_command_inner(action, dry_run, yes).await
+}
 
-    let (selected_agent, quarantine, status_only) = match action {
-        crate::cli::HostBundleAction::Status => (None, false, true),
-        crate::cli::HostBundleAction::Recover { agent, quarantine } => (agent, quarantine, dry_run),
-        crate::cli::HostBundleAction::ArtifactBackup { .. }
-        | crate::cli::HostBundleAction::ArtifactRestore { .. } => {
+fn handle_host_bundle_recovery_command_inner(
+    action: crate::cli::HostBundleAction,
+    dry_run: bool,
+    yes: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested host-bundle-recovery future before it reaches
+    // the measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let home = tracedecay::agents::home_dir().ok_or_else(|| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: "could not determine home directory".to_string(),
+            }
+        })?;
+        let lifecycle_root =
+            tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root().map_err(
+                |error| tracedecay::errors::TraceDecayError::Config {
+                    message: format!("could not resolve host lifecycle root: {error}"),
+                },
+            )?;
+        let mut writer =
+            tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                &home,
+                &lifecycle_root,
+            )
+            .map_err(host_bundle_error)?;
+
+        let (selected_agent, quarantine, status_only) = match action {
+            crate::cli::HostBundleAction::Status => (None, false, true),
+            crate::cli::HostBundleAction::Recover { agent, quarantine } => {
+                (agent, quarantine, dry_run)
+            }
+            crate::cli::HostBundleAction::ArtifactBackup { .. }
+            | crate::cli::HostBundleAction::ArtifactRestore { .. } => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "artifact backup and restore are not recovery operations".to_string(),
+                });
+            }
+        };
+
+        let mut pending = writer
+            .pending_component_set_journal_hosts()
+            .map_err(host_bundle_error)?;
+        if let Some(agent) = selected_agent.as_deref() {
+            let host = host_kind_for_agent(agent)?;
+            pending.retain(|pending_host| *pending_host == host);
+        }
+        if pending.is_empty() {
+            eprintln!("\x1b[32m✔\x1b[0m no host component lifecycle journal is awaiting recovery");
+            return Ok(());
+        }
+        for host in &pending {
+            eprintln!(
+                "  pending: {} ({:?})",
+                tracedecay::agents::integration_id_for_host(*host),
+                host
+            );
+        }
+        if status_only {
+            return Ok(());
+        }
+        if !yes {
             return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "artifact backup and restore are not recovery operations".to_string(),
+                message: "host component recovery mutates deployed files; re-run with --yes"
+                    .to_string(),
             });
         }
-    };
 
-    let mut pending = writer
-        .pending_component_set_journal_hosts()
-        .map_err(host_bundle_error)?;
-    if let Some(agent) = selected_agent.as_deref() {
-        let host = host_kind_for_agent(agent)?;
-        pending.retain(|pending_host| *pending_host == host);
-    }
-    if pending.is_empty() {
-        eprintln!("\x1b[32m✔\x1b[0m no host component lifecycle journal is awaiting recovery");
-        return Ok(());
-    }
-    for host in &pending {
-        eprintln!(
-            "  pending: {} ({:?})",
-            tracedecay::agents::integration_id_for_host(*host),
-            host
-        );
-    }
-    if status_only {
-        return Ok(());
-    }
-    if !yes {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "host component recovery mutates deployed files; re-run with --yes"
-                .to_string(),
-        });
-    }
-
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-            message: "system clock is before the Unix epoch".to_string(),
-        })?
-        .as_secs();
-    for host in pending {
-        let agent_id = tracedecay::agents::integration_id_for_host(host);
-        let operation = writer
-            .pending_component_set_journal_operation(host)
-            .map_err(host_bundle_error)?
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: format!("{agent_id}: pending lifecycle journal disappeared"),
-            })?;
-        let mut registration = CatalogHostComponentRegistrationAuthority::new(
-            agent_id,
-            &home,
-            &lifecycle_root,
-            operation,
-        )?;
-        let outcome =
-            tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer)
-                .recover_host(host, &mut registration);
-        match outcome {
-            Ok(()) => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal recovered"),
-            Err(error) if quarantine => {
-                let quarantined = writer
-                    .quarantine_component_set_journal(host, now_unix)
-                    .map_err(host_bundle_error)?;
-                match quarantined {
-                    Some(path) => eprintln!(
-                        "\x1b[33m!\x1b[0m {agent_id}: {error}; journal quarantined at {} (rollback backups preserved)",
-                        path.display()
-                    ),
-                    None => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal cleared"),
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+                message: "system clock is before the Unix epoch".to_string(),
+            })?
+            .as_secs();
+        for host in pending {
+            let agent_id = tracedecay::agents::integration_id_for_host(host);
+            let operation = writer
+                .pending_component_set_journal_operation(host)
+                .map_err(host_bundle_error)?
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!("{agent_id}: pending lifecycle journal disappeared"),
+                })?;
+            let mut registration = CatalogHostComponentRegistrationAuthority::new(
+                agent_id,
+                &home,
+                &lifecycle_root,
+                operation,
+            )?;
+            let outcome =
+                tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer)
+                    .recover_host(host, &mut registration);
+            match outcome {
+                Ok(()) => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal recovered"),
+                Err(error) if quarantine => {
+                    let quarantined = writer
+                        .quarantine_component_set_journal(host, now_unix)
+                        .map_err(host_bundle_error)?;
+                    match quarantined {
+                        Some(path) => eprintln!(
+                            "\x1b[33m!\x1b[0m {agent_id}: {error}; journal quarantined at {} (rollback backups preserved)",
+                            path.display()
+                        ),
+                        None => eprintln!("\x1b[32m✔\x1b[0m {agent_id}: lifecycle journal cleared"),
+                    }
                 }
+                Err(error) => return Err(host_bundle_error(error)),
             }
-            Err(error) => return Err(host_bundle_error(error)),
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Inverse of `integration_id_for_host`, derived from the stock host list so
@@ -2652,7 +2675,11 @@ pub(crate) async fn handle_install_command(
         refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
             let scoped_project_path = validate_codex_automation_project_path()?;
-            install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
+            hotpath::future!(
+                install_codex_daemon_automation(&scoped_project_path, &home, options),
+                label = "cli.agent.automation"
+            )
+            .await?;
         }
         user_cfg
             .agent_dashboard_enabled
@@ -2850,6 +2877,7 @@ pub(crate) async fn handle_update_plugin_command(adopt: bool) -> tracedecay::err
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.preflight")]
 pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {

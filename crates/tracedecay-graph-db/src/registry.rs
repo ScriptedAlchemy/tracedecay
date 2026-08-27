@@ -786,12 +786,28 @@ impl GraphDbRegistry {
         }
     }
 
+    /// Reports whether any entry — `Ready`, `Opening`, `Closing`, `Retiring`,
+    /// or `Faulted` — currently occupies this shard's slot.
+    ///
+    /// A lease-only consumer of a shared physical shard (for example the code
+    /// graph, which never attaches its own map owner; see
+    /// [`Self::resolve_owner_attachment`]) can use this to detect that the
+    /// shard's owning attachment was retired out from under it and that
+    /// re-attaching is needed before the next lease attempt, instead of
+    /// discovering the gap only as an `unavailable` error deep inside a
+    /// publish call.
+    pub fn shard_is_registered(&self, shard_id: &StoreShardIdV1) -> Result<bool, GraphDbError> {
+        let state = self.state_lock()?;
+        Ok(state.entries.contains_key(shard_id))
+    }
+
     /// Mounts an absent graph runtime through its exact Store map-owner
     /// attachment and returns the matching native graph map-owner attachment.
     ///
     /// This is deliberately the only entry-creation path. Ordinary
     /// [`GraphDbRegistration`] values can resolve an already mounted entry,
     /// but cannot turn an operation lease into map ownership.
+    #[hotpath::measure(label = "graph_db.registry.attach", impl_type = "GraphDbRegistry")]
     pub fn resolve_owner_attachment(
         &self,
         registration: GraphDbOwnerRegistrationV1,
@@ -1108,6 +1124,7 @@ impl GraphDbRegistry {
         self.reopen(registration)
     }
 
+    #[hotpath::measure(label = "graph_db.registry.close", impl_type = "GraphDbRegistry")]
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
@@ -1155,6 +1172,10 @@ impl GraphDbRegistry {
         self.close_retained_inner(binding, verified_locator, true)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.registry.close_retained",
+        impl_type = "GraphDbRegistry"
+    )]
     fn close_retained_inner(
         &self,
         binding: &StoreRuntimeBindingV1,
@@ -1170,6 +1191,7 @@ impl GraphDbRegistry {
         Ok(true)
     }
 
+    #[hotpath::measure(label = "graph_db.registry.evict", impl_type = "GraphDbRegistry")]
     pub fn evict_idle(
         &self,
         minimum_idle: Duration,
@@ -1322,6 +1344,10 @@ impl GraphDbRegistry {
     /// Identity and client-lease checks complete under one registry-state lock,
     /// so failure leaves every target ready and success denies new resolution
     /// for the entire selected set until commit or drop.
+    #[hotpath::measure(
+        label = "graph_db.registry.retire.reserve",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<GraphDbRetirementTarget>,

@@ -1,0 +1,48 @@
+# Experimental companion to hotpath-profile.yml: posts the head-vs-base
+# profiling diff as a PR comment via hotpath-utils profile-pr.
+name: hotpath-comment
+
+on:
+  workflow_run:
+    workflows: ["hotpath-profile"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: profile-metrics
+          path: /tmp/metrics/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Install hotpath-utils 0.24.0
+        run: cargo install hotpath --version 0.24.0 --locked --features utils --bin hotpath-utils
+
+      - name: Post PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr=$(cat /tmp/metrics/pr_number.txt)
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "no PR context (manual run); skipping comment"; exit 0
+          fi
+          export GITHUB_BASE_REF=$(cat /tmp/metrics/base_ref.txt)
+          export GITHUB_HEAD_REF=$(cat /tmp/metrics/head_ref.txt)
+          hotpath-utils profile-pr \
+            --head-metrics /tmp/metrics/head_timing.json \
+            --base-metrics /tmp/metrics/base_timing.json \
+            --github-token "$GH_TOKEN" \
+            --pr-number "$pr" \
+            --benchmark-id "mcp-smoke-timing"

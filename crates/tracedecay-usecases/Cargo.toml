@@ -27,7 +27,9 @@ hotpath = [
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
+    "tracedecay-host-integration/hotpath",
     "tracedecay-lsp/hotpath",
+    "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
@@ -35,7 +37,9 @@ hotpath = [
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
+    "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -47,7 +51,9 @@ hotpath-alloc = [
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-integration/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
@@ -55,7 +61,9 @@ hotpath-alloc = [
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -67,7 +75,9 @@ hotpath-cpu = [
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-integration/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
@@ -75,12 +85,17 @@ hotpath-cpu = [
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
 ]
 default = []
 # Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
 # provider wiring inside `semantic_runtime`.
 semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
+# Mirrors the root crate's opt-in GPU execution-provider features.
+semantic-gpu-coreml = ["tracedecay-semantic/semantic-gpu-coreml"]
+semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
 # Exposes test-only helper surfaces to dependent crates' test builds without
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve

@@ -4,6 +4,7 @@
 //! It consumes the current configuration snapshot and exposes one integration
 //! port that those owners can mount later.
 
+mod acceptance_calibration;
 mod accepted_profile_authority;
 mod config_backend;
 mod config_inventory;
@@ -19,6 +20,11 @@ mod publish_failure_memo;
 mod redundancy;
 mod retention;
 
+pub use acceptance_calibration::{
+    MAX_COSINE_DISTANCE_MICROS, SemanticAcceptanceCalibrationV1,
+    UNCALIBRATED_MAXIMUM_DISTANCE_MICROS, measure_acceptance_calibration,
+    measure_acceptance_calibration_from_values,
+};
 pub(crate) use accepted_profile_authority::SemanticAcceptedProfileAuthorityPortV1;
 pub use accepted_profile_authority::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,

@@ -77,6 +77,7 @@ pub struct RedundancyMatchScore {
 /// `full_source` is the entire file contents (tree-sitter needs context
 /// outside the body to parse correctly); `body_node` is the function's
 /// AST subtree.
+#[hotpath::measure(label = "redundancy.fingerprint")]
 pub fn compute_fingerprint(full_source: &str, body_node: Node<'_>) -> Fingerprint {
     let body_text = body_node
         .utf8_text(full_source.as_bytes())
@@ -97,6 +98,7 @@ pub fn compute_fingerprint(full_source: &str, body_node: Node<'_>) -> Fingerprin
 /// `Tree`. Returns `None` when parsing fails (malformed input, missing
 /// grammar). Builds a fresh `Parser` per call — the call site for
 /// fingerprint computation invokes this once per file, not per node.
+#[hotpath::measure(label = "redundancy.parse_file")]
 pub fn parse_file(source: &str, language: &tree_sitter::Language) -> Option<Tree> {
     let mut parser = Parser::new();
     parser.set_language(language).ok()?;

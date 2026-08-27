@@ -209,8 +209,23 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
-    /// Minimum nonnegative cosine similarity, in parts per million. This is
-    /// not the former shifted `[-1, 1]` calibration domain.
+    /// Declared per-profile acceptance cut-off, expressed as a minimum
+    /// nonnegative cosine similarity in parts per million. This is not the
+    /// former shifted `[-1, 1]` calibration domain.
+    ///
+    /// This does **not** gate candidate admission. The semantic lane abstains
+    /// on `SemanticCalibrationProfileV1::maximum_distance_micros`, which is
+    /// measured from the committed generation's own vectors by
+    /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
+    /// — deliberately, because a fixed cosine cut-off is a property of the
+    /// model and corpus rather than of a checked-in profile.
+    ///
+    /// The field is currently read only to assert that the rerank comparison
+    /// profile differs from the semantic one by rerank material alone. Wiring
+    /// it as an explicit override of the measured bound would mean carrying it
+    /// through `DirectEvaluatedProfileMaterialV1` into the daemon candidate
+    /// builder; until then, treat a value here as documentation, not as a
+    /// threshold in force.
     pub calibration_threshold_ppm: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
@@ -1272,6 +1287,7 @@ fn generate_candidate_outputs_sharing_corpora(
 
 /// Generate the same byte-stable query fallback plus evidence-bearing native
 /// semantic/rerank results. Missing optional authorities remain pending.
+#[hotpath::measure(label = "search_eval.native.generate")]
 pub fn generate_candidate_outputs_with_native(
     options: &GenerateCandidateOutputsOptions<'_>,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
@@ -1353,6 +1369,7 @@ pub fn generate_candidate_outputs_with_native(
     Ok(generated)
 }
 
+#[hotpath::measure(label = "search_eval.native.partition")]
 fn measure_native_partition(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
@@ -1473,6 +1490,7 @@ fn retriever_outcome_candidate_count<E>(
     }
 }
 
+#[hotpath::measure(label = "search_eval.native.retrieve")]
 fn retrieve_one_native_query(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
@@ -2405,6 +2423,7 @@ impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
     }
 }
 
+#[hotpath::measure(label = "search_eval.hydrate.late")]
 fn measure_late_hydration(
     published: &PublishedCorpus,
     request: &RetrievalRequest,

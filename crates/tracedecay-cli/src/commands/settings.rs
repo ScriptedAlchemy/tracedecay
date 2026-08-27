@@ -327,7 +327,7 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
 pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::Result<()> {
     let resolved =
         super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
@@ -364,95 +364,112 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::R
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.settings.gitignore", future = true)]
 pub(crate) async fn handle_gitignore(
     path: Option<String>,
     action: Option<String>,
 ) -> tracedecay::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(path);
-    match action.as_deref() {
-        Some("on") => {
-            let resolved = super::scope::resolve_project_scope(project_path).await?;
-            let expected_revision = current_configuration_revision(&resolved.project_path).await?;
-            let current = current_project_setting(
-                &resolved.project_path,
-                tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
-            )
-            .await?;
-            let mutations = (current != ConfigurationValueV1::Boolean(true))
-                .then(|| {
-                    project_configuration_set(
-                        &resolved.project_id,
-                        tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
-                        ConfigurationValueV1::Boolean(true),
-                    )
-                })
-                .transpose()?
-                .into_iter()
-                .collect();
-            let receipt = mutate_project_configuration(
-                &resolved.project_path,
-                &resolved.project_id,
-                expected_revision,
-                mutations,
-            )
-            .await?;
-            eprintln!("gitignore enabled — .gitignore rules will be respected during indexing.");
-            eprintln!("Run `tracedecay sync` to re-index with the new setting.");
-            report_configuration_receipt(receipt.as_ref());
+    handle_gitignore_inner(path, action).await
+}
+
+fn handle_gitignore_inner(
+    path: Option<String>,
+    action: Option<String>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested gitignore-settings future before it reaches the
+    // measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let project_path = tracedecay::config::resolve_path(path);
+        match action.as_deref() {
+            Some("on") => {
+                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let expected_revision =
+                    current_configuration_revision(&resolved.project_path).await?;
+                let current = current_project_setting(
+                    &resolved.project_path,
+                    tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
+                )
+                .await?;
+                let mutations = (current != ConfigurationValueV1::Boolean(true))
+                    .then(|| {
+                        project_configuration_set(
+                            &resolved.project_id,
+                            tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
+                            ConfigurationValueV1::Boolean(true),
+                        )
+                    })
+                    .transpose()?
+                    .into_iter()
+                    .collect();
+                let receipt = mutate_project_configuration(
+                    &resolved.project_path,
+                    &resolved.project_id,
+                    expected_revision,
+                    mutations,
+                )
+                .await?;
+                eprintln!(
+                    "gitignore enabled — .gitignore rules will be respected during indexing."
+                );
+                eprintln!("Run `tracedecay sync` to re-index with the new setting.");
+                report_configuration_receipt(receipt.as_ref());
+            }
+            Some("off") => {
+                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let expected_revision =
+                    current_configuration_revision(&resolved.project_path).await?;
+                let current = current_project_setting(
+                    &resolved.project_path,
+                    tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
+                )
+                .await?;
+                let mutations = (current != ConfigurationValueV1::Boolean(false))
+                    .then(|| {
+                        project_configuration_set(
+                            &resolved.project_id,
+                            tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
+                            ConfigurationValueV1::Boolean(false),
+                        )
+                    })
+                    .transpose()?
+                    .into_iter()
+                    .collect();
+                let receipt = mutate_project_configuration(
+                    &resolved.project_path,
+                    &resolved.project_id,
+                    expected_revision,
+                    mutations,
+                )
+                .await?;
+                eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
+                eprintln!("Run `tracedecay sync` to re-index with the new setting.");
+                report_configuration_receipt(receipt.as_ref());
+            }
+            Some(other) => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("unknown action '{other}': expected 'on' or 'off'"),
+                });
+            }
+            None => {
+                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let response = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_admin_project",
+                    serde_json::json!({ "action": "gitignore_status" }),
+                )
+                .await?;
+                let enabled = response
+                    .get("git_ignore")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "daemon gitignore status omitted git_ignore".to_string(),
+                    })?;
+                let status = if enabled { "on" } else { "off" };
+                eprintln!("gitignore: {status}");
+            }
         }
-        Some("off") => {
-            let resolved = super::scope::resolve_project_scope(project_path).await?;
-            let expected_revision = current_configuration_revision(&resolved.project_path).await?;
-            let current = current_project_setting(
-                &resolved.project_path,
-                tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
-            )
-            .await?;
-            let mutations = (current != ConfigurationValueV1::Boolean(false))
-                .then(|| {
-                    project_configuration_set(
-                        &resolved.project_id,
-                        tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
-                        ConfigurationValueV1::Boolean(false),
-                    )
-                })
-                .transpose()?
-                .into_iter()
-                .collect();
-            let receipt = mutate_project_configuration(
-                &resolved.project_path,
-                &resolved.project_id,
-                expected_revision,
-                mutations,
-            )
-            .await?;
-            eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
-            eprintln!("Run `tracedecay sync` to re-index with the new setting.");
-            report_configuration_receipt(receipt.as_ref());
-        }
-        Some(other) => {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: format!("unknown action '{other}': expected 'on' or 'off'"),
-            });
-        }
-        None => {
-            let resolved = super::scope::resolve_project_scope(project_path).await?;
-            let response = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_admin_project",
-                serde_json::json!({ "action": "gitignore_status" }),
-            )
-            .await?;
-            let enabled = response
-                .get("git_ignore")
-                .and_then(serde_json::Value::as_bool)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "daemon gitignore status omitted git_ignore".to_string(),
-                })?;
-            let status = if enabled { "on" } else { "off" };
-            eprintln!("gitignore: {status}");
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }

@@ -123,6 +123,7 @@ pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path)
         .flatten()
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
@@ -151,13 +152,18 @@ pub(crate) async fn write_hook_output(
             }
         }
     };
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    let written = stdout
-        .write_all(output.as_bytes())
-        .and_then(|()| stdout.write_all(b"\n"))
-        .and_then(|()| stdout.flush());
-    drop(stdout);
+    // Scoped so both the stdout handle and its lock guard (neither of which is
+    // `Send`) are fully dropped before the delivery-settlement await below;
+    // otherwise the compiler must treat this future as holding a `!Send`
+    // guard across that suspend point.
+    let written = {
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        stdout
+            .write_all(output.as_bytes())
+            .and_then(|()| stdout.write_all(b"\n"))
+            .and_then(|()| stdout.flush())
+    };
     if let Err(error) = written {
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
@@ -303,10 +309,12 @@ async fn hook_native_event(
     0
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
 pub async fn hook_kimi_event() -> i32 {
     hook_native_event(tracedecay_hooks::HookHostV1::KimiCode, dispatch_kimi_event).await
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]
 pub async fn hook_opencode_event() -> i32 {
     hook_native_event(
         tracedecay_hooks::HookHostV1::OpenCode,
@@ -315,6 +323,7 @@ pub async fn hook_opencode_event() -> i32 {
     .await
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
 pub async fn hook_opencode_tool_after() -> i32 {
     hook_native_event(
         tracedecay_hooks::HookHostV1::OpenCode,
@@ -323,6 +332,7 @@ pub async fn hook_opencode_tool_after() -> i32 {
     .await
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.native_resolve_root")]
 async fn native_event_project_root(event: &str) -> Option<PathBuf> {
     let parsed = serde_json::from_str::<Value>(event).ok();
     let start = parsed
@@ -342,6 +352,7 @@ pub(crate) async fn daemon_tool_json(
     crate::ports::hook_runtime::daemon_tool_json(project_root, tool_name, arguments, false).await
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
 pub(crate) async fn daemon_hook_action(
     project_root: Option<&Path>,
     mut arguments: Value,
@@ -374,6 +385,7 @@ pub(crate) async fn daemon_hook_action(
     result
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.ingest_user_session")]
 pub(crate) async fn ingest_user_session(
     provider: &str,
     session_id: Option<String>,
@@ -483,6 +495,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     }
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.ingest_transcript")]
 pub(crate) async fn ingest_transcript_for_event(
     provider: &str,
     event_json: &str,
@@ -572,6 +585,7 @@ pub(crate) fn compact_daemon_args(
     args
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
 pub(crate) async fn notify_hook_event_with_telemetry(
     project_root: &Path,
     event: DaemonHookEvent,
@@ -597,6 +611,7 @@ pub(crate) async fn notify_hook_event_with_optional_telemetry(
     }
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
 pub async fn hook_hermes_terminal_receipt() -> i32 {
     let event_json = read_hook_event!();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
@@ -1068,6 +1083,7 @@ fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
 /// Identity-aware [`event_project_root`]: consults the registry so a
 /// global-store-only checkout still resolves. Shared by every host whose session
 /// events carry `cwd`.
+#[hotpath::measure(future = true, label = "hosts.hooks.resolve_root")]
 async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
     crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await

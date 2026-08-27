@@ -16,290 +16,310 @@ fn branch_list_rpc_args() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure(label = "cli.branch.dispatch", future = true)]
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
-    use tracedecay::branch;
-    use tracedecay::branch_meta;
+    handle_branch_action_inner(action).await
+}
 
-    match action {
-        BranchAction::List { path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
-            let status = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_status",
-                branch_list_rpc_args(),
-            )
-            .await?;
-            let diagnostics = status.get("branch_diagnostics").ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "daemon status omitted branch diagnostics".to_string(),
-                }
-            })?;
-            if !diagnostics
-                .get("tracking_enabled")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
-                return Ok(());
-            }
-            eprintln!(
-                "Default branch: {}",
-                diagnostics
-                    .get("default_branch")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("<unknown>")
-            );
-            eprintln!(
-                "Current branch: {}",
-                diagnostics
-                    .get("current_branch")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("<detached HEAD>")
-            );
-            if let Some(serving) = diagnostics
-                .get("serving_branch")
-                .and_then(serde_json::Value::as_str)
-            {
-                let suffix = if diagnostics
-                    .get("is_fallback")
+fn handle_branch_action_inner(
+    action: BranchAction,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested branch-dispatch future before it reaches the
+    // measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        use tracedecay::branch;
+        use tracedecay::branch_meta;
+
+        match action {
+            BranchAction::List { path } => {
+                let resolved =
+                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
+                        .await?;
+                let status = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_status",
+                    branch_list_rpc_args(),
+                )
+                .await?;
+                let diagnostics = status.get("branch_diagnostics").ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "daemon status omitted branch diagnostics".to_string(),
+                    }
+                })?;
+                if !diagnostics
+                    .get("tracking_enabled")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    " (fallback)"
-                } else {
-                    ""
-                };
-                eprintln!("Serving branch: {serving}{suffix}");
-            }
-            if diagnostics
-                .get("branch_drifted")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
+                    eprintln!(
+                        "No branch tracking configured. Run `tracedecay branch add` to start."
+                    );
+                    return Ok(());
+                }
                 eprintln!(
-                    "Opened branch: {}",
+                    "Default branch: {}",
                     diagnostics
-                        .get("open_active_branch")
+                        .get("default_branch")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<unknown>")
+                );
+                eprintln!(
+                    "Current branch: {}",
+                    diagnostics
+                        .get("current_branch")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("<detached HEAD>")
                 );
-            }
-            eprintln!();
-            for branch in diagnostics
-                .get("branches")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let db_exists = branch
-                    .get("db_exists")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let size = if db_exists {
-                    tracedecay::display::format_bytes(
-                        branch
-                            .get("size_bytes")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0),
-                    )
-                } else {
-                    "missing".to_string()
-                };
-                let parent = branch
-                    .get("parent")
+                if let Some(serving) = diagnostics
+                    .get("serving_branch")
                     .and_then(serde_json::Value::as_str)
-                    .map(|p| format!(" (from {p})"))
-                    .unwrap_or_default();
-                let last_synced_at = branch
-                    .get("last_synced_at")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("never");
-                let synced = branch_meta::format_timestamp(last_synced_at);
-                let mut flags = Vec::new();
-                if branch
-                    .get("is_default")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
                 {
-                    flags.push("default");
+                    let suffix = if diagnostics
+                        .get("is_fallback")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        " (fallback)"
+                    } else {
+                        ""
+                    };
+                    eprintln!("Serving branch: {serving}{suffix}");
                 }
-                if branch
-                    .get("is_current")
+                if diagnostics
+                    .get("branch_drifted")
                     .and_then(serde_json::Value::as_bool)
-                    == Some(true)
+                    .unwrap_or(false)
                 {
-                    flags.push("current");
+                    eprintln!(
+                        "Opened branch: {}",
+                        diagnostics
+                            .get("open_active_branch")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<detached HEAD>")
+                    );
                 }
-                if branch
-                    .get("is_serving")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    flags.push("serving");
-                }
-                if !db_exists {
-                    flags.push("missing-db");
-                }
-                let flags = if flags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", flags.join(", "))
-                };
-                eprintln!(
-                    "  {}{} — {}{}, synced {}",
-                    branch
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("<unknown>"),
-                    flags,
-                    size,
-                    parent,
-                    synced
-                );
-            }
-            if let Some(warnings) = diagnostics
-                .get("warnings")
-                .and_then(serde_json::Value::as_array)
-                .filter(|warnings| !warnings.is_empty())
-            {
                 eprintln!();
-                for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
-                    eprintln!("warning: {warning}");
+                for branch in diagnostics
+                    .get("branches")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let db_exists = branch
+                        .get("db_exists")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let size = if db_exists {
+                        tracedecay::display::format_bytes(
+                            branch
+                                .get("size_bytes")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0),
+                        )
+                    } else {
+                        "missing".to_string()
+                    };
+                    let parent = branch
+                        .get("parent")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|p| format!(" (from {p})"))
+                        .unwrap_or_default();
+                    let last_synced_at = branch
+                        .get("last_synced_at")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("never");
+                    let synced = branch_meta::format_timestamp(last_synced_at);
+                    let mut flags = Vec::new();
+                    if branch
+                        .get("is_default")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        flags.push("default");
+                    }
+                    if branch
+                        .get("is_current")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        flags.push("current");
+                    }
+                    if branch
+                        .get("is_serving")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        flags.push("serving");
+                    }
+                    if !db_exists {
+                        flags.push("missing-db");
+                    }
+                    let flags = if flags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", flags.join(", "))
+                    };
+                    eprintln!(
+                        "  {}{} — {}{}, synced {}",
+                        branch
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<unknown>"),
+                        flags,
+                        size,
+                        parent,
+                        synced
+                    );
+                }
+                if let Some(warnings) = diagnostics
+                    .get("warnings")
+                    .and_then(serde_json::Value::as_array)
+                    .filter(|warnings| !warnings.is_empty())
+                {
+                    eprintln!();
+                    for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+                        eprintln!("warning: {warning}");
+                    }
                 }
             }
-        }
-        BranchAction::Add { name, path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
-            let branch_name = match name {
-                Some(n) => n,
-                None => branch::current_branch(&resolved.project_path).ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
+            BranchAction::Add { name, path } => {
+                let resolved =
+                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
+                        .await?;
+                let branch_name = match name {
+                    Some(n) => n,
+                    None => branch::current_branch(&resolved.project_path).ok_or_else(|| {
+                        tracedecay::errors::TraceDecayError::Config {
                         message:
                             "cannot detect current branch (detached HEAD?). Specify a branch name."
                                 .to_string(),
                     }
-                })?,
-            };
+                    })?,
+                };
 
-            let spinner = Spinner::new();
-            spinner.set_message("syncing changes");
-            let response = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_admin_branch_add",
-                serde_json::json!({ "branch": branch_name }),
-            )
-            .await?;
-            match parse_daemon_branch_add_outcome(&response)? {
-                branch::BranchAddOutcome::NotIndexed => {
-                    spinner.done("no TraceDecay index found; run `tracedecay init` first");
-                }
-                branch::BranchAddOutcome::AlreadyTracked => {
-                    spinner.done(&format!("Branch '{branch_name}' is already tracked."));
-                }
-                branch::BranchAddOutcome::Added => {
-                    spinner.done(&format!("branch '{branch_name}' tracked"));
-                }
-                branch::BranchAddOutcome::Deferred => {
-                    spinner.done(&format!(
+                let spinner = Spinner::new();
+                spinner.set_message("syncing changes");
+                let response = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_admin_branch_add",
+                    serde_json::json!({ "branch": branch_name }),
+                )
+                .await?;
+                match parse_daemon_branch_add_outcome(&response)? {
+                    branch::BranchAddOutcome::NotIndexed => {
+                        spinner.done("no TraceDecay index found; run `tracedecay init` first");
+                    }
+                    branch::BranchAddOutcome::AlreadyTracked => {
+                        spinner.done(&format!("Branch '{branch_name}' is already tracked."));
+                    }
+                    branch::BranchAddOutcome::Added => {
+                        spinner.done(&format!("branch '{branch_name}' tracked"));
+                    }
+                    branch::BranchAddOutcome::Deferred => {
+                        spinner.done(&format!(
                         "branch '{branch_name}' tracked; sync deferred because another process is active"
                     ));
+                    }
                 }
             }
-        }
-        BranchAction::Remove { name, path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
-            let response = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_admin_branch",
-                serde_json::json!({ "action": "remove", "branch": name }),
-            )
-            .await?;
-            let report = parse_daemon_branch_admin_report(&response)?;
-            match report.outcome {
-                branch::BranchAdminOutcome::NoTracking => {
-                    eprintln!("No branch tracking configured.");
-                }
-                branch::BranchAdminOutcome::NotTracked => {
-                    eprintln!("Branch '{name}' is not tracked.");
-                }
-                branch::BranchAdminOutcome::Removed => {
-                    eprintln!("\x1b[32m✔\x1b[0m Branch '{name}' removed.");
-                }
-                branch::BranchAdminOutcome::NoChanges => {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: "daemon branch remove returned no_changes".to_string(),
-                    });
+            BranchAction::Remove { name, path } => {
+                let resolved =
+                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
+                        .await?;
+                let response = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_admin_branch",
+                    serde_json::json!({ "action": "remove", "branch": name }),
+                )
+                .await?;
+                let report = parse_daemon_branch_admin_report(&response)?;
+                match report.outcome {
+                    branch::BranchAdminOutcome::NoTracking => {
+                        eprintln!("No branch tracking configured.");
+                    }
+                    branch::BranchAdminOutcome::NotTracked => {
+                        eprintln!("Branch '{name}' is not tracked.");
+                    }
+                    branch::BranchAdminOutcome::Removed => {
+                        eprintln!("\x1b[32m✔\x1b[0m Branch '{name}' removed.");
+                    }
+                    branch::BranchAdminOutcome::NoChanges => {
+                        return Err(tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon branch remove returned no_changes".to_string(),
+                        });
+                    }
                 }
             }
-        }
-        BranchAction::Removeall { path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
-            let response = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_admin_branch",
-                serde_json::json!({ "action": "remove_all" }),
-            )
-            .await?;
-            let report = parse_daemon_branch_admin_report(&response)?;
-            match report.outcome {
-                branch::BranchAdminOutcome::NoTracking => {
-                    eprintln!("No branch tracking configured.");
+            BranchAction::Removeall { path } => {
+                let resolved =
+                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
+                        .await?;
+                let response = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_admin_branch",
+                    serde_json::json!({ "action": "remove_all" }),
+                )
+                .await?;
+                let report = parse_daemon_branch_admin_report(&response)?;
+                match report.outcome {
+                    branch::BranchAdminOutcome::NoTracking => {
+                        eprintln!("No branch tracking configured.");
+                    }
+                    branch::BranchAdminOutcome::NoChanges => {
+                        eprintln!("No non-default branches to remove.");
+                    }
+                    branch::BranchAdminOutcome::Removed => {
+                        for name in &report.removed_branches {
+                            eprintln!("  removed '{name}'");
+                        }
+                        eprintln!(
+                            "\x1b[32m✔\x1b[0m Removed {} branch(es). Only '{}' remains.",
+                            report.removed_branches.len(),
+                            report.default_branch.as_deref().unwrap_or("<unknown>")
+                        );
+                    }
+                    branch::BranchAdminOutcome::NotTracked => {
+                        return Err(tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon branch remove_all returned not_tracked".to_string(),
+                        });
+                    }
                 }
-                branch::BranchAdminOutcome::NoChanges => {
-                    eprintln!("No non-default branches to remove.");
-                }
-                branch::BranchAdminOutcome::Removed => {
+            }
+            BranchAction::Gc { path } => {
+                let resolved =
+                    super::scope::resolve_project_scope(tracedecay::config::resolve_path(path))
+                        .await?;
+                let response = daemon_tool_json(
+                    Some(&resolved.project_path),
+                    "tracedecay_admin_branch",
+                    serde_json::json!({ "action": "gc" }),
+                )
+                .await?;
+                let report = parse_daemon_branch_admin_report(&response)?;
+                if report.outcome == branch::BranchAdminOutcome::Removed {
                     for name in &report.removed_branches {
                         eprintln!("  removed '{name}'");
                     }
+                    for path in &report.removed_orphan_dbs {
+                        eprintln!("  removed orphan '{}'", path.display());
+                    }
                     eprintln!(
-                        "\x1b[32m✔\x1b[0m Removed {} branch(es). Only '{}' remains.",
+                        "\x1b[32m✔\x1b[0m Cleaned up {} stale branch(es) and {} orphan database(s).",
                         report.removed_branches.len(),
-                        report.default_branch.as_deref().unwrap_or("<unknown>")
+                        report.removed_orphan_dbs.len()
                     );
-                }
-                branch::BranchAdminOutcome::NotTracked => {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: "daemon branch remove_all returned not_tracked".to_string(),
-                    });
+                } else {
+                    eprintln!("No stale branches or orphan databases to clean up.");
                 }
             }
-        }
-        BranchAction::Gc { path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
-            let response = daemon_tool_json(
-                Some(&resolved.project_path),
-                "tracedecay_admin_branch",
-                serde_json::json!({ "action": "gc" }),
-            )
-            .await?;
-            let report = parse_daemon_branch_admin_report(&response)?;
-            if report.outcome == branch::BranchAdminOutcome::Removed {
-                for name in &report.removed_branches {
-                    eprintln!("  removed '{name}'");
-                }
-                for path in &report.removed_orphan_dbs {
-                    eprintln!("  removed orphan '{}'", path.display());
-                }
-                eprintln!(
-                    "\x1b[32m✔\x1b[0m Cleaned up {} stale branch(es) and {} orphan database(s).",
-                    report.removed_branches.len(),
-                    report.removed_orphan_dbs.len()
-                );
-            } else {
-                eprintln!("No stale branches or orphan databases to clean up.");
+            BranchAction::Autotrack { action } => {
+                handle_branch_autotrack_action(action).await?;
             }
         }
-        BranchAction::Autotrack { action } => {
-            handle_branch_autotrack_action(action).await?;
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn parse_daemon_branch_admin_report(

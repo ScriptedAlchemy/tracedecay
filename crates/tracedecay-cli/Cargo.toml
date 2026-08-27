@@ -32,16 +32,75 @@ required-features = ["test-transport"]
 
 [features]
 default = ["production"]
-hotpath = ["dep:regex", "tracedecay/hotpath", "hotpath/hotpath", "hotpath/tokio", "hotpath/axum-0-8", "hotpath/ureq-3"]
-hotpath-alloc = ["hotpath", "tracedecay/hotpath-alloc", "hotpath/hotpath-alloc"]
-hotpath-cpu = ["hotpath", "tracedecay/hotpath-cpu", "hotpath/hotpath-cpu"]
+hotpath = [
+    "dep:regex",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "hotpath/axum-0-8",
+    "hotpath/ureq-3",
+    "tracedecay/hotpath",
+    "tracedecay-agent-hosts/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-host-integration/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay/hotpath-alloc",
+    "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-integration/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay/hotpath-cpu",
+    "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-integration/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production"]
+# Opt-in tiered graph storage; not part of `production`.
+graph-disk-tier = ["tracedecay/graph-disk-tier"]
+graph-tiered-storage = ["tracedecay/graph-tiered-storage"]
 token-counting = ["tracedecay/token-counting"]
 lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]
 full = ["tracedecay/full"]
 semantic-fastembed = ["tracedecay/semantic-fastembed"]
+# Opt-in GPU execution providers for the embedded FastEmbed/ORT runtime.
+# Still requires `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml|cuda` at runtime;
+# compiling the feature in alone changes nothing.
+semantic-gpu-coreml = ["tracedecay/semantic-gpu-coreml"]
+semantic-gpu-cuda = ["tracedecay/semantic-gpu-cuda"]
 test-transport = ["tracedecay/test-transport"]
 lang-dart = ["tracedecay/lang-dart"]
 lang-pascal = ["tracedecay/lang-pascal"]

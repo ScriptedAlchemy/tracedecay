@@ -2769,6 +2769,7 @@ version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e185dd750843637a2d99e56100c08ef4cc34ce4a7b5f9cb9566f873bbf54c90"
 dependencies = [
+ "arc-swap",
  "arcstr",
  "bincode",
  "byteorder",
@@ -2804,6 +2805,7 @@ dependencies = [
  "grafeo-storage",
  "hashbrown 0.17.1",
  "indexmap",
+ "memmap2",
  "parking_lot",
  "serde",
  "smallvec",
@@ -6267,6 +6269,7 @@ dependencies = [
 name = "tracedecay-host-integration"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
@@ -6308,6 +6311,7 @@ dependencies = [
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
@@ -6466,6 +6470,7 @@ dependencies = [
  "hex",
  "hf-hub",
  "hotpath",
+ "ort",
  "rayon",
  "serde",
  "serde_json",
@@ -6478,6 +6483,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-query",
  "tracedecay-runtime-core",
+ "tracing",
  "url",
 ]
 
@@ -6518,6 +6524,7 @@ dependencies = [
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6545,6 +6552,7 @@ dependencies = [
 name = "tracedecay-tool-catalog"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",

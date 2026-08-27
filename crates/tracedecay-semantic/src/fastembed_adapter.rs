@@ -32,6 +32,12 @@
 //!   are modelled here as a `Duration` against the injected pool clock and
 //!   interruption as the [`SemanticExecutionAuthority`] trait; the integrator
 //!   adapts `RetrievalBudget` onto it.
+//! - Execution provider: `open_session` always asks
+//!   [`crate::execution_provider::requested_execution_providers`] for the
+//!   ONNX Runtime execution providers to register. The default (CPU-only)
+//!   build and runtime configuration return an empty list — ORT's own
+//!   default CPU EP — so behavior is byte-identical to before GPU support
+//!   existed; see that module for the opt-in CoreML/CUDA switches.
 #[cfg(feature = "semantic-fastembed")]
 use fastembed::{
     InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
@@ -1150,7 +1156,8 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             crate::embedding_parallelism::embedding_intra_threads(artifact.max_threads());
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
-            .with_intra_threads(intra_threads);
+            .with_intra_threads(intra_threads)
+            .with_execution_providers(crate::execution_provider::requested_execution_providers());
         let embedding = hotpath::measure_block!("semantic.model.load", {
             TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
                 let failure = fastembed_error(

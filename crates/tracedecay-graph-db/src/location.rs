@@ -133,9 +133,10 @@ impl GraphDbOpenOptions {
                         ));
                     }
                 };
-                let config = Config::persistent(path)
+                let config = Config::persistent(&path)
                     .with_storage_format(StorageFormat::SingleFile)
                     .with_wal_durability(durability);
+                let config = apply_tiered_storage(config, &path);
                 Ok(ValidatedOpen {
                     config,
                     durability: self.durability,
@@ -145,6 +146,68 @@ impl GraphDbOpenOptions {
             }
         }
     }
+}
+
+/// Feature-off: the persistent config is handed to Grafeo untouched, so the
+/// default all-in-RAM LPG store and default buffer budget stay exactly as they
+/// were before `graph-disk-tier` existed.
+#[cfg(not(feature = "graph-disk-tier"))]
+fn apply_tiered_storage(config: Config, _path: &Path) -> Config {
+    config
+}
+
+/// Fraction of detected system RAM the graph buffer manager may hold before
+/// it starts spilling eligible sections. Deliberately conservative: the point
+/// of the tier is to bound the projection/publication peak, not to squeeze the
+/// resident set as small as it will go.
+#[cfg(feature = "graph-disk-tier")]
+const TIERED_MEMORY_FRACTION: f64 = 0.25;
+
+/// Feature-on: give Grafeo somewhere to put spilled sections and a bounded
+/// memory budget to spill against.
+///
+/// Both knobs are prerequisites, not triggers. `with_spill_path` only decides
+/// *where* a spill lands — grafeo's `SectionConsumer::spill` returns
+/// `SpillError::NoSpillDirectory` without it — and `with_memory_fraction` sets
+/// the budget the buffer manager measures pressure against. Section tiers are
+/// left at grafeo's default `TierOverride::Auto` on purpose:
+///
+/// * `SectionType::LpgStore` is declared `mmap_able: false` in grafeo-common
+///   (`src/storage/section.rs`), so its consumer reports `can_spill() == false`
+///   and `ForceDisk` on it is a silent no-op.
+/// * Forcing `VectorStore`/`TextIndex` to disk at open would change read
+///   behaviour for every caller, which is not something an opt-in storage
+///   feature should do implicitly.
+///
+/// The spill directory is named as a sibling of the `.grafeo` file
+/// (`<name>.spill/`) so the tier's on-disk footprint lives with the database
+/// it belongs to.
+///
+/// It is deliberately *not* created here. Grafeo's
+/// `write_and_mmap_spill_file` (and the query-spill path in `session/mod.rs`)
+/// already `create_dir_all` the parent on first use, so an open that never
+/// spills leaves no trace on disk. Creating it eagerly would plant an empty
+/// directory beside every database, including the short-lived
+/// `*.tracedecay-restore-*.grafeo` staging stores whose parent directory
+/// `backup_contract::assert_no_staging_residue` requires to be clean.
+///
+/// Note for whoever makes this default: once a section *does* spill, the
+/// directory becomes real and nothing currently removes it when a staging
+/// store closes. That cleanup is unwritten, because no section tracedecay
+/// registers today is spillable (see above).
+#[cfg(feature = "graph-disk-tier")]
+fn apply_tiered_storage(config: Config, path: &Path) -> Config {
+    config
+        .with_spill_path(tiered_spill_directory(path))
+        .with_memory_fraction(TIERED_MEMORY_FRACTION)
+}
+
+/// `/var/db/graph.grafeo` -> `/var/db/graph.spill`.
+#[cfg(feature = "graph-disk-tier")]
+fn tiered_spill_directory(path: &Path) -> PathBuf {
+    // `validate_persistent_path` has already established a parent directory,
+    // a UTF-8 file name, and a `.grafeo` extension by the time we get here.
+    path.with_extension("spill")
 }
 
 fn validate_persistent_path(path: &Path) -> Result<(), GraphDbError> {

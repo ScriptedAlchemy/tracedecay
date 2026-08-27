@@ -1,4 +1,9 @@
-#![allow(clippy::too_many_arguments, clippy::collapsible_if)] // binary crate: match lib allow policy for CLI dispatch
+#![allow(clippy::too_many_arguments, clippy::collapsible_if)]
+// binary crate: match lib allow policy for CLI dispatch
+// Required for the hotpath feature: layout computation for the boxed
+// `_inner` async body chain reachable from `run()` overflows the default
+// query depth ("query depth increased by 130").
+#![recursion_limit = "256"]
 #[cfg(any(feature = "hotpath", test))]
 use clap::ArgMatches;
 use clap::{CommandFactory, FromArgMatches};
@@ -406,7 +411,7 @@ fn main() -> ExitCode {
         hotpath::val!("cli.command.name").set(&command);
     }
     if let Some(code) =
-        hotpath::measure_block!("cli.native_hook_capture", hook_capture_cmd::try_run(&args))
+        hotpath::measure_block!("cli.hook.native_capture", hook_capture_cmd::try_run(&args))
     {
         return process_exit_code(code);
     }
@@ -614,7 +619,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<CommandOutcome> {
     dispatch_command(command, host_bundle).await
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.startup.preamble", future = true)]
 async fn run_startup_preamble(command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
@@ -947,7 +952,6 @@ async fn dispatch_command(
     }
 }
 
-#[hotpath::measure(label = "cli.command.project")]
 async fn dispatch_project_command(
     command: Commands,
     assume_yes: bool,
@@ -1017,6 +1021,7 @@ async fn dispatch_project_command(
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.memory.status", future = true)]
 async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Result<()> {
     match action {
         MemoryAction::Status {
@@ -1047,7 +1052,6 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Re
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.runtime")]
 async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Tool {
@@ -1059,7 +1063,12 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
         }
         Commands::Work { invocation } => work_command::run(invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
-        Commands::Remote { action } => tracedecay::remote_command::run(action.into())?,
+        Commands::Remote { action } => {
+            hotpath::measure_block!(
+                "cli.remote.run",
+                tracedecay::remote_command::run(action.into())
+            )?;
+        }
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;
         }
@@ -1070,15 +1079,18 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
             open,
         } => {
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let result = commands::daemon_tool_json(
-                Some(&project_path),
-                "tracedecay_dashboard",
-                serde_json::json!({
-                    "action": "start",
-                    "host": host,
-                    "port": port,
-                    "format": "json",
-                }),
+            let result = hotpath::future!(
+                commands::daemon_tool_json(
+                    Some(&project_path),
+                    "tracedecay_dashboard",
+                    serde_json::json!({
+                        "action": "start",
+                        "host": host,
+                        "port": port,
+                        "format": "json",
+                    }),
+                ),
+                label = "cli.dashboard.start"
             )
             .await?;
             let url = result
@@ -1148,7 +1160,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
-            serve::run_serve(path, timings).await?;
+            hotpath::future!(serve::run_serve(path, timings), label = "cli.serve.run").await?;
         }
         Commands::Daemon { action } => {
             dispatch_daemon_command(action).await?;
@@ -1175,7 +1187,11 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 remote_tls_cert.map(PathBuf::from),
                 remote_tls_key.map(PathBuf::from),
             )?;
-            tracedecay::daemon::run_foreground(socket_path, remote_tls).await?;
+            hotpath::future!(
+                tracedecay::daemon::run_foreground(socket_path, remote_tls),
+                label = "cli.daemon.run"
+            )
+            .await?;
         }
         DaemonAction::InstallService {
             socket,
@@ -1199,7 +1215,10 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 socket,
                 remote_tls,
             )?;
-            let service_path = tracedecay::daemon::install_service(&spec, !no_start)?;
+            let service_path = hotpath::measure_block!(
+                "cli.daemon.install_service",
+                tracedecay::daemon::install_service(&spec, !no_start)
+            )?;
             eprintln!(
                 "Installed TraceDecay daemon service at {}",
                 service_path.display()
@@ -1218,32 +1237,37 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
             }
         }
         DaemonAction::UninstallService { no_stop } => {
-            let service_path = tracedecay::daemon::uninstall_service(!no_stop)?;
+            let service_path = hotpath::measure_block!(
+                "cli.daemon.uninstall_service",
+                tracedecay::daemon::uninstall_service(!no_stop)
+            )?;
             eprintln!(
                 "Removed TraceDecay daemon service at {}",
                 service_path.display()
             );
         }
         DaemonAction::Start => {
-            tracedecay::daemon::start_service()?;
+            hotpath::measure_block!("cli.daemon.start", tracedecay::daemon::start_service())?;
             eprintln!("Started TraceDecay daemon service");
         }
         DaemonAction::Stop => {
-            tracedecay::daemon::stop_service()?;
+            hotpath::measure_block!("cli.daemon.stop", tracedecay::daemon::stop_service())?;
             eprintln!("Stopped TraceDecay daemon service");
         }
         DaemonAction::Restart => {
-            update_cmd::restart_daemon_service()?;
+            hotpath::measure_block!("cli.daemon.restart", update_cmd::restart_daemon_service())?;
         }
         DaemonAction::Status => {
             let socket_path = tracedecay::daemon::socket_path_or_default(None)?;
-            print!("{}", tracedecay::daemon::service_status(&socket_path));
+            hotpath::measure_block!(
+                "cli.daemon.status",
+                print!("{}", tracedecay::daemon::service_status(&socket_path))
+            );
         }
     }
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.agent")]
 async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
@@ -1420,7 +1444,6 @@ async fn dispatch_agent_command(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.hook")]
 async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<CommandOutcome> {
     let code = match command {
         hook_command @ (Commands::HookPreToolUse
@@ -1458,7 +1481,6 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
     Ok(CommandOutcome::Exit(code))
 }
 
-#[hotpath::measure(label = "cli.command.update")]
 async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Upgrade { no_reinstall } => {
@@ -1481,35 +1503,48 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
                 package_id,
                 state_file,
             } => {
-                tracedecay::daemon::prepare_scoop_package_service(&package_id, &state_file)?;
+                hotpath::measure_block!(
+                    "cli.package_hook.prepare",
+                    tracedecay::daemon::prepare_scoop_package_service(&package_id, &state_file)
+                )?;
             }
             ScoopPackageHookAction::Restore {
                 package_id,
                 state_file,
             } => {
-                tracedecay::daemon::restore_scoop_package_service(&package_id, &state_file)?;
+                hotpath::measure_block!(
+                    "cli.package_hook.restore",
+                    tracedecay::daemon::restore_scoop_package_service(&package_id, &state_file)
+                )?;
             }
         },
         Commands::Channel { channel } => match channel {
             Some(target) => {
-                tracedecay::upgrade::switch_channel(&target)?;
+                hotpath::measure_block!(
+                    "cli.channel.switch",
+                    tracedecay::upgrade::switch_channel(&target)
+                )?;
             }
-            None => tracedecay::upgrade::show_channel(),
+            None => {
+                hotpath::measure_block!("cli.channel.show", tracedecay::upgrade::show_channel())
+            }
         },
         _ => unreachable!("non-update command passed to update dispatcher"),
     }
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.configuration")]
 async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let result = commands::daemon_tool_json(
-                Some(&project_path),
-                "tracedecay_admin_project",
-                serde_json::json!({ "action": "counter_get" }),
+            let result = hotpath::future!(
+                commands::daemon_tool_json(
+                    Some(&project_path),
+                    "tracedecay_admin_project",
+                    serde_json::json!({ "action": "counter_get" }),
+                ),
+                label = "cli.counter.current"
             )
             .await?;
             let value = result
@@ -1534,10 +1569,13 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
                 .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                     message: "daemon counter response omitted counter".to_string(),
                 })?;
-            commands::daemon_tool_json(
-                Some(&project_path),
-                "tracedecay_admin_project",
-                serde_json::json!({ "action": "counter_reset" }),
+            hotpath::future!(
+                commands::daemon_tool_json(
+                    Some(&project_path),
+                    "tracedecay_admin_project",
+                    serde_json::json!({ "action": "counter_reset" }),
+                ),
+                label = "cli.counter.reset"
             )
             .await?;
             eprintln!("Local counter reset (was {prev})");
@@ -1556,11 +1594,10 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.diagnostics")]
 async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Doctor => {
-            tracedecay::doctor::run_doctor().await?;
+            hotpath::future!(tracedecay::doctor::run_doctor(), label = "cli.doctor.run").await?;
         }
         Commands::Cost {
             range,
@@ -1587,14 +1624,13 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::
             commands::handle_gain(all, history, &range, json).await?;
         }
         Commands::Monitor => {
-            tracedecay::monitor::run()?;
+            hotpath::measure_block!("cli.monitor.run", tracedecay::monitor::run())?;
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.command.knowledge")]
 async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Git { action } => {
@@ -1605,10 +1641,18 @@ async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Re
         }
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync, .. } => {
-                tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync).await?;
+                hotpath::future!(
+                    tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync),
+                    label = "cli.analytics.diagnostics"
+                )
+                .await?;
             }
             AnalyticsAction::Sync => {
-                tracedecay::analytics_bridge::run_analytics_sync().await?;
+                hotpath::future!(
+                    tracedecay::analytics_bridge::run_analytics_sync(),
+                    label = "cli.analytics.sync"
+                )
+                .await?;
             }
         },
         Commands::Automation { action } => {

@@ -134,6 +134,7 @@ enum ReplayCompletion {
 
 /// Drain one host spool once. `admit` reauthorizes and admits a single
 /// envelope; production passes the daemon admission path, tests pass a fake.
+#[hotpath::measure(label = "daemon.authority.hook_v2.replay")]
 pub(crate) async fn drain_host_spool_once<A, F>(
     data_root: &Path,
     host: HookHostV1,
@@ -325,6 +326,7 @@ where
     admit(envelope, native_session_id).await
 }
 
+#[hotpath::measure(label = "daemon.authority.hook_v2.receipt_replay")]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: HookHostV1,
@@ -376,6 +378,7 @@ async fn drain_hook_delivery_receipts(
     }
 }
 
+#[hotpath::measure(label = "daemon.authority.hook_v2.drain")]
 async fn drain_all_hosts(
     graph: &crate::tracedecay::TraceDecay,
     data_root: &Path,

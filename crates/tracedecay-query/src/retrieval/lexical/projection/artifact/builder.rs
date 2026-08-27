@@ -62,6 +62,14 @@ const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
 const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
 const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
+// An exact-posting plan entry owns one document id plus a field/term BLOB
+// key carried as borrowed fat-pointer slices (`&str` and `&[u8]`, two words
+// each) rather than the single thin reference a term-posting entry holds.
+// Six words conservatively covers both the 32-bit and 64-bit layouts;
+// general allocator metadata remains outside the ledger contract.
+const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 6 * std::mem::size_of::<usize>();
+const EXACT_INSERT_CONTROL_INTERVAL: usize = TERM_INSERT_CONTROL_INTERVAL;
+const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 // This gate serializes mutation within the private-profile/stable-handle
 // authority. It denies ordinary second-connection DML, but is not a
 // cryptographic defense against malicious same-UID code that deliberately
@@ -122,6 +130,61 @@ impl Ord for PreparedTermMergeCursorV1<'_> {
 struct PreparedTermInsertPlanV1<'a> {
     entries: Vec<PreparedTermInsertRefV1<'a>>,
     merge_heap: BinaryHeap<Reverse<PreparedTermMergeCursorV1<'a>>>,
+}
+
+// `exact_postings` shares `term_postings`'s clustered key shape (field,
+// term, document_id) so the same bounded k-way merge sort pattern applies:
+// insert in `PRIMARY KEY`/`WITHOUT ROWID` clustered order instead of raw
+// arrival order to avoid B-tree page splits on out-of-order inserts.
+#[derive(Clone, Copy)]
+struct PreparedExactInsertRefV1<'a> {
+    document_id: i64,
+    field: &'a str,
+    term: &'a [u8],
+}
+
+impl PreparedExactInsertRefV1<'_> {
+    fn key(&self) -> (&str, &[u8], i64) {
+        (self.field, self.term, self.document_id)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedExactMergeCursorV1<'a> {
+    entry: PreparedExactInsertRefV1<'a>,
+    run_index: usize,
+    run_offset: usize,
+}
+
+impl PartialEq for PreparedExactMergeCursorV1<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry.key() == other.entry.key()
+            && self.run_index == other.run_index
+            && self.run_offset == other.run_offset
+    }
+}
+
+impl Eq for PreparedExactMergeCursorV1<'_> {}
+
+impl PartialOrd for PreparedExactMergeCursorV1<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PreparedExactMergeCursorV1<'_> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.entry
+            .key()
+            .cmp(&other.entry.key())
+            .then_with(|| self.run_index.cmp(&other.run_index))
+            .then_with(|| self.run_offset.cmp(&other.run_offset))
+    }
+}
+
+struct PreparedExactInsertPlanV1<'a> {
+    entries: Vec<PreparedExactInsertRefV1<'a>>,
+    merge_heap: BinaryHeap<Reverse<PreparedExactMergeCursorV1<'a>>>,
 }
 
 const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
@@ -1260,6 +1323,15 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         )?;
+        let mut exact_insert_plan = hotpath::measure_block!(
+            "query.artifact.batch.exact_order",
+            prepare_exact_insert_plan(
+                self.fixed_ledger_charge_bytes,
+                self.memory_budget_bytes,
+                pages,
+                control,
+            )
+        )?;
         hotpath::measure_block!("query.artifact.batch.sqlite", {
             let _mutation_authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
@@ -1278,7 +1350,13 @@ impl CodeLexicalArtifactBuilderV1 {
                 record_batch_row_metrics(pages);
                 hotpath::measure_block!(
                     "query.artifact.batch.postings",
-                    append_prepared_postings(&transaction, pages, &mut term_insert_plan, control)
+                    append_prepared_postings(
+                        &transaction,
+                        pages,
+                        &mut term_insert_plan,
+                        &mut exact_insert_plan,
+                        control,
+                    )
                 )?;
                 record_batch_posting_metrics(pages);
                 hotpath::measure_block!("query.artifact.batch.receipts", {
@@ -1867,7 +1945,7 @@ fn largest_exact_prepared_prefix(
         {
             return Ok((index, Some(exceeded)));
         }
-        let required = prepared_batch_memory_with_term_plan_required_bytes(
+        let required = prepared_batch_memory_with_posting_plans_required_bytes(
             fixed_ledger_charge_bytes,
             &pages[..=index],
         )?;
@@ -1993,13 +2071,41 @@ fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalA
         .ok_or_else(batch_ledger_overflow)
 }
 
-fn prepared_batch_memory_with_term_plan_required_bytes(
+fn prepared_exact_row_count(
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    pages
+        .iter()
+        .flat_map(|page| &page.documents)
+        .try_fold(0usize, |rows, document| {
+            rows.checked_add(document.exact_postings.len())
+                .ok_or_else(batch_ledger_overflow)
+        })
+}
+
+fn exact_insert_plan_ledger_bytes(exact_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let entries = exact_rows
+        .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
+        .ok_or_else(batch_ledger_overflow)?;
+    let runs = exact_rows.div_ceil(EXACT_INSERT_SORT_RUN_ROWS);
+    let merge_heap = runs
+        .checked_mul(std::mem::size_of::<PreparedExactMergeCursorV1<'static>>())
+        .ok_or_else(batch_ledger_overflow)?;
+    entries
+        .checked_add(merge_heap)
+        .ok_or_else(batch_ledger_overflow)
+}
+
+fn prepared_batch_memory_with_posting_plans_required_bytes(
     fixed_ledger_charge_bytes: usize,
     pages: &[PreparedCodeLexicalArtifactPageV1],
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let base = prepared_batch_memory_required_bytes(fixed_ledger_charge_bytes, pages)?;
-    let plan = term_insert_plan_ledger_bytes(prepared_term_row_count(pages)?)?;
-    base.checked_add(plan).ok_or_else(batch_ledger_overflow)
+    let term_plan = term_insert_plan_ledger_bytes(prepared_term_row_count(pages)?)?;
+    let exact_plan = exact_insert_plan_ledger_bytes(prepared_exact_row_count(pages)?)?;
+    base.checked_add(term_plan)
+        .and_then(|bytes| bytes.checked_add(exact_plan))
+        .ok_or_else(batch_ledger_overflow)
 }
 
 fn admit_prepared_page_batch(
@@ -2008,7 +2114,7 @@ fn admit_prepared_page_batch(
     pages: &[PreparedCodeLexicalArtifactPageV1],
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let required =
-        prepared_batch_memory_with_term_plan_required_bytes(fixed_ledger_charge_bytes, pages)?;
+        prepared_batch_memory_with_posting_plans_required_bytes(fixed_ledger_charge_bytes, pages)?;
     if required > memory_budget_bytes {
         return Err(batch_limit(
             CodeLexicalArtifactBatchLimitV1::Memory,
@@ -2160,6 +2266,133 @@ fn next_term_insert<'a>(
                 )
             })?;
             plan.merge_heap.push(Reverse(PreparedTermMergeCursorV1 {
+                entry,
+                run_index: cursor.run_index,
+                run_offset: next_offset,
+            }));
+        }
+    }
+    Ok(Some(cursor.entry))
+}
+
+// Mirrors `prepare_term_insert_plan`/`next_term_insert` for `exact_postings`,
+// whose `PRIMARY KEY(field, term, document_id)` `WITHOUT ROWID` layout has
+// the same clustered-index cost for out-of-order inserts as `term_postings`.
+fn prepare_exact_insert_plan<'a>(
+    fixed_ledger_charge_bytes: usize,
+    memory_budget_bytes: usize,
+    pages: &'a [PreparedCodeLexicalArtifactPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<PreparedExactInsertPlanV1<'a>, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let mut exact_rows = 0usize;
+    for page in pages {
+        checkpoint(control)?;
+        for document in &page.documents {
+            checkpoint(control)?;
+            exact_rows = exact_rows
+                .checked_add(document.exact_postings.len())
+                .ok_or_else(batch_ledger_overflow)?;
+            if exact_rows > CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1 {
+                return Err(batch_limit(
+                    CodeLexicalArtifactBatchLimitV1::PreparedRows,
+                    exact_rows,
+                    CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1,
+                ));
+            }
+        }
+    }
+    let plan_bytes = exact_insert_plan_ledger_bytes(exact_rows)?;
+    let required = prepared_batch_memory_required_bytes(fixed_ledger_charge_bytes, pages)?
+        .checked_add(plan_bytes)
+        .ok_or_else(batch_ledger_overflow)?;
+    if required > memory_budget_bytes {
+        return Err(batch_limit(
+            CodeLexicalArtifactBatchLimitV1::Memory,
+            required,
+            memory_budget_bytes,
+        ));
+    }
+
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(exact_rows).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "bounded lexical exact insert plan allocation failed: {error}"
+        ))
+    })?;
+    for page in pages {
+        checkpoint(control)?;
+        for document in &page.documents {
+            checkpoint(control)?;
+            entries.extend(document.exact_postings.iter().map(|(field, term)| {
+                PreparedExactInsertRefV1 {
+                    document_id: document.document_id,
+                    field: field.as_str(),
+                    term: term.as_slice(),
+                }
+            }));
+        }
+    }
+    for run in entries.chunks_mut(EXACT_INSERT_SORT_RUN_ROWS) {
+        checkpoint(control)?;
+        run.sort_unstable_by(|left, right| left.key().cmp(&right.key()));
+        checkpoint(control)?;
+    }
+    checkpoint(control)?;
+
+    let run_count = exact_rows.div_ceil(EXACT_INSERT_SORT_RUN_ROWS);
+    let mut merge_heap = BinaryHeap::new();
+    merge_heap.try_reserve_exact(run_count).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "bounded lexical exact merge heap allocation failed: {error}"
+        ))
+    })?;
+    for (run_index, run) in entries.chunks(EXACT_INSERT_SORT_RUN_ROWS).enumerate() {
+        checkpoint(control)?;
+        let Some(entry) = run.first().copied() else {
+            continue;
+        };
+        merge_heap.push(Reverse(PreparedExactMergeCursorV1 {
+            entry,
+            run_index,
+            run_offset: 0,
+        }));
+    }
+    Ok(PreparedExactInsertPlanV1 {
+        entries,
+        merge_heap,
+    })
+}
+
+fn next_exact_insert<'a>(
+    plan: &mut PreparedExactInsertPlanV1<'a>,
+) -> Result<Option<PreparedExactInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
+    let Some(Reverse(cursor)) = plan.merge_heap.pop() else {
+        return Ok(None);
+    };
+    let next_offset = cursor
+        .run_offset
+        .checked_add(1)
+        .ok_or_else(batch_ledger_overflow)?;
+    if next_offset < EXACT_INSERT_SORT_RUN_ROWS {
+        let run_start = cursor
+            .run_index
+            .checked_mul(EXACT_INSERT_SORT_RUN_ROWS)
+            .ok_or_else(batch_ledger_overflow)?;
+        let next_index = run_start
+            .checked_add(next_offset)
+            .ok_or_else(batch_ledger_overflow)?;
+        let run_end = run_start
+            .checked_add(EXACT_INSERT_SORT_RUN_ROWS)
+            .ok_or_else(batch_ledger_overflow)?
+            .min(plan.entries.len());
+        if next_index < run_end {
+            let entry = plan.entries.get(next_index).copied().ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical exact merge cursor escaped its bounded run".to_owned(),
+                )
+            })?;
+            plan.merge_heap.push(Reverse(PreparedExactMergeCursorV1 {
                 entry,
                 run_index: cursor.run_index,
                 run_offset: next_offset,
@@ -2676,6 +2909,7 @@ fn append_prepared_postings(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     term_insert_plan: &mut PreparedTermInsertPlanV1<'_>,
+    exact_insert_plan: &mut PreparedExactInsertPlanV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut term_statement = transaction
@@ -2683,10 +2917,23 @@ fn append_prepared_postings(
             "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
         )
         .map_err(sqlite_error)?;
+    // Plain INSERT, not `INSERT OR IGNORE`: `exact_postings` is
+    // `PRIMARY KEY(field, term, document_id) WITHOUT ROWID`. Every prepared
+    // document's `exact_postings` is deduplicated into a `BTreeSet<(field,
+    // term)>` before this stage (`prepared.rs::prepare_document`), so within
+    // one document the pair is unique; `document_id` is then unique across
+    // the whole prepared batch because `validate_prepared_page_batch`
+    // (this file) rejects any batch whose document ids are not a strictly
+    // contiguous continuation of the already-committed cursor, and
+    // `prepare_pages_inner` only ever prepares the fresh suffix of pages
+    // that cursor has not yet accepted — a resumed or replayed call reuses
+    // no document id that is already durable. Together those invariants
+    // make every (field, term, document_id) key in a prepared batch globally
+    // unique, both within the batch and against every already-committed
+    // row, so `OR IGNORE` could only mask a real corruption bug. A plain
+    // INSERT lets that surface as a constraint failure instead of vanishing.
     let mut exact_statement = transaction
-        .prepare_cached(
-            "INSERT OR IGNORE INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
-        )
+        .prepare_cached("INSERT INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)")
         .map_err(sqlite_error)?;
     let mut ngram_statement = transaction
         .prepare_cached(
@@ -2716,19 +2963,25 @@ fn append_prepared_postings(
             "lexical term merge omitted planned postings".to_owned(),
         ));
     }
-    for page in pages {
-        for document in &page.documents {
+    let expected_exact_rows = exact_insert_plan.entries.len();
+    let mut inserted_exact_rows = 0usize;
+    while let Some(entry) = next_exact_insert(exact_insert_plan)? {
+        if inserted_exact_rows.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
             checkpoint(control)?;
-            for (field, term) in &document.exact_postings {
-                exact_statement
-                    .execute(params![
-                        field.as_str(),
-                        term.as_slice(),
-                        document.document_id
-                    ])
-                    .map_err(sqlite_error)?;
-            }
         }
+        exact_statement
+            .execute(params![entry.field, entry.term, entry.document_id])
+            .map_err(sqlite_error)?;
+        inserted_exact_rows = inserted_exact_rows
+            .checked_add(1)
+            .ok_or_else(batch_ledger_overflow)?;
+    }
+    if inserted_exact_rows != expected_exact_rows {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "lexical exact merge omitted planned postings".to_owned(),
+        ));
+    }
+    for page in pages {
         for shard in &page.ngram_shards {
             checkpoint(control)?;
             ngram_statement

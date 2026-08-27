@@ -15,7 +15,7 @@ use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::lease::{GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot};
 use crate::{
     GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationDependency, GraphGenerationId,
-    GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+    GraphGenerationManifestIdentity, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
     GraphProjectionIdentity,
 };
 
@@ -202,6 +202,7 @@ impl GraphDbRegistry {
         }
     }
 
+    #[hotpath::measure(label = "graph_db.snapshot.verified", impl_type = "GraphDbRegistry")]
     pub fn verified_snapshot(
         &self,
         registration: GraphDbRegistration,
@@ -351,10 +352,10 @@ pub(super) fn collect_closure(
 }
 
 pub(super) fn validate_exact_dependency_closure(
-    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
     loaded: &BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
 ) -> Result<(), GraphDbError> {
-    let declared = manifest
+    let declared = identity
         .dependencies
         .iter()
         .map(|dependency| {
