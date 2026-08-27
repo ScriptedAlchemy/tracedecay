@@ -13,6 +13,9 @@
 .rtk/
 .sentrux/
 cache/
+# Vendored crate sources are immutable upstream trees; the transient-cache
+# pattern above must never swallow their in-tree `cache` modules.
+!vendor/**/cache/
 generated-illustrations/
 dashboard/app-dist/
 *.log
