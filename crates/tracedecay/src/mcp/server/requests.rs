@@ -1415,7 +1415,11 @@ impl McpServer {
         // lifecycle locks or fall back to the caller's response authority.
         let response_lifecycle = dispatch_server.project_server_lifecycle.clone();
         let response_gate = Arc::clone(response_lifecycle.response_gate());
-        let response_guard = response_gate.read_owned().await;
+        let response_guard = hotpath::future!(
+            response_gate.read_owned(),
+            label = "mcp.server.response_gate.wait"
+        )
+        .await;
         if response_lifecycle.response_revoked().is_cancelled() {
             return dispatch_server
                 .project_server_revoked_response(&id, &tool_name)

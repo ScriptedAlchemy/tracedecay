@@ -16,7 +16,8 @@ impl McpServer {
         line: &str,
         transport: &mut impl McpTransport,
     ) -> Result<()> {
-        let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(line);
+        let parsed: std::result::Result<JsonRpcRequest, _> =
+            hotpath::measure_block!("mcp.server.connection.decode", serde_json::from_str(line));
         let project_tool_call = parsed
             .as_ref()
             .is_ok_and(|request| request.method == "tools/call")
