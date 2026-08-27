@@ -164,11 +164,13 @@ impl SemanticRuntimeScheduleCancellationV1 {
             .and_then(|linked| linked.interruption())
     }
 
-    pub fn set_completed_units(&self, completed_units: u64) {
+    pub fn set_completed_units(&self, completed_units: u64) -> u64 {
         let completed_units = completed_units.min(self.total_units);
         self.completed_units
             .fetch_max(completed_units, Ordering::AcqRel);
+        let completed_units = self.completed_units.load(Ordering::Acquire);
         hotpath::gauge!("semantic_generation_completed_units").set(completed_units);
+        completed_units
     }
 
     pub(crate) fn completed_units(&self) -> u64 {
@@ -780,5 +782,14 @@ mod schedule_failure_tests {
                 .contains("rebuild_generation: vector generation plan is invalid"),
             "Debug must also carry the source: {failure:?}"
         );
+    }
+
+    #[test]
+    fn completed_units_ignore_out_of_order_regressions() {
+        let progress = SemanticRuntimeScheduleCancellationV1::new(8);
+
+        assert_eq!(progress.set_completed_units(5), 5);
+        assert_eq!(progress.set_completed_units(3), 5);
+        assert_eq!(progress.completed_units(), 5);
     }
 }
