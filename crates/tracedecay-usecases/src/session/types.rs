@@ -578,6 +578,7 @@ pub enum SessionRetrievalOutcome<T> {
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    TimedOut,
     Cancelled,
 }
 
@@ -586,11 +587,20 @@ pub enum SessionRetrievalOutcome<T> {
 /// so admission versus execution can be proven without a new wire kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRetrievalBudgetStageV1 {
-    RequestBudgetMismatch,
+    RequestResultLimit,
+    RequestHydrationLimit,
+    RequestContextBytes,
+    RequestCandidateBytes,
+    RequestRecordBytes,
+    RequestHydrationBytes,
+    EstimatorVersionMismatch,
     ExecutionWorkExhausted,
-    ParticipantManifestLimit,
+    KernelResultLimit,
+    ParticipantManifestParticipants,
+    ParticipantManifestCanonicalBytes,
     HydrationBytes,
     ContextBytes,
+    ContextTokens,
 }
 
 impl<T> SessionRetrievalOutcome<T> {
@@ -1508,7 +1518,7 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 13] = [
+        let states: [SessionRetrievalOutcome<()>; 14] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
@@ -1533,8 +1543,9 @@ mod tests {
                 maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
             },
             SessionRetrievalOutcome::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
             },
+            SessionRetrievalOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled,
         ];
 

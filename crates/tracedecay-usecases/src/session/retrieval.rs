@@ -20,8 +20,9 @@ use tracedecay_temporal_query::resolution::SummaryLineageRejection;
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 use crate::context::{
-    PolicyDigest, ResolvedSessionIdentity, SessionOwner, application_observed_at,
-    application_request_interruption, run_application_request_interruptible,
+    PolicyDigest, RequestInterruption, ResolvedSessionIdentity, SessionOwner,
+    application_observed_at, application_request_interruption,
+    run_application_request_interruptible,
 };
 use crate::session::ports::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
@@ -305,7 +306,7 @@ where
             Err(failure) => return failure.into_outcome(),
         };
         let expected_execution = admitted.execution.clone();
-        let Ok(result) = hotpath::future!(
+        let result = hotpath::future!(
             run_application_request_interruptible(
                 context,
                 binding.cancellation(),
@@ -316,9 +317,13 @@ where
             ),
             label = "usecases.session.execute"
         )
-        .await
-        else {
-            return SessionRetrievalOutcome::Cancelled;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(RequestInterruption::Cancelled) => return SessionRetrievalOutcome::Cancelled,
+            Err(RequestInterruption::DeadlineExceeded) => {
+                return SessionRetrievalOutcome::TimedOut;
+            }
         };
         match result {
             Ok(report) if expected_execution.validates_report(&report) => {
@@ -346,17 +351,40 @@ fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrieval
     SessionRetrievalOutcome::BudgetExhausted { stage }
 }
 
-fn within_request_budgets(binding: &SessionRequestBinding, query: &SessionTemporalQuery) -> bool {
+fn request_budget_refusal(
+    binding: &SessionRequestBinding,
+    query: &SessionTemporalQuery,
+) -> Option<SessionRetrievalBudgetStageV1> {
     let budgets = binding.budgets();
     let limits = query.execution_limits;
-    u64::try_from(query.limit).is_ok_and(|limit| limit <= budgets.max_results())
-        && query.limit <= limits.hydration_limit
-        && query.context_budget.max_bytes <= budgets.max_bytes()
-        && u64::try_from(limits.candidate_total_bytes)
-            .is_ok_and(|bytes| bytes <= budgets.max_bytes())
-        && u64::try_from(limits.record_total_bytes).is_ok_and(|bytes| bytes <= budgets.max_bytes())
-        && u64::try_from(limits.hydration_total_bytes)
-            .is_ok_and(|bytes| bytes <= budgets.max_bytes())
+    if !u64::try_from(query.limit).is_ok_and(|limit| limit <= budgets.max_results()) {
+        return Some(SessionRetrievalBudgetStageV1::RequestResultLimit);
+    }
+    if query.limit > limits.hydration_limit {
+        return Some(SessionRetrievalBudgetStageV1::RequestHydrationLimit);
+    }
+    if query.context_budget.max_bytes > budgets.max_bytes() {
+        return Some(SessionRetrievalBudgetStageV1::RequestContextBytes);
+    }
+    for (bytes, stage) in [
+        (
+            limits.candidate_total_bytes,
+            SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        ),
+        (
+            limits.record_total_bytes,
+            SessionRetrievalBudgetStageV1::RequestRecordBytes,
+        ),
+        (
+            limits.hydration_total_bytes,
+            SessionRetrievalBudgetStageV1::RequestHydrationBytes,
+        ),
+    ] {
+        if !u64::try_from(bytes).is_ok_and(|bytes| bytes <= budgets.max_bytes()) {
+            return Some(stage);
+        }
+    }
+    None
 }
 
 fn temporal_retrieval_scope(scope: &SessionRetrievalScope) -> TemporalRetrievalScope {
@@ -542,22 +570,23 @@ fn map_execution_error(
 
 fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
     match error {
-        TemporalKernelError::InvalidLimit | TemporalKernelError::BudgetExceeded => {
+        TemporalKernelError::InvalidLimit => {
+            budget_exhausted(SessionRetrievalBudgetStageV1::KernelResultLimit)
+        }
+        TemporalKernelError::BudgetExceeded => {
             budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
         }
-        TemporalKernelError::Cancelled | TemporalKernelError::DeadlineExceeded => {
-            SessionRetrievalOutcome::Cancelled
-        }
+        TemporalKernelError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        TemporalKernelError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         TemporalKernelError::Port(error) => match error {
-            TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
-                SessionRetrievalOutcome::Cancelled
-            }
+            TemporalPortError::Cancelled => SessionRetrievalOutcome::Cancelled,
+            TemporalPortError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
             TemporalPortError::BudgetExceeded { .. } => {
                 budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
             }
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
                 crate::hotpath_observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
+                    SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::Participants,
@@ -567,7 +596,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
                 crate::hotpath_observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
+                    SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::CanonicalBytes,
@@ -616,9 +645,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             HydrationError::BudgetExceeded { .. } => {
                 budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
             }
-            HydrationError::Interrupted(
-                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
-            ) => SessionRetrievalOutcome::Cancelled,
+            HydrationError::Interrupted(TemporalPortError::Cancelled) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            HydrationError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::TimedOut
+            }
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
             }
@@ -631,12 +663,15 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
         },
         TemporalKernelError::Context(error) => match error {
-            ContextError::BudgetExceeded { .. } => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
+            ContextError::BudgetExceeded { resource } => {
+                budget_exhausted(context_budget_stage(resource))
             }
-            ContextError::Interrupted(
-                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
-            ) => SessionRetrievalOutcome::Cancelled,
+            ContextError::Interrupted(TemporalPortError::Cancelled) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            ContextError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::TimedOut
+            }
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
             }
@@ -650,6 +685,13 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         TemporalKernelError::Ranking(_) | TemporalKernelError::CandidateExportContract(_) => {
             SessionRetrievalOutcome::Unavailable
         }
+    }
+}
+
+fn context_budget_stage(resource: &'static str) -> SessionRetrievalBudgetStageV1 {
+    match resource {
+        "token" => SessionRetrievalBudgetStageV1::ContextTokens,
+        _ => SessionRetrievalBudgetStageV1::ContextBytes,
     }
 }
 
@@ -927,6 +969,66 @@ mod tests {
                 maximum: 65_536,
             }
         );
+    }
+
+    #[test]
+    fn deadline_and_cancellation_remain_distinct_application_outcomes() {
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::DeadlineExceeded),
+            SessionRetrievalOutcome::TimedOut
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::DeadlineExceeded,
+            )),
+            SessionRetrievalOutcome::TimedOut
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cancelled),
+            SessionRetrievalOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn structural_refusals_preserve_their_source() {
+        for (error, expected) in [
+            (
+                TemporalKernelError::InvalidLimit,
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::KernelResultLimit,
+                },
+            ),
+            (
+                TemporalKernelError::BudgetExceeded,
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                },
+            ),
+            (
+                TemporalKernelError::Port(TemporalPortError::ParticipantLimitExceeded {
+                    observed: 257,
+                    maximum: 256,
+                }),
+                SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                    kind: CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                },
+            ),
+            (
+                TemporalKernelError::Port(TemporalPortError::ParticipantManifestBytesExceeded {
+                    observed: 4_097,
+                    maximum: 4_096,
+                }),
+                SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                    kind: CursorManifestLimitKindV1::CanonicalBytes,
+                    observed: 4_097,
+                    maximum: 4_096,
+                },
+            ),
+        ] {
+            assert_eq!(map_kernel_error(error), expected);
+        }
     }
 
     #[test]
