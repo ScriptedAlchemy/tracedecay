@@ -128,6 +128,11 @@ const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
+#[cfg(feature = "hotpath")]
+static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hotpath")]
+static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
 pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
     canonical_project_root: &Path,
@@ -420,6 +425,61 @@ impl Drop for DecodeLeaseV1<'_> {
             state.in_flight.retain(|pending| *pending != self.subject);
         }
         self.cache.ready.notify_all();
+    }
+}
+
+#[cfg(feature = "hotpath")]
+struct GenerationDecodeObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl GenerationDecodeObservationV1 {
+    fn enter() -> Self {
+        let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("code_index.generation.decode.attempts_total").inc(1_u64);
+        hotpath::gauge!("code_index.generation.decode.active").set(active);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for GenerationDecodeObservationV1 {
+    fn drop(&mut self) {
+        let _ = CODE_INDEX_GENERATION_DECODES_ACTIVE.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |active| active.checked_sub(1),
+        );
+        hotpath::gauge!("code_index.generation.decode.active")
+            .set(CODE_INDEX_GENERATION_DECODES_ACTIVE.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(feature = "hotpath")]
+struct GenerationDecodeWaitObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl GenerationDecodeWaitObservationV1 {
+    fn enter() -> Self {
+        let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("code_index.generation.decode.waiters").set(waiters);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for GenerationDecodeWaitObservationV1 {
+    fn drop(&mut self) {
+        let _ = CODE_INDEX_GENERATION_DECODE_WAITERS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |waiters| waiters.checked_sub(1),
+        );
+        hotpath::gauge!("code_index.generation.decode.waiters")
+            .set(CODE_INDEX_GENERATION_DECODE_WAITERS.load(Ordering::Relaxed));
     }
 }
 
@@ -947,11 +1007,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if state.is_in_flight(&subject) {
                 // Another caller already owns this O(store) decode. Park on it
                 // rather than starting a second sweep over the same bytes.
-                let _parked = self
-                    .cache
-                    .ready
-                    .wait(state)
-                    .map_err(|_| DecodedGenerationCacheV1::poisoned())?;
+                #[cfg(feature = "hotpath")]
+                let _waiting = GenerationDecodeWaitObservationV1::enter();
+                let _parked =
+                    hotpath::measure_block!("code_index.generation.decode.singleflight_wait", {
+                        self.cache
+                            .ready
+                            .wait(state)
+                            .map_err(|_| DecodedGenerationCacheV1::poisoned())
+                    })?;
                 continue;
             }
             let epoch = state.active_epoch;
@@ -1012,32 +1076,42 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "indexed code-generation byte size does not match its durable entry",
             ));
         }
-        let bytes = std::fs::read(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Self::corruption("durable code-generation index target disappeared during read")
-            } else {
-                Self::unavailable(error)
-            }
+        #[cfg(feature = "hotpath")]
+        let _decode = GenerationDecodeObservationV1::enter();
+        let bytes = hotpath::measure_block!("code_index.generation.decode.file_read", {
+            std::fs::read(path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Self::corruption("durable code-generation index target disappeared during read")
+                } else {
+                    Self::unavailable(error)
+                }
+            })
         })?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(bytes_read) = u64::try_from(bytes.len()) {
+            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
+        }
         let actual_size = u64::try_from(bytes.len()).map_err(Self::unavailable)?;
         if actual_size != entry.size_bytes {
             return Err(Self::corruption(
                 "indexed code-generation byte size does not match its durable entry",
             ));
         }
-        if Self::state_digest(&bytes) != entry.state_digest {
+        let state_digest = hotpath::measure_block!(
+            "code_index.generation.decode.file_digest",
+            Self::state_digest(&bytes)
+        );
+        if state_digest != entry.state_digest {
             return Err(Self::corruption(
                 "indexed code-generation bytes do not match their sealed digest",
             ));
         }
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
-            .map_err(Self::unavailable)?
-        {
+        let Some(generation) = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&bytes)
+            .map_err(Self::corruption)?
+        else {
             return Ok(None);
-        }
+        };
         self.cache.note_decode();
-        let generation =
-            CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::corruption)?;
         if let Some(cardinality) = entry.cardinality.as_ref()
             && Self::generation_cardinality(&generation)? != *cardinality
         {
@@ -1123,11 +1197,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 // rather than starting a second sweep over the same bytes.
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_add(1, Ordering::AcqRel);
-                let parked = self
-                    .cache
-                    .ready
-                    .wait(state)
-                    .map_err(|_| DecodedGenerationCacheV1::poisoned());
+                #[cfg(feature = "hotpath")]
+                let _waiting = GenerationDecodeWaitObservationV1::enter();
+                let parked = hotpath::measure_block!(
+                    "code_index.generation.decode.singleflight_wait",
+                    self.cache
+                        .ready
+                        .wait(state)
+                        .map_err(|_| DecodedGenerationCacheV1::poisoned())
+                );
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_sub(1, Ordering::AcqRel);
                 let _parked = parked?;
@@ -1194,26 +1272,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation byte size does not match its durable entry",
             ));
         }
-        let generation_bytes = std::fs::read(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Self::corruption("active code-generation target is missing")
-            } else {
-                Self::unavailable(error)
-            }
-        })?;
-        if Self::state_digest(&generation_bytes) != pointer.state_digest {
+        #[cfg(feature = "hotpath")]
+        let _decode = GenerationDecodeObservationV1::enter();
+        let generation_bytes =
+            hotpath::measure_block!("code_index.generation.decode.file_read", {
+                std::fs::read(path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Self::corruption("active code-generation target is missing")
+                    } else {
+                        Self::unavailable(error)
+                    }
+                })
+            })?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(bytes_read) = u64::try_from(generation_bytes.len()) {
+            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
+        }
+        let state_digest = hotpath::measure_block!(
+            "code_index.generation.decode.file_digest",
+            Self::state_digest(&generation_bytes)
+        );
+        if state_digest != pointer.state_digest {
             return Err(Self::corruption(
                 "sealed code-generation bytes do not match the active pointer digest",
             ));
         }
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&generation_bytes)
-            .map_err(Self::unavailable)?
-        {
+        let Some(generation) =
+            CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&generation_bytes)
+                .map_err(Self::corruption)?
+        else {
             return Ok(None);
-        }
+        };
         self.cache.note_decode();
-        let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
-            .map_err(Self::corruption)?;
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
