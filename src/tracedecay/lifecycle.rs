@@ -229,11 +229,7 @@ impl TraceDecay {
         // stay behind the rare paths that actually compare stores. Resolving a
         // layout is on every open, including fail-closed clients that must not
         // touch the store at all.
-        let (
-            candidates,
-            selected_manifest_matches_exact_root,
-            candidates_match_exact_root,
-        ) =
+        let (candidates, selected_manifest_matches_exact_root, candidates_match_exact_root) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
         if selected.is_some()
             && !candidates.is_empty()
@@ -265,6 +261,9 @@ impl TraceDecay {
         )
     }
 
+    // The four flags mirror the resolver evidence computed by the sole
+    // caller; a params struct would outlive this soon-to-move code.
+    #[allow(clippy::fn_params_excessive_bools)]
     async fn choose_identity_layout(
         project_root: &Path,
         selected: Option<StoreLayout>,
@@ -280,14 +279,27 @@ impl TraceDecay {
         // This resolver uses bounded presence probes only; the subsequent
         // serving open performs full integrity validation and fails closed.
         // Legacy duplicates stay untouched, while an empty or unreadable
-        // selected store still reaches the fail-closed diagnostics.
+        // selected store still reaches the fail-closed diagnostics. An
+        // exact-root candidate with real content is a genuine identity
+        // cutover: it keeps the fail-closed conflict diagnostics instead of
+        // being silently outranked.
         if (selected_manifest_matches_exact_root
             || (selected_via_exact_registry_alias && !candidates_match_exact_root))
             && !candidates.is_empty()
-            && let Some(selected) = selected.as_ref()
+            && let Some(selected_layout) = selected.as_ref()
+            && store_identity_has_bounded_population_evidence(selected_layout).await
         {
-            if store_identity_has_bounded_population_evidence(selected).await {
-                return Ok(Some(selected.clone()));
+            let mut exact_candidate_is_populated = false;
+            if candidates_match_exact_root {
+                for candidate in &candidates {
+                    if store_identity_has_bounded_population_evidence(candidate).await {
+                        exact_candidate_is_populated = true;
+                        break;
+                    }
+                }
+            }
+            if !exact_candidate_is_populated {
+                return Ok(Some(selected_layout.clone()));
             }
         }
         if candidates.len() > 1 {
@@ -1567,9 +1579,8 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
         tree_has_files(&layout.lcm_payload_root),
         tree_has_files(&layout.response_handle_root),
     );
-    let (automation_files, payload_files, response_files) = match tree_presence {
-        (Ok(automation), Ok(payloads), Ok(responses)) => (automation, payloads, responses),
-        _ => return false,
+    let (Ok(automation_files), Ok(payload_files), Ok(response_files)) = tree_presence else {
+        return false;
     };
 
     graph_is_populated
@@ -1591,11 +1602,10 @@ fn branch_inventory(data_root: &Path) -> std::result::Result<usize, ()> {
     let path = data_root.join(storage::BRANCH_META_FILENAME);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(_) => Err(()),
         Ok(metadata) if metadata.file_type().is_file() => branch_meta::load_branch_meta(data_root)
             .map(|meta| meta.branches.len())
             .ok_or(()),
-        Ok(_) => Err(()),
+        Err(_) | Ok(_) => Err(()),
     }
 }
 

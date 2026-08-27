@@ -402,6 +402,8 @@ async fn synthesized_branch_metadata_change_invalidates_confirmation_token() {
 
 #[tokio::test]
 async fn hook_analytics_append_after_plan_preserves_bytes_without_invalidating_confirmation() {
+    use std::io::Write;
+
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let telemetry_path = source.data_root.join("hook_analytics.jsonl");
@@ -411,7 +413,6 @@ async fn hook_analytics_append_after_plan_preserves_bytes_without_invalidating_c
     let options = fixture.options();
 
     let planned = plan(&options).await.unwrap();
-    use std::io::Write;
     fs::OpenOptions::new()
         .append(true)
         .open(&telemetry_path)
