@@ -1,3 +1,9 @@
+// Required for the hotpath feature: layout computation for the boxed
+// `_inner` async bodies in daemon::bootstrap::run_foreground,
+// daemon::core_doctor::write_doctor_runtime_response, and
+// daemon::projectless::serve_projectless_client overflows the default query
+// depth (each reports "query depth increased by 130").
+#![recursion_limit = "256"]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]

@@ -12,6 +12,7 @@ use super::*;
 
 static WARMING_BOOTSTRAP_TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
 
+#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
 fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
     if let Some(definitions) = WARMING_BOOTSTRAP_TOOLS.get() {
         return Ok(definitions.clone());
@@ -51,32 +52,47 @@ pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
     warming_bootstrap_tool_definitions().map(|_| ())
 }
 
+#[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
     first_request_line: &str,
     store_administration: &StoreAdministration,
 ) -> Result<Option<InitializeRouteMetadata>> {
-    if !handshake.allow_initialize_root_routing {
-        return Ok(None);
-    }
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
-        return Ok(None);
-    };
-    if request.method != "initialize" {
-        return Ok(None);
-    }
-    let registry = store_administration.registered_profile_database().await?;
-    let Some(route) =
-        resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await?
-    else {
-        return Ok(None);
-    };
-    if handshake.project_path.as_deref() != Some(route.project_path.as_path()) {
-        handshake.scope_prefix = None;
-    }
-    handshake.project_path = Some(route.project_path.clone());
-    handshake.allow_init = route.allow_init;
-    Ok(Some(route))
+    apply_daemon_initialize_route_inner(handshake, first_request_line, store_administration).await
+}
+
+fn apply_daemon_initialize_route_inner<'a>(
+    handshake: &'a mut DaemonHandshake,
+    first_request_line: &'a str,
+    store_administration: &'a StoreAdministration,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<InitializeRouteMetadata>>> + Send + 'a>,
+> {
+    // Erase the deeply nested future before it reaches the measured wrapper
+    // so every profiling feature can compute its layout.
+    Box::pin(async move {
+        if !handshake.allow_initialize_root_routing {
+            return Ok(None);
+        }
+        let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
+            return Ok(None);
+        };
+        if request.method != "initialize" {
+            return Ok(None);
+        }
+        let registry = store_administration.registered_profile_database().await?;
+        let Some(route) =
+            resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await?
+        else {
+            return Ok(None);
+        };
+        if handshake.project_path.as_deref() != Some(route.project_path.as_path()) {
+            handshake.scope_prefix = None;
+        }
+        handshake.project_path = Some(route.project_path.clone());
+        handshake.allow_init = route.allow_init;
+        Ok(Some(route))
+    })
 }
 
 pub(super) fn attach_initialize_route_metadata(
@@ -122,13 +138,16 @@ pub(super) fn daemon_bootstrap_response(
                 let authority = default_catalog_discovery_authority();
                 match (profile_id, authority) {
                     (Ok(profile_id), Ok(authority)) => {
-                        let definitions = get_catalog_filtered_tool_definitions_with_budget(
-                            node_count,
-                            budget,
-                            &profile_id,
-                            &authority,
-                            &project_catalog_discovery_scope(),
-                            ToolRegistryMode::HostAvailable,
+                        let definitions = hotpath::measure_block!(
+                            "daemon.bootstrap.catalog",
+                            get_catalog_filtered_tool_definitions_with_budget(
+                                node_count,
+                                budget,
+                                &profile_id,
+                                &authority,
+                                &project_catalog_discovery_scope(),
+                                ToolRegistryMode::HostAvailable
+                            )
                         );
                         match definitions {
                             Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
@@ -151,31 +170,43 @@ pub(super) fn daemon_bootstrap_response(
     }
 }
 
+#[hotpath::measure(label = "daemon.bootstrap.project_node_count", future = true)]
 pub(super) async fn cached_project_node_count(
     store_administration: &StoreAdministration,
     handshake: &DaemonHandshake,
 ) -> Option<u64> {
-    let project_path = handshake.project_path.as_ref()?;
-    let canonical_project_path = project_path
-        .canonicalize()
-        .unwrap_or_else(|_| project_path.clone());
-    let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
-    let _server = {
-        let servers = store_administration.project_servers().lock().await;
-        servers
-            .get_route(&route)
-            .map(|(_, server)| Arc::clone(server))
-    }?;
-    ensure_registered_project_route(
-        store_administration,
-        &canonical_project_path,
-        handshake.allow_init,
-    )
-    .await
-    .ok()?;
-    // Bootstrap routing does not receive the daemon invocation state's
-    // retained code-index scheduler. A mounted project alone cannot prove a
-    // current generation or node count, so catalog discovery stays in its
-    // explicit warming state instead of reading the retired SQLite graph.
-    None
+    cached_project_node_count_inner(store_administration, handshake).await
+}
+
+fn cached_project_node_count_inner<'a>(
+    store_administration: &'a StoreAdministration,
+    handshake: &'a DaemonHandshake,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + 'a>> {
+    // Erase the deeply nested future before it reaches the measured wrapper
+    // so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let project_path = handshake.project_path.as_ref()?;
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
+        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
+        let _server = {
+            let servers = store_administration.project_servers().lock().await;
+            servers
+                .get_route(&route)
+                .map(|(_, server)| Arc::clone(server))
+        }?;
+        ensure_registered_project_route(
+            store_administration,
+            &canonical_project_path,
+            handshake.allow_init,
+        )
+        .await
+        .ok()?;
+        // Bootstrap routing does not receive the daemon invocation state's
+        // retained code-index scheduler. A mounted project alone cannot prove a
+        // current generation or node count, so catalog discovery stays in its
+        // explicit warming state instead of reading the retired SQLite graph.
+        None
+    })
 }
