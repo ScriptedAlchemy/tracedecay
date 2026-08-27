@@ -1580,15 +1580,33 @@ impl GitHubCiReadOnlyClientV1 {
                 // conditional response would have contained.
                 Some(HttpResponseV1::NotModified { etag, .. }) => {
                     cached.map_or(GitHubCiTransportOutcomeV1::Unavailable, |entry| {
-                        if let Some(etag) = etag.as_ref() {
-                            let _ = self.response_cache.refresh_etag_if_current(
-                                &cache_url,
-                                entry.revision,
-                                &entry.etag,
-                                etag,
-                            );
+                        let refreshed = self.response_cache.refresh_etag_if_current(
+                            &cache_url,
+                            entry.revision,
+                            &entry.etag,
+                            etag.as_ref().unwrap_or(&entry.etag),
+                        );
+                        match refreshed {
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Stored => {
+                                GitHubCiTransportOutcomeV1::Response(entry.body.as_ref().to_vec())
+                            }
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Ignored => {
+                                match self.response_cache.get(&cache_url) {
+                                    super::ci_cache::CiResponseCacheReadOutcomeV1::Hit(current) => {
+                                        GitHubCiTransportOutcomeV1::Response(
+                                            current.body.as_ref().to_vec(),
+                                        )
+                                    }
+                                    super::ci_cache::CiResponseCacheReadOutcomeV1::Miss
+                                    | super::ci_cache::CiResponseCacheReadOutcomeV1::Unavailable => {
+                                        GitHubCiTransportOutcomeV1::Unavailable
+                                    }
+                                }
+                            }
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Unavailable => {
+                                GitHubCiTransportOutcomeV1::Unavailable
+                            }
                         }
-                        GitHubCiTransportOutcomeV1::Response(entry.body.as_ref().to_vec())
                     })
                 }
                 Some(HttpResponseV1::RateLimited {
@@ -2872,23 +2890,29 @@ mod tests {
 
     #[tokio::test]
     async fn secondary_limit_blocks_even_with_positive_primary_headers() {
+        let retry_deadline = Arc::new(Mutex::new(None));
+        let first_deadline = Arc::clone(&retry_deadline);
         assert_ci_quota_response_blocks_page_two(
             b"HTTP/1.1 429 Too Many Requests\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4000\r\nX-RateLimit-Reset: 2000000000\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 .to_vec(),
             None,
-            |actual| {
-                assert!(matches!(
-                    actual,
-                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
-                        if checkpoint.remaining == 4_000
-                ));
+            move |actual| {
+                let GitHubCiTransportOutcomeV1::RateLimited(checkpoint) = actual else {
+                    panic!("the provider response must report its secondary limit");
+                };
+                assert_eq!(checkpoint.remaining, 4_000);
+                *first_deadline.lock().unwrap() = Some(checkpoint.reset_at);
             },
-            |actual| {
-                assert!(matches!(
-                    actual,
-                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
-                        if checkpoint.remaining == 4_000
-                ));
+            move |actual| {
+                let GitHubCiTransportOutcomeV1::RateLimited(checkpoint) = actual else {
+                    panic!("page two must report the retained secondary limit");
+                };
+                assert_eq!(checkpoint.remaining, 4_000);
+                assert_eq!(
+                    Some(checkpoint.reset_at),
+                    *retry_deadline.lock().unwrap(),
+                    "page two must expose Retry-After, not the primary reset"
+                );
             },
         )
         .await;
@@ -2976,6 +3000,77 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("if-none-match:"),
             "a repeated read must send the retained validator"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_concurrent_304_returns_the_current_retained_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (first_request_tx, first_request_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let (first_headers, _) = read_http_request_with_headers(&mut first);
+            assert!(
+                first_headers
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: e1")
+            );
+            first_request_tx.send(()).unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let (second_headers, _) = read_http_request_with_headers(&mut second);
+            assert!(
+                second_headers
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: e1")
+            );
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nETag: E2\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 3999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: 2\r\nConnection: close\r\n\r\nB2"
+            )
+            .unwrap();
+
+            release_first_rx.recv().unwrap();
+            write!(
+                first,
+                "HTTP/1.1 304 Not Modified\r\nETag: E1\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 3998\r\nX-RateLimit-Reset: 2000000000\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let client = ci_fixture_client(address);
+        let url = format!("http://{address}/repos/ScriptedAlchemy/tracedecay/actions/runs/95");
+        let _ = client
+            .response_cache
+            .retain(&url, &GitHubReviewEtagV1::new("E1").unwrap(), b"B1");
+        let _ = client
+            .rate_limits
+            .record(&GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 4_000,
+                reset_at: UtcMicros(2_000_000_000_000_000),
+            });
+
+        let first_client = client.clone();
+        let first_context = context(&scope("ci-stale-304-first"));
+        let first_read =
+            tokio::spawn(async move { first_client.read_workflow_run(&first_context, 95).await });
+        tokio::task::spawn_blocking(move || first_request_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let second_context = context(&scope("ci-stale-304-second"));
+        let second = client.read_workflow_run(&second_context, 95).await;
+        assert_eq!(second, GitHubCiTransportOutcomeV1::Response(b"B2".to_vec()));
+        release_first_tx.send(()).unwrap();
+        let first = first_read.await.unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            first,
+            GitHubCiTransportOutcomeV1::Response(b"B2".to_vec()),
+            "the stale 304 must not return its pre-request B1 snapshot"
         );
     }
 
