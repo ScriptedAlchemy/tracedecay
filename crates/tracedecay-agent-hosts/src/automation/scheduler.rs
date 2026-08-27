@@ -459,48 +459,55 @@ fn schedule_decision_for_trigger(
         task,
         enforce_schedule.then_some(AutomationTrigger::Scheduler),
     )?;
-    if let Some((record, completed_at)) = latest_cadence
-        && record.status == AutomationRunStatus::Failed
-    {
-        let failure = agent_task_failure_disposition(
-            record.error_classification,
-            record.error_retryable,
-            record.error.as_deref(),
-        );
-        // Identity-stand first: a deterministic failure stamped under the
-        // current backend stays suppressed until that identity changes.
-        match deterministic_backend_failure_stands(record, config) {
-            Ok(true) => {
+    let retryable_cadence_terminal = latest_cadence.is_some_and(|(record, _)| {
+        record.status == AutomationRunStatus::Failed
+            || skipped_terminal_failure_class(record)
+                .is_some_and(AgentTaskFailureClass::is_retryable)
+    });
+    if let Some((record, completed_at)) = latest_cadence {
+        if record.status == AutomationRunStatus::Failed {
+            let failure = agent_task_failure_disposition(
+                record.error_classification,
+                record.error_retryable,
+                record.error.as_deref(),
+            );
+            // Identity-stand first: a deterministic failure stamped under the
+            // current backend stays suppressed until that identity changes.
+            match deterministic_backend_failure_stands(record, config) {
+                Ok(true) => {
+                    return Ok(AutomationScheduleDecision::skipped(
+                        BACKEND_IDENTITY_SUPPRESSED,
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to derive automation backend identity for standing-failure admission"
+                    );
+                    return Err(error);
+                }
+            }
+            // Denied is configuration/policy state and uses the ordinary
+            // cooldown so a changed grant can recover without a backend identity
+            // stamp. Other non-retryable failures remain suppressed.
+            if failure.is_non_retryable()
+                && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
+            {
                 return Ok(AutomationScheduleDecision::skipped(
-                    BACKEND_IDENTITY_SUPPRESSED,
+                    "scheduler_non_retryable_failure",
                 ));
             }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "failed to derive automation backend identity for standing-failure admission"
-                );
-                return Err(error);
+        }
+        if retryable_cadence_terminal {
+            let cooldown_secs = task_config
+                .cooldown_secs
+                .unwrap_or(DEFAULT_FAILURE_COOLDOWN_SECS);
+            if elapsed_secs(completed_at, now_secs) < cooldown_secs {
+                return Ok(AutomationScheduleDecision::skipped(
+                    "scheduler_cooldown_active",
+                ));
             }
-        }
-        // Denied is configuration/policy state and uses the ordinary
-        // cooldown so a changed grant can recover without a backend identity
-        // stamp. Other non-retryable failures remain suppressed.
-        if failure.is_non_retryable()
-            && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
-        {
-            return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_non_retryable_failure",
-            ));
-        }
-        let cooldown_secs = task_config
-            .cooldown_secs
-            .unwrap_or(DEFAULT_FAILURE_COOLDOWN_SECS);
-        if elapsed_secs(completed_at, now_secs) < cooldown_secs {
-            return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_cooldown_active",
-            ));
         }
     }
 
@@ -518,10 +525,10 @@ fn schedule_decision_for_trigger(
                     .is_some_and(|last_activity| last_activity > started_at)
             });
 
-    if let Some((record, completed_at)) = latest_cadence {
-        // A failed run that has cleared its policy and cooldown gates is
-        // retryable now; it does not wait for the ordinary interval.
-        if record.status != AutomationRunStatus::Failed {
+    if let Some((_, completed_at)) = latest_cadence {
+        // A retryable terminal that has cleared its policy and cooldown gates
+        // is due now; it does not wait for the ordinary interval.
+        if !retryable_cadence_terminal {
             if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity)
                 && elapsed_secs(completed_at, now_secs) < interval_secs
             {
@@ -545,15 +552,14 @@ fn schedule_decision_for_trigger(
         ));
     }
 
-    // Authority is required after failure policy/cooldown gates, so a failed
-    // task cannot become due merely because its cooldown elapsed while the
+    // Authority is required after failure policy/cooldown gates, so a task
+    // cannot become due merely because its cooldown elapsed while the
     // canonical message-search activity signal is unavailable. Retryable
-    // failures may reuse existing evidence; successes and effectful skips
-    // require genuinely newer activity.
+    // terminals may reuse existing evidence; successes and other effectful
+    // skips require genuinely newer activity.
     if task_consumes_session_evidence(task) {
         let has_activity_authority = activity.last_activity_secs.is_some();
-        let requires_fresh_activity =
-            latest_cadence.is_some_and(|(record, _)| record.status != AutomationRunStatus::Failed);
+        let requires_fresh_activity = latest_cadence.is_some() && !retryable_cadence_terminal;
         if !has_activity_authority || (requires_fresh_activity && !fresh_session_activity) {
             return Ok(AutomationScheduleDecision::skipped(
                 "no_new_session_activity",
@@ -652,6 +658,23 @@ fn task_consumes_session_evidence(task: AgentTaskKind) -> bool {
         | AgentTaskKind::SkillWriter
         | AgentTaskKind::CombinedReview => true,
         AgentTaskKind::MemoryCurator | AgentTaskKind::UserJob => false,
+    }
+}
+
+/// Classifies effectful session-evidence skips through the same retry
+/// authority used by failed backend attempts. Retrieval timeout is transient
+/// and keeps the ordinary cooldown; cancellation is intentionally absent
+/// because it remains an effectful skip awaiting fresh activity.
+fn skipped_terminal_failure_class(
+    record: &AutomationRunLedgerRecord,
+) -> Option<AgentTaskFailureClass> {
+    if record.status != AutomationRunStatus::Skipped || !task_consumes_session_evidence(record.task)
+    {
+        return None;
+    }
+    match record.error.as_deref()? {
+        "session_evidence_timed_out" => Some(AgentTaskFailureClass::Timeout),
+        _ => None,
     }
 }
 
@@ -2100,6 +2123,61 @@ evidence about it",
                 2_060,
             )
             .is_due()
+        );
+    }
+
+    #[test]
+    fn evidence_timeout_retries_after_cooldown_without_conflating_cancellation() {
+        let config = session_evidence_config();
+        let timeout = scheduler_ledger_record(
+            "run-evidence-timeout",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Skipped,
+            Some("session_evidence_timed_out"),
+            2_000,
+        );
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                std::slice::from_ref(&timeout),
+                SessionActivity::at(1_500),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64 - 1,
+            )
+            .skip_reason(),
+            Some("scheduler_cooldown_active"),
+        );
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                std::slice::from_ref(&timeout),
+                SessionActivity::at(1_500),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            )
+            .is_due(),
+            "canonical timeout retry may reuse the evidence request after cooldown",
+        );
+
+        let cancelled = scheduler_ledger_record(
+            "run-evidence-cancelled",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Skipped,
+            Some("session_evidence_cancelled"),
+            2_000,
+        );
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &[cancelled],
+                SessionActivity::at(1_500),
+                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
+            )
+            .skip_reason(),
+            Some("no_new_session_activity"),
+            "cancellation remains an effectful skip that needs fresh activity",
         );
     }
 
