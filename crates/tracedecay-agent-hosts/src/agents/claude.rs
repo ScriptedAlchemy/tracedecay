@@ -948,37 +948,22 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
 ///
 /// Handles the steady marker plus display-case product name.
 fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
-    if !claude_md_path.exists() {
-        return Ok(());
-    }
-    let contents =
-        std::fs::read_to_string(claude_md_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to read {}: {error}", claude_md_path.display()),
-        })?;
-    if !contents.contains("tracedecay") {
-        eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
-        return Ok(());
-    }
-    let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
-        return Ok(());
-    };
-    let new_contents = super::prompt_rules::splice_out(&contents, range.start, range.end);
-    if new_contents.is_empty() {
-        super::safe_remove_host_file(claude_md_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", claude_md_path.display()),
-        })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            claude_md_path.display()
-        );
-    } else {
-        safe_write_text_file(claude_md_path, &format!("{new_contents}\n"), None)?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            claude_md_path.display()
-        );
-    }
-    Ok(())
+    super::prompt_rules::remove_prompt_rules_with(claude_md_path, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(range) = claude_md_rules_block_range(contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
