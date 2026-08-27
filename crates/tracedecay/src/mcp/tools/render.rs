@@ -37,6 +37,7 @@ where
     finalize_with_format(project_root, parse_format(args), value, md)
 }
 
+#[hotpath::measure(label = "mcp.server.response.render")]
 pub(super) fn finalize_with_format<F>(
     project_root: Option<&Path>,
     format: RequestedOutputFormat,
@@ -360,7 +361,10 @@ fn prepare_truncated_response_handle(
     text: &str,
 ) -> TruncatedResponseHandle {
     if let Some(root) = project_root {
-        match run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp())) {
+        match hotpath::measure_block!(
+            "mcp.server.response.handle_store",
+            run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))
+        ) {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,

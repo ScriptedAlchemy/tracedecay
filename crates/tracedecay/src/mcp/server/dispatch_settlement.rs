@@ -9,6 +9,11 @@ const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
 const SETTLEMENT_JOINED: u8 = 2;
 
+#[cfg(feature = "hotpath")]
+type RetainedDispatchStateMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type RetainedDispatchStateMutex<T> = tokio::sync::Mutex<T>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DispatchSettlement {
     NotStarted,
@@ -108,6 +113,39 @@ struct ActiveDispatch {
     cancellation: tracedecay_application::CancellationSignal,
     live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
+    _gauge: ActiveDispatchGaugeGuard,
+}
+
+struct ActiveDispatchGaugeGuard;
+
+impl ActiveDispatchGaugeGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.server.dispatch.active").inc(1_u64);
+        hotpath::gauge!("mcp.server.dispatch.admitted_total").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for ActiveDispatchGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.server.dispatch.active").dec(1_u64);
+        hotpath::gauge!("mcp.server.dispatch.settled_total").inc(1_u64);
+    }
+}
+
+struct DispatchAdmissionWaitGuard;
+
+impl DispatchAdmissionWaitGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.server.dispatch.admission_waiters").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for DispatchAdmissionWaitGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.server.dispatch.admission_waiters").dec(1_u64);
+    }
 }
 
 struct RetainedDispatchState {
@@ -124,7 +162,7 @@ struct RetainedDispatchState {
 pub(super) struct RetainedDispatchRegistry {
     accepting: AtomicBool,
     capacity: usize,
-    state: tokio::sync::Mutex<RetainedDispatchState>,
+    state: RetainedDispatchStateMutex<RetainedDispatchState>,
 }
 
 impl RetainedDispatchRegistry {
@@ -132,13 +170,17 @@ impl RetainedDispatchRegistry {
         Self {
             accepting: AtomicBool::new(true),
             capacity: dispatch_capacity_for_host(),
-            state: tokio::sync::Mutex::new(RetainedDispatchState {
-                tasks: tokio::task::JoinSet::new(),
-                active: HashMap::new(),
-            }),
+            state: hotpath::mutex!(
+                tokio::sync::Mutex::new(RetainedDispatchState {
+                    tasks: tokio::task::JoinSet::new(),
+                    active: HashMap::new(),
+                }),
+                label = "mcp.server.dispatch.registry"
+            ),
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.dispatch.admission", future = true)]
     async fn spawn<T, F>(
         &self,
         cancellation: tracedecay_application::CancellationSignal,
@@ -152,7 +194,9 @@ impl RetainedDispatchRegistry {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
+        let admission_wait = DispatchAdmissionWaitGuard::enter();
         let mut state = self.state.lock().await;
+        drop(admission_wait);
         Self::reap_finished(&mut state);
         if !self.accepting.load(Ordering::Acquire) {
             return Err(dispatch_shutdown_error());
@@ -181,9 +225,15 @@ impl RetainedDispatchRegistry {
                 cancellation,
                 live_cancellable,
                 settlement: Arc::clone(&settlement),
+                _gauge: ActiveDispatchGaugeGuard::enter(),
             },
         );
         Ok((receiver, settlement))
+    }
+
+    #[cfg(test)]
+    async fn active_count_for_test(&self) -> usize {
+        self.state.lock().await.active.len()
     }
 
     fn reap_finished(state: &mut RetainedDispatchState) {
@@ -459,6 +509,7 @@ impl DispatchControl {
         self.cancellation.clone()
     }
 
+    #[hotpath::measure(label = "mcp.server.dispatch.settlement", future = true)]
     pub(super) async fn run_retained<T, F>(
         &self,
         registry: &RetainedDispatchRegistry,
@@ -557,6 +608,7 @@ fn received_result<T>(
     }
 }
 
+#[hotpath::measure(label = "mcp.server.dispatch.canonical_wait", future = true)]
 async fn receive_canonical_result<T>(
     result: &mut tokio::sync::oneshot::Receiver<Result<T>>,
 ) -> std::result::Result<T, DispatchFailure> {
@@ -672,6 +724,7 @@ mod tests {
         });
 
         worker_started.notified().await;
+        assert_eq!(registry.active_count_for_test().await, 1);
         assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
         let cancelled = runner.await.expect("dispatch runner");
         let settlement = Arc::clone(&cancelled.settlement);
@@ -686,6 +739,7 @@ mod tests {
 
         worker_release.notify_one();
         registry.shutdown().await;
+        assert_eq!(registry.active_count_for_test().await, 0);
         assert_eq!(settlement.snapshot(), DispatchSettlement::Joined);
     }
 

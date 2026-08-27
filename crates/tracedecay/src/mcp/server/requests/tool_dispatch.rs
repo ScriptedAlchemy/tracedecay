@@ -328,7 +328,10 @@ impl McpServer {
                     Err(error) => Err(error),
                 },
                 ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok((*result).clone()),
+                    Some(result) => Ok(hotpath::measure_block!(
+                        "mcp.server.read_coalescing.result_clone",
+                        (*result).clone()
+                    )),
                     None => dispatch.await,
                 },
             }
