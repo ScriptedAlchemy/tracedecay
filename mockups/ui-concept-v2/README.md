@@ -1,0 +1,43 @@
+# TraceDecay UI concept V2
+
+Jayse Hansen / Cantina Avengers FUI grammar applied to the fourteen dashboard channels. Steal the grammar (night glass, hairline frames, amber alert, cyan signal, measured fields). Do not copy Marvel marks.
+
+These are lookbook stills, not visual-audit goldens. Do not treat them as dashboard/audit-baselines/.
+
+## Layout
+
+One folder per channel, versions stacked inside:
+
+```
+mockups/ui-concept-v2/
+  <NN>-<channel>/
+    v<N>-<short-slug>.png
+```
+
+- Add new iterations as `vN-short-slug.png` inside the channel folder (for example the next Brain synapse/hook-firing plate is `01-brain/v2-hook-synapses.png`).
+- Highest `vN` in a folder is the current plate.
+- 2026-08-27 correction: Brain current is `01-brain/v10-activity-becomes-synapse.png`; Loom current is `03-loom/v7-host-weave-overview.png` (prior versions kept). (prior versions kept).
+- Do not flatten plates into the root. Do not dump iterations into a `drafts/` folder.
+- Never overwrite an older version; add the next `vN`.
+- No git symlinks.
+
+## Canonical plates
+
+Current (highest `vN`) plate per channel:
+
+| # | File | Hero |
+|---|---|---|
+| 01 |  01-brain/v10-activity-becomes-synapse.png | Admitted-activity live field. Pulse projectId/family/streamId/at. Massless hub. 1/3 hop. Shared 192px TRACEDECAY rail. CONCEPT/SYNTHETIC. |
+| 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
+| 03 |  03-loom/v7-host-weave-overview.png | Time down, hosts across, vertical strands, width=messages. OPEN/ONGOING · RECORDED · UNKNOWN. Loaded LCM page. CONCEPT/SYNTHETIC. |
+| 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
+| 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
+| 06 | 06-code/v3-lenses.png | CORTEX/TRACE/CORE with direct labels. Graph totals, symbol path, strata, freshness, diagnostic warming/stale/unavailable. CONCEPT/SYNTHETIC. |
+| 07 | 07-knowledge/v4-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks. PCA only if method=pca; otherwise unserved. Independent camera states. CONCEPT/SYNTHETIC. |
+| 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
+| 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
+| 10 | 10-observatory/v4-overview-honest.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. Each source own coverage/error. No invented heartbeat. CONCEPT/SYNTHETIC. |
+| 11 | 11-costs/v3-provider-spend.png | Actual provider spend first. Unpriced/null ≠ zero. Saved tokens ≠ dollars. CONCEPT/SYNTHETIC. |
+| 12 | 12-settings/v4-effective-only.png | Effective config only. Provenance unserved unless the server supplies it. Multi-root capability, no fake query. Remote Brain operational status. CONCEPT/SYNTHETIC. |
+| 13 | 13-work/v4-six-cameras.png | Six cameras over one immutable product-graph version. Unserved cameras unavailable, not invented graphs. CONCEPT/SYNTHETIC. |
+| 14 | 14-workflows/v3-definition-ledger.png | Definition ledger. Immutable versions, pinned digests, CAS activate/retire/reject, on-demand run lookup. No ARM/PAUSE/CANCEL. CONCEPT/SYNTHETIC. |
