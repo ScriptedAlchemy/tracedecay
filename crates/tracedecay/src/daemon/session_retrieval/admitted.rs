@@ -514,6 +514,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_session_binding_preserves_cursor_manifest_refusal_details() {
+        assert!(matches!(
+            task_session_binding_outcome(
+                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                }
+            ),
+            TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+                kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            }
+        ));
+    }
+
+    #[test]
     fn admitted_binding_preserves_outer_grant_scope_and_cancellation_identity() {
         let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
         let identity = ResolvedSessionIdentity::for_project(
