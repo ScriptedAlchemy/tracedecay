@@ -284,7 +284,7 @@ fn replace_existing_with_backup(
     replacement: &Path,
     destination: &Path,
     backup: &Path,
-) -> io::Result<()> {
+) -> io::Result<PathBuf> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
 
@@ -310,7 +310,7 @@ fn replace_existing_with_backup(
     if result == 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(())
+        Ok(backup.to_path_buf())
     }
 }
 
@@ -318,18 +318,10 @@ fn replace_existing_with_backup(
 fn replace_existing_with_backup(
     replacement: &Path,
     destination: &Path,
-    backup: &Path,
-) -> io::Result<()> {
+    _backup: &Path,
+) -> io::Result<PathBuf> {
     exchange_paths(replacement, destination)?;
-    if let Err(error) = rename_noreplace(replacement, backup) {
-        return match exchange_paths(replacement, destination) {
-            Ok(()) => Err(error),
-            Err(rollback_error) => Err(io::Error::other(format!(
-                "failed to retain displaced file ({error}) and rollback exchange ({rollback_error})"
-            ))),
-        };
-    }
-    Ok(())
+    Ok(replacement.to_path_buf())
 }
 
 #[cfg(target_os = "linux")]
@@ -495,6 +487,7 @@ where
     hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
+    let published_existing = std::cell::Cell::new(false);
     let result = (|| {
         output.write_all(bytes)?;
         sync_owned_file(&output)?;
@@ -513,28 +506,50 @@ where
                 })?;
             }
             ConditionalPublishExpectation::Present => {
-                let rollback = unused_temporary_path(destination, "conditional-rollback")?;
-                replace_existing_with_backup(&temporary, destination, &rollback)?;
-                let displaced = verify_displaced(&rollback);
+                let publish_backup = unused_temporary_path(destination, "conditional-backup")?;
+                let displaced_path =
+                    replace_existing_with_backup(&temporary, destination, &publish_backup)?;
+                published_existing.set(true);
+                let displaced = verify_displaced(&displaced_path);
                 if !matches!(displaced, Ok(true)) {
-                    replace_existing_with_backup(&rollback, destination, &temporary).map_err(
-                        |error| {
+                    let rollback_backup =
+                        unused_temporary_path(destination, "conditional-rollback")?;
+                    let rolled_back_published = replace_existing_with_backup(
+                        &displaced_path,
+                        destination,
+                        &rollback_backup,
+                    )
+                    .map_err(|error| {
+                        io::Error::other(format!(
+                            "failed to rollback conditional publication; displaced destination is retained at {}: {error}",
+                            displaced_path.display()
+                        ))
+                    })?;
+                    if !matches!(verify_published(&rolled_back_published), Ok(true)) {
+                        let restore_backup =
+                            unused_temporary_path(destination, "conditional-restore")?;
+                        let restored_destination = replace_existing_with_backup(
+                            &rolled_back_published,
+                            destination,
+                            &restore_backup,
+                        )
+                        .map_err(|error| {
                             io::Error::other(format!(
-                                "failed to rollback conditional publication; displaced destination is retained at {}: {error}",
-                                rollback.display()
+                                "failed to restore a concurrent destination edit retained at {}: {error}",
+                                rolled_back_published.display()
                             ))
-                        },
-                    )?;
-                    if !matches!(verify_published(&temporary), Ok(true)) {
-                        replace_existing_with_backup(&temporary, destination, &rollback).map_err(
-                            |error| {
-                                io::Error::other(format!(
-                                    "failed to restore a concurrent destination edit retained at {}: {error}",
-                                    temporary.display()
-                                ))
-                            },
-                        )?;
-                        remove_owned_temp(&rollback);
+                        })?;
+                        if let Err(error) = fs::remove_file(&restored_destination) {
+                            return Err(io::Error::other(format!(
+                                "restored the concurrent destination edit but could not remove the displaced file retained at {}: {error}",
+                                restored_destination.display()
+                            )));
+                        }
+                    } else if let Err(error) = fs::remove_file(&rolled_back_published) {
+                        return Err(io::Error::other(format!(
+                            "rolled back conditional publication but could not remove the staged file retained at {}: {error}",
+                            rolled_back_published.display()
+                        )));
                     }
                     sync_parent_directory(destination, directory_policy)?;
                     return match displaced {
@@ -545,16 +560,18 @@ where
                         )),
                     };
                 }
-                if let Err(error) = fs::remove_file(&rollback) {
-                    replace_existing_with_backup(&rollback, destination, &temporary)?;
+                if let Err(error) = fs::remove_file(&displaced_path) {
                     sync_parent_directory(destination, directory_policy)?;
-                    return Err(error);
+                    return Err(io::Error::other(format!(
+                        "published replacement but could not remove the displaced destination retained at {}: {error}",
+                        displaced_path.display()
+                    )));
                 }
             }
         }
         sync_parent_directory(destination, directory_policy)
     })();
-    if result.is_err() {
+    if result.is_err() && !published_existing.get() {
         remove_owned_temp_if_contents_match(&temporary, bytes);
     }
     result
