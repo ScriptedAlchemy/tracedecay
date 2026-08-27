@@ -102,7 +102,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
-            GraphDbRegistryConfig { max_open: 8 },
+            // Derived from the project ceiling; see MAX_RETAINED_GRAPH_DB_OWNERS for
+            // the arithmetic and for why a mounted project is never evictable.
+            GraphDbRegistryConfig {
+                max_open: super::MAX_RETAINED_GRAPH_DB_OWNERS,
+            },
             graph_manifest_provider.clone(),
         )
         .map_err(|error| {
