@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, RwLock, TryLockError};
 
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
@@ -52,6 +52,27 @@ pub use self::models::{
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
 
+enum InteractiveCatalogState {
+    Cold,
+    Warming,
+    Ready(Arc<InteractiveCatalog>),
+    Failed(CodeGraphProjectionError),
+}
+
+pub(super) struct InteractiveCatalogCache {
+    state: RwLock<InteractiveCatalogState>,
+    build: Mutex<()>,
+}
+
+impl InteractiveCatalogCache {
+    pub(super) fn new() -> Self {
+        Self {
+            state: RwLock::new(InteractiveCatalogState::Cold),
+            build: Mutex::new(()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AdjacencyDirection {
     Outgoing,
@@ -66,7 +87,7 @@ pub struct CodeGraphInteractiveReader {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
-    catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
+    catalog: Arc<InteractiveCatalogCache>,
 }
 
 impl fmt::Debug for CodeGraphInteractiveReader {
@@ -89,16 +110,33 @@ impl CodeGraphProjectionStore {
     ) -> Result<(), CodeGraphProjectionError> {
         let reader =
             self.interactive_reader_with_cancellation(&self.generation, Arc::clone(&cancellation))?;
-        reader.catalog(cancellation).map(|_| ())
+        reader.warm_catalog(cancellation)
+    }
+
+    /// Marks the catalog as background warming before graph serving is
+    /// installed. Catalog-dependent reads then refuse promptly instead of
+    /// winning a race to perform the full scan on a request thread.
+    pub fn mark_interactive_catalog_warming(&self) -> Result<(), CodeGraphProjectionError> {
+        let mut state = self
+            .interactive_catalog
+            .state
+            .write()
+            .map_err(|_| catalog_lock_poisoned())?;
+        match &*state {
+            InteractiveCatalogState::Cold => {
+                *state = InteractiveCatalogState::Warming;
+                Ok(())
+            }
+            InteractiveCatalogState::Warming | InteractiveCatalogState::Ready(_) => Ok(()),
+            InteractiveCatalogState::Failed(error) => Err(error.clone()),
+        }
     }
 
     /// Reports whether this store's generation-pinned interactive catalog has
     /// been fully built without triggering a build or hiding lock failure.
     pub fn interactive_catalog_is_warm(&self) -> Result<bool, CodeGraphProjectionError> {
-        match self.interactive_catalog.try_read() {
-            Ok(catalog) => Ok(catalog.is_some()),
-            // Exclusive ownership does not reveal whether the writer acquired
-            // an empty or populated slot, so contention cannot fabricate cold.
+        match self.interactive_catalog.state.try_read() {
+            Ok(state) => Ok(matches!(*state, InteractiveCatalogState::Ready(_))),
             Err(TryLockError::WouldBlock) => Err(CodeGraphProjectionError::Unavailable(
                 "code graph interactive catalog warm state is contended".to_owned(),
             )),
@@ -114,7 +152,7 @@ impl CodeGraphInteractiveReader {
         snapshot: Arc<VerifiedGraphSnapshot>,
         projection_node_count: usize,
         cancellation: Arc<dyn GraphCancellation>,
-        catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
+        catalog: Arc<InteractiveCatalogCache>,
     ) -> Self {
         Self {
             generation,
@@ -671,34 +709,110 @@ impl CodeGraphInteractiveReader {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let slot = self.catalog.read().map_err(|_| catalog_lock_poisoned())?;
-        if let Some(catalog) = slot.as_ref() {
-            if cancellation.is_cancelled() {
-                return Err(CodeGraphProjectionError::Cancelled);
+        {
+            let state = self
+                .catalog
+                .state
+                .read()
+                .map_err(|_| catalog_lock_poisoned())?;
+            match &*state {
+                InteractiveCatalogState::Ready(catalog) => {
+                    if cancellation.is_cancelled() {
+                        return Err(CodeGraphProjectionError::Cancelled);
+                    }
+                    return Ok(Arc::clone(catalog));
+                }
+                InteractiveCatalogState::Warming => {
+                    return Err(CodeGraphProjectionError::Unavailable(
+                        "code graph interactive catalog is warming in the background".to_owned(),
+                    ));
+                }
+                InteractiveCatalogState::Failed(error) => return Err(error.clone()),
+                InteractiveCatalogState::Cold => {}
             }
-            return Ok(Arc::clone(catalog));
         }
-        drop(slot);
-        // Exclusive ownership of the one cache slot is also the single-flight
-        // authority: followers wait, then recheck before attempting a scan.
-        let mut slot = self.catalog.write().map_err(|_| catalog_lock_poisoned())?;
-        if let Some(existing) = slot.as_ref() {
-            if cancellation.is_cancelled() {
-                return Err(CodeGraphProjectionError::Cancelled);
+        self.warm_catalog(Arc::clone(&cancellation))?;
+        let state = self
+            .catalog
+            .state
+            .read()
+            .map_err(|_| catalog_lock_poisoned())?;
+        match &*state {
+            InteractiveCatalogState::Ready(catalog) => Ok(Arc::clone(catalog)),
+            InteractiveCatalogState::Failed(error) => Err(error.clone()),
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming => {
+                Err(CodeGraphProjectionError::Unavailable(
+                    "code graph interactive catalog is warming in the background".to_owned(),
+                ))
             }
-            return Ok(Arc::clone(existing));
         }
-        let built = Arc::new(catalog::build_interactive_catalog(
-            &self.snapshot,
-            &self.projection,
-            self.projection_node_count,
-            Arc::clone(&cancellation),
-        )?);
+    }
+
+    fn warm_catalog(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        *slot = Some(Arc::clone(&built));
-        Ok(built)
+        let _build = self
+            .catalog
+            .build
+            .lock()
+            .map_err(|_| catalog_lock_poisoned())?;
+        {
+            let mut state = self
+                .catalog
+                .state
+                .write()
+                .map_err(|_| catalog_lock_poisoned())?;
+            match &*state {
+                InteractiveCatalogState::Ready(_) => {
+                    if cancellation.is_cancelled() {
+                        return Err(CodeGraphProjectionError::Cancelled);
+                    }
+                    return Ok(());
+                }
+                InteractiveCatalogState::Failed(error) => return Err(error.clone()),
+                InteractiveCatalogState::Cold | InteractiveCatalogState::Warming => {
+                    *state = InteractiveCatalogState::Warming;
+                }
+            }
+        }
+        let result = hotpath::measure_block!("code_graph.catalog.build", {
+            catalog::build_interactive_catalog(
+                &self.snapshot,
+                &self.projection,
+                self.projection_node_count,
+                Arc::clone(&cancellation),
+            )
+        })
+        .and_then(|catalog| {
+            if cancellation.is_cancelled() {
+                Err(CodeGraphProjectionError::Cancelled)
+            } else {
+                Ok(Arc::new(catalog))
+            }
+        });
+        let mut state = self
+            .catalog
+            .state
+            .write()
+            .map_err(|_| catalog_lock_poisoned())?;
+        match result {
+            Ok(catalog) => {
+                *state = InteractiveCatalogState::Ready(catalog);
+                Ok(())
+            }
+            Err(CodeGraphProjectionError::Cancelled) => {
+                *state = InteractiveCatalogState::Cold;
+                Err(CodeGraphProjectionError::Cancelled)
+            }
+            Err(error) => {
+                *state = InteractiveCatalogState::Failed(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Hydration is staged so excluded work is never paid: each adjacency row
