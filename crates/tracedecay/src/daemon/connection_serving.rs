@@ -79,7 +79,7 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     .await
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
 pub(super) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
@@ -117,7 +117,7 @@ pub(super) async fn serve_routed_rmcp_connection(
     let result = tokio::select! {
         result = &mut waiting => result,
         () = lifecycle.wait_for_draining() => {
-            cancellation.cancel();
+            hotpath::measure_block!("daemon.engine.transport.cancel", cancellation.cancel());
             waiting.await
         }
     };
@@ -435,9 +435,11 @@ async fn write_daemon_delivery_ack_response(
     transport: &mut impl McpTransport,
     response: &crate::daemon_contract::DaemonInvocationDeliveryAckResponse,
 ) -> Result<()> {
-    transport
-        .write_line(&serde_json::to_string(response)?)
-        .await?;
+    let payload = hotpath::measure_block!(
+        "daemon.engine.transport.serialize",
+        serde_json::to_string(response)
+    )?;
+    transport.write_line(&payload).await?;
     transport.write_line("\n").await?;
     transport.flush().await?;
     Ok(())
@@ -490,7 +492,7 @@ where
     }
 }
 
-#[hotpath::measure(label = "daemon.project_owner.wait", future = true)]
+#[hotpath::measure(label = "daemon.engine.transport.await_owner", future = true)]
 pub(super) async fn await_project_owner_or_disconnect<T>(
     transport: &mut impl McpTransport,
     open: impl std::future::Future<Output = Result<T>>,
@@ -541,7 +543,7 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
@@ -622,7 +624,9 @@ async fn serve_broker_socket_client(
     if let Some(cancellation) =
         crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
     {
-        crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        hotpath::measure_block!("daemon.engine.transport.cancel", {
+            crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        });
         drop(setup_activity);
         return Ok(());
     }
@@ -1159,6 +1163,7 @@ pub(super) async fn serve_windows_broker_client_with_class(
 #[cfg(any(not(unix), test))]
 // The foreground portable broker supplies one daemon-generation invocation state.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
 pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     stream: BrokerStream,
     auth_token: &str,
@@ -1232,7 +1237,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     if let Some(cancellation) =
         crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
     {
-        crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        hotpath::measure_block!("daemon.engine.transport.cancel", {
+            crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        });
         drop(setup_activity);
         return Ok(());
     }

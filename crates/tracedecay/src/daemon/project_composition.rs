@@ -41,6 +41,7 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
     Arc::strong_count(server) > 1 || project_server_response_lifecycle_has_in_flight(&lifecycle)
 }
 
+#[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -198,7 +199,7 @@ pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<Path
     tracedecay_sessions::runtime::home_dir()
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.project.compose.server", future = true)]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -1428,6 +1429,7 @@ async fn reclaim_core_after_failed_upgrade(
 
 /// Retire every server this failed open attempt published, including the core
 /// itself when session capabilities had already gone live.
+#[hotpath::measure(label = "daemon.project.compose.retire_failed", future = true)]
 async fn retire_failed_project_open_owner(
     store_administration: &StoreAdministration,
     failed_key: &ProjectServerKey,
