@@ -31,6 +31,7 @@ pub(super) enum GitHubRequestAdmissionV1 {
 struct GitHubRateLimitStateV1 {
     checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
     latest_reset_at: Option<UtcMicros>,
+    blocked_until: Option<UtcMicros>,
     reservations: u32,
     unknown_probe_in_flight: bool,
     unknown_probe_failed_closed: bool,
@@ -76,7 +77,19 @@ impl GitHubRateLimitTrackerV1 {
                 state.checkpoint = None;
                 state.unknown_probe_failed_closed = false;
             }
-            if let Some(checkpoint) = state.checkpoint.as_ref().cloned() {
+            if state
+                .blocked_until
+                .is_some_and(|blocked_until| blocked_until.0 <= now.0)
+            {
+                state.blocked_until = None;
+            }
+            if state.blocked_until.is_some() {
+                state
+                    .checkpoint
+                    .as_ref()
+                    .cloned()
+                    .map_or(Decision::Unavailable, Decision::RateLimited)
+            } else if let Some(checkpoint) = state.checkpoint.as_ref().cloned() {
                 let available = checkpoint
                     .remaining
                     .saturating_sub(GITHUB_RATE_LIMIT_RESERVE_V1)
@@ -121,13 +134,13 @@ impl GitHubRateLimitTrackerV1 {
     fn record_locked(
         state: &mut GitHubRateLimitStateV1,
         observed: &GitHubReviewRateLimitCheckpointV1,
-    ) {
+    ) -> bool {
         let observation_is_stale = state.latest_reset_at.is_some_and(|latest_reset_at| {
             observed.reset_at.0 < latest_reset_at.0
                 || (state.checkpoint.is_none() && observed.reset_at == latest_reset_at)
         });
         if observation_is_stale {
-            return;
+            return false;
         }
         state.latest_reset_at = Some(observed.reset_at);
         state.unknown_probe_failed_closed = false;
@@ -144,6 +157,7 @@ impl GitHubRateLimitTrackerV1 {
                 state.checkpoint = Some(observed.clone());
             }
         }
+        true
     }
 
     fn finish(
@@ -151,6 +165,7 @@ impl GitHubRateLimitTrackerV1 {
         reserved_reset_at: Option<UtcMicros>,
         unknown_probe: bool,
         observed: Option<&GitHubReviewRateLimitCheckpointV1>,
+        blocked_until: Option<UtcMicros>,
     ) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -165,12 +180,16 @@ impl GitHubRateLimitTrackerV1 {
         if reserved_reset_at.is_some() {
             state.reservations = state.reservations.saturating_sub(1);
         }
+        if let Some(blocked_until) = blocked_until {
+            state.blocked_until = Some(state.blocked_until.map_or(blocked_until, |current| {
+                UtcMicros(current.0.max(blocked_until.0))
+            }));
+        }
+        let accepted_observation =
+            observed.is_some_and(|observed| Self::record_locked(&mut state, observed));
         if unknown_probe {
             state.unknown_probe_in_flight = false;
-            state.unknown_probe_failed_closed = observed.is_none();
-        }
-        if let Some(observed) = observed {
-            Self::record_locked(&mut state, observed);
+            state.unknown_probe_failed_closed = !accepted_observation;
         }
     }
 
@@ -195,9 +214,17 @@ pub(super) struct GitHubRequestQuotaPermitV1 {
 }
 
 impl GitHubRequestQuotaPermitV1 {
-    pub(super) fn finish(mut self, observed: Option<&GitHubReviewRateLimitCheckpointV1>) {
-        self.tracker
-            .finish(self.reserved_reset_at, self.unknown_probe, observed);
+    pub(super) fn finish(
+        mut self,
+        observed: Option<&GitHubReviewRateLimitCheckpointV1>,
+        blocked_until: Option<UtcMicros>,
+    ) {
+        self.tracker.finish(
+            self.reserved_reset_at,
+            self.unknown_probe,
+            observed,
+            blocked_until,
+        );
         self.finished = true;
     }
 }
@@ -234,7 +261,7 @@ mod tests {
     fn an_unknown_first_response_at_the_reserve_refuses_page_two() {
         let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
         let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
-        first.finish(Some(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1, 9_000)));
+        first.finish(Some(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1, 9_000)), None);
 
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
@@ -246,7 +273,7 @@ mod tests {
     fn an_unknown_first_response_without_a_checkpoint_refuses_page_two() {
         let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
         let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
-        first.finish(None);
+        first.finish(None, None);
 
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
@@ -258,15 +285,66 @@ mod tests {
     fn an_unknown_first_response_with_an_invalid_checkpoint_refuses_page_two() {
         let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
         let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
-        first.finish(Some(&GitHubReviewRateLimitCheckpointV1 {
-            limit: 10,
-            remaining: 11,
-            reset_at: UtcMicros(9_000),
-        }));
+        first.finish(
+            Some(&GitHubReviewRateLimitCheckpointV1 {
+                limit: 10,
+                remaining: 11,
+                reset_at: UtcMicros(9_000),
+            }),
+            None,
+        );
 
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
             GitHubRequestAdmissionV1::Unavailable
+        ));
+    }
+
+    #[test]
+    fn an_expired_bootstrap_checkpoint_does_not_clear_fail_closed_state() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        tracker.record(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1 + 1, 2_000));
+        let probe = granted(Arc::clone(&tracker).acquire(UtcMicros(2_000)));
+
+        probe.finish(Some(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1, 2_000)), None);
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(2_000)),
+            GitHubRequestAdmissionV1::Unavailable
+        ));
+    }
+
+    #[test]
+    fn secondary_limit_blocks_positive_primary_quota_until_its_deadline() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        tracker.record(&checkpoint(4_000, 9_000));
+        let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        permit.finish(Some(&checkpoint(3_999, 9_000)), Some(UtcMicros(2_000)));
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_999)),
+            GitHubRequestAdmissionV1::RateLimited(_)
+        ));
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(2_000)),
+            GitHubRequestAdmissionV1::Granted(_)
+        ));
+    }
+
+    #[test]
+    fn retry_after_only_blocks_known_quota_until_its_deadline() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        tracker.record(&checkpoint(4_000, 9_000));
+        let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        permit.finish(None, Some(UtcMicros(2_000)));
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_999)),
+            GitHubRequestAdmissionV1::RateLimited(_)
+        ));
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(2_000)),
+            GitHubRequestAdmissionV1::Granted(_)
         ));
     }
 
@@ -286,7 +364,7 @@ mod tests {
                 while let GitHubRequestAdmissionV1::Granted(permit) =
                     Arc::clone(&tracker).acquire(UtcMicros(1_000))
                 {
-                    permit.finish(None);
+                    permit.finish(None, None);
                     spent += 1;
                 }
                 spent
@@ -337,7 +415,7 @@ mod tests {
 
         drop(granted(Arc::clone(&tracker).acquire(UtcMicros(1_000))));
         for _ in 0..3 {
-            granted(Arc::clone(&tracker).acquire(UtcMicros(1_000))).finish(None);
+            granted(Arc::clone(&tracker).acquire(UtcMicros(1_000))).finish(None, None);
         }
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
@@ -385,7 +463,7 @@ mod tests {
         let old_window = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
         tracker.record(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1 + 1, 10_000));
 
-        old_window.finish(None);
+        old_window.finish(None, None);
 
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
@@ -399,9 +477,9 @@ mod tests {
         tracker.record(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1 + 1, 2_000));
         let old_window = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
         let new_window_probe = granted(Arc::clone(&tracker).acquire(UtcMicros(2_000)));
-        new_window_probe.finish(None);
+        new_window_probe.finish(None, None);
 
-        old_window.finish(Some(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1, 2_000)));
+        old_window.finish(Some(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1, 2_000)), None);
 
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(2_000)),
