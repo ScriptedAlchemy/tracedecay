@@ -28,7 +28,7 @@ Current (highest `vN`) plate per channel:
 | # | File | Hero |
 |---|---|---|
 | 01 | 01-brain/v4-measured-registry.png | Unscoped measured registry field. X=recency bucket. Y/size=indexed mass. Hub only when checkouts share git_common_dir. One-hop pulse. CONCEPT/SYNTHETIC. |
-| 02 | 02-explorer/v2-four-lanes.png | Four fan-out lanes: code / sessions / knowledge / semantic. |
+| 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
 | 03 | 03-loom/v1-weave.png | Weave canvas. Time down, host across, width = messages. Causal crossings listed, not drawn. |
 | 04 | 04-sessions/v1-inspector.png | Session list with real headers + LCM inspector. |
 | 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
