@@ -191,16 +191,9 @@ fn configure_hotpath_output() -> Result<(), String> {
             "{HOTPATH_OUTPUT_FORMAT_ENV} must be one of table, json, json-pretty, or none"
         ));
     }
-    if focus.as_deref().is_some_and(|focus| {
-        focus.to_str().is_some_and(|focus| {
-            focus
-                .strip_prefix('/')
-                .and_then(|pattern| pattern.strip_suffix('/'))
-                .is_some()
-        })
-    }) {
+    if !hotpath_focus_is_supported(focus.as_deref()) {
         return Err(format!(
-            "{HOTPATH_FOCUS_ENV} regular-expression form is unsupported; use a text focus"
+            "{HOTPATH_FOCUS_ENV} must be Unicode text; regular-expression form is unsupported"
         ));
     }
     let report_disabled = output_format
@@ -217,6 +210,18 @@ fn configure_hotpath_output() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(feature = "hotpath", test))]
+fn hotpath_focus_is_supported(focus: Option<&std::ffi::OsStr>) -> bool {
+    focus.is_none_or(|focus| {
+        focus.to_str().is_some_and(|focus| {
+            focus
+                .strip_prefix('/')
+                .and_then(|pattern| pattern.strip_suffix('/'))
+                .is_none()
+        })
+    })
 }
 
 fn validate_requested_workload(
@@ -401,7 +406,18 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_hotpath_focus_is_rejected() {
+        let focus = std::ffi::OsString::from_vec(vec![0xff]);
+
+        assert!(!hotpath_focus_is_supported(Some(focus.as_os_str())));
+    }
 
     fn qualification_expectations_for_corrupt_bytes() -> NativeQualificationExpectationsV1 {
         let runtime = serde_json::from_value(serde_json::json!({
