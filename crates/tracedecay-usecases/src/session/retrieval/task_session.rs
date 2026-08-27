@@ -24,6 +24,11 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     },
     Unavailable,
     ResetRequired,
+    CursorManifestLimitExceeded {
+        kind: tracedecay_domain::CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
@@ -333,9 +338,41 @@ fn map_task_session_execution_error(
         | SessionRetrievalOutcome::CompleteZero { .. }
         | SessionRetrievalOutcome::Locked
         | SessionRetrievalOutcome::Redacted
-        | SessionRetrievalOutcome::Deleted
-        | SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
-            TaskSessionRetrievalOutcomeV1::Unavailable
-        }
+        | SessionRetrievalOutcome::Deleted => TaskSessionRetrievalOutcomeV1::Unavailable,
+        SessionRetrievalOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::CursorManifestLimitKindV1;
+    use tracedecay_temporal_query::TemporalKernelError;
+    use tracedecay_temporal_query::ports::TemporalPortError;
+
+    use super::*;
+
+    #[test]
+    fn task_session_preserves_cursor_manifest_refusal_details() {
+        assert_eq!(
+            map_task_session_execution_error(SessionTemporalExecutionError::Kernel(
+                TemporalKernelError::Port(TemporalPortError::ParticipantLimitExceeded {
+                    observed: 257,
+                    maximum: 256,
+                }),
+            )),
+            TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+                kind: CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            }
+        );
     }
 }

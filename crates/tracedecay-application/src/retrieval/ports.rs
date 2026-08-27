@@ -1,6 +1,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::CursorManifestLimitKindV1;
+
 use crate::context::RequestContext;
 use crate::handlers::ApplicationOperation;
 use crate::result::RetrievalEvidence;
@@ -88,10 +92,47 @@ pub trait AffectedTestsRetrievalPort {
     ) -> RetrievalPortOutcome<AffectedTestsResult>;
 }
 
+/// Structural budget boundary that rejected a session retrieval request.
+/// These causes are non-retryable request corrections; concurrent permit or
+/// queue pressure remains a separate capacity-saturation failure.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRetrievalBudgetStageV1 {
+    RequestResultLimit,
+    RequestHydrationLimit,
+    RequestContextBytes,
+    RequestCandidateBytes,
+    RequestRecordBytes,
+    RequestHydrationBytes,
+    EstimatorVersionMismatch,
+    ExecutionWorkExhausted,
+    KernelResultLimit,
+    ParticipantManifestParticipants,
+    ParticipantManifestCanonicalBytes,
+    HydrationBytes,
+    ContextBytes,
+    ContextTokens,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "refusal", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionRetrievalStructuralRefusalV1 {
+    CursorManifestLimitExceeded {
+        #[schemars(with = "String")]
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporalRetrievalFailure {
     Unavailable,
     ResetRequired,
+    StructuralRefusal(SessionRetrievalStructuralRefusalV1),
 }
 
 pub type TemporalRetrievalFuture<'a> = Pin<
