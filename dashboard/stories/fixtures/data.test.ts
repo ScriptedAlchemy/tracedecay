@@ -45,6 +45,7 @@ import {
   GraphSubgraphPayloadV1Schema,
   LcmOverviewPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
+  LoomTemporalPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
@@ -57,6 +58,7 @@ import {
   SettingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
+  StructureReadV12Schema,
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
@@ -104,6 +106,10 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/graph/search': DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
   '/api/plugins/graph/subgraph': DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
   '/api/plugins/graph/path': DashboardEnvelopeV1Schema(GraphPathPayloadV1Schema),
+  // `StructureReadV12` is the schemars-deduplicated alias whose `measured`
+  // variant carries `StrataMeasurementV1`.
+  '/api/plugins/graph/strata': DashboardEnvelopeV1Schema(StructureReadV12Schema),
+  '/api/loom/temporal': DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),

@@ -613,6 +613,56 @@ const GRAPH_FILES = [
 ] as const;
 
 /**
+ * Realistic symbol names, cycled by node index. The audit's Code and Explorer
+ * shots print these in the most-connected list, the search results and the
+ * canvas labels — `sym_0`-style placeholders there would put a fixture
+ * artifact into every review screenshot where a plausible daemon symbol
+ * belongs. Names are invented but shaped like this codebase's own.
+ */
+const GRAPH_SYMBOL_NAMES = [
+  'subgraph_payload',
+  'resolve_scope',
+  'StoreLayout',
+  'EvidenceRef',
+  'graph_service',
+  'RetentionConfig',
+  'ScopedStore',
+  'watermark_at',
+  'overview_payload',
+  'attach_degrees',
+  'DoctorReport',
+  'TelemetryRead',
+  'scheduler_tick',
+  'lease_renewal',
+  'SessionLedger',
+  'compose_report',
+  'edge_rows_for_ids',
+  'neighbors_payload',
+  'GraphGeneration',
+  'BudgetEvaluation',
+  'ingest_refusal',
+  'store_size_sample',
+  'CaptureRuntime',
+  'HookOutcome',
+  'search_payload',
+  'rank_candidates',
+  'ProjectRegistry',
+  'WorktreeIdentity',
+  'apply_migration',
+  'collect_findings',
+  'AnchorIndex',
+  'SpanEvidence',
+  'route_dispatch',
+  'validate_grant',
+  'LcmSummaryNode',
+  'TrustHistogram',
+  'commit_batch',
+  'sweep_orphans',
+  'QueryDeadline',
+  'FreshnessGate',
+] as const;
+
+/**
  * Every `GraphNodeV1` key at its absent value.
  *
  * A query that selects a subset of `NODE_COLUMNS` still deserializes into the
@@ -662,7 +712,7 @@ const GRAPH_NODE_ABSENT = {
 function graphNode(i: number, prefix: string, degree: number): Record<string, unknown> {
   const kind = pick(GRAPH_KINDS, i);
   const file = pick(GRAPH_FILES, i);
-  const name = `${prefix}_${i}`;
+  const name = pick(GRAPH_SYMBOL_NAMES, i);
   const startLine = 40 + i * 7;
   const callable = kind === 'function' || kind === 'method';
   return {
@@ -2635,6 +2685,205 @@ function lcmOverviewPayload(): Record<string, unknown> {
   };
 }
 
+/* ==========================================================================
+ * GET /api/loom/temporal (loom_api.rs::temporal) — the weave's canonical
+ * read: sessions plus durable causal relations (commits, edited files,
+ * branch/worktree spans) with per-source coverage. Wire-true to
+ * `LoomTemporalPayloadV1`; the session population reuses the same skewed
+ * distribution as the savings fixture so the weave has real structure.
+ * ========================================================================== */
+
+function loomTemporalPayload(): Record<string, unknown> {
+  const rows = loomSessionRows();
+  const sessions = rows.map((row, i) => ({
+    session_id: row['session_id'],
+    provider: row['provider'],
+    title: row['title'],
+    started_at: row['started_at'],
+    last_message_at: row['last_message_at'],
+    // A recorded end exists on a minority of rows, and never without a last
+    // message — the weave draws open threads from exactly this distinction.
+    ended_at: i % 8 === 1 ? (row['last_message_at'] as number | null) : null,
+    messages: row['messages'],
+    models: [{ model: null }, { model: pick(LOOM_MODELS, i) }],
+    is_subagent: row['is_subagent'],
+    edited_files_recorded: i % 3 !== 2,
+  }));
+  const commits = sessions.slice(0, 6).map((session, i) => ({
+    session_id: session.session_id,
+    provider: session.provider,
+    commit_sha: `${(0xa1c3f0 + i * 0x91).toString(16)}${'0'.repeat(28)}`.slice(0, 40),
+    committed_at: (session.started_at as number) + 1_800 + i * 240,
+    branch: i % 2 === 0 ? 'master' : `feat/branch-${i}`,
+    worktree: i % 3 === 0 ? '/fast/projects/tracedecay' : null,
+    relation: i % 2 === 0 ? 'authored_during' : 'observed_near',
+    evidence: 'session_span_overlap',
+    span_overlap_kind: i % 2 === 0 ? 'contained' : 'adjacent',
+    confidence: 0.92 - i * 0.07,
+  }));
+  const editedFiles = sessions.slice(0, 5).flatMap((session, i) => [
+    {
+      session_id: session.session_id,
+      provider: session.provider,
+      path: pick(GRAPH_FILES, i),
+      change_type: i % 2 === 0 ? 'modified' : 'added',
+      hunks: 1 + (i % 4),
+    },
+  ]);
+  const branchSpans = sessions.slice(0, 4).map((session, i) => ({
+    session_id: session.session_id,
+    provider: session.provider,
+    source: 'git_watch',
+    branch: i === 3 ? null : i % 2 === 0 ? 'master' : `feat/branch-${i}`,
+    worktree: '/fast/projects/tracedecay',
+    first_at: session.started_at,
+    last_at: (session.started_at as number) + 3_600,
+    event_count: 4 + i * 3,
+  }));
+  const coverage = (matched: number, eligible: number, unit: string, reason: string) => ({
+    completeness: matched === eligible ? 'complete' : 'partial',
+    eligible,
+    examined: eligible,
+    matched,
+    omitted: eligible - matched,
+    reason,
+    unit,
+  });
+  return {
+    available: true,
+    sessions,
+    commits,
+    edited_files: editedFiles,
+    branch_spans: branchSpans,
+    source_statuses: [
+      {
+        id: 'sessions',
+        label: 'Sessions',
+        state: 'ready',
+        granularity: 'session',
+        authority: 'session_store',
+        required_authority: null,
+        providers: [...LOOM_PROVIDERS],
+        item_count: sessions.length,
+        reason: null,
+        coverage: coverage(sessions.length, sessions.length, 'sessions', 'every eligible session was read'),
+      },
+      {
+        id: 'commits',
+        label: 'Commit attributions',
+        state: 'ready',
+        granularity: 'commit',
+        authority: 'git_watch',
+        required_authority: null,
+        providers: ['codex', 'claude'],
+        item_count: commits.length,
+        reason: null,
+        coverage: coverage(commits.length, commits.length, 'commits', 'every attributed commit was read'),
+      },
+      {
+        id: 'edited_files',
+        label: 'Edited files',
+        state: 'partial',
+        granularity: 'file',
+        authority: 'session_store',
+        required_authority: null,
+        providers: ['codex'],
+        item_count: editedFiles.length,
+        reason: 'two providers record no per-file edit evidence',
+        coverage: coverage(editedFiles.length, editedFiles.length + 4, 'files', 'two providers record no per-file edit evidence'),
+      },
+      {
+        id: 'branch_spans',
+        label: 'Branch spans',
+        state: 'ready',
+        granularity: 'span',
+        authority: 'git_watch',
+        required_authority: null,
+        providers: [...LOOM_PROVIDERS],
+        item_count: branchSpans.length,
+        reason: null,
+        coverage: coverage(branchSpans.length, branchSpans.length, 'spans', 'every recorded span was read'),
+      },
+    ],
+    temporal_refresh: {
+      authority: 'loom_temporal_projection',
+      state: 'ready',
+      active_generations: 1,
+      latest_activated_at_micros: nowMicros - 90_000_000,
+    },
+    total: 6_053,
+  };
+}
+
+/* ==========================================================================
+ * GET /api/plugins/graph/strata (graph_structure_api.rs::strata) — the CORTEX
+ * relief's one reading: file depth strata plus per-directory boundary totals,
+ * wrapped in the measurement-grade `StructureReadV1` union. Modeled as a real
+ * measurement so the terrain draws; the unmeasured and failed states stay
+ * reachable through fault injection.
+ * ========================================================================== */
+
+const STRATA_DIRECTORIES = [
+  { directory: 'src/domain', files: 14, base: 0 },
+  { directory: 'src/storage', files: 12, base: 1 },
+  { directory: 'src/capture', files: 8, base: 1 },
+  { directory: 'src/query', files: 10, base: 2 },
+  { directory: 'src/application', files: 16, base: 3 },
+  { directory: 'src/dashboard', files: 18, base: 4 },
+  { directory: 'src/automation', files: 9, base: 4 },
+  { directory: 'dashboard/src/workspaces', files: 22, base: 5 },
+] as const;
+
+function strataPayload(): Record<string, unknown> {
+  const files = STRATA_DIRECTORIES.flatMap((cluster, clusterIndex) =>
+    Array.from({ length: cluster.files }, (_, i) => {
+      const depth = cluster.base + (i % 3);
+      const stem = `${cluster.directory}/${pick(GRAPH_SYMBOL_NAMES, clusterIndex * 7 + i)
+        .replace(/([a-z])([A-Z])/g, '$1_$2')
+        .toLowerCase()}`;
+      return {
+        path: `${stem}.rs`,
+        depth,
+        // One deliberate cycle: three storage files share a strongly
+        // connected component, which the relief hatches differently.
+        scc_size: cluster.directory === 'src/storage' && i < 3 ? 3 : 1,
+        chain: Array.from({ length: Math.min(depth, 3) }, (_, link) => `${stem}.rs#${link}`),
+      };
+    }),
+  );
+  return {
+    status: 'measured',
+    measurement: {
+      algorithm: 'longest_path_layering',
+      cluster_ordering: 'boundary_edges_desc',
+      granularity: 'file',
+      graph_generation: 'generation.2026-08-27.001',
+      ideal_depth: 5,
+      max_depth: 7,
+      dependency_edge_kinds: ['imports', 'calls'],
+      clusters: STRATA_DIRECTORIES.map((cluster, i) => ({
+        directory: cluster.directory,
+        file_count: cluster.files,
+        order: i,
+        internal_edges: cluster.files * 3 + i,
+        incoming_edges: 12 + i * 5,
+        outgoing_edges: 9 + i * 4,
+        boundary_edges: 21 + i * 9,
+      })),
+      files,
+      scan: {
+        budget_ms: 250,
+        cache_scope: 'sealed_generation',
+        cache_state: 'warm',
+        dependency_edges_examined: 1_872,
+        files_examined: files.length,
+        max_dependency_edges: 50_000,
+        max_files: 10_000,
+      },
+    },
+  };
+}
+
 const LOOM_CHAIN_TOOLS = [
   'Read',
   'Bash',
@@ -2831,6 +3080,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/search': envelope(graphSearchPayload()),
   '/api/plugins/graph/subgraph': envelope(subgraphPayload(null)),
   '/api/plugins/graph/path': envelope(graphPathPayload()),
+  '/api/plugins/graph/strata': envelope(strataPayload()),
+  // Loom's canonical temporal read.
+  '/api/loom/temporal': envelope(loomTemporalPayload()),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),

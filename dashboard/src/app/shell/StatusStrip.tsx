@@ -131,12 +131,16 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
 export function SourceProvenance() {
   const { state } = useEventStreamState();
   const hasData = useAnyResolvedRead();
-  const live = state === 'live' || state === 'connecting';
-  const source = live
-    ? { value: state === 'live' ? 'live' : 'syncing', tone: 'bg-state-ready', ink: 'text-text-primary' }
-    : hasData
-      ? { value: 'captured', tone: 'bg-alert', ink: 'text-alert' }
-      : { value: 'no source', tone: 'bg-state-offline', ink: 'text-text-muted' };
+  // Only a LIVE stream earns the live stamp. A connecting stream is a stream
+  // that is not delivering: whatever the plates show meanwhile is a captured
+  // read, and stamping it anything softer would be the strip vouching for
+  // freshness it cannot see.
+  const source =
+    state === 'live'
+      ? { value: 'live', tone: 'bg-state-ready', ink: 'text-text-primary' }
+      : hasData
+        ? { value: 'captured', tone: 'bg-alert', ink: 'text-alert' }
+        : { value: 'no source', tone: 'bg-state-offline', ink: 'text-text-muted' };
   return (
     <Cell code="03" label="Source">
       <span aria-hidden className={cn('size-2 shrink-0', source.tone)} />
