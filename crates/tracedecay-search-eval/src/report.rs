@@ -51,6 +51,27 @@ pub(crate) fn pairwise_query_pairs<'a>(
     pairs
 }
 
+pub(crate) fn semantic_distance_summary(distances: impl IntoIterator<Item = i64>) -> String {
+    let mut distances = distances.into_iter().collect::<Vec<_>>();
+    distances.sort_unstable();
+    let top_distance = distances.first().copied();
+    let second_distance = distances.get(1).copied();
+    let top_margin = top_distance
+        .zip(second_distance)
+        .map(|(top, second)| u64::try_from(i128::from(second) - i128::from(top)).unwrap_or(0));
+    let display =
+        |value: Option<i64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+    let display_margin =
+        |value: Option<u64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+    format!(
+        "semantic_candidates={},top_distance={},second_distance={},top_margin={}",
+        distances.len(),
+        display(top_distance),
+        display(second_distance),
+        display_margin(top_margin),
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRatioMetricV1 {
@@ -387,8 +408,34 @@ impl DirectEvaluationReportV1 {
                 .iter()
                 .find(|query| query.status == DirectEvaluationStatusV1::Fail)
             {
+                let semantic_confidence = self
+                    .raw_outputs
+                    .iter()
+                    .find(|output| {
+                        output.profile_id == profile.profile_id
+                            && output.partition == profile.partition
+                    })
+                    .and_then(|output| {
+                        output
+                            .queries
+                            .iter()
+                            .find(|raw| raw.query_id == query.query_id)
+                    })
+                    .and_then(|raw| raw.native.as_ref())
+                    .map(|native| match &native.exact_flat_oracle {
+                        SemanticNativeStageResultV1::Complete(oracle) => semantic_distance_summary(
+                            oracle.hits.iter().map(|hit| hit.evidence.distance.micros()),
+                        ),
+                        SemanticNativeStageResultV1::NotRequested => {
+                            "semantic_candidates=not_requested".to_owned()
+                        }
+                        SemanticNativeStageResultV1::Pending { .. } => {
+                            "semantic_candidates=pending".to_owned()
+                        }
+                    })
+                    .unwrap_or_else(|| "semantic_candidates=unavailable".to_owned());
                 return format!(
-                    "{}:{} query {} failed: first_useful_rank={:?} returned_candidates={} wrong_scope_hits={} forbidden_hits={} expected_no_result={} protected={} recall={}/{} duplicates={}/{}",
+                    "{}:{} query {} failed: first_useful_rank={:?} returned_candidates={} wrong_scope_hits={} forbidden_hits={} expected_no_result={} protected={} recall={}/{} duplicates={}/{} {}",
                     profile.profile_id,
                     profile.partition,
                     query.query_id,
@@ -402,6 +449,7 @@ impl DirectEvaluationReportV1 {
                     query.quality.recall_at_10.denominator,
                     query.quality.duplicate_rate.numerator,
                     query.quality.duplicate_rate.denominator,
+                    semantic_confidence,
                 );
             }
             if !profile.fallback_stable {
