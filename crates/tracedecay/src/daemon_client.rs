@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -369,6 +370,66 @@ pub struct DaemonInvocationClient {
     connection: crate::daemon::DaemonConnection,
     handshake: crate::daemon::DaemonHandshake,
     state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+    activity: Arc<DaemonInvocationClientActivity>,
+}
+
+#[derive(Default)]
+struct DaemonInvocationClientActivity {
+    queued: AtomicUsize,
+    in_flight: AtomicUsize,
+}
+
+enum DaemonInvocationClientPhase {
+    Queued,
+    InFlight,
+}
+
+struct DaemonInvocationClientActivityGuard {
+    activity: Arc<DaemonInvocationClientActivity>,
+    phase: DaemonInvocationClientPhase,
+}
+
+impl DaemonInvocationClientActivity {
+    fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        hotpath::gauge!("daemon.invocation.client.queued").inc(1.0);
+        DaemonInvocationClientActivityGuard {
+            activity: Arc::clone(self),
+            phase: DaemonInvocationClientPhase::Queued,
+        }
+    }
+
+    fn in_flight(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        hotpath::gauge!("daemon.invocation.client.in_flight").inc(1.0);
+        DaemonInvocationClientActivityGuard {
+            activity: Arc::clone(self),
+            phase: DaemonInvocationClientPhase::InFlight,
+        }
+    }
+}
+
+impl DaemonInvocationClientActivityGuard {
+    fn into_in_flight(self) -> Self {
+        let activity = Arc::clone(&self.activity);
+        drop(self);
+        activity.in_flight()
+    }
+}
+
+impl Drop for DaemonInvocationClientActivityGuard {
+    fn drop(&mut self) {
+        match self.phase {
+            DaemonInvocationClientPhase::Queued => {
+                self.activity.queued.fetch_sub(1, Ordering::AcqRel);
+                hotpath::gauge!("daemon.invocation.client.queued").inc(-1.0);
+            }
+            DaemonInvocationClientPhase::InFlight => {
+                self.activity.in_flight.fetch_sub(1, Ordering::AcqRel);
+                hotpath::gauge!("daemon.invocation.client.in_flight").inc(-1.0);
+            }
+        }
+    }
 }
 
 struct DaemonInvocationConnection {
@@ -395,6 +456,7 @@ impl DaemonInvocationClient {
             connection: crate::daemon::current_daemon_connection()?,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            activity: Arc::new(DaemonInvocationClientActivity::default()),
         })
     }
 
@@ -407,21 +469,40 @@ impl DaemonInvocationClient {
             connection,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            activity: Arc::new(DaemonInvocationClientActivity::default()),
         }
     }
 
+    #[hotpath::measure(label = "daemon.invocation.client", future = true)]
     pub(crate) async fn invoke(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
     ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
-        let mut state = self.state.lock().await;
+        let queued = self.activity.queued();
+        let mut state = hotpath::future!(
+            self.state.lock(),
+            label = "daemon.invocation.client.queue_wait"
+        )
+        .await;
+        let _in_flight = queued.into_in_flight();
         if state.is_none() {
-            let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
+            let stream = hotpath::future!(
+                crate::daemon::connect_to_daemon_connection(&self.connection),
+                label = "daemon.invocation.client.connect"
+            )
+            .await?;
             let (reader, mut writer) = stream.into_split();
-            crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
-                .await?;
+            hotpath::future!(
+                crate::daemon::write_daemon_preamble(
+                    &mut writer,
+                    &self.connection,
+                    &self.handshake
+                ),
+                label = "daemon.invocation.client.preamble"
+            )
+            .await?;
             *state = Some(DaemonInvocationConnection {
                 reader: BufReader::new(reader),
                 writer,
@@ -431,18 +512,30 @@ impl DaemonInvocationClient {
             let connection = state.as_mut().ok_or_else(|| crate::errors::TraceDecayError::Config {
                 message: "daemon invocation connection was not initialized".to_owned(),
             })?;
-            connection
-                .writer
-                .write_all(serde_json::to_string(&request)?.as_bytes())
-                .await?;
-            connection.writer.write_all(b"\n").await?;
-            connection.writer.flush().await?;
+            let request_json = hotpath::measure_block!(
+                "daemon.invocation.client.request.encode",
+                serde_json::to_string(&request)
+            )?;
+            hotpath::gauge!("daemon.invocation.client.request.bytes")
+                .set(request_json.len() as f64);
+            hotpath::future!(
+                async {
+                    connection.writer.write_all(request_json.as_bytes()).await?;
+                    connection.writer.write_all(b"\n").await?;
+                    connection.writer.flush().await
+                },
+                label = "daemon.invocation.client.request.write"
+            )
+            .await?;
 
-            let Some(line) = crate::daemon::next_daemon_response_line(
-                &mut connection.reader,
-                &self.connection,
-                request_label,
-                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            let Some(line) = hotpath::future!(
+                crate::daemon::next_daemon_response_line(
+                    &mut connection.reader,
+                    &self.connection,
+                    request_label,
+                    crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                ),
+                label = "daemon.invocation.client.response.wait"
             )
             .await?
             else {
@@ -452,8 +545,13 @@ impl DaemonInvocationClient {
                     ),
                 });
             };
+            hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
             let response: crate::daemon_contract::DaemonInvocationResponse =
-                serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
+                hotpath::measure_block!(
+                    "daemon.invocation.client.response.decode",
+                    serde_json::from_str(&line)
+                )
+                .map_err(|_| crate::errors::TraceDecayError::Config {
                     message: "daemon returned an invalid invocation response".to_owned(),
                 })?;
             if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
@@ -503,7 +601,13 @@ impl DaemonInvocationClient {
             }
         };
         let request_id = target_request_id.to_owned();
-        let mut state = self.state.lock().await;
+        let queued = self.activity.queued();
+        let mut state = hotpath::future!(
+            self.state.lock(),
+            label = "daemon.invocation.client.queue_wait"
+        )
+        .await;
+        let _in_flight = queued.into_in_flight();
         let result = async {
             let connection = state.as_mut().ok_or_else(|| {
                 crate::errors::TraceDecayError::Config {
