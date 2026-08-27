@@ -4746,15 +4746,29 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.reconcile_fault = Some(fault);
     }
 
+    /// Records one attempted reconcile pass against the installed test fault.
+    ///
+    /// The worker loop reaches indexing through three branches — a retained
+    /// text generation, retained-owner activation, and a plain reconcile — so
+    /// hooking any single one of them counts a subset of the passes the loop
+    /// actually makes. This is called once at the top of the loop's blocking
+    /// closure instead, which is what `install_reconcile_fault_for_test`
+    /// promises to count.
+    #[cfg(test)]
+    pub(in crate::daemon::code_index_scheduler) fn arrive_reconcile_fault_for_test(
+        &self,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        if let Some(fault) = self.reconcile_fault.clone() {
+            fault.arrive()?;
+        }
+        Ok(())
+    }
+
     /// Retained-owner activation entry point. Foreground reads never call this.
     #[hotpath::measure(label = "code_index.reconcile.pass")]
     pub(super) fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
-        #[cfg(test)]
-        if let Some(fault) = self.reconcile_fault.clone() {
-            fault.arrive()?;
-        }
         // The in-progress signal must cover the retained-activation branch
         // too: the worker has already claimed the pending wake, so without it
         // a failing activation pass would leave query admission unable to see

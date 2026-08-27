@@ -2516,6 +2516,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // One arrival per attempted pass, before the branch: the
+                    // three reconcile entry points below are alternatives, so
+                    // hooking them individually would under- or double-count.
+                    #[cfg(test)]
+                    scheduler.arrive_reconcile_fault_for_test()?;
                     if let Some(metadata) = retained_text_metadata {
                         match scheduler.reconcile_retained_text_generation(&metadata) {
                             Ok(Some(outcome)) => Ok(outcome),
