@@ -109,10 +109,18 @@ fn observe_code_graph_publication<T>(
 }
 
 fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
-    let scaled = sealed_projection_scaled_deadline(sealed_bytes);
-    SEALED_PROJECTION_DEADLINE_FLOOR
-        .saturating_add(scaled)
-        .min(SEALED_PROJECTION_DEADLINE_CEILING)
+    // The background projection has no wall-clock bail-out. It is bounded by
+    // cancellation (request and lifecycle), which is the mechanism that
+    // reclaims a genuinely wedged projection; a wall clock cannot tell
+    // "wedged" from "slower than a modeled throughput", and killing a
+    // progressing projection only re-runs the same work into the same wall,
+    // turning slow into never. The registration API wants an `Instant`, so
+    // "no deadline" is expressed as a far-future one. Projection latency
+    // itself is the number to fix (see the code_graph hotpath spans), not a
+    // policy to tune. The size-scaled model remains only for the
+    // stage-boundary heuristic in [`sealed_projection_requires_stage_boundary`].
+    let _ = sealed_bytes;
+    Duration::from_secs(7 * 24 * 60 * 60)
 }
 
 fn sealed_projection_scaled_deadline(sealed_bytes: u64) -> Duration {
@@ -348,6 +356,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_manifest")]
     pub(crate) fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -736,6 +745,7 @@ impl RetainedCodeGraphRuntimeV1 {
         (&self.code_shard, self.authority.binding())
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
     pub(crate) fn publish_verified_snapshot(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
