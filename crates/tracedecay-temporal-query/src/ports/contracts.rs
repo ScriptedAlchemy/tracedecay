@@ -9,8 +9,9 @@ use tracedecay_domain::{LogicalCopyRecordV1, SessionSummaryRecordV1};
 use super::{
     BoundedPage, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
     ExecutionLimits, PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalRecordPageSink, TemporalRecordReadState,
-    TemporalRetrievalScope, await_controlled,
+    TemporalExecutionSnapshot, TemporalPortError, TemporalPreparedCandidateCohort,
+    TemporalRecordPageSink, TemporalRecordReadState, TemporalRetrievalScope,
+    TemporalSnapshotRequest, await_controlled,
 };
 use crate::candidates::{CandidateChannel, CandidatePlan};
 use crate::ranking::RankingCandidate;
@@ -110,6 +111,76 @@ pub trait TemporalReadPort: Send + Sync {
     }
 }
 
+/// Bounded producer used before a root-wide participant manifest exists.
+///
+/// The implementation is captured inside the already-authorized global DB
+/// read snapshot; this port owns no authorization or persistence authority.
+pub trait TemporalCandidatePreparationPort: Send + Sync {
+    fn produce_prepared_candidate_page<'a>(
+        &'a self,
+        request: PageRequest,
+        sink: &'a mut CandidatePageSink<'_>,
+    ) -> PortFuture<'a, PageStatus>;
+}
+
+#[hotpath::measure]
+pub async fn prepare_temporal_candidate_cohort(
+    request: &TemporalSnapshotRequest,
+    port: &impl TemporalCandidatePreparationPort,
+) -> Result<TemporalPreparedCandidateCohort, TemporalPortError> {
+    request.execution_control().checkpoint()?;
+    let limits = request.limits();
+    let candidate_page_items = limits.candidate_limit.min(64);
+    let candidate_limits = super::PageLimits::new(
+        limits.candidate_limit,
+        limits.candidate_total_bytes,
+        limits.candidate_item_bytes,
+        candidate_page_items,
+    )?;
+    let mut state = CandidateReadState::new(candidate_limits);
+    let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+    loop {
+        let limits = begin_pull_request(
+            request,
+            &state,
+            |limits| {
+                (
+                    limits.candidate_limit,
+                    limits.candidate_total_bytes,
+                    limits.candidate_item_bytes,
+                )
+            },
+            CANDIDATE_READ_BUDGET,
+        )?;
+        let control = request.execution_control();
+        let field_caps = CandidateFieldCaps::new(
+            limits.candidate_stable_id_bytes,
+            limits.candidate_anchor_id_bytes,
+            limits.candidate_metadata_field_bytes,
+        );
+        let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
+        let mut sink = state.begin_page(
+            control,
+            limits.candidate_key_bytes,
+            Some(field_caps),
+            CANDIDATE_READ_BUDGET,
+        );
+        let status = await_controlled(
+            control,
+            port.produce_prepared_candidate_page(page_request, &mut sink),
+        )
+        .await?;
+        let page = sink.finish(status)?;
+        let page = commit_pulled_page(&mut state, page, CANDIDATE_READ_BUDGET)?;
+        let status = page.status();
+        candidates.extend(page.into_items());
+        if status == PageStatus::Complete {
+            break;
+        }
+    }
+    TemporalPreparedCandidateCohort::new(candidates)
+}
+
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -202,8 +273,17 @@ fn begin_pull<T>(
     select_caps: impl FnOnce(&ExecutionLimits) -> (usize, usize, usize),
     resources: ReadBudgetResources,
 ) -> Result<ExecutionLimits, TemporalPortError> {
-    snapshot.request().execution_control().checkpoint()?;
-    let limits = snapshot.request().limits().validate()?;
+    begin_pull_request(snapshot.request(), state, select_caps, resources)
+}
+
+fn begin_pull_request<T>(
+    request: &TemporalSnapshotRequest,
+    state: &ReadState<T>,
+    select_caps: impl FnOnce(&ExecutionLimits) -> (usize, usize, usize),
+    resources: ReadBudgetResources,
+) -> Result<ExecutionLimits, TemporalPortError> {
+    request.execution_control().checkpoint()?;
+    let limits = request.limits().validate()?;
     let (max_items, max_total_bytes, max_item_bytes) = select_caps(&limits);
     state.require_within_limits(max_items, max_total_bytes, max_item_bytes, resources)?;
     if state.is_exhausted() {
@@ -252,6 +332,7 @@ struct CandidateWire<'a> {
     source: &'a Option<String>,
     evidence_role: &'a Option<String>,
     exact_ranges: &'a [tracedecay_domain::ByteRangeV1],
+    participant_generation: u64,
 }
 
 impl MeasuredTemporalValue for RankingCandidate {
@@ -283,6 +364,7 @@ impl MeasuredTemporalValue for RankingCandidate {
                 source: &self.source,
                 evidence_role: &self.evidence_role,
                 exact_ranges: &self.exact_ranges,
+                participant_generation: self.participant_generation,
             },
         )
     }

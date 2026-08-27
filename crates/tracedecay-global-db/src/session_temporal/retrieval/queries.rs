@@ -407,7 +407,8 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
 pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role, authority_session.provider
+           o.message_id, o.turn_id, o.session_id, o.role, authority_session.provider,
+           frozen.generation
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
@@ -500,7 +501,7 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           authority_session.provider, o.snippet_text, ?3
+           authority_session.provider, o.snippet_text, ?3, frozen.generation
     FROM session_occurrences AS o
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
@@ -535,7 +536,7 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           authority_session.provider
+           authority_session.provider, frozen.generation
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
@@ -570,7 +571,7 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
-           authority_session.provider
+           authority_session.provider, frozen.generation
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
@@ -604,7 +605,7 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
-           authority_session.provider
+           authority_session.provider, frozen.generation
     FROM session_summary_nodes_fts
     JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
     JOIN session_summary_availability AS a
@@ -646,7 +647,7 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
-           authority_session.provider
+           authority_session.provider, frozen.generation
     FROM session_summary_nodes AS n
     JOIN session_summary_availability AS a
       ON a.summary_id = n.summary_id
@@ -726,7 +727,7 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
            CASE WHEN evidence.member_count = 1
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
-           authority_session.provider
+           authority_session.provider, frozen.generation
     FROM sessions AS authority_session
     CROSS JOIN session_temporal_generations AS frozen
     CROSS JOIN session_derived_evidence AS evidence

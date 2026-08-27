@@ -7,7 +7,7 @@ use tracedecay_runtime_core::db::engine::Value as SqlValue;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
 use tracedecay_temporal_query::ports::{
     CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope,
+    TemporalRetrievalScope, TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
@@ -66,13 +66,12 @@ pub(super) fn exact_match_ranges(text: &str, literal: &str) -> Vec<tracedecay_do
 
 pub(super) fn authorized_root_project_key<'a>(
     scope: &TemporalRetrievalScope,
-    snapshot: &'a TemporalExecutionSnapshot,
+    request: &'a TemporalSnapshotRequest,
 ) -> Result<Option<&'a str>, TemporalPortError> {
     if !matches!(scope, TemporalRetrievalScope::AllSessionsInAuthorizedRoot) {
         return Ok(None);
     }
-    snapshot
-        .request()
+    request
         .authorized_root()
         .map(|root| Some(root.project_key()))
         .ok_or(TemporalPortError::UnauthorizedSnapshot)
@@ -347,15 +346,16 @@ pub(super) async fn require_candidate_root_authority(
 pub(super) async fn query_candidate_clause(
     conn: &TemporalSqlRead<'_>,
     scope: &TemporalRetrievalScope,
-    snapshot: &TemporalExecutionSnapshot,
+    snapshot_request: &TemporalSnapshotRequest,
+    session_generation: u64,
     clause: &CandidateClause,
     cursor: &CandidateCursor,
     limit: usize,
     request: &PageRequest,
     root_project_key: Option<&str>,
 ) -> Result<TemporalSqlRows, TemporalPortError> {
-    snapshot.request().execution_control().checkpoint()?;
-    let generation = i64::try_from(snapshot.watermarks().generation)
+    snapshot_request.execution_control().checkpoint()?;
+    let generation = i64::try_from(session_generation)
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let limit = i64::try_from(limit).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let caps = request.candidate_field_caps();
@@ -383,7 +383,7 @@ pub(super) async fn query_candidate_clause(
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let exact_source_cap = i64::try_from(MAX_OBSERVATION_RECORD_BYTES)
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-    let provider = snapshot
+    let provider = snapshot_request
         .provider_scope()
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
     let root_project_key =
@@ -686,7 +686,8 @@ pub(super) async fn query_candidate_clause(
 pub(super) fn candidate_from_row(
     row: &TemporalSqlRow,
     channel: CandidateChannel,
-    _scope: &TemporalRetrievalScope,
+    scope: &TemporalRetrievalScope,
+    session_generation: u64,
 ) -> Result<RankingCandidate, TemporalPortError> {
     let source_id: String = row
         .get(0)
@@ -718,6 +719,16 @@ pub(super) fn candidate_from_row(
     } else {
         Vec::new()
     };
+    let participant_generation = match scope {
+        TemporalRetrievalScope::Session(_) => session_generation,
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => row
+            .get(if channel == CandidateChannel::ExactMessage {
+                10
+            } else {
+                8
+            })
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
+    };
     Ok(RankingCandidate {
         stable_id: anchor.clone(),
         anchor_id: parse_text(anchor, CANDIDATE_OPERATION)?,
@@ -739,6 +750,7 @@ pub(super) fn candidate_from_row(
             .get(6)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
         exact_ranges,
+        participant_generation,
     })
 }
 

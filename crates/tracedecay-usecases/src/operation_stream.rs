@@ -1745,6 +1745,7 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
         | CursorError::GenerationMismatch
         | CursorError::ParticipantManifestMismatch
         | CursorError::EpochMismatch
+        | CursorError::CandidateCohortMismatch
         | CursorError::SourceWatermarkMismatch
         | CursorError::ProjectionWatermarkMismatch
         | CursorError::IndexWatermarkMismatch

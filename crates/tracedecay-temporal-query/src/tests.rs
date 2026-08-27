@@ -25,8 +25,8 @@ use super::ports::{
     BindingDigest, CandidatePageSink, ExecutionLimits, InMemoryCursorAuthenticator, KernelVersions,
     PageKey, PageRequest, PageStatus, PortFuture, SummarySourceRecord, TemporalExecutionSnapshot,
     TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalPortError, TemporalReadPort, TemporalRecord, TemporalRecordPageSink,
-    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
+    TemporalPortError, TemporalPreparedCandidateCohort, TemporalReadPort, TemporalRecord,
+    TemporalRecordPageSink, TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
 };
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
 use super::resolution::summary::SummarySourceState;
@@ -139,6 +139,17 @@ impl TemporalReadPort for FakeReadPort {
             })
         })
     }
+
+    fn produce_temporal_record_page_for_scope<'a>(
+        &'a self,
+        _scope: &'a super::ports::TemporalRetrievalScope,
+        snapshot: &'a TemporalExecutionSnapshot,
+        candidates: &'a [RankingCandidate],
+        request: PageRequest,
+        sink: &'a mut TemporalRecordPageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        self.produce_temporal_record_page(snapshot, candidates, request, sink)
+    }
 }
 
 fn page_start(request: &PageRequest) -> usize {
@@ -248,6 +259,7 @@ fn candidate(stable_id: &str, anchor_id: &str, raw_score: i64) -> RankingCandida
         source: Some("source-1".to_string()),
         evidence_role: Some("message".to_string()),
         exact_ranges: Vec::new(),
+        participant_generation: 1,
     }
 }
 
@@ -584,6 +596,63 @@ fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
         assert!(
             hydrator.calls.lock().expect("calls lock").is_empty(),
             "compact projection must not authorize or read payload bytes",
+        );
+    });
+}
+
+#[test]
+fn root_wide_export_reuses_the_exact_prepared_candidate_cohort() {
+    block_on(async {
+        let mut prepared = candidate("prepared", "prepared", 20);
+        prepared.participant_generation = 7;
+        let port = FakeReadPort::new(
+            vec![candidate("must-not-be-read", "must-not-be-read", 99)],
+            vec![TemporalRecord::Occurrence(occurrence('a', "prepared", 20))],
+        );
+        let mut request = request(TemporalModeV1::Current, 1);
+        let participant = TemporalParticipantGeneration::new(
+            SessionId::new("session-1").expect("session"),
+            "source-1",
+            request.snapshot.watermarks(),
+            request.snapshot.watermarks().projection,
+            &request.snapshot.versions().configuration_digest,
+            request.snapshot.access_digest(),
+            TemporalParticipantAuthorization::Authorized,
+            TemporalSourceAccess::Available,
+        )
+        .expect("participant");
+        request.snapshot = TemporalExecutionSnapshot::new_authorized(
+            request.snapshot.request().clone().with_retrieval_scope(
+                super::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+            ),
+            request.snapshot.watermarks(),
+            request.snapshot.versions().clone(),
+            request.snapshot.cursor_key().cloned(),
+            ValidatedAuthorization::Authorized,
+        )
+        .expect("root snapshot")
+        .with_participant_manifest(
+            TemporalParticipantManifest::new(vec![participant]).expect("manifest"),
+        )
+        .expect("authoritative manifest")
+        .with_prepared_candidate_cohort(
+            TemporalPreparedCandidateCohort::new(vec![prepared]).expect("prepared cohort"),
+        )
+        .expect("bound cohort");
+
+        let export =
+            execute_temporal_candidate_export(&request, &port, &authenticator("key-1", 1, 7))
+                .await
+                .expect("candidate export");
+
+        assert_eq!(port.candidate_pages.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            export
+                .ranked()
+                .iter()
+                .map(|candidate| candidate.stable_id.as_str())
+                .collect::<Vec<_>>(),
+            ["prepared"]
         );
     });
 }

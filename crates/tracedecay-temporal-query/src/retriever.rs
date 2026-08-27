@@ -349,7 +349,10 @@ pub async fn hydrate_temporal_candidate_export(
     hydration_port: &impl TemporalHydrationPort,
     token_estimator: &impl VersionedTokenEstimator,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
-    if export.snapshot != request.snapshot {
+    if !export
+        .snapshot
+        .has_same_execution_authority(&request.snapshot)
+    {
         return Err(TemporalKernelError::Port(
             TemporalPortError::InvalidBinding {
                 field: "temporal candidate export snapshot",

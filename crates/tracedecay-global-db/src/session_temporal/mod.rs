@@ -35,9 +35,9 @@ use tracedecay_graph_db::GraphNamespace;
 
 use self::execution::{
     AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
-    SessionTemporalExecutionError, SessionTemporalExecutionPort, SessionTemporalExecutionReport,
-    TaskSessionExecutionOmissionReasonV1, TaskSessionExecutionOmissionV1,
-    TaskSessionRankSelectorV1, TaskSessionReauthorizationStageV1,
+    SessionDataFreshness, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+    SessionTemporalExecutionReport, TaskSessionExecutionOmissionReasonV1,
+    TaskSessionExecutionOmissionV1, TaskSessionRankSelectorV1, TaskSessionReauthorizationStageV1,
     TaskSessionSelectionCallbackErrorV1, TaskSessionTemporalExecutionFutureV1,
     TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,
     TaskSessionTemporalExecutionReportV1, TemporalExecutionFuture,
@@ -64,6 +64,7 @@ use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
 use tracedecay_temporal_query::hydration::hydrate_selected;
 use tracedecay_temporal_query::ports::{
     BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
+    TemporalRetrievalScope,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
@@ -71,8 +72,10 @@ use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_tempo
 pub use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
-use self::participant_freeze::freeze_participants;
-use self::retrieval::GlobalDbTemporalReadPort;
+use self::participant_freeze::{
+    freeze_participants, freeze_prepared_candidate_participants, root_readiness,
+};
+use self::retrieval::{GlobalDbPreparedCandidatePort, GlobalDbTemporalReadPort};
 use self::sql::TemporalSqlRead;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content_with_checkpoint;
 
@@ -779,6 +782,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         (
             tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
             TemporalExecutionSnapshot,
+            Option<SessionDataFreshness>,
         ),
         SessionTemporalExecutionError,
     > {
@@ -789,10 +793,63 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let (participants, watermarks, cursor_key) =
-            freeze_participants(&TemporalSqlRead::registered(&read), request).await?;
+        let temporal_read = TemporalSqlRead::registered(&read);
+        let (participants, watermarks, cursor_key, prepared, readiness) =
+            match request.snapshot_request().retrieval_scope() {
+                TemporalRetrievalScope::Session(_) => {
+                    let (participants, watermarks, cursor_key) =
+                        freeze_participants(&temporal_read, request).await?;
+                    (participants, watermarks, cursor_key, None, None)
+                }
+                TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+                    let relation_authority = self.db.session_relation_store().ok();
+                    let candidate_read = match relation_authority {
+                        Some((relation_scope, relation_store)) => {
+                            GlobalDbTemporalReadPort::new_registered_with_relations(
+                                &read,
+                                relation_scope,
+                                relation_store,
+                            )
+                        }
+                        None => GlobalDbTemporalReadPort::new_registered(&read),
+                    };
+                    let plan = tracedecay_temporal_query::plan_temporal_candidates(
+                        request.query(),
+                        request.direct_anchor(),
+                        request.snapshot_request().semantic_filter().goals,
+                    );
+                    let preparation = GlobalDbPreparedCandidatePort::new(
+                        &candidate_read,
+                        request.snapshot_request(),
+                        &plan,
+                    );
+                    let prepared =
+                        tracedecay_temporal_query::ports::prepare_temporal_candidate_cohort(
+                            request.snapshot_request(),
+                            &preparation,
+                        )
+                        .await
+                        .map_err(map_control_error)?;
+                    let readiness = root_readiness(&temporal_read, request).await?;
+                    if prepared.candidates().is_empty() {
+                        return Err(SessionTemporalExecutionError::Empty {
+                            freshness: readiness,
+                        });
+                    }
+                    let (participants, watermarks, cursor_key) =
+                        freeze_prepared_candidate_participants(&temporal_read, request, &prepared)
+                            .await?;
+                    (
+                        participants,
+                        watermarks,
+                        cursor_key,
+                        Some(prepared),
+                        Some(readiness),
+                    )
+                }
+            };
         control.checkpoint().map_err(map_control_error)?;
-        let snapshot = TemporalExecutionSnapshot::new_authorized(
+        let mut snapshot = TemporalExecutionSnapshot::new_authorized(
             request.snapshot_request().clone(),
             watermarks,
             KernelVersions {
@@ -809,7 +866,12 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         )
         .and_then(|snapshot| snapshot.with_participant_manifest(participants))
         .map_err(map_control_error)?;
-        Ok((read, snapshot))
+        if let Some(prepared) = prepared {
+            snapshot = snapshot
+                .with_prepared_candidate_cohort(prepared)
+                .map_err(map_control_error)?;
+        }
+        Ok((read, snapshot, readiness))
     }
 
     #[hotpath::measure]
@@ -822,7 +884,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         E: VersionedTokenEstimator + Sync,
     {
         hotpath::gauge!("session_temporal.execution").inc(1u32);
-        let (read_snapshot, snapshot) = self.freeze(&request).await?;
+        let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
         let authenticator =
             GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
                 .await
@@ -857,14 +919,18 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         )
         .await
         .map_err(map_kernel_execution_error)?;
-        let source_coverage = result
-            .snapshot
-            .source_coverage()
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        Ok(SessionTemporalExecutionReport::from_source_coverage(
-            result,
-            source_coverage,
-        ))
+        if let Some(readiness) = root_readiness {
+            Ok(SessionTemporalExecutionReport::new(result, readiness))
+        } else {
+            let source_coverage = result
+                .snapshot
+                .source_coverage()
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            Ok(SessionTemporalExecutionReport::from_source_coverage(
+                result,
+                source_coverage,
+            ))
+        }
     }
 }
 
@@ -893,7 +959,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
     {
         Box::pin(async move {
             hotpath::gauge!("session_temporal.execution").inc(1u32);
-            let (read_snapshot, snapshot) = self.freeze(request.temporal()).await?;
+            let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
             let authenticator =
                 GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
                     .await
@@ -1227,6 +1293,7 @@ fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
         | CursorError::GenerationMismatch
         | CursorError::ParticipantManifestMismatch
         | CursorError::EpochMismatch
+        | CursorError::CandidateCohortMismatch
         | CursorError::SourceWatermarkMismatch
         | CursorError::ProjectionWatermarkMismatch
         | CursorError::IndexWatermarkMismatch

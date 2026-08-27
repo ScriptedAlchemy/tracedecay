@@ -19,6 +19,12 @@ pub struct RankingCandidate {
     pub source: Option<String>,
     pub evidence_role: Option<String>,
     pub exact_ranges: Vec<ByteRangeV1>,
+    /// Exact persisted generation that admitted this candidate.
+    ///
+    /// Root-wide retrieval carries this through candidate planning so the
+    /// later participant freeze and record read cannot silently switch to a
+    /// newer generation.
+    pub participant_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -471,6 +477,7 @@ mod tests {
             source: Some("store-a".to_string()),
             evidence_role: Some("message".to_string()),
             exact_ranges: Vec::new(),
+            participant_generation: 1,
         }
     }
 

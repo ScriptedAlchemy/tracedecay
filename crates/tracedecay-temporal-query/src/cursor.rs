@@ -62,6 +62,8 @@ pub enum CursorError {
     ParticipantManifestMismatch,
     #[error("cursor snapshot epoch changed")]
     EpochMismatch,
+    #[error("cursor prepared candidate cohort changed")]
+    CandidateCohortMismatch,
     #[error("cursor source watermark changed")]
     SourceWatermarkMismatch,
     #[error("cursor projection watermark changed")]
@@ -104,6 +106,7 @@ struct CursorPayload {
     index_watermark: u64,
     summary_watermark: u64,
     epoch_digest: String,
+    candidate_cohort_digest: String,
     schema_version: u32,
     ranking_version: u32,
     configuration_digest: String,
@@ -147,6 +150,7 @@ impl CursorPayload {
             index_watermark: snapshot.watermarks().index,
             summary_watermark: snapshot.watermarks().summary,
             epoch_digest: snapshot.participant_manifest().epoch_digest().to_string(),
+            candidate_cohort_digest: snapshot.candidate_cohort_digest().as_str().to_string(),
             schema_version: snapshot.versions().schema,
             ranking_version: snapshot.versions().ranking,
             configuration_digest: snapshot
@@ -346,6 +350,9 @@ fn verify_bindings(
     if payload.configuration_digest != expected.versions().configuration_digest.as_str() {
         return Err(CursorError::ConfigurationMismatch);
     }
+    if payload.candidate_cohort_digest != expected.candidate_cohort_digest().as_str() {
+        return Err(CursorError::CandidateCohortMismatch);
+    }
     Ok(())
 }
 
@@ -417,12 +424,14 @@ mod tests {
     };
 
     use super::*;
+    use crate::candidates::CandidateChannel;
     use crate::ports::{
-        BindingDigest, CursorKeyError, CursorSignature, KernelVersions, SessionCursorAuthenticator,
-        TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-        TemporalParticipantManifest, TemporalSnapshotRequest, TemporalSourceAccess,
-        TemporalWatermarks, MAX_TEMPORAL_PARTICIPANTS,
+        BindingDigest, CursorKeyError, CursorSignature, KernelVersions, MAX_TEMPORAL_PARTICIPANTS,
+        SessionCursorAuthenticator, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+        TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSnapshotRequest,
+        TemporalSourceAccess, TemporalWatermarks,
     };
+    use crate::ranking::RankingCandidate;
 
     const TEST_NOW_MICROS: i64 = 1_800_000_000_000_000;
 
@@ -571,8 +580,7 @@ mod tests {
             (0..count)
                 .map(|index| {
                     TemporalParticipantGeneration::new(
-                        SessionId::new(format!("session-{index:03}"))
-                            .expect("session"),
+                        SessionId::new(format!("session-{index:03}")).expect("session"),
                         "source-1",
                         TemporalWatermarks {
                             generation: 7,
@@ -582,10 +590,8 @@ mod tests {
                             summary: 19,
                         },
                         23,
-                        &BindingDigest::new("configuration", digest('3'))
-                            .expect("configuration"),
-                        &BindingDigest::new("authorization", digest('2'))
-                            .expect("authorization"),
+                        &BindingDigest::new("configuration", digest('3')).expect("configuration"),
+                        &BindingDigest::new("authorization", digest('2')).expect("authorization"),
                         TemporalParticipantAuthorization::Authorized,
                         TemporalSourceAccess::Available,
                     )
@@ -594,6 +600,24 @@ mod tests {
                 .collect(),
         )
         .expect("manifest")
+    }
+
+    fn cohort_candidate(stable_id: &str) -> RankingCandidate {
+        RankingCandidate {
+            stable_id: stable_id.to_string(),
+            anchor_id: tracedecay_domain::RetrievalAnchorId::new(stable_id).expect("anchor"),
+            retriever_record_id: stable_id.to_string(),
+            channel: CandidateChannel::ExactMessage,
+            raw_score: 1_000,
+            knowledge_at_micros: 7,
+            logical_message: Some(stable_id.to_string()),
+            turn: None,
+            session: Some("session-1".to_string()),
+            source: Some("source-1".to_string()),
+            evidence_role: Some("message".to_string()),
+            exact_ranges: Vec::new(),
+            participant_generation: 7,
+        }
     }
 
     fn resign(
@@ -797,6 +821,49 @@ mod tests {
         .expect("maximum cursor");
 
         assert_eq!(maximum.len(), one.len());
+    }
+
+    #[test]
+    fn cursor_ignores_unrelated_no_match_state_but_rejects_candidate_change() {
+        let provider = auth(7);
+        let first_candidate = cohort_candidate("candidate-1");
+        let expected = snapshot('2', 13)
+            .with_observed_candidate_cohort(std::slice::from_ref(&first_candidate))
+            .expect("candidate cohort");
+        let encoded = encode_cursor(&expected, &sort_key(), &provider).expect("cursor");
+
+        let unrelated_no_match = snapshot('2', 13)
+            .with_observed_candidate_cohort(std::slice::from_ref(&first_candidate))
+            .expect("unchanged matching cohort");
+        assert_eq!(
+            verify_cursor(&encoded, &unrelated_no_match, &provider),
+            Ok(sort_key())
+        );
+
+        let matching_change = snapshot('2', 13)
+            .with_observed_candidate_cohort(&[first_candidate, cohort_candidate("candidate-2")])
+            .expect("changed matching cohort");
+        assert_eq!(
+            verify_cursor(&encoded, &matching_change, &provider),
+            Err(CursorError::CandidateCohortMismatch)
+        );
+    }
+
+    #[test]
+    fn cursor_static_binding_drift_precedes_candidate_cohort_planning() {
+        let auth = auth(7);
+        let expected = snapshot('2', 13);
+        let key_ref = expected.cursor_key().expect("cursor key");
+        let encoded = encode_cursor(&expected, &sort_key(), &auth).expect("cursor");
+        let drifted = mutate_and_resign(&encoded, key_ref, &auth, |payload| {
+            payload.candidate_cohort_digest = digest('9');
+            payload.schema_version += 1;
+        });
+
+        assert_eq!(
+            verify_cursor(&drifted, &expected, &auth),
+            Err(CursorError::SchemaMismatch)
+        );
     }
 
     #[test]
@@ -1062,6 +1129,10 @@ mod tests {
         mismatch!(
             |payload: &mut CursorPayload| payload.epoch_digest = digest('9'),
             CursorError::EpochMismatch
+        );
+        mismatch!(
+            |payload: &mut CursorPayload| payload.candidate_cohort_digest = digest('9'),
+            CursorError::CandidateCohortMismatch
         );
         mismatch!(
             |payload: &mut CursorPayload| payload.last_sort_key.stable_id.clear(),

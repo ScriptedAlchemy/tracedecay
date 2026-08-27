@@ -340,7 +340,13 @@ fn candidate_generation(
     session_id: &SessionId,
 ) -> Result<u64, TemporalPortError> {
     let Some(participants) = participants else {
-        return Ok(snapshot.watermarks().generation);
+        if candidate.participant_generation != snapshot.watermarks().generation {
+            return Err(read_message(
+                RECORD_OPERATION,
+                "candidate generation changed after the session freeze",
+            ));
+        }
+        return Ok(candidate.participant_generation);
     };
     let source = candidate
         .source
@@ -362,7 +368,13 @@ fn candidate_generation(
             "candidate graph watermark is stale for the frozen projection",
         ));
     }
-    Ok(generation)
+    if candidate.participant_generation != generation {
+        return Err(read_message(
+            RECORD_OPERATION,
+            "candidate generation changed after the participant freeze",
+        ));
+    }
+    Ok(candidate.participant_generation)
 }
 
 fn map_relation_error(

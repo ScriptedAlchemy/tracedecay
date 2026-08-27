@@ -633,6 +633,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::GenerationMismatch
             | CursorError::ParticipantManifestMismatch
             | CursorError::EpochMismatch
+            | CursorError::CandidateCohortMismatch
             | CursorError::SourceWatermarkMismatch
             | CursorError::ProjectionWatermarkMismatch
             | CursorError::IndexWatermarkMismatch
