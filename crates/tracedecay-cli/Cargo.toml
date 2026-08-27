@@ -117,6 +117,7 @@ url = "2"
 axum = "0.8"
 dirs = "6"
 fs2 = "0.4"
+regex = "1.12.3"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
