@@ -16,6 +16,7 @@ mockups/ui-concept-v2/
 
 - Add new iterations as `vN-short-slug.png` inside the channel folder (for example the next Brain synapse/hook-firing plate is `01-brain/v2-hook-synapses.png`).
 - Highest `vN` in a folder is the current plate.
+- 2026-08-27 correction: Brain current is `v4-measured-registry.png` (prior versions kept).
 - Do not flatten plates into the root. Do not dump iterations into a `drafts/` folder.
 - Never overwrite an older version; add the next `vN`.
 - No git symlinks.
@@ -26,7 +27,7 @@ Current (highest `vN`) plate per channel:
 
 | # | File | Hero |
 |---|---|---|
-| 01 | 01-brain/v1-recency-field.png | Measured registry field. Recency columns. Size = holdings. Brightness = vitality. Live SSE strikes, never decorative neurons. |
+| 01 | 01-brain/v4-measured-registry.png | Unscoped measured registry field. X=recency bucket. Y/size=indexed mass. Hub only when checkouts share git_common_dir. One-hop pulse. CONCEPT/SYNTHETIC. |
 | 02 | 02-explorer/v2-four-lanes.png | Four fan-out lanes: code / sessions / knowledge / semantic. |
 | 03 | 03-loom/v1-weave.png | Weave canvas. Time down, host across, width = messages. Causal crossings listed, not drawn. |
 | 04 | 04-sessions/v1-inspector.png | Session list with real headers + LCM inspector. |
