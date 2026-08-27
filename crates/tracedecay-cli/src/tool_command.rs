@@ -141,121 +141,134 @@ fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Resul
 }
 
 /// Entry point for `tracedecay tool ...`.
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.tool.dispatch", future = true)]
 pub(crate) async fn run(
     project: Option<String>,
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    #[cfg(feature = "hotpath")]
-    {
-        let requested_name = name.as_deref().map(canonical_tool_name);
-        hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
-    }
-    let defs = get_tool_definitions().map_err(|error| {
-        TraceDecayError::project_route(
-            "mcp.catalog_discovery_unavailable",
-            false,
-            format!("MCP tool discovery is unavailable: {error}"),
-        )
-    })?;
+    run_inner(project, name, args).await
+}
 
-    let Some(raw_name) = name else {
-        print_tool_list(&defs);
-        return Ok(());
-    };
+fn run_inner(
+    project: Option<String>,
+    name: Option<String>,
+    args: Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    // Erase the deeply nested tool-dispatch future before it reaches the
+    // measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        #[cfg(feature = "hotpath")]
+        {
+            let requested_name = name.as_deref().map(canonical_tool_name);
+            hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
+        }
+        let defs = get_tool_definitions().map_err(|error| {
+            TraceDecayError::project_route(
+                "mcp.catalog_discovery_unavailable",
+                false,
+                format!("MCP tool discovery is unavailable: {error}"),
+            )
+        })?;
 
-    let canonical = canonical_tool_name(&raw_name);
-    let internal_def = internal_daemon_tool_definition(&canonical);
-    let Some(def) = defs
-        .iter()
-        .find(|definition| definition.name == canonical)
-        .or(internal_def.as_ref())
-    else {
-        let suggestion = nearest_tool_name(&canonical, &defs)
-            .map(|name| format!(" Did you mean '{name}'?"))
-            .unwrap_or_default();
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
-            ),
-        });
-    };
+        let Some(raw_name) = name else {
+            print_tool_list(&defs);
+            return Ok(());
+        };
 
-    let parsed = parse_invocation(def, &args)?;
-    if parsed.show_help {
-        print_tool_help(def);
-        return Ok(());
-    }
-    let ParsedInvocation {
-        tool_args,
-        project: parsed_project,
-        raw_json,
-        dry_run,
-        show_help: _,
-    } = parsed;
+        let canonical = canonical_tool_name(&raw_name);
+        let internal_def = internal_daemon_tool_definition(&canonical);
+        let Some(def) = defs
+            .iter()
+            .find(|definition| definition.name == canonical)
+            .or(internal_def.as_ref())
+        else {
+            let suggestion = nearest_tool_name(&canonical, &defs)
+                .map(|name| format!(" Did you mean '{name}'?"))
+                .unwrap_or_default();
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
+                ),
+            });
+        };
 
-    if dry_run {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&tool_args).unwrap_or_default()
-        );
-        return Ok(());
-    }
+        let parsed = parse_invocation(def, &args)?;
+        if parsed.show_help {
+            print_tool_help(def);
+            return Ok(());
+        }
+        let ParsedInvocation {
+            tool_args,
+            project: parsed_project,
+            raw_json,
+            dry_run,
+            show_help: _,
+        } = parsed;
 
-    let explicit_project = project.or(parsed_project);
-    let deadline = Instant::now()
-        .checked_add(tool_command_deadline()?)
-        .ok_or_else(tool_deadline_range_error)?;
-    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
-        let (request, requested_format) = cli_surface_invocation(&def.name, tool_args, raw_json)
+        if dry_run {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tool_args).unwrap_or_default()
+            );
+            return Ok(());
+        }
+
+        let explicit_project = project.or(parsed_project);
+        let deadline = Instant::now()
+            .checked_add(tool_command_deadline()?)
+            .ok_or_else(tool_deadline_range_error)?;
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+            let (request, requested_format) =
+                cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: error.to_string(),
+                    }
+                })?;
+            return dispatch_cli_application_surface(
+                operation,
+                request,
+                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path,
+                requested_format,
+                deadline,
+            )
+            .await;
+        }
+        // Catalog-declared operations must pass the same binding resolver as the
+        // typed application surfaces before entering the retained compatibility
+        // owner. Operations with no catalog contract remain explicitly owned by
+        // the root MCP handler migration, rather than an unclassified fallback.
+        let _catalog_binding = resolve_catalog_tool_binding(BindingSurface::Cli, &def.name)
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
             })?;
-        return dispatch_cli_application_surface(
-            operation,
-            request,
-            DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path,
-            requested_format,
+        let compatibility_owned =
+            LegacyToolCompatibilityOwner::admits(&def.name).map_err(|error| {
+                TraceDecayError::project_route(
+                    "mcp.catalog_discovery_unavailable",
+                    false,
+                    format!("MCP tool discovery is unavailable: {error}"),
+                )
+            })?;
+        if internal_def.is_none() && !compatibility_owned {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "{} does not own {}: {}",
+                    LegacyToolCompatibilityOwner::OWNER,
+                    def.name,
+                    LegacyToolCompatibilityOwner::REASON
+                ),
+            });
+        }
+        dispatch_compatibility_tool(
+            DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
+            &def.name,
+            tool_args,
+            raw_json,
             deadline,
         )
-        .await;
-    }
-    // Catalog-declared operations must pass the same binding resolver as the
-    // typed application surfaces before entering the retained compatibility
-    // owner. Operations with no catalog contract remain explicitly owned by
-    // the root MCP handler migration, rather than an unclassified fallback.
-    let _catalog_binding =
-        resolve_catalog_tool_binding(BindingSurface::Cli, &def.name).map_err(|error| {
-            TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })?;
-    let compatibility_owned = LegacyToolCompatibilityOwner::admits(&def.name).map_err(|error| {
-        TraceDecayError::project_route(
-            "mcp.catalog_discovery_unavailable",
-            false,
-            format!("MCP tool discovery is unavailable: {error}"),
-        )
-    })?;
-    if internal_def.is_none() && !compatibility_owned {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{} does not own {}: {}",
-                LegacyToolCompatibilityOwner::OWNER,
-                def.name,
-                LegacyToolCompatibilityOwner::REASON
-            ),
-        });
-    }
-    dispatch_compatibility_tool(
-        DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
-        &def.name,
-        tool_args,
-        raw_json,
-        deadline,
-    )
-    .await
+        .await
+    })
 }
 
 /// Dispatch one catalogued application-surface operation on behalf of a
@@ -264,7 +277,7 @@ pub(crate) async fn run(
 /// This is the same normalized-argument, deadline, and warm-up-retry path the
 /// `tracedecay tool` fallback uses, so first-class commands cannot drift from
 /// the typed surface's transport behavior.
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.tool.catalog", future = true)]
 pub(crate) async fn dispatch_catalogued_cli_operation(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -305,7 +318,7 @@ fn cli_surface_invocation(
 /// without a project reaches the profile-scoped projectless route, where those
 /// operations can only answer `application.surface.unavailable` /
 /// `not_found_or_not_authorized`.
-#[hotpath::measure(label = "cli.tool.application")]
+#[hotpath::measure(label = "cli.tool.application", future = true)]
 async fn dispatch_cli_application_surface(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -313,89 +326,111 @@ async fn dispatch_cli_application_surface(
     requested_format: RequestedOutputFormat,
     deadline: Instant,
 ) -> Result<()> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.application.operation").set(&operation.as_str());
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
-            message: "could not allocate an application surface request id".to_owned(),
-        })?;
-    let request = match parse_application_surface_request(operation, tool_args.clone()) {
-        Ok(request) => request,
-        Err(error) => {
-            if let Ok(handshake) =
-                DaemonHandshake::for_current_client(project.clone(), None, false, false)
-                && let Ok(client) = DaemonInvocationClient::for_current(handshake)
-            {
-                observe_surface_argument_rejection(
-                    Some(&client),
-                    tracedecay_tool_catalog::BindingSurface::Cli,
-                    operation,
-                    &request_id,
-                    &error,
-                )
-                .await;
+    dispatch_cli_application_surface_inner(
+        operation,
+        tool_args,
+        project,
+        requested_format,
+        deadline,
+    )
+    .await
+}
+
+fn dispatch_cli_application_surface_inner(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    requested_format: RequestedOutputFormat,
+    deadline: Instant,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    // Erase the deeply nested application-surface future before it reaches
+    // the measured wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        #[cfg(feature = "hotpath")]
+        hotpath::val!("cli.application.operation").set(&operation.as_str());
+        let request_id = mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| {
+            TraceDecayError::Config {
+                message: "could not allocate an application surface request id".to_owned(),
             }
-            return Err(TraceDecayError::Config {
+        })?;
+        let request = match parse_application_surface_request(operation, tool_args.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                if let Ok(handshake) =
+                    DaemonHandshake::for_current_client(project.clone(), None, false, false)
+                    && let Ok(client) = DaemonInvocationClient::for_current(handshake)
+                {
+                    observe_surface_argument_rejection(
+                        Some(&client),
+                        tracedecay_tool_catalog::BindingSurface::Cli,
+                        operation,
+                        &request_id,
+                        &error,
+                    )
+                    .await;
+                }
+                return Err(TraceDecayError::Config {
+                    message: error.to_string(),
+                });
+            }
+        };
+        let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
+        let client = DaemonInvocationClient::for_current(handshake)?;
+        // A cold daemon answers a retryable pre-admission problem while the
+        // project open still warms in the background (bounded by the daemon's
+        // foreground open wait). The compatibility tool path rides that state out
+        // through its project-open retry loop; the typed surface path must present
+        // the same transport behavior, so re-send the same request per the
+        // envelope's own retry directive until the CLI deadline expires.
+        let mut next_request = Some(request);
+        let result = loop {
+            let request = match next_request.take() {
+                Some(request) => request,
+                None => parse_application_surface_request(operation, tool_args.clone()).map_err(
+                    |error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    },
+                )?,
+            };
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+                .unwrap_or(i64::MAX);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let request_deadline = Deadline::new(UtcMicros(
+                now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
+            ))
+            .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
-            });
-        }
-    };
-    let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
-    let client = DaemonInvocationClient::for_current(handshake)?;
-    // A cold daemon answers a retryable pre-admission problem while the
-    // project open still warms in the background (bounded by the daemon's
-    // foreground open wait). The compatibility tool path rides that state out
-    // through its project-open retry loop; the typed surface path must present
-    // the same transport behavior, so re-send the same request per the
-    // envelope's own retry directive until the CLI deadline expires.
-    let mut next_request = Some(request);
-    let result = loop {
-        let request = match next_request.take() {
-            Some(request) => request,
-            None => parse_application_surface_request(operation, tool_args.clone()).map_err(
-                |error| TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            )?,
+            })?;
+            let cancellation =
+                CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
+                    .map_err(|error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?;
+            let result = resolve_cli_application_surface(
+                operation,
+                request_id.clone(),
+                request,
+                requested_format,
+                request_deadline,
+                cancellation,
+                Some(&client),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
+            let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
+                break result;
+            };
+            if deadline.saturating_duration_since(Instant::now()) <= delay {
+                break result;
+            }
+            tokio::time::sleep(delay).await;
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-            .unwrap_or(i64::MAX);
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let request_deadline = Deadline::new(UtcMicros(
-            now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
-        ))
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let cancellation =
-            CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
-        let result = resolve_cli_application_surface(
-            operation,
-            request_id.clone(),
-            request,
-            requested_format,
-            request_deadline,
-            cancellation,
-            Some(&client),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
-            break result;
-        };
-        if deadline.saturating_duration_since(Instant::now()) <= delay {
-            break result;
-        }
-        tokio::time::sleep(delay).await;
-    };
-    print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
+        print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
+    })
 }
 
 fn print_cli_application_surface(
@@ -511,7 +546,7 @@ fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDeca
 ///
 /// Owner: root MCP tool-dispatch migration. The operation has already passed
 /// definition admission and, when declared, catalog binding resolution.
-#[hotpath::measure(label = "cli.tool.compatibility")]
+#[hotpath::measure(label = "cli.tool.compatibility", future = true)]
 async fn dispatch_compatibility_tool(
     dispatch: DaemonToolDispatch,
     tool_name: &str,

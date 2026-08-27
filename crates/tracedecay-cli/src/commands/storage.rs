@@ -270,216 +270,245 @@ mod wipe_safety_tests {
 /// non-interactive acceptance every other destructive first-party command
 /// takes, so a scripted caller no longer has to feed `go!` through a pipe on
 /// stdin to reach the wipe.
+#[hotpath::measure(label = "cli.wipe.run", future = true)]
 pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::errors::Result<()> {
-    let profile_root = tracedecay::storage::default_profile_root()?;
-    let home_tracedecay = Some(profile_root.clone());
-    if all {
-        validate_complete_wipe_profile_root(
-            &profile_root,
-            tracedecay::agents::home_dir().as_deref(),
-        )?;
-    }
-    let lifecycle_lease =
-        tracedecay::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, "wipe")?;
-    let _database_scope =
-        tracedecay::db::enter_maintenance_database_scope(&lifecycle_lease, &profile_root, "wipe")?;
-    let registry = if all {
-        None
-    } else {
-        tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::try_open_existing(&profile_root)
-            .await?
-    };
+    handle_wipe_inner(all, assume_yes).await
+}
 
-    // A complete wipe is deliberately schema-independent: the databases may
-    // be corrupt or newer than this binary, and opening the state we are about
-    // to destroy would make the recovery command unavailable. Local wipes keep
-    // their registry-backed target classification and ledger cleanup.
-    let project_paths = if all {
-        Vec::new()
-    } else {
-        global::gather_target_projects(false, &home_tracedecay).await?
-    };
-    let mut targets = Vec::new();
-    for path in &project_paths {
-        let location = global::classify_project_storage_with_registry(
-            path,
-            registry.as_ref(),
-            home_tracedecay.as_deref(),
-        )
-        .await?;
-        // A prior partial wipe may have removed the profile shard while a
-        // marker deletion failed. Keep that marker-backed target selectable so
-        // the same command can finish the cleanup without deleting its registry
-        // retry authority on the failed attempt.
-        if location.status.is_live() || location.marker_root.is_some() {
-            targets.push(location);
+fn handle_wipe_inner(
+    all: bool,
+    assume_yes: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested wipe future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        let profile_root = tracedecay::storage::default_profile_root()?;
+        let home_tracedecay = Some(profile_root.clone());
+        if all {
+            validate_complete_wipe_profile_root(
+                &profile_root,
+                tracedecay::agents::home_dir().as_deref(),
+            )?;
         }
-    }
+        let lifecycle_lease =
+            tracedecay::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, "wipe")?;
+        let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+            &lifecycle_lease,
+            &profile_root,
+            "wipe",
+        )?;
+        let registry = if all {
+            None
+        } else {
+            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::try_open_existing(&profile_root)
+            .await?
+        };
 
-    if !all && targets.is_empty() {
-        eprintln!("No tracedecay projects found in current folder, parents, or children.");
-        return Ok(());
-    }
-
-    global::print_flash_warning(all, &targets);
-
-    if assume_yes {
-        eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
-    } else {
-        eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
-        io::stderr().flush().ok();
-        let mut answer = String::new();
-        io::stdin().lock().read_line(&mut answer).map_err(|e| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: format!("failed to read stdin: {e}"),
+        // A complete wipe is deliberately schema-independent: the databases may
+        // be corrupt or newer than this binary, and opening the state we are about
+        // to destroy would make the recovery command unavailable. Local wipes keep
+        // their registry-backed target classification and ledger cleanup.
+        let project_paths = if all {
+            Vec::new()
+        } else {
+            global::gather_target_projects(false, &home_tracedecay).await?
+        };
+        let mut targets = Vec::new();
+        for path in &project_paths {
+            let location = global::classify_project_storage_with_registry(
+                path,
+                registry.as_ref(),
+                home_tracedecay.as_deref(),
+            )
+            .await?;
+            // A prior partial wipe may have removed the profile shard while a
+            // marker deletion failed. Keep that marker-backed target selectable so
+            // the same command can finish the cleanup without deleting its registry
+            // retry authority on the failed attempt.
+            if location.status.is_live() || location.marker_root.is_some() {
+                targets.push(location);
             }
-        })?;
-        if answer.trim() != "go!" {
-            eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
-            if !io::stdin().is_terminal() {
-                eprintln!("(no terminal on stdin — pass --yes to confirm a scripted wipe)");
-            }
+        }
+
+        if !all && targets.is_empty() {
+            eprintln!("No tracedecay projects found in current folder, parents, or children.");
             return Ok(());
         }
-    }
 
-    if all {
-        let removed = wipe_complete_profile_database_state(&profile_root)?;
+        global::print_flash_warning(all, &targets);
+
+        if assume_yes {
+            eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
+        } else {
+            eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
+            io::stderr().flush().ok();
+            let mut answer = String::new();
+            io::stdin().lock().read_line(&mut answer).map_err(|e| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: format!("failed to read stdin: {e}"),
+                }
+            })?;
+            if answer.trim() != "go!" {
+                eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
+                if !io::stdin().is_terminal() {
+                    eprintln!("(no terminal on stdin — pass --yes to confirm a scripted wipe)");
+                }
+                return Ok(());
+            }
+        }
+
+        if all {
+            let removed = wipe_complete_profile_database_state(&profile_root)?;
+            eprintln!();
+            eprintln!(
+                "\x1b[32mWiped complete profile database state ({removed} filesystem entries).\x1b[0m"
+            );
+            return Ok(());
+        }
+
+        let mut removed = 0usize;
+        let mut failures = Vec::new();
+        let mut wiped_paths: Vec<PathBuf> = Vec::new();
+        let mut marker_cleanup = Vec::new();
+
+        for location in &targets {
+            match remove_local_wipe_directory(&location.data_root) {
+                Ok(_) => {
+                    wiped_paths.push(location.project_root.clone());
+                    marker_cleanup.push(location);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "  \x1b[31m✗\x1b[0m {} ({error})",
+                        location.data_root.display()
+                    );
+                    failures.push(format!("{} ({error})", location.data_root.display()));
+                }
+            }
+        }
+
+        // Keep repository markers intact until the registry transaction succeeds.
+        // If it fails after a shard was removed, the marker remains the durable
+        // local discovery authority for a retry.
+        if !wiped_paths.is_empty() {
+            if let Some(registry) = registry.as_ref() {
+                registry.delete_project_paths(&wiped_paths).await?;
+            }
+        }
+
+        for location in marker_cleanup {
+            if let Some(marker_root) = &location.marker_root
+                && let Err(error) = remove_local_wipe_directory(marker_root)
+            {
+                eprintln!("  \x1b[31m✗\x1b[0m {} ({error})", marker_root.display());
+                failures.push(format!("{} ({error})", marker_root.display()));
+                continue;
+            }
+            removed += 1;
+            eprintln!(
+                "  \x1b[32m✔\x1b[0m wiped {}",
+                location.project_root.display()
+            );
+        }
+
+        if !failures.is_empty() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "local wipe failed for {} selected target(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            });
+        }
+
         eprintln!();
-        eprintln!(
-            "\x1b[32mWiped complete profile database state ({removed} filesystem entries).\x1b[0m"
-        );
-        return Ok(());
-    }
-
-    let mut removed = 0usize;
-    let mut failures = Vec::new();
-    let mut wiped_paths: Vec<PathBuf> = Vec::new();
-    let mut marker_cleanup = Vec::new();
-
-    for location in &targets {
-        match remove_local_wipe_directory(&location.data_root) {
-            Ok(_) => {
-                wiped_paths.push(location.project_root.clone());
-                marker_cleanup.push(location);
-            }
-            Err(error) => {
-                eprintln!(
-                    "  \x1b[31m✗\x1b[0m {} ({error})",
-                    location.data_root.display()
-                );
-                failures.push(format!("{} ({error})", location.data_root.display()));
-            }
-        }
-    }
-
-    // Keep repository markers intact until the registry transaction succeeds.
-    // If it fails after a shard was removed, the marker remains the durable
-    // local discovery authority for a retry.
-    if !wiped_paths.is_empty() {
-        if let Some(registry) = registry.as_ref() {
-            registry.delete_project_paths(&wiped_paths).await?;
-        }
-    }
-
-    for location in marker_cleanup {
-        if let Some(marker_root) = &location.marker_root
-            && let Err(error) = remove_local_wipe_directory(marker_root)
-        {
-            eprintln!("  \x1b[31m✗\x1b[0m {} ({error})", marker_root.display());
-            failures.push(format!("{} ({error})", marker_root.display()));
-            continue;
-        }
-        removed += 1;
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m wiped {}",
-            location.project_root.display()
-        );
-    }
-
-    if !failures.is_empty() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "local wipe failed for {} selected target(s): {}",
-                failures.len(),
-                failures.join("; ")
-            ),
-        });
-    }
-
-    eprintln!();
-    eprintln!("\x1b[32mWiped {removed} project(s).\x1b[0m");
-    Ok(())
+        eprintln!("\x1b[32mWiped {removed} project(s).\x1b[0m");
+        Ok(())
+    })
 }
 
 /// Handles the `list` and `list --all` commands.
+#[hotpath::measure(label = "cli.list.run", future = true)]
 pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
-    use tracedecay::display::format_token_count;
+    handle_list_inner(all).await
+}
 
-    let home_tracedecay = tracedecay::config::user_data_dir();
-    let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
+fn handle_list_inner(
+    all: bool,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+> {
+    // Erase the deeply nested list future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
+    Box::pin(async move {
+        use tracedecay::display::format_token_count;
 
-    if !all && project_paths.is_empty() {
-        println!("No tracedecay projects found in current folder, parents, or children.");
-        return Ok(());
-    }
+        let home_tracedecay = tracedecay::config::user_data_dir();
+        let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
 
-    let token_result = daemon_tool_json(
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "registry_project_tokens",
-            "project_args": &project_paths,
-        }),
-    )
-    .await?;
-    let token_rows = token_result
-        .get("projects")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
-    let mut token_errors: Vec<String> = Vec::new();
-
-    for path in &project_paths {
-        let mut location = global::classify_project_storage(path);
-        if location.status == global::ProjectStorageStatus::Stale
-            && let Some(profile_root) = home_tracedecay.as_deref()
-        {
-            let context = daemon_tool_json(
-                None,
-                "tracedecay_admin_cli",
-                serde_json::json!({
-                    "action": "registry_context",
-                    "project_arg": path,
-                }),
-            )
-            .await?;
-            if let Some(store) = context
-                .get("stores")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.get("store"))
-                .find(|store| {
-                    store.get("store_kind").and_then(serde_json::Value::as_str)
-                        == Some("code_project")
-                })
-                && let Some(registry_location) =
-                    global::classify_registry_storage_value(path, profile_root, store)
-            {
-                location = registry_location;
-            }
+        if !all && project_paths.is_empty() {
+            println!("No tracedecay projects found in current folder, parents, or children.");
+            return Ok(());
         }
-        let has_data = location.data_root.exists();
-        let size = if has_data {
-            global::tracedecay_dir_size(&location.data_root)
-        } else {
-            0
-        };
-        let project_key =
+
+        let token_result = daemon_tool_json(
+            None,
+            "tracedecay_admin_cli",
+            serde_json::json!({
+                "action": "registry_project_tokens",
+                "project_args": &project_paths,
+            }),
+        )
+        .await?;
+        let token_rows = token_result
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
+        let mut token_errors: Vec<String> = Vec::new();
+
+        for path in &project_paths {
+            let mut location = global::classify_project_storage(path);
+            if location.status == global::ProjectStorageStatus::Stale
+                && let Some(profile_root) = home_tracedecay.as_deref()
+            {
+                let context = daemon_tool_json(
+                    None,
+                    "tracedecay_admin_cli",
+                    serde_json::json!({
+                        "action": "registry_context",
+                        "project_arg": path,
+                    }),
+                )
+                .await?;
+                if let Some(store) = context
+                    .get("stores")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.get("store"))
+                    .find(|store| {
+                        store.get("store_kind").and_then(serde_json::Value::as_str)
+                            == Some("code_project")
+                    })
+                    && let Some(registry_location) =
+                        global::classify_registry_storage_value(path, profile_root, store)
+                {
+                    location = registry_location;
+                }
+            }
+            let has_data = location.data_root.exists();
+            let size = if has_data {
+                global::tracedecay_dir_size(&location.data_root)
+            } else {
+                0
+            };
+            let project_key =
             tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path);
-        let token_row = token_rows.iter().find(|row| {
+            let token_row = token_rows.iter().find(|row| {
             row.get("project")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|value| {
@@ -488,102 +517,103 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
                     ) == project_key
                 })
         });
-        // `None` is a total this run could not read, which is not the same
-        // answer as a project that has saved nothing.
-        let tokens = token_row
-            .and_then(|row| row.get("tokens"))
-            .and_then(serde_json::Value::as_u64);
-        if tokens.is_none() {
-            let reason = token_row
-                .and_then(|row| row.get("error"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("no token total reported for this project");
-            token_errors.push(format!("{}: {reason}", path.display()));
+            // `None` is a total this run could not read, which is not the same
+            // answer as a project that has saved nothing.
+            let tokens = token_row
+                .and_then(|row| row.get("tokens"))
+                .and_then(serde_json::Value::as_u64);
+            if tokens.is_none() {
+                let reason = token_row
+                    .and_then(|row| row.get("error"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no token total reported for this project");
+                token_errors.push(format!("{}: {reason}", path.display()));
+            }
+            rows.push(ListRow {
+                path: path.clone(),
+                status_label: location.status.label(),
+                has_data,
+                size,
+                tokens,
+            });
         }
-        rows.push(ListRow {
-            path: path.clone(),
-            status_label: location.status.label(),
-            has_data,
-            size,
-            tokens,
-        });
-    }
 
-    if all {
-        append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
-    }
+        if all {
+            append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
+        }
 
-    if rows.is_empty() {
-        println!("No tracedecay projects tracked in the global DB.");
-        return Ok(());
-    }
+        if rows.is_empty() {
+            println!("No tracedecay projects tracked in the global DB.");
+            return Ok(());
+        }
 
-    let total_size: u64 = rows.iter().map(|row| row.size).sum();
-    let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
+        let total_size: u64 = rows.iter().map(|row| row.size).sum();
+        let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
 
-    rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
+        rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
 
-    let path_w = rows
-        .iter()
-        .map(|r| {
-            format!("{} [{}]", r.path.display(), r.status_label)
-                .chars()
-                .count()
-        })
-        .max()
-        .unwrap_or(0);
+        let path_w = rows
+            .iter()
+            .map(|r| {
+                format!("{} [{}]", r.path.display(), r.status_label)
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
 
-    println!("Found {} tracedecay project(s):", rows.len());
-    println!();
-    for r in &rows {
-        let path_str = format!("{} [{}]", r.path.display(), r.status_label);
-        let pad = path_w.saturating_sub(path_str.chars().count());
-        let size_str = if r.has_data {
-            tracedecay::display::format_bytes(r.size)
-        } else {
+        println!("Found {} tracedecay project(s):", rows.len());
+        println!();
+        for r in &rows {
+            let path_str = format!("{} [{}]", r.path.display(), r.status_label);
+            let pad = path_w.saturating_sub(path_str.chars().count());
+            let size_str = if r.has_data {
+                tracedecay::display::format_bytes(r.size)
+            } else {
+                "—".to_string()
+            };
+            let tokens_str = match r.tokens {
+                None => "unavailable".to_string(),
+                Some(0) => "—".to_string(),
+                Some(tokens) => format_token_count(tokens),
+            };
+            println!(
+                "  {path_str}{pad}  {size:>10}  {tokens:>10} tokens",
+                pad = " ".repeat(pad),
+                size = size_str,
+                tokens = tokens_str
+            );
+        }
+        println!();
+        let total_tokens_str = if total_tokens == 0 {
             "—".to_string()
+        } else {
+            format_token_count(total_tokens)
         };
-        let tokens_str = match r.tokens {
-            None => "unavailable".to_string(),
-            Some(0) => "—".to_string(),
-            Some(tokens) => format_token_count(tokens),
+        let unreadable = rows.iter().filter(|row| row.tokens.is_none()).count();
+        let total_suffix = if unreadable == 0 {
+            String::new()
+        } else {
+            format!(" (excludes {unreadable} project(s) with unavailable totals)")
         };
         println!(
-            "  {path_str}{pad}  {size:>10}  {tokens:>10} tokens",
-            pad = " ".repeat(pad),
-            size = size_str,
-            tokens = tokens_str
+            "Total: {} on disk · {} tokens saved{}",
+            tracedecay::display::format_bytes(total_size),
+            total_tokens_str,
+            total_suffix
         );
-    }
-    println!();
-    let total_tokens_str = if total_tokens == 0 {
-        "—".to_string()
-    } else {
-        format_token_count(total_tokens)
-    };
-    let unreadable = rows.iter().filter(|row| row.tokens.is_none()).count();
-    let total_suffix = if unreadable == 0 {
-        String::new()
-    } else {
-        format!(" (excludes {unreadable} project(s) with unavailable totals)")
-    };
-    println!(
-        "Total: {} on disk · {} tokens saved{}",
-        tracedecay::display::format_bytes(total_size),
-        total_tokens_str,
-        total_suffix
-    );
-    if !token_errors.is_empty() {
-        eprintln!();
-        eprintln!(
-            "Token totals could not be read for {} project(s):",
-            token_errors.len()
-        );
-        for error in &token_errors {
-            eprintln!("  {error}");
+        if !token_errors.is_empty() {
+            eprintln!();
+            eprintln!(
+                "Token totals could not be read for {} project(s):",
+                token_errors.len()
+            );
+            for error in &token_errors {
+                eprintln!("  {error}");
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[derive(Debug)]
