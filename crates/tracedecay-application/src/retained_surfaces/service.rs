@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{CursorManifestLimitKindV1, UtcMicros};
 
 use super::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
@@ -39,6 +39,7 @@ pub type RetainedSurfaceExecutionFutureV1<'a> = Pin<
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetainedSurfaceExecutionErrorV1 {
     ApplicationProblem(ApplicationProblem),
+    StructuralRefusal(RetainedStructuralRefusalV1),
     InvalidRequest,
     NotFoundOrNotAuthorized,
     Conflict,
@@ -55,6 +56,17 @@ pub enum RetainedSurfaceExecutionErrorV1 {
     ProjectResetRequired,
     Cancelled(CancellationStage),
     TimedOut(CancellationStage),
+}
+
+/// Bounded structural refusals that callers must correct rather than retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedStructuralRefusalV1 {
+    SessionRetrievalBudget,
+    SessionCursorManifestLimit {
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
 }
 
 /// Exact admitted input handed to the daemon-owned retained runtime.
@@ -484,6 +496,9 @@ pub fn retained_surface_execution_problem(
 ) -> ApplicationProblem {
     match error {
         RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem) => problem,
+        RetainedSurfaceExecutionErrorV1::StructuralRefusal(refusal) => {
+            structural_refusal_problem(refusal)
+        }
         RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: diagnostic(
                 "application.retained.invalid-request",
@@ -580,14 +595,47 @@ impl RetainedSurfaceExecutionErrorV1 {
     /// Fail-closed structural budget refusal. True concurrent saturation stays
     /// [`Self::Saturated`] and retryable; this path never is.
     pub fn structural_budget_refusal() -> Self {
-        Self::ApplicationProblem(ApplicationProblem::InvalidRequest {
-            diagnostic: diagnostic(
-                "application.retained.budget-refused",
-                "The request exceeds the admitted retrieval budget. Narrow the scope or limit.",
-            ),
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
+        Self::StructuralRefusal(RetainedStructuralRefusalV1::SessionRetrievalBudget)
+    }
+
+    pub fn cursor_manifest_limit_refusal(
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    ) -> Self {
+        Self::StructuralRefusal(RetainedStructuralRefusalV1::SessionCursorManifestLimit {
+            kind,
+            observed,
+            maximum,
         })
+    }
+}
+
+fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> ApplicationProblem {
+    let diagnostic = match refusal {
+        RetainedStructuralRefusalV1::SessionRetrievalBudget => diagnostic(
+            "application.retained.budget-refused",
+            "The request exceeds the admitted retrieval budget. Narrow the scope or limit.",
+        ),
+        RetainedStructuralRefusalV1::SessionCursorManifestLimit {
+            kind: CursorManifestLimitKindV1::Participants,
+            ..
+        } => diagnostic(
+            "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            "The authorized session scope contains too many cursor participants. Narrow the session scope.",
+        ),
+        RetainedStructuralRefusalV1::SessionCursorManifestLimit {
+            kind: CursorManifestLimitKindV1::CanonicalBytes,
+            ..
+        } => diagnostic(
+            "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            "The authorized session scope exceeds the cursor manifest byte limit. Narrow the session scope.",
+        ),
+    };
+    ApplicationProblem::InvalidRequest {
+        diagnostic,
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
     }
 }
 
@@ -719,7 +767,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn structural_budget_refusal_is_non_retryable_invalid_request() {
         let problem = retained_surface_execution_problem(
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal(),
@@ -733,6 +780,33 @@ mod tests {
             Some("application.retained.budget-refused")
         );
         assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+    }
+
+    #[test]
+    fn cursor_manifest_refusals_have_distinct_non_retryable_diagnostics() {
+        for (kind, expected_code) in [
+            (
+                CursorManifestLimitKindV1::Participants,
+                "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                CursorManifestLimitKindV1::CanonicalBytes,
+                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+        ] {
+            let problem = retained_surface_execution_problem(
+                RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, 257, 256),
+            );
+            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(expected_code)
+            );
+            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+        }
     }
 
     #[test]

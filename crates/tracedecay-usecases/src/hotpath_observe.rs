@@ -135,20 +135,47 @@ pub(crate) fn admission_persist_frames(frames: usize) {
 pub(crate) fn session_retrieval_budget_stage(stage: crate::session::SessionRetrievalBudgetStageV1) {
     use crate::session::SessionRetrievalBudgetStageV1;
     match stage {
-        SessionRetrievalBudgetStageV1::RequestBudgetMismatch => {
-            hotpath::gauge!("session.retrieval.budget.request_mismatch").inc(1.0);
+        SessionRetrievalBudgetStageV1::RequestResultLimit => {
+            hotpath::gauge!("session.retrieval.budget.request_results").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
+            hotpath::gauge!("session.retrieval.budget.request_hydration_items").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RequestContextBytes => {
+            hotpath::gauge!("session.retrieval.budget.request_context_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
+            hotpath::gauge!("session.retrieval.budget.request_candidate_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
+            hotpath::gauge!("session.retrieval.budget.request_record_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
+            hotpath::gauge!("session.retrieval.budget.request_hydration_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
+            hotpath::gauge!("session.retrieval.budget.estimator_version").inc(1.0);
         }
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             hotpath::gauge!("session.retrieval.budget.execution_work").inc(1.0);
         }
-        SessionRetrievalBudgetStageV1::ParticipantManifestLimit => {
-            hotpath::gauge!("session.retrieval.budget.participant_manifest").inc(1.0);
+        SessionRetrievalBudgetStageV1::KernelResultLimit => {
+            hotpath::gauge!("session.retrieval.budget.kernel_results").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
+            hotpath::gauge!("session.retrieval.budget.manifest_participants").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
+            hotpath::gauge!("session.retrieval.budget.manifest_canonical_bytes").inc(1.0);
         }
         SessionRetrievalBudgetStageV1::HydrationBytes => {
             hotpath::gauge!("session.retrieval.budget.hydration_bytes").inc(1.0);
         }
         SessionRetrievalBudgetStageV1::ContextBytes => {
             hotpath::gauge!("session.retrieval.budget.context_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ContextTokens => {
+            hotpath::gauge!("session.retrieval.budget.context_tokens").inc(1.0);
         }
     }
 }
