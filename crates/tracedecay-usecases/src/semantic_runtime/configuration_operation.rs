@@ -586,7 +586,9 @@ fn candidate_rebound_to_snapshot_runtime(
             candidate.compatibility.semantic = Some(snapshot_semantic.clone());
             Ok(candidate)
         }
-        _ => Err(SemanticActivationCoordinationErrorV1::Rejected),
+        _ => Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation candidate runtime does not match the verified snapshot".to_owned(),
+        )),
     }
 }
 
@@ -800,26 +802,37 @@ fn validate_evaluation_snapshot(
     snapshot: &SemanticEvaluationPublicationSnapshotV1,
     candidate: &SemanticEvaluationProfileCandidateV1,
 ) -> Result<(), SemanticActivationCoordinationErrorV1> {
-    snapshot
-        .scope
-        .validate()
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-    snapshot
-        .code_generation
-        .validate()
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    snapshot.scope.validate().map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation scope is invalid".to_owned(),
+        )
+    })?;
+    snapshot.code_generation.validate().map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation code generation is invalid".to_owned(),
+        )
+    })?;
     snapshot
         .code_source_manifest_digest
         .validate()
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-    snapshot
-        .code_snapshot_digest
-        .validate()
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation source manifest digest is invalid".to_owned(),
+            )
+        })?;
+    snapshot.code_snapshot_digest.validate().map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation code snapshot digest is invalid".to_owned(),
+        )
+    })?;
     snapshot
         .code_capability_manifest_digest
         .validate()
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation capability manifest digest is invalid".to_owned(),
+            )
+        })?;
     let expected_root = repo_root
         .canonicalize()
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
@@ -831,7 +844,10 @@ fn validate_evaluation_snapshot(
         || candidate.evaluated_profile_id.trim() != candidate.evaluated_profile_id
         || candidate.evaluated_profile_id.is_empty()
     {
-        return Err(SemanticActivationCoordinationErrorV1::Rejected);
+        return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation project or profile selection does not match the mounted authority"
+                .to_owned(),
+        ));
     }
     match (
         candidate.compatibility.semantic.as_ref(),
@@ -853,7 +869,12 @@ fn validate_evaluation_snapshot(
             && generation == &required.vector_generation_id
             && observed == required => {}
         (None, None, None, None, None, None) => {}
-        _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+        _ => {
+            return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation vector, lifecycle, or runtime pins do not match the verified snapshot"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1197,7 +1218,10 @@ mod tests {
 
         assert_eq!(
             validate_evaluation_snapshot(workspace_root(), &snapshot, &candidate),
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation vector, lifecycle, or runtime pins do not match the verified snapshot"
+                    .to_owned(),
+            ))
         );
     }
 
@@ -1217,7 +1241,8 @@ mod tests {
 
         assert!(matches!(
             candidate_rebound_to_snapshot_runtime(candidate, &snapshot),
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation candidate runtime does not match the verified snapshot"
         ));
     }
 

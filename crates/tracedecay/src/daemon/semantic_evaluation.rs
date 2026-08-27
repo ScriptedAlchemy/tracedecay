@@ -295,9 +295,14 @@ fn daemon_semantic_evaluation_candidate(
     vector: &PublishedVectorGenerationV1,
     configured_limits: crate::config::SemanticResourceCeilings,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
-    let material =
-        crate::search_eval::load_default_evaluated_profile_material(evaluated_profile_id)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    let material = crate::search_eval::load_default_evaluated_profile_material(
+        evaluated_profile_id,
+    )
+    .map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation profile is not in the packaged workload".to_owned(),
+        )
+    })?;
     let embedding = vector.embedding_key().embedding_key();
     let runtime_compatibility_digest = canonical_sha256(&(
         "tracedecay.semantic-runtime-compatibility.v1",
@@ -306,15 +311,27 @@ fn daemon_semantic_evaluation_candidate(
         embedding.device_class,
         embedding.precision,
     ))
-    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    .map_err(|_| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation runtime compatibility digest is invalid".to_owned(),
+        )
+    })?;
     let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
         .and_then(|profile| profile.index_key())
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation search index identity is invalid".to_owned(),
+            )
+        })?;
     let resources = daemon_semantic_evaluation_resource_requirement(configured_limits);
     let vector_generation_id = vector.generation_id().clone();
     let calibration = SemanticCalibrationProfileV1 {
         calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "semantic evaluation calibration profile identity is invalid".to_owned(),
+                )
+            })?,
         cohort_digest: canonical_sha256(&(
             "tracedecay.semantic.evaluation-calibration-cohort.v1",
             code.manifest().generation_id.clone(),
@@ -324,7 +341,11 @@ fn daemon_semantic_evaluation_candidate(
             vector_generation_id.clone(),
             embedding.model_artifact_digest.clone(),
         ))
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?,
+        .map_err(|_| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation calibration cohort digest is invalid".to_owned(),
+            )
+        })?,
         projection_key: vector.projection_key().clone(),
         vector_generation: vector_generation_id.clone(),
         capability_manifest_digest: code.capability().manifest_digest.clone(),
