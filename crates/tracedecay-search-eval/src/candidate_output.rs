@@ -1278,6 +1278,7 @@ fn generate_candidate_outputs_sharing_corpora(
 
 /// Generate the same byte-stable query fallback plus evidence-bearing native
 /// semantic/rerank results. Missing optional authorities remain pending.
+#[hotpath::measure(label = "search_eval.native.generate")]
 pub fn generate_candidate_outputs_with_native(
     options: &GenerateCandidateOutputsOptions<'_>,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
@@ -1355,6 +1356,7 @@ pub fn generate_candidate_outputs_with_native(
     Ok(generated)
 }
 
+#[hotpath::measure(label = "search_eval.native.partition")]
 fn measure_native_partition(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
@@ -1472,6 +1474,7 @@ fn retriever_outcome_candidate_count<E>(
     }
 }
 
+#[hotpath::measure(label = "search_eval.native.retrieve")]
 fn retrieve_one_native_query(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
@@ -2404,6 +2407,7 @@ impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
     }
 }
 
+#[hotpath::measure(label = "search_eval.hydrate.late")]
 fn measure_late_hydration(
     published: &PublishedCorpus,
     request: &RetrievalRequest,

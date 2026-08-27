@@ -927,6 +927,7 @@ impl GitHubReadOnlyClientV1 {
                 .cloned()
             {
                 return network_failure(HttpResponseV1::RateLimited {
+                    primary_rate_limit: Some(checkpoint.clone()),
                     checkpoint: Some(checkpoint),
                     retry_at: None,
                 });
@@ -1033,6 +1034,7 @@ impl GitHubReadOnlyClientV1 {
                         .cloned()
                     {
                         return Err(HttpResponseV1::RateLimited {
+                            primary_rate_limit: Some(checkpoint.clone()),
                             checkpoint: Some(checkpoint),
                             retry_at: None,
                         });
@@ -1180,6 +1182,7 @@ impl GitHubReadOnlyClientV1 {
             HttpResponseV1::RateLimited {
                 checkpoint,
                 retry_at,
+                ..
             } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
                 metadata: GitHubReadNetworkMetadataV1 {
                     status: GitHubReadNetworkStatusV1::RateLimited,
@@ -1251,6 +1254,8 @@ pub struct GitHubCiReadOnlyClientV1 {
     target: GitHubCiRepositoryTargetV1,
     credential: GitHubReadOnlyCredentialV1,
     config: GitHubHttpReadConfigV1,
+    rate_limits: Arc<super::rate_gate::GitHubRateLimitTrackerV1>,
+    response_cache: Arc<super::ci_cache::CiResponseCacheV1>,
 }
 
 impl GitHubCiReadOnlyClientV1 {
@@ -1294,10 +1299,17 @@ impl GitHubCiReadOnlyClientV1 {
             target,
             credential,
             config,
+            rate_limits: Arc::new(super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::ci_cache::CiResponseCacheV1::default()),
         })
     }
 
-    fn get(&self, url: &str, permission: GitHubReadPermissionV1) -> HttpResponseV1 {
+    fn get(
+        &self,
+        url: &str,
+        etag: Option<&GitHubReviewEtagV1>,
+        permission: GitHubReadPermissionV1,
+    ) -> HttpResponseV1 {
         let authorization = self.credential.authorization_for_repository(
             &self.target.owner,
             &self.target.repository,
@@ -1314,6 +1326,9 @@ impl GitHubCiReadOnlyClientV1 {
             .header("User-Agent", "tracedecay-github-read");
         if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
             request = request.header("Authorization", authorization.as_str());
+        }
+        if let Some(etag) = etag {
+            request = request.header("If-None-Match", etag.as_str());
         }
         decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
     }
@@ -1490,6 +1505,26 @@ impl GitHubCiReadOnlyClientV1 {
         ) {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Denied });
         }
+        let permit = match Arc::clone(&self.rate_limits).acquire(now_micros()) {
+            super::rate_gate::GitHubRequestAdmissionV1::Granted(permit) => permit,
+            super::rate_gate::GitHubRequestAdmissionV1::RateLimited(checkpoint) => {
+                return Box::pin(
+                    async move { GitHubCiTransportOutcomeV1::RateLimited(checkpoint) },
+                );
+            }
+            super::rate_gate::GitHubRequestAdmissionV1::Unavailable => {
+                return Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable });
+            }
+        };
+        // Conditional-request state is resolved before the blocking read so
+        // the retained body is still in hand when a 304 arrives.
+        let cached = match self.response_cache.get(&url) {
+            super::ci_cache::CiResponseCacheReadOutcomeV1::Hit(cached) => Some(cached),
+            super::ci_cache::CiResponseCacheReadOutcomeV1::Miss
+            | super::ci_cache::CiResponseCacheReadOutcomeV1::Unavailable => None,
+        };
+        let request_etag = cached.as_ref().map(|entry| entry.etag.clone());
+        let cache_url = url.clone();
         let client = self.clone();
         let context_for_read = context.clone();
         Box::pin(async move {
@@ -1504,7 +1539,9 @@ impl GitHubCiReadOnlyClientV1 {
                         GitHubCredentialAuthorizationV1::Denied
                     )
                 {
-                    let response = client.get(&url, permission);
+                    let response = client.get(&url, request_etag.as_ref(), permission);
+                    let (rate_limit, blocked_until) = http_response_quota(&response);
+                    permit.finish(rate_limit, blocked_until);
                     if request_context_admitted(&context_for_read)
                         && !matches!(
                             client.credential.authorization_for_repository(
@@ -1524,8 +1561,53 @@ impl GitHubCiReadOnlyClientV1 {
                 }
             });
             match wait_for_read(context, task).await {
-                Some(HttpResponseV1::Ok { body, .. }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
+                Some(HttpResponseV1::Ok { body, etag, .. })
+                    if body.len() <= MAX_CI_RESPONSE_BYTES_V1 =>
+                {
+                    match etag.as_ref() {
+                        Some(etag) => {
+                            let _ = self.response_cache.retain(&cache_url, etag, &body);
+                        }
+                        // No validator means the next read cannot be
+                        // conditional, so nothing may stay retained under it.
+                        None => {
+                            let _ = self.response_cache.forget(&cache_url);
+                        }
+                    }
                     GitHubCiTransportOutcomeV1::Response(body)
+                }
+                // The retained body is the provider's proof of what the
+                // conditional response would have contained.
+                Some(HttpResponseV1::NotModified { etag, .. }) => {
+                    cached.map_or(GitHubCiTransportOutcomeV1::Unavailable, |entry| {
+                        let refreshed = self.response_cache.refresh_etag_if_current(
+                            &cache_url,
+                            entry.revision,
+                            &entry.etag,
+                            etag.as_ref().unwrap_or(&entry.etag),
+                        );
+                        match refreshed {
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Stored => {
+                                GitHubCiTransportOutcomeV1::Response(entry.body.as_ref().to_vec())
+                            }
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Ignored => {
+                                match self.response_cache.get(&cache_url) {
+                                    super::ci_cache::CiResponseCacheReadOutcomeV1::Hit(current) => {
+                                        GitHubCiTransportOutcomeV1::Response(
+                                            current.body.as_ref().to_vec(),
+                                        )
+                                    }
+                                    super::ci_cache::CiResponseCacheReadOutcomeV1::Miss
+                                    | super::ci_cache::CiResponseCacheReadOutcomeV1::Unavailable => {
+                                        GitHubCiTransportOutcomeV1::Unavailable
+                                    }
+                                }
+                            }
+                            super::ci_cache::CiResponseCacheWriteOutcomeV1::Unavailable => {
+                                GitHubCiTransportOutcomeV1::Unavailable
+                            }
+                        }
+                    })
                 }
                 Some(HttpResponseV1::RateLimited {
                     checkpoint: Some(limit),
@@ -1613,6 +1695,7 @@ enum HttpResponseV1 {
         rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
     },
     RateLimited {
+        primary_rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
         checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
         retry_at: Option<UtcMicros>,
     },
@@ -1620,11 +1703,31 @@ enum HttpResponseV1 {
     Unavailable,
 }
 
+fn http_response_quota(
+    response: &HttpResponseV1,
+) -> (
+    Option<&GitHubReviewRateLimitCheckpointV1>,
+    Option<UtcMicros>,
+) {
+    match response {
+        HttpResponseV1::Ok { rate_limit, .. } | HttpResponseV1::NotModified { rate_limit, .. } => {
+            (rate_limit.as_ref(), None)
+        }
+        HttpResponseV1::RateLimited {
+            primary_rate_limit,
+            retry_at,
+            ..
+        } => (primary_rate_limit.as_ref(), *retry_at),
+        HttpResponseV1::Denied | HttpResponseV1::Unavailable => (None, None),
+    }
+}
+
 fn network_failure(failure: HttpResponseV1) -> GitHubReadNetworkOutcomeV1 {
     match failure {
         HttpResponseV1::RateLimited {
             checkpoint,
             retry_at,
+            ..
         } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
             metadata: GitHubReadNetworkMetadataV1 {
                 status: GitHubReadNetworkStatusV1::RateLimited,
@@ -1676,10 +1779,15 @@ fn decode_ureq_response(
         401 => HttpResponseV1::Denied,
         403 | 429 => {
             let retry_at = retry_after_at(response.headers());
-            let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at)
-                .or_else(|| rate_limit.filter(|limit| limit.remaining == 0));
+            let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at).or_else(|| {
+                rate_limit
+                    .as_ref()
+                    .filter(|limit| limit.remaining == 0)
+                    .cloned()
+            });
             if checkpoint.is_some() || retry_at.is_some() {
                 HttpResponseV1::RateLimited {
+                    primary_rate_limit: rate_limit,
                     checkpoint,
                     retry_at,
                 }
@@ -2652,6 +2760,343 @@ mod tests {
         }
     }
 
+    fn ci_fixture_client(address: std::net::SocketAddr) -> GitHubCiReadOnlyClientV1 {
+        GitHubCiReadOnlyClientV1 {
+            agent: ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build()
+                .into(),
+            target: GitHubCiRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: "tracedecay".to_owned(),
+            },
+            credential: GitHubReadOnlyCredentialV1::anonymous(),
+            config: GitHubHttpReadConfigV1 {
+                rest_base_uri: format!("http://{address}"),
+                graphql_uri: format!("http://{address}/graphql"),
+                ..GitHubHttpReadConfigV1::default()
+            },
+            rate_limits: Arc::new(super::super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::super::ci_cache::CiResponseCacheV1::default()),
+        }
+    }
+
+    async fn assert_ci_quota_response_blocks_page_two<First, Second>(
+        response: Vec<u8>,
+        known_rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
+        assert_first: First,
+        assert_second: Second,
+    ) where
+        First: FnOnce(GitHubCiTransportOutcomeV1),
+        Second: FnOnce(GitHubCiTransportOutcomeV1),
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe = listener.try_clone().unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            stream.write_all(&response).unwrap();
+        });
+        let client = ci_fixture_client(address);
+        if let Some(known_rate_limit) = known_rate_limit.as_ref() {
+            let _ = client.rate_limits.record(known_rate_limit);
+        }
+        let request_scope = scope("ci-quota-bootstrap");
+        let request_context = context(&request_scope);
+
+        let first = client.read_workflow_run(&request_context, 93).await;
+        server.join().unwrap();
+        assert_first(first);
+        probe.set_nonblocking(true).unwrap();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let second_request = std::thread::spawn(move || {
+            loop {
+                match probe.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = read_http_request_with_headers(&mut stream);
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                        )
+                        .unwrap();
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("second request probe failed: {error}"),
+                }
+                if stop_rx.try_recv().is_ok() {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+        });
+        let second = client.read_workflow_run(&request_context, 94).await;
+        stop_tx.send(()).unwrap();
+        let sent_second_request = second_request.join().unwrap();
+
+        assert_second(second);
+        assert!(!sent_second_request, "page two must not reach the provider");
+    }
+
+    #[tokio::test]
+    async fn a_headerless_ci_bootstrap_fails_closed_before_page_two() {
+        let body = b"{}".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{}}",
+            body.len()
+        )
+        .into_bytes();
+
+        assert_ci_quota_response_blocks_page_two(
+            response,
+            None,
+            move |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Response(body)),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_ci_rate_headers_fail_closed_before_page_two() {
+        let body = b"{}".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nX-RateLimit-Limit: 10\r\nX-RateLimit-Remaining: 11\r\nX-RateLimit-Reset: 9\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{}}",
+            body.len()
+        )
+        .into_bytes();
+
+        assert_ci_quota_response_blocks_page_two(
+            response,
+            None,
+            move |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Response(body)),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_only_ci_limit_is_typed_unavailable_and_fails_closed() {
+        assert_ci_quota_response_blocks_page_two(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            None,
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn secondary_limit_blocks_even_with_positive_primary_headers() {
+        let retry_deadline = Arc::new(Mutex::new(None));
+        let first_deadline = Arc::clone(&retry_deadline);
+        assert_ci_quota_response_blocks_page_two(
+            b"HTTP/1.1 429 Too Many Requests\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4000\r\nX-RateLimit-Reset: 2000000000\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            None,
+            move |actual| {
+                let GitHubCiTransportOutcomeV1::RateLimited(checkpoint) = actual else {
+                    panic!("the provider response must report its secondary limit");
+                };
+                assert_eq!(checkpoint.remaining, 4_000);
+                *first_deadline.lock().unwrap() = Some(checkpoint.reset_at);
+            },
+            move |actual| {
+                let GitHubCiTransportOutcomeV1::RateLimited(checkpoint) = actual else {
+                    panic!("page two must report the retained secondary limit");
+                };
+                assert_eq!(checkpoint.remaining, 4_000);
+                assert_eq!(
+                    Some(checkpoint.reset_at),
+                    *retry_deadline.lock().unwrap(),
+                    "page two must expose Retry-After, not the primary reset"
+                );
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_only_blocks_a_known_primary_checkpoint() {
+        assert_ci_quota_response_blocks_page_two(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            Some(GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 4_000,
+                reset_at: UtcMicros(2_000_000_000_000_000),
+            }),
+            |actual| assert_eq!(actual, GitHubCiTransportOutcomeV1::Unavailable),
+            |actual| {
+                assert!(matches!(
+                    actual,
+                    GitHubCiTransportOutcomeV1::RateLimited(checkpoint)
+                        if checkpoint.remaining == 3_999
+                ));
+            },
+        )
+        .await;
+    }
+
+    /// A repeated CI poll must send `If-None-Match` and reuse the retained body
+    /// when the provider answers `304`. The assertion is on the bytes and the
+    /// request headers, never on elapsed time.
+    #[tokio::test]
+    async fn an_unchanged_ci_read_reuses_the_cached_body_on_a_304() {
+        const CI_ETAG_V1: &str = "W/\"ci-fixture-etag\"";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = serde_json::to_vec(&json!({"id": 91, "status": "completed"})).unwrap();
+        let served = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let (first_headers, _) = read_http_request_with_headers(&mut first);
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: {CI_ETAG_V1}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            )
+            .unwrap();
+            first.write_all(&served).unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let (second_headers, _) = read_http_request_with_headers(&mut second);
+            write!(
+                second,
+                "HTTP/1.1 304 Not Modified\r\nETag: {CI_ETAG_V1}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4998\r\nX-RateLimit-Reset: 2000000000\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            drop(second);
+            (first_headers, second_headers)
+        });
+
+        let client = ci_fixture_client(address);
+        let request_scope = scope("ci-etag");
+        let request_context = context(&request_scope);
+
+        let first = client.read_workflow_run(&request_context, 91).await;
+        let second = client.read_workflow_run(&request_context, 91).await;
+        let (first_headers, second_headers) = server.join().unwrap();
+
+        assert_eq!(
+            first,
+            GitHubCiTransportOutcomeV1::Response(body.clone()),
+            "the first read must return the provider body"
+        );
+        assert!(
+            !first_headers.to_ascii_lowercase().contains("if-none-match"),
+            "the first read has no validator to send"
+        );
+        assert_eq!(
+            second,
+            GitHubCiTransportOutcomeV1::Response(body),
+            "a 304 must reuse the retained body instead of reporting nothing"
+        );
+        assert!(
+            second_headers
+                .to_ascii_lowercase()
+                .contains("if-none-match:"),
+            "a repeated read must send the retained validator"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_concurrent_304_returns_the_current_retained_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (first_request_tx, first_request_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let (first_headers, _) = read_http_request_with_headers(&mut first);
+            assert!(
+                first_headers
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: e1")
+            );
+            first_request_tx.send(()).unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let (second_headers, _) = read_http_request_with_headers(&mut second);
+            assert!(
+                second_headers
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: e1")
+            );
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nETag: E2\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 3999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: 2\r\nConnection: close\r\n\r\nB2"
+            )
+            .unwrap();
+
+            release_first_rx.recv().unwrap();
+            write!(
+                first,
+                "HTTP/1.1 304 Not Modified\r\nETag: E1\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 3998\r\nX-RateLimit-Reset: 2000000000\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let client = ci_fixture_client(address);
+        let url = format!("http://{address}/repos/ScriptedAlchemy/tracedecay/actions/runs/95");
+        let _ = client
+            .response_cache
+            .retain(&url, &GitHubReviewEtagV1::new("E1").unwrap(), b"B1");
+        let _ = client
+            .rate_limits
+            .record(&GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 4_000,
+                reset_at: UtcMicros(2_000_000_000_000_000),
+            });
+
+        let first_client = client.clone();
+        let first_context = context(&scope("ci-stale-304-first"));
+        let first_read =
+            tokio::spawn(async move { first_client.read_workflow_run(&first_context, 95).await });
+        tokio::task::spawn_blocking(move || first_request_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let second_context = context(&scope("ci-stale-304-second"));
+        let second = client.read_workflow_run(&second_context, 95).await;
+        assert_eq!(second, GitHubCiTransportOutcomeV1::Response(b"B2".to_vec()));
+        release_first_tx.send(()).unwrap();
+        let first = first_read.await.unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            first,
+            GitHubCiTransportOutcomeV1::Response(b"B2".to_vec()),
+            "the stale 304 must not return its pre-request B1 snapshot"
+        );
+    }
+
+    /// A `304` for which nothing is retained can never be turned into a body.
+    #[tokio::test]
+    async fn a_304_without_a_retained_body_is_unavailable_not_empty() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let client = ci_fixture_client(address);
+        let request_scope = scope("ci-etag-cold");
+        let outcome = client.read_workflow_run(&context(&request_scope), 92).await;
+        server.join().unwrap();
+
+        assert_eq!(outcome, GitHubCiTransportOutcomeV1::Unavailable);
+    }
+
     #[tokio::test]
     async fn cancelled_ci_read_makes_no_network_request() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2673,6 +3118,8 @@ mod tests {
                 graphql_uri: format!("http://{address}/graphql"),
                 ..GitHubHttpReadConfigV1::default()
             },
+            rate_limits: Arc::new(super::super::rate_gate::GitHubRateLimitTrackerV1::default()),
+            response_cache: Arc::new(super::super::ci_cache::CiResponseCacheV1::default()),
         };
         let request_scope = scope("cancelled-ci");
         let cancelled = context(&request_scope).with_cancellation(

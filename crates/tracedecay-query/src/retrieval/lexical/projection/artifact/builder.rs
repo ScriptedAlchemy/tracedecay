@@ -852,15 +852,33 @@ impl CodeLexicalArtifactBuilderV1 {
         let fixed_ledger_charge_bytes =
             validated_fixed_ledger_charge(&expected_metadata, memory_budget_bytes)?;
         let path = path.as_ref();
-        let (connection, private_file, file_identity) = open_private_builder_connection(path)?;
+        let (connection, private_file, file_identity) = hotpath::measure_block!(
+            "query.artifact.open.sqlite_connect",
+            open_private_builder_connection(path)
+        )?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
-        require_integrity(&connection, control)?;
-        let expected_digest = metadata_digest(&expected_metadata)?;
-        verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
-        verify_artifact_table_layout(&connection)?;
-        verify_builder_mutation_gate_schema(&connection)?;
-        let receipt = read_receipt_with_control(&connection, control)?;
-        let finalization = load_finalization_state(&connection)?;
+        hotpath::measure_block!("query.artifact.open.schema_verify", {
+            require_integrity(&connection, control)?;
+            verify_artifact_table_layout(&connection)?;
+            verify_builder_mutation_gate_schema(&connection)
+        })?;
+        let expected_digest = hotpath::measure_block!("query.artifact.open.metadata_restore", {
+            let expected_digest = metadata_digest(&expected_metadata)?;
+            verify_artifact_state_metadata(
+                &connection,
+                &expected_metadata,
+                &expected_digest,
+                control,
+            )?;
+            Ok::<_, CodeLexicalArtifactErrorV1>(expected_digest)
+        })?;
+        let (receipt, finalization) = hotpath::measure_block!(
+            "query.artifact.open.receipt_restore",
+            Ok::<_, CodeLexicalArtifactErrorV1>((
+                read_receipt_with_control(&connection, control)?,
+                load_finalization_state(&connection)?,
+            ))
+        )?;
         if receipt.is_some()
             || finalization
                 .as_ref()

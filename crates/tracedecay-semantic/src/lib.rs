@@ -444,16 +444,19 @@ async fn warm_candidate_for_install(
     candidate: &Arc<SemanticRuntimeService<FastEmbedEmbeddingRuntime>>,
 ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
     let warmed = Arc::clone(candidate);
-    tokio::task::spawn_blocking(move || warmed.warm_query_session())
-        .await
-        .map_err(|error| {
-            if error.is_cancelled() {
-                SemanticRuntimeScheduleFailureV1::Cancelled
-            } else {
-                SemanticRuntimeScheduleFailureV1::Runtime
-            }
-        })?
-        .map_err(warm_failure)
+    hotpath::future!(
+        tokio::task::spawn_blocking(move || warmed.warm_query_session()),
+        label = "semantic.index.warm"
+    )
+    .await
+    .map_err(|error| {
+        if error.is_cancelled() {
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        } else {
+            SemanticRuntimeScheduleFailureV1::Runtime
+        }
+    })?
+    .map_err(warm_failure)
 }
 
 /// The daemon-callable semantic owner. It exposes no transport operation.
@@ -577,11 +580,18 @@ impl DaemonSemanticRuntimeHandleV1 {
             projection_key.clone(),
             total_units,
             move |progress| async move {
-                let resume = (request.resume_projection)().await?;
-                let authority = tokio::task::spawn_blocking(request.load_artifact)
-                    .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??
-                    .0;
+                let resume = hotpath::future!(
+                    (request.resume_projection)(),
+                    label = "semantic.index.resume"
+                )
+                .await?;
+                let authority = hotpath::future!(
+                    tokio::task::spawn_blocking(request.load_artifact),
+                    label = "semantic.index.load_artifact"
+                )
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??
+                .0;
                 if let Some(failure) = progress.failure() {
                     return Err(failure);
                 }
@@ -604,7 +614,11 @@ impl DaemonSemanticRuntimeHandleV1 {
                         return Err(failure);
                     }
                     progress.set_completed_units(total_units);
-                    let commit = (request.stage_projection)().await?;
+                    let commit = hotpath::future!(
+                        (request.stage_projection)(),
+                        label = "semantic.index.stage"
+                    )
+                    .await?;
                     return Ok(install_candidate_on_success(
                         commit,
                         target_generation,
@@ -655,7 +669,11 @@ impl DaemonSemanticRuntimeHandleV1 {
                     if let Some(failure) = progress.failure() {
                         return Err(failure);
                     }
-                    commit_batch(prepared).await?;
+                    hotpath::future!(
+                        commit_batch(prepared),
+                        label = "semantic.index.commit_batch"
+                    )
+                    .await?;
                     embedded_units = embedded_units.saturating_add(batch_units);
                     progress.set_completed_units(embedded_units.min(total_units));
                 }
@@ -672,7 +690,9 @@ impl DaemonSemanticRuntimeHandleV1 {
                 }
                 progress.set_completed_units(total_units);
 
-                let commit = (request.stage_projection)().await?;
+                let commit =
+                    hotpath::future!((request.stage_projection)(), label = "semantic.index.stage")
+                        .await?;
                 Ok(install_candidate_on_success(
                     commit,
                     target_generation,
@@ -806,6 +826,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         Ok(())
     }
 
+    #[hotpath::measure(label = "semantic.restart.restore")]
     pub fn restore_current(
         &self,
         pointer: SemanticGenerationPointerV1,
@@ -817,6 +838,7 @@ impl DaemonSemanticRuntimeHandleV1 {
             .ok_or(SemanticRuntimeScheduleFailureV1::Publication)
     }
 
+    #[hotpath::measure(label = "semantic.restart.prepare")]
     pub fn prepare_restore(
         &self,
         pointer: SemanticGenerationPointerV1,
@@ -844,7 +866,8 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-        candidate.warm_query_session().map_err(warm_failure)?;
+        hotpath::measure_block!("semantic.restart.warm", candidate.warm_query_session())
+            .map_err(warm_failure)?;
         Ok(PreparedSemanticRuntimeRestoreV1 {
             runtime: CurrentSemanticQueryRuntimeV1::new_with_admission(
                 pointer.clone(),
@@ -909,6 +932,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                 .is_some()
     }
 
+    #[hotpath::measure(label = "semantic.restart.commit")]
     fn commit_restore_if_current(&self, prepared: PreparedSemanticRuntimeRestoreV1) -> bool {
         let _transition = self
             .transitions
@@ -1080,7 +1104,8 @@ where
     // The one copy between canonical chunks and tensor input: every chunk's
     // sanitized text is cloned into an owned String. Timed separately so it
     // cannot hide inside `semantic.embed.infer`.
-    let batch = hotpath::measure_block!("semantic.embed.batch_assembly", {
+    let batch = hotpath::measure_block!(
+        "semantic.embed.batch_assembly",
         BoundedSanitizedTextBatchV1::try_new(
             chunks
                 .iter()
@@ -1089,7 +1114,7 @@ where
             max_texts,
             max_bytes,
         )
-    })
+    )
     .map_err(|error| error.to_string())?;
     let vectors = session
         .embed_batch(&batch, progress)
@@ -1100,7 +1125,8 @@ where
     // Per-vector dimension/finite validation plus the move out of the
     // adapter's vector type. Also timed separately: a regression here would
     // otherwise be read as slower inference.
-    let encoded = hotpath::measure_block!("semantic.embed.vector_writeback", {
+    let encoded = hotpath::measure_block!(
+        "semantic.embed.vector_writeback",
         vectors
             .into_iter()
             .map(|vector| {
@@ -1108,7 +1134,7 @@ where
                 Ok(vector.values)
             })
             .collect::<Result<Vec<_>, String>>()
-    })?;
+    )?;
     Ok((encoded, chunks.len() as u64))
 }
 
@@ -1128,7 +1154,7 @@ where
         Ok(vectors.pop().unwrap_or_else(|| panic!("unit vector batch")))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embed.encode")]
     fn encode_batch(
         &mut self,
         key: &tracedecay_domain::EmbeddingProjectionKeyV1,
@@ -1167,7 +1193,7 @@ where
     /// Failures are reported by lowest input index, matching the sequential
     /// path's first-error semantics regardless of which stripe failed first in
     /// wall-clock terms.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embed.encode_stripes")]
     fn encode_batches(
         &mut self,
         key: &tracedecay_domain::EmbeddingProjectionKeyV1,

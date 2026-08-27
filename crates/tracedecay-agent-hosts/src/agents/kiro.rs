@@ -18,7 +18,6 @@
 //! already exists and is not the file tracedecay writes, install and uninstall
 //! leave it untouched.
 
-use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -342,7 +341,7 @@ impl AgentIntegration for KiroIntegration {
             ],
         )?;
         uninstall_mcp_server(&mcp_path)?;
-        remove_steering_rules(&steering);
+        remove_steering_rules(&steering)?;
         remove_kiro_managed_skill_index(&ctx.home, &skill_index_path)?;
         uninstall_managed_agent(&agent_path);
         Ok(())
@@ -695,68 +694,48 @@ fn is_builtin_default_agent(agent: &str) -> bool {
 /// marker-to-end-marker splice when the owned end marker exists, otherwise
 /// the generic marker-to-next-heading strip plus a fresh append.
 fn install_steering_rules(path: &Path) -> Result<()> {
-    let existing = if path.exists() {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
-    };
     let block = prompt_rules_text();
-    if existing.contains(&block) {
-        eprintln!("  Kiro steering already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    if contains_prompt_marker(&existing) {
-        if let Some(range) = tracedecay_prompt_block_range(&existing) {
-            let mut new_contents = String::with_capacity(existing.len() + block.len());
-            new_contents.push_str(&existing[..range.start]);
-            new_contents.push_str(&block);
-            new_contents.push_str(&existing[range.end..]);
-            std::fs::write(path, new_contents).map_err(|e| TraceDecayError::Config {
-                message: format!("failed to write {}: {e}", path.display()),
-            })?;
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
-                path.display()
-            );
-            return Ok(());
+    super::prompt_rules::reconcile_prompt_rules_with(path, |existing| {
+        if existing.contains(&block) {
+            return Ok(super::prompt_rules::PromptRulesEdit::Unchanged);
         }
-        // Marker present but no owned end marker: fall back to the heading-based
-        // strip the other hosts use (trying both the current and legacy
-        // heading), then append fresh rules.
-        let marker = if existing.contains(PROMPT_MARKER) {
-            PROMPT_MARKER
+        if contains_prompt_marker(existing) {
+            if let Some(range) = tracedecay_prompt_block_range(existing) {
+                let mut new_contents = String::with_capacity(existing.len() + block.len());
+                new_contents.push_str(&existing[..range.start]);
+                new_contents.push_str(&block);
+                new_contents.push_str(&existing[range.end..]);
+                return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
+                    new_contents,
+                ));
+            }
+            let marker = if existing.contains(PROMPT_MARKER) {
+                PROMPT_MARKER
+            } else {
+                PROMPT_MARKER_LEGACY
+            };
+            let stripped =
+                super::prompt_rules::strip_heading_block(existing, marker).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "could not isolate tracedecay steering block in {}",
+                            path.display()
+                        ),
+                    }
+                })?;
+            return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
+                super::prompt_rules::refreshed_contents(&stripped, &block),
+            ));
+        }
+        let separator = if existing.trim().is_empty() {
+            ""
         } else {
-            PROMPT_MARKER_LEGACY
+            "\n\n"
         };
-        let stripped =
-            super::prompt_rules::strip_heading_block(&existing, marker).unwrap_or_default();
-        return super::prompt_rules::write_refreshed(path, &stripped, &block);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to create {}: {e}", parent.display()),
-        })?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", path.display()),
-        })?;
-    let separator = if existing.trim().is_empty() {
-        ""
-    } else {
-        "\n\n"
-    };
-    writeln!(f, "{separator}{block}").map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
-        path.display()
-    );
-    Ok(())
+        Ok(super::prompt_rules::PromptRulesEdit::Added(format!(
+            "{existing}{separator}{block}\n"
+        )))
+    })
 }
 
 fn prompt_rules_text() -> String {
@@ -829,41 +808,23 @@ fn uninstall_mcp_server(path: &Path) -> Result<()> {
     )
 }
 
-fn remove_steering_rules(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if !contains_prompt_marker(&contents) {
-        eprintln!("  Kiro steering does not contain tracedecay rules, skipping");
-        return;
-    }
-    let Some(range) = tracedecay_prompt_block_range(&contents) else {
-        eprintln!(
-            "  Kiro steering contains tracedecay rules without an owned end marker; leaving unchanged"
-        );
-        return;
-    };
-    let mut new_contents = String::new();
-    new_contents.push_str(contents[..range.start].trim_end());
-    let remainder = &contents[range.end..];
-    if !remainder.is_empty() {
-        new_contents.push_str("\n\n");
-        new_contents.push_str(remainder.trim_start());
-    }
-    let new_contents = new_contents.trim().to_string();
-    if new_contents.is_empty() {
-        super::safe_remove_host_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else {
-        std::fs::write(path, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            path.display()
-        );
-    }
+fn remove_steering_rules(path: &Path) -> Result<()> {
+    super::prompt_rules::remove_prompt_rules_with(path, |contents| {
+        if !contains_prompt_marker(contents) {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(range) = tracedecay_prompt_block_range(contents) else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 fn uninstall_managed_agent(path: &Path) {

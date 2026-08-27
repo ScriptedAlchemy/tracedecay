@@ -276,6 +276,7 @@ pub fn commit_project_initial_semantic_roots(
     true
 }
 
+#[hotpath::measure(label = "usecases.semantic.commit_redundancy")]
 pub fn commit_project_semantic_redundancy_authority(
     project_root: PathBuf,
     prepared: &PreparedSemanticRedundancyAuthorityV1,
@@ -345,6 +346,7 @@ fn record_retained_generation_count(retained: &BTreeMap<PathBuf, RetainedProject
 }
 
 /// Read only the exact complete cosine generation selected by committed pins.
+#[hotpath::measure(label = "usecases.semantic.redundancy_generation", future = true)]
 pub async fn project_semantic_redundancy_generation(
     project_root: &Path,
 ) -> Option<SemanticRedundancyGenerationV1> {

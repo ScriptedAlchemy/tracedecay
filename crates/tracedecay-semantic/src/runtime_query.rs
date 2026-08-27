@@ -137,7 +137,7 @@ impl<R> SemanticQueryEmbeddingPort for PooledSemanticQueryEmbedder<'_, R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.search.embed")]
     fn embed_query(
         &self,
         request: SemanticQueryEmbeddingRequestV1<'_>,
@@ -175,7 +175,9 @@ where
         let _query_permit = self.factory.try_query_permit().ok_or_else(|| {
             RetrievalPortError::AuthorityUnavailable("semantic query already in flight".to_owned())
         })?;
-        let mut session = pool.acquire(&authority).map_err(map_acquire_error)?;
+        let mut session =
+            hotpath::measure_block!("semantic.search.acquire", pool.acquire(&authority))
+                .map_err(map_acquire_error)?;
         let mut vectors = session
             .embed_batch(&batch, self.cancellation.as_ref())
             .map_err(map_embed_error)?;

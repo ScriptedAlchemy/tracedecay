@@ -431,7 +431,7 @@ pub(crate) struct DaemonSemanticEvaluationWorkerOwnerV1 {
 }
 
 impl DaemonSemanticEvaluationWorkerOwnerV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.semantic.evaluation.execute", future = true)]
     pub(crate) async fn execute<Output, Work, WorkFuture>(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,

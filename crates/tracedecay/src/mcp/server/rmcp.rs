@@ -294,6 +294,7 @@ impl RmcpConnectionAdapter {
         .await
     }
 
+    #[hotpath::measure(label = "mcp.server.rmcp.dispatch", future = true)]
     async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
