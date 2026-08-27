@@ -36,7 +36,7 @@ Current (highest `vN`) plate per channel:
 | 07 | 07-knowledge/v4-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks. PCA only if method=pca; otherwise unserved. Independent camera states. CONCEPT/SYNTHETIC. |
 | 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
 | 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
-| 10 | 10-observatory/v2-overview-stack.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. |
+| 10 | 10-observatory/v4-overview-honest.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. Each source own coverage/error. No invented heartbeat. CONCEPT/SYNTHETIC. |
 | 11 | 11-costs/v1-provider-burn.png | Provider/model spend, tokens, latency. Segmented bars, not pies. |
 | 12 | 12-settings/v2-effective-values.png | Effective values only. Provenance named. No invented layer cake. |
 | 13 | 13-work/v2-six-cameras.png | Six cameras: Board / DAG / Timeline / Causal / Workload / Topology. |
