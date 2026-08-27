@@ -6272,6 +6272,7 @@ dependencies = [
 name = "tracedecay-host-integration"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
@@ -6313,6 +6314,7 @@ dependencies = [
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
@@ -6443,6 +6445,7 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "hex",
+ "hotpath",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6522,6 +6525,7 @@ dependencies = [
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6549,6 +6553,7 @@ dependencies = [
 name = "tracedecay-tool-catalog"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
