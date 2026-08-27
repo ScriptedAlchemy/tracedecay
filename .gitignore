@@ -13,6 +13,9 @@
 .rtk/
 .sentrux/
 cache/
+# Vendored crate sources are immutable upstream trees; the transient-cache
+# pattern above must never swallow their in-tree `cache` modules.
+!vendor/**/cache/
 generated-illustrations/
 dashboard/app-dist/
 *.log
@@ -30,3 +33,7 @@ dashboard/.*-axe/
 
 # mockup screenshot output; regenerate with each mockup's shoot.mjs / qa-drive.mjs
 mockups/**/shots/
+
+# standalone lockfiles cargo writes when a vendored grafeo crate is tested
+# from inside its own directory; the workspace lock is the one that matters
+vendor/grafeo/*/Cargo.lock

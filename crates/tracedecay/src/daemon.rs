@@ -345,6 +345,15 @@ mod service;
 pub(crate) mod session_retrieval;
 pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
+
+/// Truthy `TRACEDECAY_SESSION_INGEST_DISABLED` turns off every session
+/// transcript ingest lane for the daemon's lifetime - the session-temporal
+/// refresh workers and the session-sync import service alike. A dev/profiling
+/// switch: session history simply stays un-ingested, reported as a typed
+/// unavailable outcome rather than an empty success.
+pub(crate) fn session_ingest_disabled() -> bool {
+    std::env::var("TRACEDECAY_SESSION_INGEST_DISABLED").is_ok_and(|v| !v.is_empty() && v != "0")
+}
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;

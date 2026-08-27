@@ -632,9 +632,4 @@ pub(super) fn session_refresh_retry_delay(
     tracedecay_usecases::host_admission::replay_backoff(attempt, shift_cap)
 }
 
-/// Truthy `TRACEDECAY_SESSION_INGEST_DISABLED` stops the session-temporal
-/// supervisor from running any ingest workers. A dev/profiling switch:
-/// session history simply stays un-ingested for the daemon's lifetime.
-fn session_ingest_disabled() -> bool {
-    std::env::var("TRACEDECAY_SESSION_INGEST_DISABLED").is_ok_and(|v| !v.is_empty() && v != "0")
-}
+use crate::daemon::session_ingest_disabled;

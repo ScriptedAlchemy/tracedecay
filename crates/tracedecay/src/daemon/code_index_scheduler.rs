@@ -4676,13 +4676,41 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
-        let resolved = identity::IndexingIdentityV1::resolve(&self.project_root).ok()?;
+        let resolved = match identity::IndexingIdentityV1::resolve(&self.project_root) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_index_servable_identity_resolve_failed",
+                    error = %error,
+                    "decoded generation refused: indexing identity resolution failed"
+                );
+                return None;
+            }
+        };
         if !resolved.authorizes_reuse_of(&self.identity) {
+            tracing::warn!(
+                event = "code_index_servable_identity_reuse_refused",
+                "decoded generation refused: live checkout identity does not \
+                 authorize reuse of the scheduler's indexing identity"
+            );
             return None;
         }
-        self.validate_generation_identity(&generation).ok()?;
+        if let Err(error) = self.validate_generation_identity(&generation) {
+            tracing::warn!(
+                event = "code_index_servable_generation_identity_invalid",
+                error = %error,
+                "decoded generation refused: sealed generation identity does \
+                 not match this scheduler"
+            );
+            return None;
+        }
         self.adopt_ignored_source_roster(&generation);
         if !self.ignored_source_roster_matches_generation(&generation) {
+            tracing::warn!(
+                event = "code_index_servable_ignored_roster_mismatch",
+                "decoded generation refused: ignored-source roster disagrees \
+                 with the sealed generation"
+            );
             self.ignored_source_admissions.clear();
             return None;
         }
