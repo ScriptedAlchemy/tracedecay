@@ -110,6 +110,45 @@ pub struct GraphGenerationManifest {
     pub relations: Vec<GraphGenerationRelation>,
 }
 
+/// The small, cheaply cloned metadata half of a generation manifest: exactly
+/// the fields that name a generation and bind it to its dependency closure.
+///
+/// Every stage after the staged rows are durable — the close/reopen
+/// recovered-digest proof, quarantine, lease seating, and the finalization
+/// receipt — reads only these fields. Carrying them separately lets the bulk
+/// `entities`/`relations` vectors (multiple gigabytes on a first index) be
+/// released the moment the last staging page commits, instead of staying live
+/// through reopen and verification alongside the rebuilt in-RAM store.
+///
+/// This type is deliberately not serialized: the canonical replay payload and
+/// every pinned digest are still produced from the flat
+/// [`GraphGenerationManifest`] shape, so its byte layout is unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphGenerationManifestIdentity {
+    pub projection: GraphProjectionIdentity,
+    pub generation: GraphGenerationId,
+    pub source_generation: SourceGeneration,
+    pub watermark: GraphWatermark,
+    pub dependencies: Vec<GraphGenerationDependency>,
+}
+
+impl GraphGenerationManifestIdentity {
+    pub fn dependency_closure_digest(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
+        dependency_closure_digest(&self.dependencies, check)
+    }
+
+    pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
+        physical_namespace(
+            &self.projection.namespace,
+            &self.projection.projection,
+            &self.generation,
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphReplayCollectionOutcome {
     Retired(GraphGenerationReplaySource),
@@ -307,20 +346,26 @@ impl GraphGenerationManifest {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
-        let mut digest = Sha256::new();
-        let mut writer = CheckedDigestWriter::new(&mut digest, check);
-        let encoded = serde_json::to_writer(&mut writer, &self.dependencies);
-        writer.finish()?;
-        encoded.map_err(|error| {
-            GraphDbError::invalid(format!(
-                "failed to encode graph dependency generation closure: {error}"
-            ))
-        })?;
-        GraphDependencyGenerationClosureDigestV1::new(encode_tagged_lowercase_hex(
-            "sha256:",
-            &digest.finalize(),
-        ))
-        .map_err(|error| GraphDbError::invalid(error.to_string()))
+        dependency_closure_digest(&self.dependencies, check)
+    }
+
+    /// The metadata half of this manifest, cloned away from its bulk rows.
+    #[must_use]
+    pub fn identity(&self) -> GraphGenerationManifestIdentity {
+        GraphGenerationManifestIdentity {
+            projection: self.projection.clone(),
+            generation: self.generation.clone(),
+            source_generation: self.source_generation.clone(),
+            watermark: self.watermark.clone(),
+            dependencies: self.dependencies.clone(),
+        }
+    }
+
+    /// `(entities, relations)` row counts, for observability that must not
+    /// keep the rows themselves alive.
+    #[must_use]
+    pub fn row_counts(&self) -> (usize, usize) {
+        (self.entities.len(), self.relations.len())
     }
 
     pub fn expected_recovered_digest(
@@ -412,24 +457,7 @@ impl GraphGenerationManifest {
         &self,
         shard_id: &StoreShardIdV1,
     ) -> Result<Vec<GraphDependencyGenerationIdentityV1>, GraphDbError> {
-        self.dependencies
-            .iter()
-            .map(|dependency| {
-                Ok(GraphDependencyGenerationIdentityV1::new(
-                    GraphProjectionIdentityV1 {
-                        shard_id: shard_id.clone(),
-                        namespace: GraphNamespaceV1::new(dependency.projection.namespace.as_str())
-                            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                        projection: GraphProjectionIdV1::new(
-                            dependency.projection.projection.as_str(),
-                        )
-                        .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                    },
-                    GraphGenerationIdV1::new(dependency.generation.as_str())
-                        .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                ))
-            })
-            .collect()
+        relational_dependency_generations(&self.dependencies, shard_id)
     }
 
     pub(crate) fn validate_checked(
@@ -508,14 +536,6 @@ impl GraphGenerationManifest {
         check()?;
         Ok(())
     }
-
-    pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
-        physical_namespace(
-            &self.projection.namespace,
-            &self.projection.projection,
-            &self.generation,
-        )
-    }
 }
 
 fn checked_sorted_dependencies(
@@ -584,6 +604,50 @@ fn collect_checked<T>(
     Ok(collected)
 }
 
+/// The dependency-closure digest, shared by the full manifest and its
+/// identity so both hash the exact same `dependencies` encoding.
+fn dependency_closure_digest(
+    dependencies: &[GraphGenerationDependency],
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let encoded = serde_json::to_writer(&mut writer, dependencies);
+    writer.finish()?;
+    encoded.map_err(|error| {
+        GraphDbError::invalid(format!(
+            "failed to encode graph dependency generation closure: {error}"
+        ))
+    })?;
+    GraphDependencyGenerationClosureDigestV1::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &digest.finalize(),
+    ))
+    .map_err(|error| GraphDbError::invalid(error.to_string()))
+}
+
+fn relational_dependency_generations(
+    dependencies: &[GraphGenerationDependency],
+    shard_id: &StoreShardIdV1,
+) -> Result<Vec<GraphDependencyGenerationIdentityV1>, GraphDbError> {
+    dependencies
+        .iter()
+        .map(|dependency| {
+            Ok(GraphDependencyGenerationIdentityV1::new(
+                GraphProjectionIdentityV1 {
+                    shard_id: shard_id.clone(),
+                    namespace: GraphNamespaceV1::new(dependency.projection.namespace.as_str())
+                        .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                    projection: GraphProjectionIdV1::new(dependency.projection.projection.as_str())
+                        .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                },
+                GraphGenerationIdV1::new(dependency.generation.as_str())
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            ))
+        })
+        .collect()
+}
+
 pub(crate) fn physical_namespace(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
@@ -610,51 +674,53 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Streams the stored rows of `manifest`'s generation through the
+/// Streams the stored rows of `identity`'s generation through the
 /// recovered-digest proof and compares against `expected`, the digest bound
 /// to this exact manifest (a journaled publication's
 /// `expected_recovered_digest`, a verified head's digest, or a digest the
 /// caller computed from the manifest once). Verification never
-/// re-canonicalizes the manifest itself.
+/// re-canonicalizes the manifest itself, and reads no manifest row: the
+/// expected rows come from the database, so the caller may already have
+/// released the bulk `entities`/`relations` vectors.
 #[hotpath::measure(label = "graph_db.generation.recover.verify")]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
-    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     #[cfg(test)]
     RECOVERED_GENERATION_ENUMERATIONS.with(|count| count.set(count.get() + 1));
     check()?;
-    let physical_namespace = manifest.physical_namespace()?;
+    let physical_namespace = identity.physical_namespace()?;
     let recovered_commit = latest_projection(
         database,
         &physical_namespace,
-        &manifest.projection.projection,
+        &identity.projection.projection,
     )?
     .ok_or_else(|| GraphDbError::GenerationMismatch {
-        namespace: manifest.projection.namespace.to_string(),
-        projection: manifest.projection.projection.to_string(),
-        generation: manifest.generation.to_string(),
+        namespace: identity.projection.namespace.to_string(),
+        projection: identity.projection.projection.to_string(),
+        generation: identity.generation.to_string(),
         message: "recovered generation is missing".to_owned(),
     })?
     .commit;
-    let expected_dependency_digest = manifest.dependency_closure_digest(check)?;
-    if recovered_commit.source_generation != manifest.source_generation
-        || recovered_commit.watermark != manifest.watermark
+    let expected_dependency_digest = identity.dependency_closure_digest(check)?;
+    if recovered_commit.source_generation != identity.source_generation
+        || recovered_commit.watermark != identity.watermark
         || recovered_commit.generation_dependency_digest.as_ref()
             != Some(&expected_dependency_digest)
     {
         return Err(GraphDbError::GenerationMismatch {
-            namespace: manifest.projection.namespace.to_string(),
-            projection: manifest.projection.projection.to_string(),
-            generation: manifest.generation.to_string(),
+            namespace: identity.projection.namespace.to_string(),
+            projection: identity.projection.projection.to_string(),
+            generation: identity.generation.to_string(),
             message:
                 "persisted generation source, watermark, or dependency metadata does not match its manifest"
                     .to_owned(),
         });
     }
-    let digest = recovered_generation_digest_from_database(database, manifest, check)?;
+    let digest = recovered_generation_digest_from_database(database, identity, check)?;
     let actual =
         GraphRecoveredGenerationDigestV1::new(format!("sha256:{digest}")).map_err(|error| {
             GraphDbError::Corrupt {
@@ -663,9 +729,9 @@ pub(crate) fn verify_recovered_generation(
         })?;
     if &actual != expected {
         return Err(GraphDbError::GenerationMismatch {
-            namespace: manifest.projection.namespace.to_string(),
-            projection: manifest.projection.projection.to_string(),
-            generation: manifest.generation.to_string(),
+            namespace: identity.projection.namespace.to_string(),
+            projection: identity.projection.projection.to_string(),
+            generation: identity.generation.to_string(),
             message: format!(
                 "expected recovered digest `{}`, observed `{}`",
                 expected.as_str(),
@@ -717,10 +783,10 @@ pub(crate) fn canonical_buffer_allocation_growths() -> usize {
 }
 
 fn physical_namespace_projection_map(
-    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
 ) -> Result<BTreeMap<GraphNamespace, GraphProjectionIdentity>, GraphDbError> {
-    let mut map = BTreeMap::from([(manifest.physical_namespace()?, manifest.projection.clone())]);
-    for dependency in &manifest.dependencies {
+    let mut map = BTreeMap::from([(identity.physical_namespace()?, identity.projection.clone())]);
+    for dependency in &identity.dependencies {
         map.insert(
             physical_namespace(
                 &dependency.projection.namespace,
@@ -782,47 +848,14 @@ fn recovered_generation_digest(
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
     let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
-    write_canonical_frame(
+    write_generation_identity_frames(
         &mut writer,
         &mut canonical,
-        "format",
-        "tracedecay.graph-generation.v1",
-        "recovered generation format",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "projection",
         projection,
-        "recovered generation projection",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "generation",
         generation,
-        "recovered generation identity",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "source_generation",
         source_generation,
-        "recovered source generation",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "watermark",
         watermark,
-        "recovered generation watermark",
-    )?;
-    write_canonical_frame(
-        &mut writer,
-        &mut canonical,
-        "dependencies",
         dependencies,
-        "recovered generation dependencies",
     )?;
     for entity in entities {
         write_canonical_frame(
@@ -844,6 +877,65 @@ fn recovered_generation_digest(
     }
     writer.finish()?;
     Ok(encode_lowercase_hex(&digest.finalize()))
+}
+
+/// Writes the leading identity frames of the recovered-generation digest.
+///
+/// The in-memory manifest proof and the streamed database proof must agree
+/// byte for byte, so both go through this one writer: the frame order
+/// (`format`, `projection`, `generation`, `source_generation`, `watermark`,
+/// `dependencies`) and each frame's canonical encoding live here only.
+fn write_generation_identity_frames(
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    projection: &GraphProjectionIdentity,
+    generation: &GraphGenerationId,
+    source_generation: &SourceGeneration,
+    watermark: &GraphWatermark,
+    dependencies: &[GraphGenerationDependency],
+) -> Result<(), GraphDbError> {
+    write_canonical_frame(
+        writer,
+        canonical,
+        "format",
+        "tracedecay.graph-generation.v1",
+        "recovered generation format",
+    )?;
+    write_canonical_frame(
+        writer,
+        canonical,
+        "projection",
+        projection,
+        "recovered generation projection",
+    )?;
+    write_canonical_frame(
+        writer,
+        canonical,
+        "generation",
+        generation,
+        "recovered generation identity",
+    )?;
+    write_canonical_frame(
+        writer,
+        canonical,
+        "source_generation",
+        source_generation,
+        "recovered source generation",
+    )?;
+    write_canonical_frame(
+        writer,
+        canonical,
+        "watermark",
+        watermark,
+        "recovered generation watermark",
+    )?;
+    write_canonical_frame(
+        writer,
+        canonical,
+        "dependencies",
+        dependencies,
+        "recovered generation dependencies",
+    )
 }
 
 fn write_frame(

@@ -25,8 +25,9 @@ use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
 use crate::{
-    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest, GraphGenerationReplaySource,
-    GraphProjectionIdentity, GraphReplayCollectionOutcome, VerifiedGraphCommit,
+    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
+    GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
+    GraphReplayCollectionOutcome, VerifiedGraphCommit,
 };
 
 /// The three publication mode choices `publish_verified_inner` varies on.
@@ -554,12 +555,11 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
-        crate::hotpath_observe::record_counts(
-            manifest.entities.len(),
-            manifest.relations.len(),
-            1,
-            0,
-        );
+        // Every stage after staging reads only the identity and these row
+        // counts, never a manifest row.
+        let identity = manifest.identity();
+        let (entity_rows, relation_rows) = manifest.row_counts();
+        crate::hotpath_observe::record_counts(entity_rows, relation_rows, 1, 0);
         crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
             crate::hotpath_observe::HydrationSource::Supplied
         } else if metadata_only {
@@ -590,7 +590,7 @@ impl GraphDbRegistry {
                     &database,
                     authority,
                     context,
-                    &manifest,
+                    &identity,
                     &mut visiting,
                 )?;
                 // The journaled replay's expected recovered digest is
@@ -598,6 +598,7 @@ impl GraphDbRegistry {
                 // close/reopen recovered-digest proof verifies against it
                 // directly instead of re-canonicalizing the full manifest.
                 let sealed_digest = &replay.publication.expected_recovered_digest;
+                let row_counts = (entity_rows, relation_rows);
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
@@ -612,25 +613,28 @@ impl GraphDbRegistry {
                             }
                             let commit = staged.commit();
                             let (_, recovered) = database.reopen_and_verify_existing_generation(
-                                &manifest,
+                                &identity,
                                 sealed_digest,
+                                row_counts,
                                 &check,
                             )?;
                             (commit, recovered)
                         }
                         (false, true) => database.reopen_and_verify_existing_generation(
-                            &manifest,
+                            &identity,
                             sealed_digest,
+                            row_counts,
                             &check,
                         )?,
                         (false, false) if reopen_metadata => database
                             .reopen_and_verify_existing_generation(
-                                &manifest,
+                                &identity,
                                 sealed_digest,
+                                row_counts,
                                 &check,
                             )?,
                         (false, false) => {
-                            database.verify_existing_generation(&manifest, sealed_digest, &check)?
+                            database.verify_existing_generation(&identity, sealed_digest, &check)?
                         }
                     };
                 visiting.clear();
@@ -642,7 +646,7 @@ impl GraphDbRegistry {
                     historical_head.clone(),
                     &mut visiting,
                 )?;
-                let lease = generation_lease(&manifest, historical_head.clone(), dependencies);
+                let lease = generation_lease(&identity, historical_head.clone(), dependencies);
                 if is_current_head {
                     // The durable CAS already advanced the head to this exact
                     // publication (an earlier publish crashed after its
@@ -670,7 +674,7 @@ impl GraphDbRegistry {
             &database,
             authority,
             context,
-            &manifest,
+            &identity,
             &mut visiting,
         )?;
 
@@ -680,6 +684,7 @@ impl GraphDbRegistry {
         // recovered-digest proof verifies against it directly instead of
         // re-canonicalizing the full manifest a second time.
         let sealed_digest = &replay.publication.expected_recovered_digest;
+        let row_counts = (entity_rows, relation_rows);
         let verified = match (apply_native, has_supplied_manifest) {
             // A supplied manifest for a metadata-only replay carries the
             // native rows (vectors) the canonical source omits; a first
@@ -695,13 +700,21 @@ impl GraphDbRegistry {
                 }
                 let commit = staged.commit();
                 database
-                    .reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
+                    .reopen_and_verify_existing_generation(
+                        &identity,
+                        sealed_digest,
+                        row_counts,
+                        &check,
+                    )
                     .map(|(_, recovered)| (commit, recovered))
             }
-            (false, false) if reopen_metadata => {
-                database.reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
-            }
-            (false, false) => database.verify_existing_generation(&manifest, sealed_digest, &check),
+            (false, false) if reopen_metadata => database.reopen_and_verify_existing_generation(
+                &identity,
+                sealed_digest,
+                row_counts,
+                &check,
+            ),
+            (false, false) => database.verify_existing_generation(&identity, sealed_digest, &check),
         };
         let (commit, recovered_digest) = match verified {
             Ok(verified) => verified,
@@ -742,9 +755,9 @@ impl GraphDbRegistry {
             }
             GraphVerifiedHeadCasOutcomeV1::RecoveredDigestMismatch { expected, actual } => {
                 return Err(GraphDbError::GenerationMismatch {
-                    namespace: manifest.projection.namespace.to_string(),
-                    projection: manifest.projection.projection.to_string(),
-                    generation: manifest.generation.to_string(),
+                    namespace: identity.projection.namespace.to_string(),
+                    projection: identity.projection.projection.to_string(),
+                    generation: identity.generation.to_string(),
                     message: format!(
                         "relational CAS expected recovered digest `{}`, observed `{}`",
                         expected.as_str(),
@@ -765,7 +778,7 @@ impl GraphDbRegistry {
 
         // Relational CAS is the linearization point. Caller cancellation is
         // deliberately not observed after it succeeds.
-        let lease = generation_lease(&manifest, head.clone(), dependencies);
+        let lease = generation_lease(&identity, head.clone(), dependencies);
         database.install_verified_generation(Arc::clone(&lease))?;
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
@@ -904,11 +917,11 @@ impl GraphDbRegistry {
         database: &GraphDb,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
-        manifest: &GraphGenerationManifest,
+        identity: &GraphGenerationManifestIdentity,
         visiting: &mut BTreeSet<GenerationLocator>,
     ) -> Result<BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>, GraphDbError> {
         let mut loaded = BTreeMap::new();
-        for dependency in &manifest.dependencies {
+        for dependency in &identity.dependencies {
             let key = dependency_key_for_binding(operation.binding(), dependency)?;
             let replay = authority
                 .replay(&key, context)
@@ -948,7 +961,7 @@ impl GraphDbRegistry {
                 self.load_verified_head(operation, database, authority, context, head, visiting)?;
             loaded.insert(dependency.projection.clone(), lease);
         }
-        validate_exact_dependency_closure(manifest, &loaded)?;
+        validate_exact_dependency_closure(identity, &loaded)?;
         Ok(loaded)
     }
 
@@ -986,8 +999,12 @@ impl GraphDbRegistry {
                 &check,
             )?,
         };
+        // Only the identity is needed from here on: the closure walk, the
+        // readability check, and the recovered-digest proof all read metadata
+        // or stream stored rows.
+        let identity = manifest.identity();
         let locator =
-            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(lease) = database.verified_generation(&locator)? {
             return Ok(lease);
         }
@@ -997,18 +1014,18 @@ impl GraphDbRegistry {
             });
         }
         let dependencies =
-            self.load_dependencies(operation, database, authority, context, &manifest, visiting)?;
+            self.load_dependencies(operation, database, authority, context, &identity, visiting)?;
         operation.check(self, context)?;
         let physical_namespace = locator.physical_namespace()?;
         match database
-            .ensure_projection_readable(&physical_namespace, &manifest.projection.projection)
+            .ensure_projection_readable(&physical_namespace, &identity.projection.projection)
         {
             Ok(()) => {}
             Err(GraphDbError::ProjectionMismatch { message, .. }) => {
                 return Err(GraphDbError::GenerationMismatch {
-                    namespace: manifest.projection.namespace.to_string(),
-                    projection: manifest.projection.projection.to_string(),
-                    generation: manifest.generation.to_string(),
+                    namespace: identity.projection.namespace.to_string(),
+                    projection: identity.projection.projection.to_string(),
+                    generation: identity.generation.to_string(),
                     message,
                 });
             }
@@ -1020,17 +1037,17 @@ impl GraphDbRegistry {
         // the manifest was proven to bind that replay's digests when it was
         // decoded above, so the stored rows verify directly against the head
         // digest without canonicalizing the full manifest a second time.
-        match verify_recovered_generation(native, &manifest, &head.recovered_digest, &check) {
+        match verify_recovered_generation(native, &identity, &head.recovered_digest, &check) {
             Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
                 drop(guard);
-                database.quarantine_generation(&manifest)?;
+                database.quarantine_generation(&identity)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
         }
         drop(guard);
-        let lease = generation_lease(&manifest, head, dependencies);
+        let lease = generation_lease(&identity, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);
         Ok(lease)
