@@ -1,45 +1,46 @@
-# Delivery concept plates
+# Delivery concept
 
-## Purpose
-
-Local Git and provider delivery as independent authorities rather than a healthy pipeline.
+Delivery is TraceDecay's agent-native environment for discovering, understanding, reviewing, and delivering the growing volume of agent-generated pull requests. It explains how changes came to exist without replacing exact diffs, transcripts, review threads, checks, Git history, or provider evidence.
 
 Route: `/delivery`.
+
+## Authoritative set
+
+The reviewed state sequence and per-image product briefs are indexed in [final/README.md](final/README.md). Files at this directory level are historical iterations and are not implementation authority.
+
+The final sequence covers:
+
+1. Global PR discovery across every ingested project.
+2. Project-scoped PRs plus agent-touched and correlated cross-project work.
+3. Umbrella Deliveries connecting individually drillable PRs across repositories.
+4. A horizontal causal journey from human objective to delivered outcome.
+5. Temporal replay and agent/subagent branching.
+6. Honest partial, missing, stale, inferred, and unavailable evidence.
+7. Exact review coverage, diffs, threads, and checks.
+8. A full-size Follow the Story review workspace.
+
+## Product boundary
+
+- A Delivery can be one PR or an umbrella outcome spanning correlated PRs.
+- Work's task graph is compared with observed sessions, agent work, code, checks, and outcomes.
+- Provider/GitHub lifecycle and evidence are read-only in this concept unless a real authorized write path is implemented.
+- Local TraceDecay comments and feedback attach to visible persisted artifacts; the product never claims private chain-of-thought.
+- Exact, inferred, ambiguous, stale, missing, and unavailable correlations remain distinct.
+
+## Historical asset ledger
+
+Historical PNGs remain indexed here until the approved replacements and cleanup are independently accepted.
+
+| PNG | Explainer | Lifecycle | Decision |
+|---|---|---|---|
+| [v1-recency-field.png](v1-recency-field.png) | [v1-recency-field.md](v1-recency-field.md) | `superseded` | Repository recency study; too narrow for the final product. |
+| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Historical HUD study. |
+| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Historical HUD study. |
+| [v3-independent-authorities.png](v3-independent-authorities.png) | [v3-independent-authorities.md](v3-independent-authorities.md) | `superseded` | Honest authority model retained as historical source, but not the final interaction. |
 
 ## Production authorities
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/delivery/DeliveryPage.tsx`, `DeliveryField.tsx`, and `field.ts` are the delivery-field authority; `time.test.ts` is test coverage, not a runtime authority.
-- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
-
-## Canonical semantic-state matrix
-
-| Depicted semantic state or interaction | Current explainer | Entry condition |
-|---|---|---|
-| Local Git ready | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Pull requests unavailable | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Reviews unavailable | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| CI rate limited | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Failure localization stale | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Releases not published | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Index freshness ready | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| Projection-state matrix | [v3-independent-authorities.md](v3-independent-authorities.md) | Depicted by this selected still. |
-| A provider refetch result | No current plate | Required interaction/result is not depicted. |
-
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
-
-## Asset ledger
-
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-recency-field.png](v1-recency-field.png) | [v1-recency-field.md](v1-recency-field.md) | `superseded` | Earlier Delivery lookbook iteration; replaced by canonical `v3-independent-authorities`. |
-| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Earlier Delivery lookbook iteration; replaced by canonical `v3-independent-authorities`. |
-| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Earlier Delivery lookbook iteration; replaced by canonical `v3-independent-authorities`. |
-| [v3-independent-authorities.png](v3-independent-authorities.png) | [v3-independent-authorities.md](v3-independent-authorities.md) | `current` | Pre-Task-1 canonical selection for Delivery. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v3; previous studies are superseded.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and typed-state language.
+- [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns shared state coverage.
+- Production Delivery projections remain independently typed: local changes, commits, pull requests, review evidence, CI checks, failure localization, releases, and generation freshness.

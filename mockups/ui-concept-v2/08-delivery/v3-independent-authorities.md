@@ -1,11 +1,11 @@
 ---
-design_status: current
+design_status: superseded
 ---
 
 # Delivery: v3 independent authorities
 
 - **Asset:** `v3-independent-authorities.png`
-- **Lifecycle:** `current`
+- **Lifecycle:** `superseded`
 
 ## Intent
 
@@ -30,4 +30,4 @@ This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establi
 
 ## Lifecycle history
 
-Pre-Task-1 canonical selection for Delivery. Lifecycle is an explicit editorial decision; the version stem records iteration order only.
+Historical repository-authority study. It was replaced by the approved multi-state PR discovery, journey, replay, and review set in `final/`.
