@@ -58,6 +58,7 @@ impl DashboardLcmReadAdapter {
         })
     }
 
+    #[hotpath::measure(label = "mcp.lcm.total")]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -106,10 +107,12 @@ impl DashboardLcmReadAdapter {
                     "lcm_dashboard_request_invalid",
                 );
             };
-            let (page, omitted, paged_partial) = match self
-                .retrieval
-                .retrieve_admitted_with_cancellation(&context, &cancellation, query)
-                .await
+            let (page, omitted, paged_partial) = match hotpath::future!(
+                self.retrieval
+                    .retrieve_admitted_with_cancellation(&context, &cancellation, query,),
+                label = "mcp.lcm.retrieve"
+            )
+            .await
             {
                 SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
                 SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
@@ -158,7 +161,7 @@ impl DashboardLcmReadAdapter {
                     );
                 }
                 SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-                | SessionRetrievalServiceOutcome::BudgetExhausted
+                | SessionRetrievalServiceOutcome::BudgetExhausted { .. }
                 | SessionRetrievalServiceOutcome::Cancelled => {
                     return not_ready(
                         DashboardLcmReadStateV1::Unavailable,
@@ -331,14 +334,16 @@ impl DashboardLcmReadAdapter {
         }
 
         let next_cursor = page.temporal.cursor;
-        let canonical_page = DashboardLcmCanonicalPageV1 {
-            messages,
-            summary_nodes,
-            overview_matches: None,
-            stats,
-            has_more: next_cursor.is_some(),
-            next_cursor,
-        };
+        let canonical_page = hotpath::measure_block!("mcp.lcm.assemble", {
+            DashboardLcmCanonicalPageV1 {
+                messages,
+                summary_nodes,
+                overview_matches: None,
+                stats,
+                has_more: next_cursor.is_some(),
+                next_cursor,
+            }
+        });
         let total_omitted = omitted.saturating_add(partial_description_count);
         // A windowed page with a continuation cursor stays visibly partial
         // even when nothing was genuinely omitted (omitted stays 0): the
@@ -354,6 +359,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
+    #[hotpath::measure(label = "mcp.lcm.overview")]
     async fn execute_overview_with_matches(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -424,6 +430,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
+    #[hotpath::measure(label = "mcp.lcm.hydrate")]
     async fn hydrate_summary(
         &self,
         context: &RequestContext,
@@ -480,9 +487,8 @@ impl DashboardLcmReadAdapter {
         target: LcmDescribeTarget,
         grain: RetrievalGrainV1,
     ) -> Result<(LcmDescribeResponse, bool), (DashboardLcmReadStateV1, &'static str)> {
-        match self
-            .retrieval
-            .describe_lcm_admitted(
+        match hotpath::future!(
+            self.retrieval.describe_lcm_admitted(
                 context,
                 cancellation,
                 LcmDescribeServiceCommand::new(
@@ -492,8 +498,10 @@ impl DashboardLcmReadAdapter {
                     grain,
                     SessionRetrievalStoreScope::Project,
                 ),
-            )
-            .await
+            ),
+            label = "mcp.lcm.describe"
+        )
+        .await
         {
             LcmDescribeServiceOutcome::Complete { description, .. } => Ok((description, false)),
             LcmDescribeServiceOutcome::Partial {

@@ -536,6 +536,8 @@ pub fn retained_surface_execution_problem(
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
+        // Structural budget refusal uses InvalidRequest so the wire kind stays
+        // unchanged and non-retryable. Callers must narrow scope or limit.
         RetainedSurfaceExecutionErrorV1::Unavailable => unavailable_problem(
             "application.retained.authority-unavailable",
             "The retained operation authority is unavailable.",
@@ -571,6 +573,21 @@ fn unavailable_problem(code: &'static str, message: &'static str) -> Application
         diagnostic: diagnostic(code, message),
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![LegalAction::Retry],
+    }
+}
+
+impl RetainedSurfaceExecutionErrorV1 {
+    /// Fail-closed structural budget refusal. True concurrent saturation stays
+    /// [`Self::Saturated`] and retryable; this path never is.
+    pub fn structural_budget_refusal() -> Self {
+        Self::ApplicationProblem(ApplicationProblem::InvalidRequest {
+            diagnostic: diagnostic(
+                "application.retained.budget-refused",
+                "The request exceeds the admitted retrieval budget. Narrow the scope or limit.",
+            ),
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        })
     }
 }
 
@@ -702,6 +719,23 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn structural_budget_refusal_is_non_retryable_invalid_request() {
+        let problem = retained_surface_execution_problem(
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal(),
+        );
+        assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("application.retained.budget-refused")
+        );
+        assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+    }
+
+    #[test]
     fn runtime_terminal_states_remain_typed() {
         for (error, expected) in [
             (
@@ -723,6 +757,10 @@ mod tests {
             (
                 RetainedSurfaceExecutionErrorV1::Saturated,
                 ApplicationProblemKind::Saturated,
+            ),
+            (
+                RetainedSurfaceExecutionErrorV1::structural_budget_refusal(),
+                ApplicationProblemKind::InvalidRequest,
             ),
             (
                 RetainedSurfaceExecutionErrorV1::ProfileResetRequired,

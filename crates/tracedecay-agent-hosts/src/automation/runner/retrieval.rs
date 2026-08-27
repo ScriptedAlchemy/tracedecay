@@ -509,7 +509,7 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             AutomationTemporalRetrieval::Rejected("session_cursor_manifest_limit_exceeded")
         }
-        SessionRetrievalOutcome::BudgetExhausted => {
+        SessionRetrievalOutcome::BudgetExhausted { .. } => {
             AutomationTemporalRetrieval::Rejected(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
         }
         SessionRetrievalOutcome::Cancelled => {

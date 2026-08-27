@@ -485,9 +485,9 @@ fn map_evidence_terminal(
         RetainedSurfaceEvidenceTerminalV1::Effect => {
             RetainedSurfaceExecutionErrorV1::InvalidRequest
         }
-        RetainedSurfaceEvidenceTerminalV1::Busy
-        | RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
-            RetainedSurfaceExecutionErrorV1::Saturated
+        RetainedSurfaceEvidenceTerminalV1::Busy => RetainedSurfaceExecutionErrorV1::Saturated,
+        RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
         RetainedSurfaceEvidenceTerminalV1::Cancelled => {
             RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)

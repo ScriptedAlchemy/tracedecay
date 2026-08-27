@@ -37,10 +37,10 @@ use tracedecay_usecases::context::{
 use tracedecay_usecases::session::{
     AuthorizationGrantId, AuthorizedTemporalExecutionRequest, SessionAccess,
     SessionAuthorizationError, SessionAuthorizationGrant, SessionDataFreshness,
-    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalExecutionPort,
-    SessionTemporalExecutionReport, SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalBudgetStageV1, SessionRetrievalConfiguration,
+    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
+    SessionTemporalExecutionPort, SessionTemporalExecutionReport, SessionTemporalQuery,
 };
 
 const DIGEST: [u8; 32] = [0x5a; 32];
@@ -1624,7 +1624,9 @@ async fn request_budget_preflight_rejects_before_execution() {
 
     assert!(matches!(
         retrieve(&service, &constrained, query("alpha")).await,
-        SessionRetrievalOutcome::BudgetExhausted
+        SessionRetrievalOutcome::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+        }
     ));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
 }
@@ -1819,11 +1821,15 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
     }
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("budget-bytes")).await,
-        SessionRetrievalOutcome::BudgetExhausted
+        SessionRetrievalOutcome::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ContextBytes,
+        }
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("kernel-budget")).await,
-        SessionRetrievalOutcome::BudgetExhausted
+        SessionRetrievalOutcome::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        }
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("kernel-cancelled")).await,
@@ -1855,7 +1861,9 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("execution-budget")).await,
-        SessionRetrievalOutcome::BudgetExhausted
+        SessionRetrievalOutcome::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        }
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("execution-cancelled")).await,
