@@ -196,7 +196,7 @@ impl CodeGraphActivationAuthorityV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.graph.activate", future = true)]
     pub(super) async fn activate(
         &self,
         project_id: &ProjectId,
@@ -262,7 +262,7 @@ impl CodeGraphActivationAuthorityV1 {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::BudgetExhausted {
                             budget: "resident_memory".to_owned(),
-                            limit: tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+                            limit: tracedecay_runtime_core::resident_memory::process_resident_memory_limit_v1().get(),
                         },
                     ));
                 }

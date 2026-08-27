@@ -10,7 +10,7 @@ use serde_json::Value;
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ProcessResidentMemoryV1, process_resident_memory_limit_v1,
 };
 
 use crate::errors::{Result, TraceDecayError};
@@ -50,7 +50,7 @@ impl DaemonInvocationState {
     /// progress is ordered by the existing durable daemon-authority epoch.
     pub(super) fn with_progress_producer_incarnation(producer_incarnation: u64) -> Self {
         let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
-            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            process_resident_memory_limit_v1(),
         ));
         let code_index_schedulers = code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory_and_progress_producer_incarnation(
             MAX_CACHED_PROJECT_SERVERS,
@@ -110,6 +110,7 @@ impl DaemonInvocationState {
         })
     }
 
+    #[hotpath::measure(label = "daemon.invocation.retire_owners", future = true)]
     pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -121,6 +122,7 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
+    #[hotpath::measure(label = "daemon.invocation.quiesce_owners", future = true)]
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -137,6 +139,7 @@ impl DaemonInvocationState {
             })
     }
 
+    #[hotpath::measure(label = "daemon.invocation.drain_owners", future = true)]
     async fn drain_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -935,6 +938,7 @@ impl DaemonInvocationState {
         }
     }
 
+    #[hotpath::measure(label = "daemon.invocation.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
