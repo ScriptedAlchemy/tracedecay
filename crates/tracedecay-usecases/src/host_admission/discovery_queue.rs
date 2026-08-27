@@ -61,7 +61,7 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    pub(super) async fn replace_parse_offset(
+    pub(super) async fn replace_registered_parse_offset(
         &self,
         scope: &ObservationScopeV1,
         path: &str,
@@ -89,7 +89,7 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    pub(super) async fn replace_parse_offset_pair(
+    pub(super) async fn replace_registered_parse_offset_pair(
         &self,
         scope: &ObservationScopeV1,
         first: (
