@@ -86,6 +86,10 @@ pub enum DashboardLcmReadStateV1 {
     Denied,
     Redacted,
     Unavailable,
+    CursorManifestLimitExceeded,
+    BudgetExhausted,
+    TimedOut,
+    Cancelled,
 }
 
 #[derive(Clone, Debug)]
@@ -625,7 +629,11 @@ where
                 DashboardLcmReadStateV1::Redacted => {
                     typed_not_ready_envelope(scope, DashboardDomainStateV1::Redacted, reason)
                 }
-                DashboardLcmReadStateV1::Unavailable => {
+                DashboardLcmReadStateV1::Unavailable
+                | DashboardLcmReadStateV1::CursorManifestLimitExceeded
+                | DashboardLcmReadStateV1::BudgetExhausted
+                | DashboardLcmReadStateV1::TimedOut
+                | DashboardLcmReadStateV1::Cancelled => {
                     DashboardEnvelopeV1::unavailable(scope, None, reason)
                 }
             };

@@ -1327,7 +1327,11 @@ where
         DashboardLcmReadStateV1::Redacted => {
             DashboardEnvelopeV1::redacted(scope, None::<T>, reason)
         }
-        DashboardLcmReadStateV1::Unavailable => {
+        DashboardLcmReadStateV1::Unavailable
+        | DashboardLcmReadStateV1::CursorManifestLimitExceeded
+        | DashboardLcmReadStateV1::BudgetExhausted
+        | DashboardLcmReadStateV1::TimedOut
+        | DashboardLcmReadStateV1::Cancelled => {
             DashboardEnvelopeV1::unavailable(scope, None::<T>, reason)
         }
     };
@@ -1342,5 +1346,11 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
         DashboardLcmReadStateV1::Denied => "lcm_temporal_read_denied",
         DashboardLcmReadStateV1::Redacted => "lcm_temporal_read_redacted",
         DashboardLcmReadStateV1::Unavailable => "lcm_temporal_authority_unavailable",
+        DashboardLcmReadStateV1::CursorManifestLimitExceeded => {
+            "lcm_temporal_cursor_manifest_limit_exceeded"
+        }
+        DashboardLcmReadStateV1::BudgetExhausted => "lcm_temporal_budget_exhausted",
+        DashboardLcmReadStateV1::TimedOut => "lcm_temporal_read_timed_out",
+        DashboardLcmReadStateV1::Cancelled => "lcm_temporal_read_cancelled",
     }
 }
