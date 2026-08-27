@@ -512,6 +512,9 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::BudgetExhausted { .. } => {
             AutomationTemporalRetrieval::Rejected(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
         }
+        SessionRetrievalOutcome::TimedOut => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_timed_out")
+        }
         SessionRetrievalOutcome::Cancelled => {
             AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")
         }

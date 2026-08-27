@@ -762,9 +762,16 @@ pub(super) fn describe_retrieval_outcome(
         SessionRetrievalOutcome::BudgetExhausted { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
         }
-        SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
-            LcmDescribeServiceOutcome::BudgetExhausted
-        }
+        SessionRetrievalOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
+        SessionRetrievalOutcome::TimedOut => LcmDescribeServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionRetrievalOutcome::Stale { freshness } => LcmDescribeServiceOutcome::Stale {
             temporal,
@@ -806,9 +813,16 @@ pub(super) fn expand_retrieval_outcome(
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalOutcome::BudgetExhausted { .. } => LcmExpandServiceOutcome::BudgetExhausted,
-        SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
-            LcmExpandServiceOutcome::BudgetExhausted
-        }
+        SessionRetrievalOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => LcmExpandServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
+        SessionRetrievalOutcome::TimedOut => LcmExpandServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionRetrievalOutcome::Stale { freshness } => LcmExpandServiceOutcome::Stale {
             temporal,

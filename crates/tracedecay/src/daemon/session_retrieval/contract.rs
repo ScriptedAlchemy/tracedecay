@@ -384,7 +384,13 @@ pub(crate) enum LcmDescribeServiceOutcome {
         store_scope: SessionRetrievalStoreScope,
     },
     Unavailable(SessionRetrievalUnavailable),
+    CursorManifestLimitExceeded {
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted,
+    TimedOut,
     Cancelled,
 }
 
@@ -418,7 +424,13 @@ pub(crate) enum LcmExpandServiceOutcome {
         store_scope: SessionRetrievalStoreScope,
     },
     Unavailable(SessionRetrievalUnavailable),
+    CursorManifestLimitExceeded {
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted,
+    TimedOut,
     Cancelled,
 }
 
@@ -464,5 +476,6 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     BudgetExhausted {
         stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
     },
+    TimedOut,
     Cancelled,
 }

@@ -98,6 +98,9 @@ fn map_outcome(
                 }),
             )?))
         }
+        SessionRetrievalServiceOutcome::TimedOut => Ok(RetrievalPortOutcome::TimedOut(
+            terminal_evidence(request, finished_at, OmissionReason::TimedOut, None)?,
+        )),
         SessionRetrievalServiceOutcome::Stale { .. } => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
         )),

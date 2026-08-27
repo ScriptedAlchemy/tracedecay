@@ -162,6 +162,7 @@ impl DashboardLcmReadAdapter {
                 }
                 SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
                 | SessionRetrievalServiceOutcome::BudgetExhausted { .. }
+                | SessionRetrievalServiceOutcome::TimedOut
                 | SessionRetrievalServiceOutcome::Cancelled => {
                     return not_ready(
                         DashboardLcmReadStateV1::Unavailable,
@@ -534,7 +535,9 @@ impl DashboardLcmReadAdapter {
                 description: None, ..
             }
             | LcmDescribeServiceOutcome::Unavailable(_)
+            | LcmDescribeServiceOutcome::CursorManifestLimitExceeded { .. }
             | LcmDescribeServiceOutcome::BudgetExhausted
+            | LcmDescribeServiceOutcome::TimedOut
             | LcmDescribeServiceOutcome::Cancelled => Err((
                 DashboardLcmReadStateV1::Unavailable,
                 "lcm_session_description_unavailable",

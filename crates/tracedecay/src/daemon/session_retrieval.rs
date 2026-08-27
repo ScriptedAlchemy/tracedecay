@@ -536,6 +536,7 @@ impl DaemonSessionRetrievalService {
             SessionRetrievalOutcome::BudgetExhausted { stage } => {
                 SessionRetrievalServiceOutcome::BudgetExhausted { stage }
             }
+            SessionRetrievalOutcome::TimedOut => SessionRetrievalServiceOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
         }
     }
