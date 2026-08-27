@@ -34,6 +34,7 @@ impl McpBackgroundTaskOwner {
         true
     }
 
+    #[hotpath::measure(label = "mcp.server.background_shutdown", future = true)]
     pub(crate) async fn shutdown(&self) -> Vec<String> {
         let mut retained = self.shutdown_tasks.lock().await;
         if retained.is_none() {
@@ -283,6 +284,7 @@ impl ProjectServerResponseLifecycle {
     /// Close response admission without invalidating an already-admitted reply.
     /// Tokio's write-preferring lock prevents later readers from overtaking the
     /// queued retirement writer, so cancellation is published at the cutover.
+    #[hotpath::measure(label = "mcp.server.revoke_drain", future = true)]
     pub(crate) async fn revoke_after_request_drain(&self) {
         let _guard = self.response_gate.write().await;
         self.response_revoked.cancel();
@@ -373,6 +375,7 @@ impl McpServer {
     }
 
     /// Shutdown-side teardown of the startup index-sync phase.
+    #[hotpath::measure(label = "mcp.server.startup_catch_up.shutdown", future = true)]
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
@@ -514,6 +517,7 @@ impl McpServer {
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
+    #[hotpath::measure(label = "mcp.server.startup_catch_up", future = true)]
     pub async fn run_startup_catch_up_sync(&self) {
         self.startup_catch_up.begin_sync();
 
@@ -583,6 +587,7 @@ impl McpServer {
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
+    #[hotpath::measure(label = "mcp.server.sync_if_stale", future = true)]
     pub async fn maybe_sync_if_stale(&self) {
         let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()

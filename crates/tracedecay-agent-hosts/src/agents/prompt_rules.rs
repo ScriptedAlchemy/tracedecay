@@ -4,10 +4,9 @@
 //! tracedecay rules block. Claude and Kiro keep host-specific text but reuse
 //! the block-splicing helpers here.
 
-use std::io::Write;
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
 /// Marker heading shared by every standard prompt-rules host.
 pub(crate) const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
@@ -105,9 +104,8 @@ pub(crate) fn strip_heading_block(contents: &str, marker: &str) -> Option<String
     Some(splice_out(contents, start, end))
 }
 
-/// Writes `stripped` user content plus a fresh managed `block` to `path` and
-/// reports the refresh.
-pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Result<()> {
+/// Render preserved operator text followed by exactly one managed block.
+pub(crate) fn refreshed_contents(stripped: &str, block: &str) -> String {
     let mut new_contents = String::with_capacity(stripped.len() + block.len() + 3);
     new_contents.push_str(stripped);
     if !new_contents.is_empty() {
@@ -115,80 +113,187 @@ pub(crate) fn write_refreshed(path: &Path, stripped: &str, block: &str) -> Resul
     }
     new_contents.push_str(block);
     new_contents.push('\n');
-    std::fs::write(path, new_contents).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
+    new_contents
+}
+
+/// Result of reconciling one host's prompt-rule syntax under the path lock.
+pub(crate) enum PromptRulesEdit {
+    Unchanged,
+    Refreshed(String),
+    Added(String),
+}
+
+pub(crate) enum PromptRulesRemoval {
+    Unchanged,
+    Rewrite(String),
+    Remove,
+}
+
+#[derive(Clone, Copy)]
+enum PromptRulesEditOutcome {
+    Unchanged,
+    Refreshed,
+    Added,
+}
+
+/// Read, reconcile, and publish host-specific prompt rules in one transaction.
+///
+/// The callback runs while the stable per-path lock is held, so no host branch
+/// can compute replacement bytes from an observation made outside the write
+/// authority.
+pub(crate) fn reconcile_prompt_rules_with(
+    path: &Path,
+    reconcile: impl FnOnce(&str) -> Result<PromptRulesEdit>,
+) -> Result<()> {
+    let outcome = super::update_text_file_transactionally(path, |existing| {
+        Ok(match reconcile(existing)? {
+            PromptRulesEdit::Unchanged => (
+                PromptRulesEditOutcome::Unchanged,
+                super::TextFileMutation::Unchanged,
+            ),
+            PromptRulesEdit::Refreshed(contents) => (
+                PromptRulesEditOutcome::Refreshed,
+                super::TextFileMutation::Write(contents),
+            ),
+            PromptRulesEdit::Added(contents) => (
+                PromptRulesEditOutcome::Added,
+                super::TextFileMutation::Write(contents),
+            ),
+        })
     })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
-        path.display()
-    );
+    match outcome {
+        PromptRulesEditOutcome::Unchanged => {
+            eprintln!(
+                "  {} already contains tracedecay rules, skipping",
+                path.display()
+            );
+        }
+        PromptRulesEditOutcome::Refreshed => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Refreshed tracedecay rules in {}",
+                path.display()
+            );
+        }
+        PromptRulesEditOutcome::Added => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read, reconcile, and conditionally remove host-specific prompt rules while
+/// holding the same path lock used by installation.
+pub(crate) fn remove_prompt_rules_with(
+    path: &Path,
+    reconcile: impl FnOnce(&str) -> Result<PromptRulesRemoval>,
+) -> Result<()> {
+    let removed = super::update_text_file_transactionally(path, |existing| {
+        Ok(match reconcile(existing)? {
+            PromptRulesRemoval::Unchanged => (false, super::TextFileMutation::Unchanged),
+            PromptRulesRemoval::Rewrite(contents) => {
+                (true, super::TextFileMutation::Write(contents))
+            }
+            PromptRulesRemoval::Remove => (true, super::TextFileMutation::Remove),
+        })
+    })?;
+    if removed {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "  {} does not contain removable tracedecay rules, skipping",
+            path.display()
+        );
+    }
     Ok(())
 }
 
 /// Install or refresh the managed rules block in `path`.
 pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> Result<()> {
-    let existing = if path.exists() {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if existing.contains(block) {
-        eprintln!(
-            "  {} already contains tracedecay rules, skipping",
-            path.display()
-        );
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    if let Some(stripped) = strip_heading_block(&existing, marker) {
-        return write_refreshed(path, &stripped, block);
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", path.display()),
-        })?;
-    write!(f, "\n{block}\n").map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
-        path.display()
-    );
-    Ok(())
+    reconcile_prompt_rules_with(path, |existing| {
+        if existing.contains(block) {
+            return Ok(PromptRulesEdit::Unchanged);
+        }
+        if let Some(stripped) = strip_heading_block(existing, marker) {
+            return Ok(PromptRulesEdit::Refreshed(refreshed_contents(
+                &stripped, block,
+            )));
+        }
+        Ok(PromptRulesEdit::Added(format!("{existing}\n{block}\n")))
+    })
 }
 
-/// Shared uninstall for the standard hosts: strips the managed block and
-/// deletes the file when nothing else remains.
-pub(crate) fn remove_prompt_rules(path: &Path, marker: &str) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
-        eprintln!(
-            "  {} does not contain tracedecay rules, skipping",
-            path.display()
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{PROMPT_RULE_MARKER, reconcile_prompt_rules};
+
+    const ORIGINAL: &[u8] = b"operator-owned instructions\n";
+    const BLOCK: &str = "## Prefer tracedecay MCP tools\n\nmanaged instructions";
+
+    #[test]
+    fn failed_write_intent_leaves_existing_prompt_rules_byte_identical() {
+        let root = tempfile::tempdir().expect("prompt-rules fixture");
+        let prompt = root.path().join("AGENTS.md");
+        fs::write(&prompt, ORIGINAL).expect("original prompt rules");
+        let blocked_intent_root = root.path().join("blocked-intent-root");
+        fs::write(&blocked_intent_root, b"not a directory").expect("blocked intent root");
+
+        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+            reconcile_prompt_rules(&prompt, PROMPT_RULE_MARKER, BLOCK)
+        })
+        .expect_err("an unpersisted write intent must refuse the prompt-rules write");
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not create host config write intent directory"),
+            "unexpected error: {error}"
         );
-        return;
+        assert_eq!(
+            fs::read(&prompt).expect("prompt rules after refused write"),
+            ORIGINAL,
+            "intent failure must not expose unowned prompt-rule bytes"
+        );
     }
-    let Some(new_contents) = strip_heading_block(&contents, marker) else {
-        return;
-    };
-    if new_contents.is_empty() {
-        std::fs::remove_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else {
-        std::fs::write(path, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            path.display()
+
+    #[test]
+    fn foreign_edit_after_refresh_read_is_refused_without_overwrite() {
+        let root = tempfile::tempdir().expect("prompt-rules fixture");
+        let prompt = root.path().join("AGENTS.md");
+        let original = format!(
+            "operator-owned instructions\n\n{PROMPT_RULE_MARKER}\n\nstale managed instructions\n"
+        );
+        fs::write(&prompt, &original).expect("original prompt rules");
+        let pause = crate::agents::pause_next_host_config_write_after_validation(&prompt);
+        let writer_prompt = prompt.clone();
+        let writer = std::thread::spawn(move || {
+            reconcile_prompt_rules(&writer_prompt, PROMPT_RULE_MARKER, BLOCK)
+                .map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        let foreign = b"operator changed these instructions concurrently\n";
+        fs::write(&prompt, foreign).expect("foreign concurrent edit");
+        pause.resume();
+        let error = writer
+            .join()
+            .expect("prompt-rules writer")
+            .expect_err("a stale refresh must refuse the foreign edit");
+
+        assert!(
+            error.to_string().contains("changed since it was read"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read(&prompt).expect("prompt rules after stale refresh"),
+            foreign,
+            "a stale refresh must not overwrite foreign bytes"
         );
     }
 }

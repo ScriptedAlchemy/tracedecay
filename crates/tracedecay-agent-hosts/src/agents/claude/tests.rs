@@ -461,13 +461,225 @@ fn uninstall_preserves_user_tracedecay_heading_after_block() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn install_claude_md_rules_surfaces_append_failures() {
+fn install_claude_md_rules_surfaces_lock_failures() {
     let err = install_claude_md_rules(Path::new("/dev/full")).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("failed to capture metadata for /dev/full"),
+        msg.contains("failed to open host config lock /dev/"),
         "unexpected error message: {msg}"
     );
+}
+
+fn claude_prompt_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
+    vec![
+        (
+            "managed-block refresh",
+            Some(
+                format!(
+                    "operator rules\n\n{CLAUDE_MD_MARKER}\n\nstale rules\n\n\
+                     {CLAUDE_MD_OWNED_SUBHEADING}\n\nstale explore rules\n"
+                )
+                .into_bytes(),
+            ),
+        ),
+        ("existing append", Some(b"operator rules\n".to_vec())),
+        ("missing create", None),
+    ]
+}
+
+#[test]
+fn every_claude_prompt_mutation_branch_requires_a_persisted_write_intent() {
+    for (case, original) in claude_prompt_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let claude_md = root.path().join("CLAUDE.md");
+        if let Some(original) = &original {
+            std::fs::write(&claude_md, original).unwrap();
+        }
+        let blocked_intent_root = root.path().join("blocked-intent-root");
+        std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
+
+        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+            install_claude_md_rules(&claude_md)
+        })
+        .expect_err(case);
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not create host config write intent directory"),
+            "{case}: unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&claude_md).ok(),
+            original,
+            "{case}: failed intent persistence must leave the target byte-identical"
+        );
+    }
+}
+
+#[test]
+fn every_claude_prompt_mutation_branch_refuses_a_stale_target() {
+    for (case, original) in claude_prompt_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let claude_md = root.path().join("CLAUDE.md");
+        if let Some(original) = original {
+            std::fs::write(&claude_md, original).unwrap();
+        }
+        let pause = crate::agents::pause_next_host_config_write_after_validation(&claude_md);
+        let writer_path = claude_md.clone();
+        let writer = std::thread::spawn(move || {
+            install_claude_md_rules(&writer_path).map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        let foreign = format!("foreign Claude edit during {case}\n");
+        std::fs::write(&claude_md, foreign.as_bytes()).unwrap();
+        pause.resume();
+
+        let error = writer.join().unwrap().expect_err(case);
+        assert!(
+            error.contains("changed since it was read"),
+            "{case}: {error}"
+        );
+        assert_eq!(std::fs::read(&claude_md).unwrap(), foreign.as_bytes());
+    }
+}
+
+#[test]
+fn every_claude_prompt_mutation_branch_converges_through_the_same_writer() {
+    let block = claude_md_rules_text();
+    for (case, original) in claude_prompt_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let claude_md = root.path().join("CLAUDE.md");
+        if let Some(original) = original {
+            std::fs::write(&claude_md, original).unwrap();
+        }
+
+        install_claude_md_rules(&claude_md).unwrap();
+
+        let installed = std::fs::read_to_string(&claude_md).unwrap();
+        assert_eq!(
+            installed.matches(&block).count(),
+            1,
+            "{case}: the canonical block must appear exactly once"
+        );
+        if case != "missing create" {
+            assert!(
+                installed.contains("operator rules"),
+                "{case}: operator content must survive"
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_prompt_install_rejects_non_utf8_without_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    let invalid = b"operator rules\n\xff\xfe";
+    std::fs::write(&claude_md, invalid).unwrap();
+
+    let error = install_claude_md_rules(&claude_md).unwrap_err();
+
+    assert!(error.to_string().contains("as UTF-8"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), invalid);
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_prompt_install_rejects_unreadable_input_without_overwrite() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    std::fs::write(&claude_md, b"operator rules\n").unwrap();
+    std::fs::set_permissions(&claude_md, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let error = install_claude_md_rules(&claude_md).unwrap_err();
+    std::fs::set_permissions(&claude_md, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(error.to_string().contains("failed to read"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), b"operator rules\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_prompt_install_refuses_a_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = root.path().join("outside.md");
+    let claude_md = root.path().join("CLAUDE.md");
+    std::fs::write(&outside, b"operator rules\n").unwrap();
+    symlink(&outside, &claude_md).unwrap();
+
+    let error = install_claude_md_rules(&claude_md).unwrap_err();
+
+    assert!(
+        error.to_string().contains("unsafe host metadata path"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"operator rules\n");
+}
+
+#[test]
+fn claude_uninstall_refuses_a_concurrent_edit_before_nonempty_rewrite() {
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    std::fs::write(&claude_md, b"operator rules\n").unwrap();
+    install_claude_md_rules(&claude_md).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&claude_md);
+    let writer_path = claude_md.clone();
+    let remover = std::thread::spawn(move || {
+        uninstall_claude_md_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Claude edit\n";
+    std::fs::write(&claude_md, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), foreign);
+}
+
+#[test]
+fn claude_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    install_claude_md_rules(&claude_md).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&claude_md);
+    let writer_path = claude_md.clone();
+    let remover = std::thread::spawn(move || {
+        uninstall_claude_md_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Claude edit\n";
+    std::fs::write(&claude_md, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), foreign);
+}
+
+#[test]
+fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
+    let root = tempfile::tempdir().unwrap();
+    let nonempty = root.path().join("nonempty.md");
+    std::fs::write(&nonempty, b"operator rules\n").unwrap();
+    install_claude_md_rules(&nonempty).unwrap();
+
+    uninstall_claude_md_rules(&nonempty).unwrap();
+
+    assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
+
+    let empty = root.path().join("empty.md");
+    install_claude_md_rules(&empty).unwrap();
+
+    uninstall_claude_md_rules(&empty).unwrap();
+
+    assert!(!empty.exists());
 }
 
 /// Every managed subagent definition the plugin ships must have valid

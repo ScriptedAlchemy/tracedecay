@@ -138,7 +138,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "mcp.tools_call.dispatch")]
+    #[hotpath::measure(label = "mcp.server.tools_call.dispatch", future = true)]
     pub(super) async fn dispatch_routed_tool_call(
         &self,
         tool_name: &str,

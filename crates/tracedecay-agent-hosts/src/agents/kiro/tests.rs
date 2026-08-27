@@ -13,6 +13,244 @@
 
 use super::*;
 
+#[test]
+fn every_steering_mutation_branch_requires_a_persisted_write_intent() {
+    for (case, original) in steering_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let steering = root.path().join("tracedecay.md");
+        if let Some(original) = &original {
+            std::fs::write(&steering, original).unwrap();
+        }
+        let blocked_intent_root = root.path().join("blocked-intent-root");
+        std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
+
+        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+            install_steering_rules(&steering)
+        })
+        .expect_err(case);
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not create host config write intent directory"),
+            "{case}: unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&steering).ok().as_deref(),
+            original.as_deref(),
+            "{case}: failed intent persistence must leave the target byte-identical"
+        );
+    }
+}
+
+fn steering_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
+    vec![
+        (
+            "owned-end refresh",
+            Some(
+                format!(
+                    "operator rules\n\n{PROMPT_MARKER}\n\nstale rules\n\n{PROMPT_END_MARKER}\n"
+                )
+                .into_bytes(),
+            ),
+        ),
+        (
+            "heading fallback",
+            Some(format!("operator rules\n\n{PROMPT_MARKER}\n\nstale rules\n").into_bytes()),
+        ),
+        ("existing append", Some(b"operator rules\n".to_vec())),
+        ("missing create", None),
+    ]
+}
+
+#[test]
+fn every_steering_mutation_branch_refuses_a_stale_target() {
+    for (case, original) in steering_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let steering = root.path().join("tracedecay.md");
+        if let Some(original) = original {
+            std::fs::write(&steering, original).unwrap();
+        }
+        let pause = crate::agents::pause_next_host_config_write_after_validation(&steering);
+        let writer_path = steering.clone();
+        let writer = std::thread::spawn(move || {
+            install_steering_rules(&writer_path).map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        let foreign = format!("foreign Kiro edit during {case}\n");
+        std::fs::write(&steering, foreign.as_bytes()).unwrap();
+        pause.resume();
+
+        let error = writer.join().unwrap().expect_err(case);
+        assert!(
+            error.contains("changed since it was read"),
+            "{case}: {error}"
+        );
+        assert_eq!(std::fs::read(&steering).unwrap(), foreign.as_bytes());
+    }
+}
+
+#[test]
+fn every_steering_mutation_branch_converges_through_the_same_writer() {
+    let block = prompt_rules_text();
+    for (case, original) in steering_mutation_cases() {
+        let root = tempfile::tempdir().unwrap();
+        let steering = root.path().join("tracedecay.md");
+        if let Some(original) = original {
+            std::fs::write(&steering, original).unwrap();
+        }
+
+        install_steering_rules(&steering).unwrap();
+
+        let installed = std::fs::read_to_string(&steering).unwrap();
+        assert_eq!(
+            installed.matches(&block).count(),
+            1,
+            "{case}: the canonical block must appear exactly once"
+        );
+        if case != "missing create" {
+            assert!(
+                installed.contains("operator rules"),
+                "{case}: operator content must survive"
+            );
+        }
+    }
+}
+
+#[test]
+fn steering_install_rejects_non_utf8_without_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    let invalid = b"operator rules\n\xff\xfe";
+    std::fs::write(&steering, invalid).unwrap();
+
+    let error = install_steering_rules(&steering).unwrap_err();
+
+    assert!(error.to_string().contains("as UTF-8"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), invalid);
+}
+
+#[cfg(unix)]
+#[test]
+fn steering_install_rejects_unreadable_input_without_overwrite() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    std::fs::write(&steering, b"operator rules\n").unwrap();
+    std::fs::set_permissions(&steering, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let error = install_steering_rules(&steering).unwrap_err();
+    std::fs::set_permissions(&steering, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(error.to_string().contains("failed to read"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), b"operator rules\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn steering_install_refuses_a_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = root.path().join("outside.md");
+    let steering = root.path().join("tracedecay.md");
+    std::fs::write(&outside, b"operator rules\n").unwrap();
+    symlink(&outside, &steering).unwrap();
+
+    let error = install_steering_rules(&steering).unwrap_err();
+
+    assert!(
+        error.to_string().contains("unsafe host metadata path"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"operator rules\n");
+}
+
+#[test]
+fn steering_uninstall_refuses_a_concurrent_edit_before_nonempty_rewrite() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    std::fs::write(&steering, b"operator rules\n").unwrap();
+    install_steering_rules(&steering).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&steering);
+    let writer_path = steering.clone();
+    let remover = std::thread::spawn(move || {
+        remove_steering_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Kiro edit\n";
+    std::fs::write(&steering, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), foreign);
+}
+
+#[test]
+fn steering_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    install_steering_rules(&steering).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&steering);
+    let writer_path = steering.clone();
+    let remover = std::thread::spawn(move || {
+        remove_steering_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Kiro edit\n";
+    std::fs::write(&steering, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), foreign);
+}
+
+#[test]
+fn steering_empty_deletion_requires_a_persisted_remove_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    install_steering_rules(&steering).unwrap();
+    let original = std::fs::read(&steering).unwrap();
+    let blocked_intent_root = root.path().join("blocked-intent-root");
+    std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
+
+    let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+        remove_steering_rules(&steering)
+    })
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("could not create host config remove intent directory"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&steering).unwrap(), original);
+}
+
+#[test]
+fn steering_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
+    let root = tempfile::tempdir().unwrap();
+    let nonempty = root.path().join("nonempty.md");
+    std::fs::write(&nonempty, b"operator rules\n").unwrap();
+    install_steering_rules(&nonempty).unwrap();
+
+    remove_steering_rules(&nonempty).unwrap();
+
+    assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
+
+    let empty = root.path().join("empty.md");
+    install_steering_rules(&empty).unwrap();
+
+    remove_steering_rules(&empty).unwrap();
+
+    assert!(!empty.exists());
+}
+
 /// Install a fake `kiro-cli` that appends each invocation's argv to `log` and
 /// then performs `body`.
 #[cfg(unix)]

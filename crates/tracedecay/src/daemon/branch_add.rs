@@ -52,6 +52,7 @@ pub(super) fn parse_branch_add_request(line: &str) -> Option<BranchAddRequest> {
     })
 }
 
+#[hotpath::measure(label = "daemon.branch_add.total", future = true)]
 pub(super) async fn branch_add_response(
     administration: &StoreAdministration,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
@@ -129,6 +130,7 @@ pub(super) async fn branch_add_response(
 /// then seal the exact scheduler generation and its Git provenance into the
 /// canonical project-store branch metadata.
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.branch_add.activate_and_track", future = true)]
 async fn activate_and_track_manual_branch(
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
@@ -171,6 +173,7 @@ async fn activate_and_track_manual_branch(
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
 async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -258,6 +261,7 @@ pub(crate) async fn track_exact_worktree_branch(
     .await
 }
 
+#[hotpath::measure(label = "daemon.branch_add.track", future = true)]
 async fn track_exact_worktree_branch_with_lifecycle(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -462,6 +466,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
     }
 }
 
+#[hotpath::measure(label = "daemon.branch_add.capture_git", future = true)]
 pub(crate) async fn capture_exact_branch_source(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -583,6 +588,7 @@ pub(crate) async fn capture_exact_branch_source(
     })
 }
 
+#[hotpath::measure(label = "daemon.branch_add.await_generation", future = true)]
 pub(crate) async fn await_exact_branch_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     canonical_worktree_root: &Path,
@@ -691,6 +697,7 @@ fn generation_matches_branch_source(
             == Some(source.source_oid.as_str())
 }
 
+#[hotpath::measure(label = "daemon.branch_add.rollback", future = true)]
 async fn rollback_failed_branch_tracking(
     data_root: &Path,
     prepared: Option<&crate::branch::PreparedBranchTracking>,

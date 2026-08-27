@@ -145,6 +145,7 @@ async fn session_correlation_health_json(
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.diagnostics.total")]
 pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -170,54 +171,78 @@ pub(crate) async fn handle_diagnostics(
         return Ok(diagnostics_warming_result(&project_root, &args));
     }
 
-    let mut diagnostics =
-        if let Some(lsp_diagnostics) = lsp_file_diagnostics(cg, &scope, diagnostics_lsp).await? {
-            lsp_diagnostics
-        } else if let Some(cache) = diagnostics_cache {
-            cache.run(&project_root, &scope).await?
-        } else {
-            run_all(&project_root, &scope).await?
-        };
+    let collect_scope = scope.clone();
+    let mut diagnostics = hotpath::future!(
+        async move {
+            if let Some(lsp_diagnostics) =
+                lsp_file_diagnostics(cg, &collect_scope, diagnostics_lsp).await?
+            {
+                Ok(lsp_diagnostics)
+            } else if let Some(cache) = diagnostics_cache {
+                cache.run(&project_root, &collect_scope).await
+            } else {
+                run_all(&project_root, &collect_scope).await
+            }
+        },
+        label = "mcp.analysis.diagnostics.collect"
+    )
+    .await?;
 
     if let crate::diagnostics::Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
     }
 
-    let mut entries: Vec<Value> = Vec::with_capacity(diagnostics.len());
-    let mut error_count = 0u64;
-    let mut warning_count = 0u64;
-    let mut spans_by_file: HashMap<String, Vec<NodeSpan>> = HashMap::new();
+    let (entries, error_count, warning_count) =
+        hotpath::measure_block!("mcp.analysis.diagnostics.map", {
+            let mut entries: Vec<Value> = Vec::with_capacity(diagnostics.len());
+            let mut error_count = 0u64;
+            let mut warning_count = 0u64;
+            let mut spans_by_file: HashMap<String, Vec<NodeSpan>> = HashMap::new();
 
-    for diag in &diagnostics {
-        match diag.level.as_str() {
-            "error" => error_count += 1,
-            "warning" => warning_count += 1,
-            _ => {}
-        }
+            for diag in &diagnostics {
+                match diag.level.as_str() {
+                    "error" => error_count += 1,
+                    "warning" => warning_count += 1,
+                    _ => {}
+                }
 
-        let enclosing =
-            enclosing_diagnostic_node(graph, &mut spans_by_file, &diag.file, diag.line_start)?;
+                let enclosing = enclosing_diagnostic_node(
+                    graph,
+                    &mut spans_by_file,
+                    &diag.file,
+                    diag.line_start,
+                )?;
 
-        entries.push(json!({
-            "file": diag.file,
-            "line_start": diag.line_start,
-            "line_end": diag.line_end,
-            "level": diag.level,
-            "code": diag.code,
-            "message": diag.message,
-            "driver": diag.driver,
-            "enclosing": enclosing,
-        }));
-    }
+                entries.push(json!({
+                    "file": diag.file,
+                    "line_start": diag.line_start,
+                    "line_end": diag.line_end,
+                    "level": diag.level,
+                    "code": diag.code,
+                    "message": diag.message,
+                    "driver": diag.driver,
+                    "enclosing": enclosing,
+                }));
+            }
+            (entries, error_count, warning_count)
+        });
 
-    let payload = json!({
-        "scope": scope_str,
-        "diagnostic_count": entries.len(),
-        "error_count": error_count,
-        "warning_count": warning_count,
-        "diagnostics": entries,
-        "session_correlation": session_correlation_health_json(session_db).await,
-    });
+    let session_correlation = hotpath::future!(
+        session_correlation_health_json(session_db),
+        label = "mcp.analysis.diagnostics.session_correlation"
+    )
+    .await;
+    let payload = hotpath::measure_block!(
+        "mcp.analysis.diagnostics.assemble",
+        json!({
+            "scope": scope_str,
+            "diagnostic_count": entries.len(),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "diagnostics": entries,
+            "session_correlation": session_correlation,
+        })
+    );
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,

@@ -196,7 +196,7 @@ pub(crate) fn tool_dispatch_deadline_error(
 /// Dispatch code-graph navigation and lookup tools (`tracedecay_search`,
 /// `tracedecay_callers`, ...). Returns `None` when `tool_name` belongs to a
 /// different domain so the caller can try the next dispatch group.
-#[hotpath::measure(label = "mcp.dispatch.graph")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.graph")]
 pub(super) async fn dispatch_graph_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -330,7 +330,7 @@ pub(super) async fn dispatch_graph_tools(
 /// Dispatch project-info, registry, and file-inspection tools
 /// (`tracedecay_status`, `tracedecay_project_list`, `tracedecay_read`, ...).
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "mcp.dispatch.info")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.info")]
 pub(super) async fn dispatch_info_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -426,7 +426,7 @@ pub(super) async fn dispatch_info_tools(
 
 /// Dispatch administrative tools (`tracedecay_hook_runtime`,
 /// `tracedecay_admin_cli`, `tracedecay_admin_project`).
-#[hotpath::measure(label = "mcp.dispatch.admin")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.admin")]
 pub(super) async fn dispatch_admin_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -487,7 +487,7 @@ pub(super) async fn dispatch_admin_tools(
 }
 
 /// Dispatch catalog-owned application surfaces.
-#[hotpath::measure(label = "mcp.dispatch.application")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.application")]
 pub(super) async fn dispatch_application_surface_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -521,7 +521,7 @@ pub(super) async fn dispatch_application_surface_tools(
 
 /// Dispatch static-analysis report tools (`tracedecay_dead_code`,
 /// `tracedecay_complexity`, `tracedecay_diagnostics`, ...).
-#[hotpath::measure(label = "mcp.dispatch.analysis")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.analysis")]
 pub(super) async fn dispatch_analysis_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -620,7 +620,7 @@ pub(super) async fn dispatch_analysis_tools(
 
 /// Dispatch git-aware tools (`tracedecay_affected`, `tracedecay_changelog`,
 /// branch and PR context helpers).
-#[hotpath::measure(label = "mcp.dispatch.git")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.git")]
 pub(super) async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -718,7 +718,7 @@ pub(super) async fn dispatch_git_tools(
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,
 /// `tracedecay_move_symbol`, ...).
-#[hotpath::measure(label = "mcp.dispatch.edit")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.edit")]
 pub(super) async fn dispatch_edit_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -764,7 +764,7 @@ pub(super) async fn dispatch_edit_tools(
 
 /// Dispatch retained memory, session, and workflow operations only after the
 /// application-owned catalog has resolved their stable operation identity.
-#[hotpath::measure(label = "mcp.dispatch.retained_application")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.retained_application")]
 pub(super) async fn dispatch_retained_application_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -891,7 +891,7 @@ pub(super) async fn dispatch_retained_application_tools(
 
 /// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store_add`,
 /// `tracedecay_skill_list`, `tracedecay_analytics`, ...).
-#[hotpath::measure(label = "mcp.dispatch.memory")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.memory")]
 pub(super) async fn dispatch_memory_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -914,7 +914,7 @@ pub(super) async fn dispatch_memory_tools(
 
 /// Dispatch dashboard and workflow tools that have not moved to a dedicated
 /// application family.
-#[hotpath::measure(label = "mcp.dispatch.session_workflow")]
+#[hotpath::measure(future = true, label = "mcp.dispatch.session_workflow")]
 pub(super) async fn dispatch_session_workflow_tools(
     tool_name: &str,
     cg: &TraceDecay,

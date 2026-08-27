@@ -28,6 +28,7 @@ struct BoundedCycle {
     omitted_member_count: usize,
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.circular.total")]
 pub(crate) async fn handle_circular(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -46,11 +47,21 @@ pub(crate) async fn handle_circular(
             (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
         });
 
-    let all_cycles = graph.find_circular_dependencies().await?;
+    let all_cycles = hotpath::future!(
+        graph.find_circular_dependencies(),
+        label = "mcp.analysis.circular.graph"
+    )
+    .await?;
     let cycle_count = all_cycles.len();
-    let (cycles, omitted) = bound_cycles(all_cycles, limit, member_limit);
+    let (cycles, omitted) = hotpath::measure_block!(
+        "mcp.analysis.circular.compute",
+        bound_cycles(all_cycles, limit, member_limit)
+    );
 
-    let output = circular_output(&cycles, cycle_count, omitted, limit, member_limit);
+    let output = hotpath::measure_block!(
+        "mcp.analysis.circular.assemble",
+        circular_output(&cycles, cycle_count, omitted, limit, member_limit)
+    );
 
     Ok(rendered_tool_result(
         Some(cg.project_root()),

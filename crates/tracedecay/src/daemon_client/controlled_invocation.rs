@@ -8,6 +8,7 @@ use super::{
 };
 
 impl DaemonInvocationClient {
+    #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
     pub(crate) async fn invoke_controlled(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,

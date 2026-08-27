@@ -34,21 +34,6 @@ members = [
 exclude = [".worktrees", ".codex-worktrees"]
 resolver = "3"
 
-[workspace.metadata.cargo-shear]
-ignored-paths = [
-    # Consumed only by scripts/check-distribution-acceptance.sh, which copies
-    # this file into the extracted package's `examples/` dir and builds it as
-    # `--example fastembed_distribution_acceptance`. It is deliberately not a
-    # source-repo target, so its "unlinked file" report is a false positive.
-    "tests/distribution/fastembed/acceptance.rs",
-    "evals/hermetic/fixtures/tool-args/*.rs",
-    "evals/hermetic/fixtures/tool-args-other/*.rs",
-    "evals/agent_adoption/fixture_broken/*.rs",
-    "tests/fixtures/context_eval_project/src/**/*.rs",
-    "tests/fixtures/search_quality/corpus/**/*.rs",
-    "tests/fixtures/search_quality/incremental/**/*.rs",
-]
-
 # Declared once here; every package inherits via
 # `edition.workspace = true`. Cargo has no config-level edition default — this
 # inheritance table is the sanctioned single source of truth.

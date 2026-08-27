@@ -223,6 +223,7 @@ where
     Ok(joined)
 }
 
+#[hotpath::measure(future = true, label = "mcp.git.diff_context.total")]
 pub(crate) async fn handle_diff_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -245,7 +246,10 @@ pub(crate) async fn handle_diff_context(
     let files = unique_file_paths(files.iter().map(std::string::String::as_str));
 
     let requested_paths = files.iter().cloned().collect::<HashSet<_>>();
-    let requested_symbols = all_symbols_in_files(graph, &requested_paths)?;
+    let requested_symbols = hotpath::measure_block!(
+        "mcp.git.diff_context.symbols",
+        all_symbols_in_files(graph, &requested_paths)?
+    );
 
     // First pass: gather all modified symbols.
     let mut modified_ids: Vec<SymbolOccurrenceId> = Vec::new();
@@ -270,21 +274,27 @@ pub(crate) async fn handle_diff_context(
             complete: true,
         }
     } else {
-        graph.impact(
-            &modified_ids,
-            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-            u32::try_from(depth).map_err(|error| TraceDecayError::Config {
-                message: format!("invalid diff context impact depth: {error}"),
-            })?,
-            PR_CONTEXT_MAX_IMPACT_NODES,
-            PR_CONTEXT_MAX_IMPACT_EDGES,
-        )?
+        hotpath::measure_block!(
+            "mcp.git.diff_context.impact",
+            graph.impact(
+                &modified_ids,
+                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                u32::try_from(depth).map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid diff context impact depth: {error}"),
+                })?,
+                PR_CONTEXT_MAX_IMPACT_NODES,
+                PR_CONTEXT_MAX_IMPACT_EDGES,
+            )?
+        )
     };
-    let files_with_inline_tests = graph.test_annotated_logical_files(
-        None,
-        VERIFIED_GRAPH_MAX_SYMBOLS,
-        VERIFIED_GRAPH_MAX_RELATIONS,
-    )?;
+    let files_with_inline_tests = hotpath::measure_block!(
+        "mcp.git.diff_context.test_annotations",
+        graph.test_annotated_logical_files(
+            None,
+            VERIFIED_GRAPH_MAX_SYMBOLS,
+            VERIFIED_GRAPH_MAX_RELATIONS,
+        )?
+    );
     let has_tests = |path: &str| {
         crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
     };
@@ -305,9 +315,11 @@ pub(crate) async fn handle_diff_context(
         }
     }
 
-    let traversal =
-        collect_verified_affected_test_files(graph, &files, depth, None, &files_with_inline_tests)
-            .await?;
+    let traversal = hotpath::future!(
+        collect_verified_affected_test_files(graph, &files, depth, None, &files_with_inline_tests),
+        label = "mcp.git.diff_context.affected"
+    )
+    .await?;
     affected_tests.extend(traversal.test_distances.into_keys());
 
     let mut tests_sorted: Vec<String> = affected_tests.into_iter().collect();
@@ -320,14 +332,17 @@ pub(crate) async fn handle_diff_context(
             .chain(files.iter().map(std::string::String::as_str)),
     );
 
-    let output = json!({
-        "changed_files": files,
-        "modified_symbols": modified_symbols,
-        "impacted_symbols_count": impacted_symbols.len(),
-        "impacted_symbols": impacted_symbols,
-        "impact_complete": impacted.complete,
-        "affected_tests": tests_sorted,
-    });
+    let output = hotpath::measure_block!(
+        "mcp.git.diff_context.assemble",
+        json!({
+            "changed_files": files,
+            "modified_symbols": modified_symbols,
+            "impacted_symbols_count": impacted_symbols.len(),
+            "impacted_symbols": impacted_symbols,
+            "impact_complete": impacted.complete,
+            "affected_tests": tests_sorted,
+        })
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
@@ -336,6 +351,8 @@ pub(crate) async fn handle_diff_context(
         touched_files,
     ))
 }
+
+#[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
 pub(crate) async fn handle_changelog(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -361,9 +378,12 @@ pub(crate) async fn handle_changelog(
         let project_root = cg.project_root().to_path_buf();
         let from_ref = from_ref.to_owned();
         let to_ref = to_ref.to_owned();
-        match blocking_git_span("tree diff", move || {
-            git_diff_file_changes(&project_root, &from_ref, &to_ref)
-        })
+        match hotpath::future!(
+            blocking_git_span("tree diff", move || {
+                git_diff_file_changes(&project_root, &from_ref, &to_ref)
+            }),
+            label = "mcp.git.changelog.diff"
+        )
         .await?
         {
             Ok(files) => files,
@@ -374,7 +394,10 @@ pub(crate) async fn handle_changelog(
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
-    let graph_symbols = all_symbols_in_files(graph, &changed_paths)?;
+    let graph_symbols = hotpath::measure_block!(
+        "mcp.git.changelog.symbols",
+        all_symbols_in_files(graph, &changed_paths)?
+    );
     let mut symbols_by_file: HashMap<String, Vec<Value>> = HashMap::new();
     for symbol in &graph_symbols {
         symbols_by_file
@@ -408,20 +431,23 @@ pub(crate) async fn handle_changelog(
 
     let touched_files: Vec<String> = changed_files.clone();
 
-    let result = json!({
-        "from_ref": from_ref,
-        "to_ref": to_ref,
-        "changed_file_count": changed_files.len(),
-        "changed_files": changed_files,
-        "symbols_added": symbols_added,
-        "symbols_modified": symbols_modified,
-        "symbols_in_changed_files": file_symbols
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>(),
-        "files_not_indexed": modified,
-    });
+    let result = hotpath::measure_block!(
+        "mcp.git.changelog.assemble",
+        json!({
+            "from_ref": from_ref,
+            "to_ref": to_ref,
+            "changed_file_count": changed_files.len(),
+            "changed_files": changed_files,
+            "symbols_added": symbols_added,
+            "symbols_modified": symbols_modified,
+            "symbols_in_changed_files": file_symbols
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
+            "files_not_indexed": modified,
+        })
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
@@ -431,6 +457,7 @@ pub(crate) async fn handle_changelog(
     ))
 }
 
+#[hotpath::measure(future = true, label = "mcp.git.commit_context.total")]
 pub(crate) async fn handle_commit_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -445,9 +472,12 @@ pub(crate) async fn handle_commit_context(
     // request runtime's workers so the carried dispatch deadline can preempt it.
     let changed_files = {
         let project_root = cg.project_root().to_path_buf();
-        match blocking_git_span("status", move || {
-            git_changed_files(&project_root, staged_only)
-        })
+        match hotpath::future!(
+            blocking_git_span("status", move || {
+                git_changed_files(&project_root, staged_only)
+            }),
+            label = "mcp.git.commit_context.status"
+        )
         .await?
         {
             Ok(files) => files,
@@ -459,22 +489,27 @@ pub(crate) async fn handle_commit_context(
 
     if changed_files.is_empty() {
         let project_root = cg.project_root().to_path_buf();
-        let recent_commits =
-            match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5))
-                .await?
-            {
-                Ok(commits) => commits,
-                Err(e) => {
-                    return Ok(git_error_result(cg, &args, "log", &e));
-                }
-            };
-        let output = json!({
-            "changed_files": [],
-            "symbols_by_role": {},
-            "suggested_category": Value::Null,
-            "recent_commits": recent_commits,
-            "summary": "No changes detected.",
-        });
+        let recent_commits = match hotpath::future!(
+            blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
+            label = "mcp.git.commit_context.recent_commits"
+        )
+        .await?
+        {
+            Ok(commits) => commits,
+            Err(e) => {
+                return Ok(git_error_result(cg, &args, "log", &e));
+            }
+        };
+        let output = hotpath::measure_block!(
+            "mcp.git.commit_context.assemble",
+            json!({
+                "changed_files": [],
+                "symbols_by_role": {},
+                "suggested_category": Value::Null,
+                "recent_commits": recent_commits,
+                "summary": "No changes detected.",
+            })
+        );
         return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
@@ -484,12 +519,18 @@ pub(crate) async fn handle_commit_context(
     }
 
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
-    let files_with_inline_tests = graph.test_annotated_logical_files(
-        Some(&changed_paths),
-        VERIFIED_GRAPH_MAX_SYMBOLS,
-        VERIFIED_GRAPH_MAX_RELATIONS,
-    )?;
-    let graph_symbols = all_symbols_in_files(graph, &changed_paths)?;
+    let files_with_inline_tests = hotpath::measure_block!(
+        "mcp.git.commit_context.test_annotations",
+        graph.test_annotated_logical_files(
+            Some(&changed_paths),
+            VERIFIED_GRAPH_MAX_SYMBOLS,
+            VERIFIED_GRAPH_MAX_RELATIONS,
+        )?
+    );
+    let graph_symbols = hotpath::measure_block!(
+        "mcp.git.commit_context.symbols",
+        all_symbols_in_files(graph, &changed_paths)?
+    );
     let mut symbols_by_file: HashMap<String, Vec<&CodeGraphSymbolSummaryV1>> = HashMap::new();
     for symbol in &graph_symbols {
         symbols_by_file
@@ -540,7 +581,12 @@ pub(crate) async fn handle_commit_context(
 
     let recent_commits = {
         let project_root = cg.project_root().to_path_buf();
-        match blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)).await? {
+        match hotpath::future!(
+            blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
+            label = "mcp.git.commit_context.recent_commits"
+        )
+        .await?
+        {
             Ok(commits) => commits,
             Err(e) => {
                 return Ok(git_error_result(cg, &args, "log", &e));
@@ -549,13 +595,16 @@ pub(crate) async fn handle_commit_context(
     };
 
     let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();
-    let output = json!({
-        "changed_files": file_roles,
-        "symbols_by_role": symbols_by_role,
-        "suggested_category": category,
-        "recent_commits": recent_commits,
-        "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
-    });
+    let output = hotpath::measure_block!(
+        "mcp.git.commit_context.assemble",
+        json!({
+            "changed_files": file_roles,
+            "symbols_by_role": symbols_by_role,
+            "suggested_category": category,
+            "recent_commits": recent_commits,
+            "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
+        })
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
@@ -743,6 +792,7 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     )
 }
 
+#[hotpath::measure(future = true, label = "mcp.pr_context.total")]
 pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
     graph: F,
@@ -776,13 +826,16 @@ where
         let project_root = cg.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.to_owned();
-        match blocking_git_span_controlled(
-            "PR comparison",
-            controls.cancellation.clone(),
-            controls.deadline.clone(),
-            move |cancelled| {
-                git_pr_comparison_controlled(&project_root, &base_ref, &head_ref, cancelled)
-            },
+        match hotpath::future!(
+            blocking_git_span_controlled(
+                "PR comparison",
+                controls.cancellation.clone(),
+                controls.deadline.clone(),
+                move |cancelled| {
+                    git_pr_comparison_controlled(&project_root, &base_ref, &head_ref, cancelled)
+                },
+            ),
+            label = "mcp.pr_context.git"
         )
         .await?
         {
@@ -827,7 +880,7 @@ where
     };
 
     let stage_started = std::time::Instant::now();
-    let graph = match graph.await {
+    let graph = match hotpath::future!(graph, label = "mcp.pr_context.graph_admission").await {
         Ok(graph) => graph,
         Err(error) if encoded_cursor.is_some() || !graph_enrichment_is_transient(&error) => {
             return Err(error);
@@ -839,55 +892,58 @@ where
                 .filter(|change| crate::tracedecay::is_test_file(&change.path))
                 .map(|change| change.path.clone())
                 .collect::<Vec<_>>();
-            let output = json!({
-                "status": "partial",
-                "message": "Verified graph results pending while the generation warms; Git comparison results are available.",
-                "base": base,
-                "head": head,
-                "base_oid": base_oid,
-                "head_oid": head_oid,
-                "merge_base": merge_base,
-                "graph_generation": null,
-                "commits": commits,
-                "files_changed": changed_files.len(),
-                "changes": changes,
-                "symbols_added": 0,
-                "symbols_modified": 0,
-                "added": [],
-                "modified": [],
-                "next_cursor": null,
-                "symbol_page": {
-                    "limit": maximum_symbols,
-                    "returned": 0,
-                    "has_more": false,
-                    "complete": false,
-                    "selection": "unavailable",
-                    "continuation_available": false,
-                },
-                "analysis_coverage": {
-                    "seed_symbols_analyzed": 0,
-                    "symbols_returned": 0,
-                    "symbols_complete": false,
-                    "impact_nodes_admitted": 0,
-                    "impact_nodes_returned": 0,
-                    "direct_call_edges_admitted": 0,
-                    "impact_bytes_admitted": 0,
-                    "impact_partial": true,
-                    "complete": false,
-                },
-                "test_files_changed": test_files_changed,
-                "affected_tests": [],
-                "affected_tests_coverage": {
-                    "complete": false,
-                    "selection": "unavailable",
-                },
-                "impacted_modules": [],
-                "impacted_modules_coverage": {
-                    "complete": false,
-                    "selection": "unavailable",
-                },
-                "verified_graph_evidence": dependency_hints::unavailable_evidence(&error),
-            });
+            let output = hotpath::measure_block!(
+                "mcp.pr_context.partial_response",
+                json!({
+                    "status": "partial",
+                    "message": "Verified graph results pending while the generation warms; Git comparison results are available.",
+                    "base": base,
+                    "head": head,
+                    "base_oid": base_oid,
+                    "head_oid": head_oid,
+                    "merge_base": merge_base,
+                    "graph_generation": null,
+                    "commits": commits,
+                    "files_changed": changed_files.len(),
+                    "changes": changes,
+                    "symbols_added": 0,
+                    "symbols_modified": 0,
+                    "added": [],
+                    "modified": [],
+                    "next_cursor": null,
+                    "symbol_page": {
+                        "limit": maximum_symbols,
+                        "returned": 0,
+                        "has_more": false,
+                        "complete": false,
+                        "selection": "unavailable",
+                        "continuation_available": false,
+                    },
+                    "analysis_coverage": {
+                        "seed_symbols_analyzed": 0,
+                        "symbols_returned": 0,
+                        "symbols_complete": false,
+                        "impact_nodes_admitted": 0,
+                        "impact_nodes_returned": 0,
+                        "direct_call_edges_admitted": 0,
+                        "impact_bytes_admitted": 0,
+                        "impact_partial": true,
+                        "complete": false,
+                    },
+                    "test_files_changed": test_files_changed,
+                    "affected_tests": [],
+                    "affected_tests_coverage": {
+                        "complete": false,
+                        "selection": "unavailable",
+                    },
+                    "impacted_modules": [],
+                    "impacted_modules_coverage": {
+                        "complete": false,
+                        "selection": "unavailable",
+                    },
+                    "verified_graph_evidence": dependency_hints::unavailable_evidence(&error),
+                })
+            );
             stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
             let timing_value = Value::Object(stage_timings.clone());
             tracing::info!(
@@ -921,7 +977,13 @@ where
         changes: &changes,
     };
     let cursor_authority = match registered_project_session_db.as_deref() {
-        Some(session_db) => Some(pr_context_cursor_authority(session_db, &cursor_binding).await?),
+        Some(session_db) => Some(
+            hotpath::future!(
+                pr_context_cursor_authority(session_db, &cursor_binding),
+                label = "mcp.pr_context.cursor_authority"
+            )
+            .await?,
+        ),
         None if encoded_cursor.is_some() => {
             return Err(TraceDecayError::Config {
                 message: "PR context cursor authority is unavailable".to_owned(),
@@ -951,11 +1013,14 @@ where
 
     // Pre-compute files with inline test modules.
     let stage_started = std::time::Instant::now();
-    let mut files_with_inline_tests = graph.test_annotated_logical_files(
-        Some(&changed_paths),
-        VERIFIED_GRAPH_MAX_SYMBOLS,
-        VERIFIED_GRAPH_MAX_RELATIONS,
-    )?;
+    let mut files_with_inline_tests = hotpath::measure_block!(
+        "mcp.pr_context.test_annotations.changed",
+        graph.test_annotated_logical_files(
+            Some(&changed_paths),
+            VERIFIED_GRAPH_MAX_SYMBOLS,
+            VERIFIED_GRAPH_MAX_RELATIONS,
+        )?
+    );
     controls.checkpoint()?;
     stage_timings.insert(
         "test_annotations".to_owned(),
@@ -978,12 +1043,15 @@ where
     test_files_changed.dedup();
 
     let stage_started = std::time::Instant::now();
-    let symbol_page = graph.symbols_in_logical_files_page(
-        &changed_paths,
-        cursor_position.as_ref().map(|position| &position.after),
-        maximum_symbols,
-        VERIFIED_GRAPH_MAX_SYMBOLS,
-    )?;
+    let symbol_page = hotpath::measure_block!(
+        "mcp.pr_context.symbol_page",
+        graph.symbols_in_logical_files_page(
+            &changed_paths,
+            cursor_position.as_ref().map(|position| &position.after),
+            maximum_symbols,
+            VERIFIED_GRAPH_MAX_SYMBOLS,
+        )?
+    );
     controls.checkpoint()?;
     stage_timings.insert(
         "symbol_page".to_owned(),
@@ -1015,7 +1083,10 @@ where
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact = pr_context_impact_snapshot(&graph, &nodes, 2, prior_impact_budget, &controls)?;
+    let impact = hotpath::measure_block!(
+        "mcp.pr_context.impact",
+        pr_context_impact_snapshot(&graph, &nodes, 2, prior_impact_budget, &controls)?
+    );
     controls.checkpoint()?;
     let impact_paths: Vec<String> = impact
         .nodes
@@ -1023,11 +1094,14 @@ where
         .map(|node| symbol_path(node).map(str::to_owned))
         .collect::<Result<Vec<_>>>()?;
     let impact_path_set = impact_paths.iter().cloned().collect::<HashSet<_>>();
-    files_with_inline_tests.extend(graph.test_annotated_logical_files(
-        Some(&impact_path_set),
-        VERIFIED_GRAPH_MAX_SYMBOLS,
-        VERIFIED_GRAPH_MAX_RELATIONS,
-    )?);
+    files_with_inline_tests.extend(hotpath::measure_block!(
+        "mcp.pr_context.test_annotations.impacted",
+        graph.test_annotated_logical_files(
+            Some(&impact_path_set),
+            VERIFIED_GRAPH_MAX_SYMBOLS,
+            VERIFIED_GRAPH_MAX_RELATIONS,
+        )?
+    ));
     let impacted_by_id: HashMap<&str, &CodeGraphSymbolSummaryV1> = impact
         .nodes
         .iter()
@@ -1085,52 +1159,55 @@ where
             authenticator,
         )?)
     };
-    let output = json!({
-        "base": base,
-        "head": head,
-        "base_oid": base_oid,
-        "head_oid": head_oid,
-        "merge_base": merge_base,
-        "graph_generation": graph_generation,
-        "commits": commits,
-        "files_changed": changed_files.len(),
-        "changes": changes,
-        "symbols_added": symbols_added,
-        "symbols_modified": symbols_modified,
-        "added": added,
-        "modified": modified,
-        "next_cursor": next_cursor,
-        "symbol_page": {
-            "limit": maximum_symbols,
-            "returned": returned_symbols,
-            "has_more": symbol_has_more,
-            "complete": symbol_complete,
-            "selection": "stable_prefix",
-            "continuation_available": symbol_has_more,
-        },
-        "analysis_coverage": {
-            "seed_symbols_analyzed": nodes.len(),
-            "symbols_returned": returned_symbols,
-            "symbols_complete": symbol_complete,
-            "impact_nodes_admitted": impact.nodes_admitted,
-            "impact_nodes_returned": impact.nodes.len(),
-            "direct_call_edges_admitted": impact.direct_call_edges_admitted,
-            "impact_bytes_admitted": impact.bytes_admitted,
-            "impact_partial": impact.partial,
-            "complete": impact_complete,
-        },
-        "test_files_changed": test_files_changed,
-        "affected_tests": affected_sorted,
-        "affected_tests_coverage": {
-            "complete": impact_complete,
-            "selection": "deterministic_bounded_prefix",
-        },
-        "impacted_modules": impacted_sorted,
-        "impacted_modules_coverage": {
-            "complete": impact_complete,
-            "selection": "deterministic_bounded_prefix",
-        },
-    });
+    let output = hotpath::measure_block!(
+        "mcp.pr_context.assemble",
+        json!({
+            "base": base,
+            "head": head,
+            "base_oid": base_oid,
+            "head_oid": head_oid,
+            "merge_base": merge_base,
+            "graph_generation": graph_generation,
+            "commits": commits,
+            "files_changed": changed_files.len(),
+            "changes": changes,
+            "symbols_added": symbols_added,
+            "symbols_modified": symbols_modified,
+            "added": added,
+            "modified": modified,
+            "next_cursor": next_cursor,
+            "symbol_page": {
+                "limit": maximum_symbols,
+                "returned": returned_symbols,
+                "has_more": symbol_has_more,
+                "complete": symbol_complete,
+                "selection": "stable_prefix",
+                "continuation_available": symbol_has_more,
+            },
+            "analysis_coverage": {
+                "seed_symbols_analyzed": nodes.len(),
+                "symbols_returned": returned_symbols,
+                "symbols_complete": symbol_complete,
+                "impact_nodes_admitted": impact.nodes_admitted,
+                "impact_nodes_returned": impact.nodes.len(),
+                "direct_call_edges_admitted": impact.direct_call_edges_admitted,
+                "impact_bytes_admitted": impact.bytes_admitted,
+                "impact_partial": impact.partial,
+                "complete": impact_complete,
+            },
+            "test_files_changed": test_files_changed,
+            "affected_tests": affected_sorted,
+            "affected_tests_coverage": {
+                "complete": impact_complete,
+                "selection": "deterministic_bounded_prefix",
+            },
+            "impacted_modules": impacted_sorted,
+            "impacted_modules_coverage": {
+                "complete": impact_complete,
+                "selection": "deterministic_bounded_prefix",
+            },
+        })
+    );
     stage_timings.insert("assemble".to_owned(), json!(elapsed_micros(stage_started)));
     stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
     let timing_value = Value::Object(stage_timings.clone());

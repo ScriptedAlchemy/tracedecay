@@ -33,6 +33,7 @@ pub(super) fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
     })
 }
 
+#[hotpath::measure(label = "mcp.graph.nodes_addressed")]
 pub(super) fn nodes_addressed_by_args(
     graph: &VerifiedGraphQuery,
     args: &Value,
@@ -196,6 +197,7 @@ pub(super) struct VerifiedNeighbor {
     pub(super) depth: usize,
 }
 
+#[hotpath::measure(label = "mcp.graph.neighbors")]
 pub(super) fn traverse_verified_neighbors(
     graph: &VerifiedGraphQuery,
     seed: SymbolOccurrenceId,
@@ -253,6 +255,7 @@ pub(super) fn verified_neighbor_value(result: &VerifiedNeighbor) -> Result<Value
     }))
 }
 
+#[hotpath::measure(label = "mcp.graph.trait_dispatch")]
 pub(super) fn verified_trait_dispatch_targets(
     graph: &VerifiedGraphQuery,
     method: &CodeGraphSymbolSummaryV1,
@@ -323,6 +326,7 @@ pub(super) fn verified_trait_dispatch_targets(
     Ok(targets)
 }
 
+#[hotpath::measure(label = "mcp.graph.context_markdown")]
 pub(super) fn verified_context_markdown(
     task: &str,
     symbols: &[Value],
@@ -374,6 +378,7 @@ pub(super) fn verified_context_markdown(
     Ok(output)
 }
 
+#[hotpath::measure(label = "mcp.graph.plan_context")]
 pub(super) fn append_verified_plan_context(
     graph: &VerifiedGraphQuery,
     symbols: &[CodeGraphSymbolSummaryV1],

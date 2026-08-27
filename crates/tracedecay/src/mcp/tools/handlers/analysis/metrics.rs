@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(future = true, label = "mcp.analysis.rank.total")]
 pub(crate) async fn handle_rank(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -70,50 +71,58 @@ pub(crate) async fn handle_rank(
             ));
         }
     };
-    let mut symbols = verified_analysis_symbols(graph, path_prefix)?;
-    let edges = verified_analysis_edges(graph, &symbols, &[relation_kind])?;
-    let mut counts = HashMap::<SymbolOccurrenceId, u64>::new();
-    for edge in edges {
-        let occurrence = if incoming {
-            edge.edge.to_occurrence
-        } else {
-            edge.edge.from_occurrence
-        };
-        *counts.entry(occurrence).or_default() += 1;
-    }
-    if let Some(kind) = node_kind {
-        symbols.retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
-    }
-    symbols.sort_by(|left, right| {
-        counts
-            .get(&right.occurrence)
-            .copied()
-            .unwrap_or(0)
-            .cmp(&counts.get(&left.occurrence).copied().unwrap_or(0))
-            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.rank.graph", {
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[relation_kind])?;
+        (symbols, edges)
     });
-    symbols.truncate(limit);
+    let (symbols, counts) = hotpath::measure_block!("mcp.analysis.rank.compute", {
+        let mut counts = HashMap::<SymbolOccurrenceId, u64>::new();
+        for edge in edges {
+            let occurrence = if incoming {
+                edge.edge.to_occurrence
+            } else {
+                edge.edge.from_occurrence
+            };
+            *counts.entry(occurrence).or_default() += 1;
+        }
+        if let Some(kind) = node_kind {
+            symbols
+                .retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
+        }
+        symbols.sort_by(|left, right| {
+            counts
+                .get(&right.occurrence)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&counts.get(&left.occurrence).copied().unwrap_or(0))
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        (symbols, counts)
+    });
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let items: Vec<Value> = symbols
-        .iter()
-        .map(|symbol| {
-            json!({
-                "id": symbol.occurrence.as_str(),
-                "name": symbol.metadata.simple_name,
-                "kind": symbol.metadata.kind,
-                "file": symbol.path,
-                "line": symbol.metadata.start_line,
-                "count": counts.get(&symbol.occurrence).copied().unwrap_or(0),
+    let output = hotpath::measure_block!("mcp.analysis.rank.assemble", {
+        let items: Vec<Value> = symbols
+            .iter()
+            .map(|symbol| {
+                json!({
+                    "id": symbol.occurrence.as_str(),
+                    "name": symbol.metadata.simple_name,
+                    "kind": symbol.metadata.kind,
+                    "file": symbol.path,
+                    "line": symbol.metadata.start_line,
+                    "count": counts.get(&symbol.occurrence).copied().unwrap_or(0),
+                })
             })
+            .collect();
+        json!({
+            "edge_kind": edge_kind_str,
+            "direction": direction,
+            "node_kind_filter": args.get("node_kind").and_then(|v| v.as_str()),
+            "result_count": items.len(),
+            "ranking": items,
         })
-        .collect();
-
-    let output = json!({
-        "edge_kind": edge_kind_str,
-        "direction": direction,
-        "node_kind_filter": args.get("node_kind").and_then(|v| v.as_str()),
-        "result_count": items.len(),
-        "ranking": items,
     });
 
     Ok(generic_tool_result(
@@ -124,6 +133,7 @@ pub(crate) async fn handle_rank(
     ))
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.largest.total")]
 pub(crate) async fn handle_largest(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -142,38 +152,46 @@ pub(crate) async fn handle_largest(
 
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let mut symbols = verified_analysis_symbols(graph, path_prefix)?;
-    if let Some(kind) = node_kind {
-        symbols.retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
-    }
-    symbols.sort_by(|left, right| {
-        right
-            .metadata
-            .line_span
-            .cmp(&left.metadata.line_span)
-            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    let mut symbols = hotpath::measure_block!(
+        "mcp.analysis.largest.graph",
+        verified_analysis_symbols(graph, path_prefix)?
+    );
+    let symbols = hotpath::measure_block!("mcp.analysis.largest.compute", {
+        if let Some(kind) = node_kind {
+            symbols
+                .retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
+        }
+        symbols.sort_by(|left, right| {
+            right
+                .metadata
+                .line_span
+                .cmp(&left.metadata.line_span)
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        symbols
     });
-    symbols.truncate(limit);
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let items: Vec<Value> = symbols
-        .iter()
-        .map(|symbol| {
-            json!({
-                "id": symbol.occurrence.as_str(),
-                "name": symbol.metadata.simple_name,
-                "kind": symbol.metadata.kind,
-                "file": symbol.path,
-                "start_line": symbol.metadata.start_line,
-                "end_line": symbol.end_line(),
-                "lines": symbol.metadata.line_span,
+    let output = hotpath::measure_block!("mcp.analysis.largest.assemble", {
+        let items: Vec<Value> = symbols
+            .iter()
+            .map(|symbol| {
+                json!({
+                    "id": symbol.occurrence.as_str(),
+                    "name": symbol.metadata.simple_name,
+                    "kind": symbol.metadata.kind,
+                    "file": symbol.path,
+                    "start_line": symbol.metadata.start_line,
+                    "end_line": symbol.end_line(),
+                    "lines": symbol.metadata.line_span,
+                })
             })
+            .collect();
+        json!({
+            "node_kind_filter": args.get("node_kind").and_then(|v| v.as_str()),
+            "result_count": items.len(),
+            "ranking": items,
         })
-        .collect();
-
-    let output = json!({
-        "node_kind_filter": args.get("node_kind").and_then(|v| v.as_str()),
-        "result_count": items.len(),
-        "ranking": items,
     });
 
     Ok(generic_tool_result(
@@ -184,6 +202,7 @@ pub(crate) async fn handle_largest(
     ))
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.coupling.total")]
 pub(crate) async fn handle_coupling(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -212,54 +231,62 @@ pub(crate) async fn handle_coupling(
 
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let symbols = verified_analysis_symbols(graph, path_prefix)?;
-    let paths = symbols
-        .iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol.path.clone()))
-        .collect::<HashMap<_, _>>();
-    let mut coupled = HashMap::<String, HashSet<String>>::new();
-    for edge in verified_analysis_edges(graph, &symbols, &[])? {
-        let (Some(source), Some(target)) = (
-            paths.get(&edge.edge.from_occurrence),
-            paths.get(&edge.edge.to_occurrence),
-        ) else {
-            return Err(verified_analysis_unavailable(
-                "coupling",
-                "a relation endpoint is absent from the admitted symbol census",
-            ));
-        };
-        if source != target {
-            let (key, value) = if fan_in {
-                (target, source)
-            } else {
-                (source, target)
+    let (symbols, edges) = hotpath::measure_block!("mcp.analysis.coupling.graph", {
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[])?;
+        (symbols, edges)
+    });
+    let results = hotpath::measure_block!("mcp.analysis.coupling.compute", {
+        let paths = symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.clone(), symbol.path.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut coupled = HashMap::<String, HashSet<String>>::new();
+        for edge in edges {
+            let (Some(source), Some(target)) = (
+                paths.get(&edge.edge.from_occurrence),
+                paths.get(&edge.edge.to_occurrence),
+            ) else {
+                return Err(verified_analysis_unavailable(
+                    "coupling",
+                    "a relation endpoint is absent from the admitted symbol census",
+                ));
             };
-            coupled
-                .entry(key.clone())
-                .or_default()
-                .insert(value.clone());
+            if source != target {
+                let (key, value) = if fan_in {
+                    (target, source)
+                } else {
+                    (source, target)
+                };
+                coupled
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(value.clone());
+            }
         }
-    }
-    let mut results = coupled
-        .into_iter()
-        .map(|(path, related)| (path, related.len()))
-        .collect::<Vec<_>>();
-    results.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    results.truncate(limit);
-    let items: Vec<Value> = results
-        .iter()
-        .map(|(file, count)| {
-            json!({
-                "file": file,
-                "coupled_files": count,
+        let mut results = coupled
+            .into_iter()
+            .map(|(path, related)| (path, related.len()))
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        results.truncate(limit);
+        results
+    });
+    let output = hotpath::measure_block!("mcp.analysis.coupling.assemble", {
+        let items: Vec<Value> = results
+            .iter()
+            .map(|(file, count)| {
+                json!({
+                    "file": file,
+                    "coupled_files": count,
+                })
             })
+            .collect();
+        json!({
+            "direction": direction,
+            "result_count": items.len(),
+            "ranking": items,
         })
-        .collect();
-
-    let output = json!({
-        "direction": direction,
-        "result_count": items.len(),
-        "ranking": items,
     });
 
     Ok(generic_tool_result(
@@ -270,6 +297,7 @@ pub(crate) async fn handle_coupling(
     ))
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.inheritance_depth.total")]
 pub(crate) async fn handle_inheritance_depth(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -283,44 +311,52 @@ pub(crate) async fn handle_inheritance_depth(
 
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let mut symbols = verified_analysis_symbols(graph, path_prefix)?;
-    let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
-    for edge in verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Extends])? {
-        parents
-            .entry(edge.edge.from_occurrence)
-            .or_default()
-            .push(edge.edge.to_occurrence);
-    }
-    let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();
-    for symbol in &symbols {
-        inheritance_depth(&symbol.occurrence, &parents, &mut HashSet::new(), &mut memo)?;
-    }
-    symbols.sort_by(|left, right| {
-        memo.get(&right.occurrence)
-            .copied()
-            .unwrap_or(0)
-            .cmp(&memo.get(&left.occurrence).copied().unwrap_or(0))
-            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.inheritance_depth.graph", {
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Extends])?;
+        (symbols, edges)
     });
-    symbols.truncate(limit);
+    let (symbols, memo) = hotpath::measure_block!("mcp.analysis.inheritance_depth.compute", {
+        let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
+        for edge in edges {
+            parents
+                .entry(edge.edge.from_occurrence)
+                .or_default()
+                .push(edge.edge.to_occurrence);
+        }
+        let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();
+        for symbol in &symbols {
+            inheritance_depth(&symbol.occurrence, &parents, &mut HashSet::new(), &mut memo)?;
+        }
+        symbols.sort_by(|left, right| {
+            memo.get(&right.occurrence)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&memo.get(&left.occurrence).copied().unwrap_or(0))
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        (symbols, memo)
+    });
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let items: Vec<Value> = symbols
-        .iter()
-        .map(|symbol| {
-            json!({
-                "id": symbol.occurrence.as_str(),
-                "name": symbol.metadata.simple_name,
-                "kind": symbol.metadata.kind,
-                "file": symbol.path,
-                "line": symbol.metadata.start_line,
-                "depth": memo.get(&symbol.occurrence).copied().unwrap_or(0),
+    let output = hotpath::measure_block!("mcp.analysis.inheritance_depth.assemble", {
+        let items: Vec<Value> = symbols
+            .iter()
+            .map(|symbol| {
+                json!({
+                    "id": symbol.occurrence.as_str(),
+                    "name": symbol.metadata.simple_name,
+                    "kind": symbol.metadata.kind,
+                    "file": symbol.path,
+                    "line": symbol.metadata.start_line,
+                    "depth": memo.get(&symbol.occurrence).copied().unwrap_or(0),
+                })
             })
+            .collect();
+        json!({
+            "result_count": items.len(),
+            "ranking": items,
         })
-        .collect();
-
-    let output = json!({
-        "result_count": items.len(),
-        "ranking": items,
     });
 
     Ok(generic_tool_result(
@@ -358,6 +394,7 @@ fn inheritance_depth(
     Ok(depth)
 }
 
+#[hotpath::measure(future = true, label = "mcp.analysis.distribution.total")]
 pub(crate) async fn handle_distribution(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -371,70 +408,83 @@ pub(crate) async fn handle_distribution(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let symbols = verified_analysis_symbols(graph, path_prefix)?;
+    let symbols = hotpath::measure_block!(
+        "mcp.analysis.distribution.graph",
+        verified_analysis_symbols(graph, path_prefix)?
+    );
     let output = if summary {
-        let mut totals = HashMap::<String, u64>::new();
-        for symbol in &symbols {
-            *totals.entry(symbol.metadata.kind.clone()).or_default() += 1;
-        }
-        let mut sorted = totals.into_iter().collect::<Vec<_>>();
-        sorted.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        let items: Vec<Value> = sorted
-            .iter()
-            .map(|(kind, count)| json!({ "kind": kind, "count": count }))
-            .collect();
-
-        json!({
-            "path_filter": path_prefix,
-            "mode": "summary",
-            "total_kinds": items.len(),
-            "distribution": items,
-        })
-    } else {
-        let file_limit = args
-            .get("limit")
-            .and_then(serde_json::Value::as_u64)
-            .map_or(100u64, |v| v.clamp(1, 1000));
-        let mut counts = HashMap::<String, HashMap<String, u64>>::new();
-        for symbol in &symbols {
-            *counts
-                .entry(symbol.path.clone())
-                .or_default()
-                .entry(symbol.metadata.kind.clone())
-                .or_default() += 1;
-        }
-        let total_files = u64::try_from(counts.len()).unwrap_or(u64::MAX);
-        let mut by_file = counts.into_iter().collect::<Vec<_>>();
-        by_file.sort_by(|left, right| {
-            let left_count = left.1.values().copied().sum::<u64>();
-            let right_count = right.1.values().copied().sum::<u64>();
-            right_count
-                .cmp(&left_count)
-                .then_with(|| left.0.cmp(&right.0))
+        let items = hotpath::measure_block!("mcp.analysis.distribution.compute", {
+            let mut totals = HashMap::<String, u64>::new();
+            for symbol in &symbols {
+                *totals.entry(symbol.metadata.kind.clone()).or_default() += 1;
+            }
+            let mut sorted = totals.into_iter().collect::<Vec<_>>();
+            sorted.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+            sorted
+                .iter()
+                .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+                .collect::<Vec<Value>>()
         });
-        by_file.truncate(file_limit as usize);
-        let items: Vec<Value> = by_file
-            .iter()
-            .map(|(file, counts)| {
-                let mut kinds = counts.iter().collect::<Vec<_>>();
-                kinds.sort_by(|left, right| left.0.cmp(right.0));
-                let kinds = kinds
-                    .into_iter()
-                    .map(|(kind, count)| json!({ "kind": kind, "count": count }))
-                    .collect::<Vec<_>>();
-                json!({ "file": file, "kinds": kinds })
+        hotpath::measure_block!(
+            "mcp.analysis.distribution.assemble",
+            json!({
+                "path_filter": path_prefix,
+                "mode": "summary",
+                "total_kinds": items.len(),
+                "distribution": items,
             })
-            .collect();
-        let returned = u64::try_from(items.len()).unwrap_or(u64::MAX);
-
-        json!({
-            "path_filter": path_prefix,
-            "mode": "per_file",
-            "file_count": items.len(),
-            "total_file_count": total_files,
-            "omitted_file_count": total_files.saturating_sub(returned),
-            "files": items,
-        })
+        )
+    } else {
+        let (items, total_files, returned) =
+            hotpath::measure_block!("mcp.analysis.distribution.compute", {
+                let file_limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(100u64, |v| v.clamp(1, 1000));
+                let mut counts = HashMap::<String, HashMap<String, u64>>::new();
+                for symbol in &symbols {
+                    *counts
+                        .entry(symbol.path.clone())
+                        .or_default()
+                        .entry(symbol.metadata.kind.clone())
+                        .or_default() += 1;
+                }
+                let total_files = u64::try_from(counts.len()).unwrap_or(u64::MAX);
+                let mut by_file = counts.into_iter().collect::<Vec<_>>();
+                by_file.sort_by(|left, right| {
+                    let left_count = left.1.values().copied().sum::<u64>();
+                    let right_count = right.1.values().copied().sum::<u64>();
+                    right_count
+                        .cmp(&left_count)
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                by_file.truncate(file_limit as usize);
+                let items: Vec<Value> = by_file
+                    .iter()
+                    .map(|(file, counts)| {
+                        let mut kinds = counts.iter().collect::<Vec<_>>();
+                        kinds.sort_by(|left, right| left.0.cmp(right.0));
+                        let kinds = kinds
+                            .into_iter()
+                            .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+                            .collect::<Vec<_>>();
+                        json!({ "file": file, "kinds": kinds })
+                    })
+                    .collect();
+                let returned = u64::try_from(items.len()).unwrap_or(u64::MAX);
+                (items, total_files, returned)
+            });
+        hotpath::measure_block!(
+            "mcp.analysis.distribution.assemble",
+            json!({
+                "path_filter": path_prefix,
+                "mode": "per_file",
+                "file_count": items.len(),
+                "total_file_count": total_files,
+                "omitted_file_count": total_files.saturating_sub(returned),
+                "files": items,
+            })
+        )
     };
 
     Ok(generic_tool_result(

@@ -22,6 +22,7 @@ pub struct DaemonLspSessionClient {
 }
 
 impl DaemonLspSessionClient {
+    #[hotpath::measure(label = "daemon.client.lsp.open", future = true)]
     pub async fn open(
         invocation: DaemonInvocationClient,
         client_revision: impl Into<String>,
