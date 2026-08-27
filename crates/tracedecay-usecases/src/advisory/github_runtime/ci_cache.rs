@@ -6,7 +6,7 @@
 //! credential creates fresh state.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::feedback::GitHubReviewEtagV1;
 
@@ -17,7 +17,7 @@ const MAX_CACHED_CI_ENTRIES_V1: usize = 512;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CachedCiResponseV1 {
     pub(super) etag: GitHubReviewEtagV1,
-    pub(super) body: Vec<u8>,
+    pub(super) body: Arc<[u8]>,
     pub(super) revision: u64,
 }
 
@@ -123,7 +123,7 @@ impl CiResponseCacheV1 {
             RetainedCiResponseV1 {
                 response: CachedCiResponseV1 {
                     etag: etag.clone(),
-                    body: body.to_vec(),
+                    body: Arc::from(body),
                     revision,
                 },
                 last_used: recency,
@@ -193,8 +193,6 @@ impl CiResponseCacheV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     fn etag(value: &str) -> GitHubReviewEtagV1 {
@@ -217,6 +215,22 @@ mod tests {
             second.get("https://fixture/runs/1"),
             CiResponseCacheReadOutcomeV1::Miss
         );
+    }
+
+    #[test]
+    fn concurrent_cache_snapshots_share_retained_body_storage() {
+        let cache = CiResponseCacheV1::default();
+        cache.retain("https://fixture/runs/shared", &etag("E-shared"), b"shared");
+        let CiResponseCacheReadOutcomeV1::Hit(first) = cache.get("https://fixture/runs/shared")
+        else {
+            panic!("expected first snapshot");
+        };
+        let CiResponseCacheReadOutcomeV1::Hit(second) = cache.get("https://fixture/runs/shared")
+        else {
+            panic!("expected second snapshot");
+        };
+
+        assert_eq!(first.body.as_ptr(), second.body.as_ptr());
     }
 
     #[test]
@@ -279,7 +293,7 @@ mod tests {
             cache.get("https://fixture/runs/3"),
             CiResponseCacheReadOutcomeV1::Hit(CachedCiResponseV1 {
                 etag: etag("W/fixture-3b"),
-                body: b"{}".to_vec(),
+                body: Arc::from(b"{}".as_slice()),
                 revision: 2,
             })
         );
@@ -311,7 +325,7 @@ mod tests {
             cache.get(url),
             CiResponseCacheReadOutcomeV1::Hit(CachedCiResponseV1 {
                 etag: etag("E2"),
-                body: b"B2".to_vec(),
+                body: Arc::from(b"B2".as_slice()),
                 revision: 2,
             })
         );

@@ -32,6 +32,7 @@ struct GitHubRateLimitStateV1 {
     checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
     reservations: u32,
     unknown_probe_in_flight: bool,
+    unknown_probe_failed_closed: bool,
 }
 
 #[derive(Default)]
@@ -72,7 +73,7 @@ impl GitHubRateLimitTrackerV1 {
                 .is_some_and(|checkpoint| checkpoint.reset_at.0 <= now.0)
             {
                 state.checkpoint = None;
-                state.reservations = 0;
+                state.unknown_probe_failed_closed = false;
             }
             if let Some(checkpoint) = state.checkpoint.as_ref().cloned() {
                 let available = checkpoint
@@ -86,7 +87,7 @@ impl GitHubRateLimitTrackerV1 {
                     Decision::Reserved(checkpoint.reset_at)
                 }
             } else {
-                if state.unknown_probe_in_flight {
+                if state.unknown_probe_in_flight || state.unknown_probe_failed_closed {
                     Decision::Unavailable
                 } else {
                     state.unknown_probe_in_flight = true;
@@ -120,6 +121,7 @@ impl GitHubRateLimitTrackerV1 {
         state: &mut GitHubRateLimitStateV1,
         observed: &GitHubReviewRateLimitCheckpointV1,
     ) {
+        state.unknown_probe_failed_closed = false;
         match state.checkpoint.as_mut() {
             Some(current) if current.reset_at.0 > observed.reset_at.0 => {}
             Some(current) if current.reset_at == observed.reset_at => {
@@ -128,7 +130,6 @@ impl GitHubRateLimitTrackerV1 {
             }
             Some(_) => {
                 state.checkpoint = Some(observed.clone());
-                state.reservations = 0;
             }
             None => {
                 state.checkpoint = Some(observed.clone());
@@ -145,22 +146,28 @@ impl GitHubRateLimitTrackerV1 {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let observed = observed.filter(|checkpoint| checkpoint.validate().is_ok());
         let reservation_is_current = reserved_reset_at.is_some_and(|reset_at| {
             state
                 .checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.reset_at == reset_at)
         });
-        if reservation_is_current {
+        if reservation_is_current
+            && let Some(checkpoint) = state.checkpoint.as_mut()
+            && observed.is_none()
+        {
+            checkpoint.remaining = checkpoint.remaining.saturating_sub(1);
+        }
+        if reserved_reset_at.is_some() {
             state.reservations = state.reservations.saturating_sub(1);
         }
         if unknown_probe {
             state.unknown_probe_in_flight = false;
+            state.unknown_probe_failed_closed = observed.is_none();
         }
-        if let Some(observed) = observed.filter(|checkpoint| checkpoint.validate().is_ok()) {
+        if let Some(observed) = observed {
             Self::record_locked(&mut state, observed);
-        } else if reservation_is_current && let Some(checkpoint) = state.checkpoint.as_mut() {
-            checkpoint.remaining = checkpoint.remaining.saturating_sub(1);
         }
     }
 
@@ -168,12 +175,7 @@ impl GitHubRateLimitTrackerV1 {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if let Some(reserved_reset_at) = reserved_reset_at
-            && state
-                .checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.reset_at == reserved_reset_at)
-        {
+        if reserved_reset_at.is_some() {
             state.reservations = state.reservations.saturating_sub(1);
         }
         if unknown_probe {
@@ -234,6 +236,34 @@ mod tests {
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
             GitHubRequestAdmissionV1::RateLimited(_)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_first_response_without_a_checkpoint_refuses_page_two() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        first.finish(None);
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_000)),
+            GitHubRequestAdmissionV1::Unavailable
+        ));
+    }
+
+    #[test]
+    fn an_unknown_first_response_with_an_invalid_checkpoint_refuses_page_two() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        first.finish(Some(&GitHubReviewRateLimitCheckpointV1 {
+            limit: 10,
+            remaining: 11,
+            reset_at: UtcMicros(9_000),
+        }));
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_000)),
+            GitHubRequestAdmissionV1::Unavailable
         ));
     }
 
@@ -322,6 +352,27 @@ mod tests {
             Arc::clone(&tracker).acquire(UtcMicros(1_000)),
             GitHubRequestAdmissionV1::Granted(_)
         ));
+    }
+
+    #[test]
+    fn a_new_window_preserves_outstanding_reservations() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        tracker.record(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1 + 2, 9_000));
+        let first = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        let second = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+
+        tracker.record(&checkpoint(GITHUB_RATE_LIMIT_RESERVE_V1 + 2, 10_000));
+
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_000)),
+            GitHubRequestAdmissionV1::RateLimited(_)
+        ));
+        drop(first);
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(1_000)),
+            GitHubRequestAdmissionV1::Granted(_)
+        ));
+        drop(second);
     }
 
     #[test]
