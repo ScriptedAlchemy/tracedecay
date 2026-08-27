@@ -16,7 +16,7 @@ mockups/ui-concept-v2/
 
 - Add new iterations as `vN-short-slug.png` inside the channel folder (for example the next Brain synapse/hook-firing plate is `01-brain/v2-hook-synapses.png`).
 - Highest `vN` in a folder is the current plate.
-- 2026-08-27 correction: Brain current is `v4-measured-registry.png` (prior versions kept).
+- 2026-08-27 correction: Brain current is `01-brain/v10-activity-becomes-synapse.png`; Loom current is `03-loom/v7-host-weave-overview.png` (prior versions kept). (prior versions kept).
 - Do not flatten plates into the root. Do not dump iterations into a `drafts/` folder.
 - Never overwrite an older version; add the next `vN`.
 - No git symlinks.
@@ -27,9 +27,9 @@ Current (highest `vN`) plate per channel:
 
 | # | File | Hero |
 |---|---|---|
-| 01 | 01-brain/v4-measured-registry.png | Unscoped measured registry field. X=recency bucket. Y/size=indexed mass. Hub only when checkouts share git_common_dir. One-hop pulse. CONCEPT/SYNTHETIC. |
+| 01 |  01-brain/v10-activity-becomes-synapse.png | Admitted-activity live field. Pulse projectId/family/streamId/at. Massless hub. 1/3 hop. Shared 192px TRACEDECAY rail. CONCEPT/SYNTHETIC. |
 | 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
-| 03 | 03-loom/v3-measured-weave.png | Time down, hosts across, thickness = messages. Causal crossings listed, not drawn. Playback over loaded LCM page. CONCEPT/SYNTHETIC. |
+| 03 |  03-loom/v7-host-weave-overview.png | Time down, hosts across, vertical strands, width=messages. OPEN/ONGOING · RECORDED · UNKNOWN. Loaded LCM page. CONCEPT/SYNTHETIC. |
 | 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
 | 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
 | 06 | 06-code/v3-lenses.png | CORTEX/TRACE/CORE with direct labels. Graph totals, symbol path, strata, freshness, diagnostic warming/stale/unavailable. CONCEPT/SYNTHETIC. |
