@@ -123,6 +123,12 @@ pub(crate) enum PromptRulesEdit {
     Added(String),
 }
 
+pub(crate) enum PromptRulesRemoval {
+    Unchanged,
+    Rewrite(String),
+    Remove,
+}
+
 #[derive(Clone, Copy)]
 enum PromptRulesEditOutcome {
     Unchanged,
@@ -141,11 +147,18 @@ pub(crate) fn reconcile_prompt_rules_with(
 ) -> Result<()> {
     let outcome = super::update_text_file_transactionally(path, |existing| {
         Ok(match reconcile(existing)? {
-            PromptRulesEdit::Unchanged => (PromptRulesEditOutcome::Unchanged, None),
-            PromptRulesEdit::Refreshed(contents) => {
-                (PromptRulesEditOutcome::Refreshed, Some(contents))
-            }
-            PromptRulesEdit::Added(contents) => (PromptRulesEditOutcome::Added, Some(contents)),
+            PromptRulesEdit::Unchanged => (
+                PromptRulesEditOutcome::Unchanged,
+                super::TextFileMutation::Unchanged,
+            ),
+            PromptRulesEdit::Refreshed(contents) => (
+                PromptRulesEditOutcome::Refreshed,
+                super::TextFileMutation::Write(contents),
+            ),
+            PromptRulesEdit::Added(contents) => (
+                PromptRulesEditOutcome::Added,
+                super::TextFileMutation::Write(contents),
+            ),
         })
     })?;
     match outcome {
@@ -167,6 +180,35 @@ pub(crate) fn reconcile_prompt_rules_with(
                 path.display()
             );
         }
+    }
+    Ok(())
+}
+
+/// Read, reconcile, and conditionally remove host-specific prompt rules while
+/// holding the same path lock used by installation.
+pub(crate) fn remove_prompt_rules_with(
+    path: &Path,
+    reconcile: impl FnOnce(&str) -> Result<PromptRulesRemoval>,
+) -> Result<()> {
+    let removed = super::update_text_file_transactionally(path, |existing| {
+        Ok(match reconcile(existing)? {
+            PromptRulesRemoval::Unchanged => (false, super::TextFileMutation::Unchanged),
+            PromptRulesRemoval::Rewrite(contents) => {
+                (true, super::TextFileMutation::Write(contents))
+            }
+            PromptRulesRemoval::Remove => (true, super::TextFileMutation::Remove),
+        })
+    })?;
+    if removed {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "  {} does not contain removable tracedecay rules, skipping",
+            path.display()
+        );
     }
     Ok(())
 }

@@ -341,7 +341,7 @@ impl AgentIntegration for KiroIntegration {
             ],
         )?;
         uninstall_mcp_server(&mcp_path)?;
-        remove_steering_rules(&steering);
+        remove_steering_rules(&steering)?;
         remove_kiro_managed_skill_index(&ctx.home, &skill_index_path)?;
         uninstall_managed_agent(&agent_path);
         Ok(())
@@ -808,41 +808,23 @@ fn uninstall_mcp_server(path: &Path) -> Result<()> {
     )
 }
 
-fn remove_steering_rules(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if !contains_prompt_marker(&contents) {
-        eprintln!("  Kiro steering does not contain tracedecay rules, skipping");
-        return;
-    }
-    let Some(range) = tracedecay_prompt_block_range(&contents) else {
-        eprintln!(
-            "  Kiro steering contains tracedecay rules without an owned end marker; leaving unchanged"
-        );
-        return;
-    };
-    let mut new_contents = String::new();
-    new_contents.push_str(contents[..range.start].trim_end());
-    let remainder = &contents[range.end..];
-    if !remainder.is_empty() {
-        new_contents.push_str("\n\n");
-        new_contents.push_str(remainder.trim_start());
-    }
-    let new_contents = new_contents.trim().to_string();
-    if new_contents.is_empty() {
-        super::safe_remove_host_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else {
-        std::fs::write(path, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            path.display()
-        );
-    }
+fn remove_steering_rules(path: &Path) -> Result<()> {
+    super::prompt_rules::remove_prompt_rules_with(path, |contents| {
+        if !contains_prompt_marker(contents) {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(range) = tracedecay_prompt_block_range(contents) else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 fn uninstall_managed_agent(path: &Path) {
