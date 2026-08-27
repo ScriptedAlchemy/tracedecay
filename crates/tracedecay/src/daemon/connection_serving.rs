@@ -490,6 +490,7 @@ where
     }
 }
 
+#[hotpath::measure(label = "daemon.project_owner.wait", future = true)]
 pub(super) async fn await_project_owner_or_disconnect<T>(
     transport: &mut impl McpTransport,
     open: impl std::future::Future<Output = Result<T>>,
