@@ -16,9 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
       - uses: actions/download-artifact@v4
         with:
           name: profile-metrics
@@ -26,18 +23,42 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
 
+      # The profile job succeeds without metrics when a side predates the
+      # benchmark binary; a comparison comment needs both sides and a PR.
+      - name: Check for a comparable profile
+        id: comparable
+        run: |
+          pr=$(cat /tmp/metrics/pr_number.txt || true)
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "no PR context (manual run); skipping comment"
+          elif [ ! -s /tmp/metrics/head_timing.json ] || \
+               [ ! -s /tmp/metrics/base_timing.json ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "head or base has no profile" \
+                 "(head available: $(cat /tmp/metrics/head_bench_available.txt || echo '?')," \
+                 "base available: $(cat /tmp/metrics/base_bench_available.txt || echo '?'));" \
+                 "skipping comment"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.comparable.outputs.available == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.comparable.outputs.available == 'true'
+
       - name: Install hotpath-utils 0.24.0
+        if: steps.comparable.outputs.available == 'true'
         run: cargo install hotpath --version 0.24.0 --locked --features utils --bin hotpath-utils
 
       - name: Post PR comment
+        if: steps.comparable.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           pr=$(cat /tmp/metrics/pr_number.txt)
-          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
-            echo "no PR context (manual run); skipping comment"; exit 0
-          fi
           export GITHUB_BASE_REF=$(cat /tmp/metrics/base_ref.txt)
           export GITHUB_HEAD_REF=$(cat /tmp/metrics/head_ref.txt)
           hotpath-utils profile-pr \
@@ -45,4 +66,4 @@ jobs:
             --base-metrics /tmp/metrics/base_timing.json \
             --github-token "$GH_TOKEN" \
             --pr-number "$pr" \
-            --benchmark-id "mcp-smoke-timing"
+            --benchmark-id "index-bench-timing"
