@@ -782,17 +782,11 @@ impl ProductionSemanticRuntimeV1 {
                 "clean evaluation projection is not a root generation",
             ));
         }
-        let clean_plan = VectorGenerationPlanV1 {
-            target_projection_key: clean_prepared.request.target_projection_key.clone(),
-            source_generation: clean_prepared.request.changes.to_generation.clone(),
-            source_manifest_digest: clean_prepared.request.changes.manifest_digest.clone(),
-            expected_chunk_ids: clean_prepared
-                .vectors
-                .iter()
-                .map(|vector| vector.chunk_id.clone())
-                .collect(),
-            base_generation: None,
-        };
+        let clean_plan = evaluation_projection_plan_from_canonical_chunks(
+            clean.code.chunks().chunks(),
+            &clean_prepared.request,
+            None,
+        );
         let clean_retained = graph
             .retained(&clean.source_generation)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
@@ -3011,18 +3005,28 @@ fn evaluation_projection_plan_from_request(
     if request.changes.to_generation != generation.manifest().generation_id {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
-    Ok(VectorGenerationPlanV1 {
+    Ok(evaluation_projection_plan_from_canonical_chunks(
+        generation.chunks().chunks(),
+        request,
+        base_generation,
+    ))
+}
+
+fn evaluation_projection_plan_from_canonical_chunks(
+    canonical_chunks: &[CodeSearchChunkV1],
+    request: &ProjectionBatchRequestV1,
+    base_generation: Option<VectorGenerationIdV1>,
+) -> VectorGenerationPlanV1 {
+    VectorGenerationPlanV1 {
         target_projection_key: request.target_projection_key.clone(),
         source_generation: request.changes.to_generation.clone(),
         source_manifest_digest: request.changes.manifest_digest.clone(),
-        expected_chunk_ids: generation
-            .chunks()
-            .chunks()
+        expected_chunk_ids: canonical_chunks
             .iter()
             .map(|chunk| chunk.id.clone())
             .collect(),
         base_generation,
-    })
+    }
 }
 
 fn evaluation_projection_case_store(
@@ -4251,6 +4255,25 @@ mod tests {
             semantic_source_manifest_digest(&request),
             &request.request_digest,
             "the projection request receipt is not the source manifest identity"
+        );
+    }
+
+    #[test]
+    fn evaluation_plan_uses_canonical_generation_chunk_order() {
+        let source = source_generation('o');
+        let alpha = canonical_chunk(&source, 'a');
+        let beta = canonical_chunk(&source, 'b');
+        let request = projection_request('o');
+
+        let plan = evaluation_projection_plan_from_canonical_chunks(
+            &[alpha.clone(), beta.clone()],
+            &request,
+            None,
+        );
+
+        assert_eq!(
+            plan.expected_chunk_ids.as_slice(),
+            &[alpha.id.clone(), beta.id.clone()]
         );
     }
 
