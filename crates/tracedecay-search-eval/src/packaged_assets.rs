@@ -15,7 +15,7 @@ const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
 const PACK_ID: &str = "184f6ca1eafd40e7889d15a20b7a5c861e80a47b";
-const WORKLOAD_SHA256: &str = "8805b9aa556d86d0ad82b3d55107e4cb0c267f288455cb769883de217c73834a";
+const WORKLOAD_SHA256: &str = "5dbf25c3305c750bc29c077f3f21e2d8259d54dc2d98dbe4812d8f2651a024b8";
 
 const FILES: &[(&str, &[u8])] = &[
     (
