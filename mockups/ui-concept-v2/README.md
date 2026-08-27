@@ -40,4 +40,4 @@ Current (highest `vN`) plate per channel:
 | 11 | 11-costs/v1-provider-burn.png | Provider/model spend, tokens, latency. Segmented bars, not pies. |
 | 12 | 12-settings/v2-effective-values.png | Effective values only. Provenance named. No invented layer cake. |
 | 13 | 13-work/v2-six-cameras.png | Six cameras: Board / DAG / Timeline / Causal / Workload / Topology. |
-| 14 | 14-workflows/v1-lifecycle-tracks.png | Definitions, lifecycle, run projection. |
+| 14 | 14-workflows/v3-definition-ledger.png | Definition ledger. Immutable versions, pinned digests, CAS activate/retire/reject, on-demand run lookup. No ARM/PAUSE/CANCEL. CONCEPT/SYNTHETIC. |
