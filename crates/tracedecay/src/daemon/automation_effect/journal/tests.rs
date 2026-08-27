@@ -6,11 +6,11 @@ use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
-    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1,
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
     AutomationTaskRequestV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
     MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1, UserJobRunInputV1, retained_surface_application_operation,
-    retained_surface_execution_problem,
+    RetainedSurfaceResultV1, SessionReflectorRunInputV1, UserJobRunInputV1,
+    retained_surface_application_operation, retained_surface_execution_problem,
 };
 
 use tracedecay_application::{
@@ -167,6 +167,38 @@ fn external_admission_for_job(
     };
     admission.recovery = AutomationRecoveryBinding::External {
         recovery_problem: reset_problem(&admission.request_id, &admission.scope, &request),
+    };
+    admission.request = request;
+    seal_effect_authority(admission)
+}
+
+fn session_reflector_admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
+    let mut admission = admission(run_id, request_id);
+    let request = AutomationRunRequestV1 {
+        run_id: admission.request.run_id.clone(),
+        task: AutomationTaskRequestV1::SessionReflector(SessionReflectorRunInputV1 {
+            provider: "cursor".to_owned(),
+            query: "project timed-out session evidence".to_owned(),
+            scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
+            session_id: None,
+            include_summaries: true,
+            evidence_limit: 5,
+            include_recent_sessions: false,
+            recent_sessions_limit: 1,
+            sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        }),
+    };
+    admission.recovery = AutomationRecoveryBinding::Memory {
+        owner: FactOwnerV1::Project {
+            project_id: admission.scope.project_id.clone(),
+        },
+        recovery_problem: reset_problem(&admission.request_id, &admission.scope, &request),
+        retirement: None,
+        reset_source_digest: None,
     };
     admission.request = request;
     seal_effect_authority(admission)
@@ -828,6 +860,44 @@ fn durable_journal_reopens_the_byte_identical_terminal() {
         panic!("terminal must replay")
     };
     assert_eq!(replay, terminal);
+}
+
+#[test]
+fn session_evidence_timeout_ledger_projects_a_typed_terminal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let run_id = "run.session-evidence-timeout";
+    let admission = session_reflector_admission(run_id, "request.session-evidence-timeout");
+    let (authority, _, _) = retained_external_authority(temp.path(), admission);
+    let ledger: AutomationRunLedgerRecord = serde_json::from_value(json!({
+        "schema_version": 2,
+        "run_id": run_id,
+        "trigger": "scheduler",
+        "task": "session_reflector",
+        "backend": "codex_app_server",
+        "status": "skipped",
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "skipped_count": 1,
+        "error": "session_evidence_timed_out",
+        "fallback_status": "session_evidence_timed_out",
+        "started_at": "100",
+        "completed_at": "100",
+        "completed_at_micros": 100_000_000,
+    }))
+    .expect("timeout ledger record");
+
+    let terminal = authority
+        .terminal_for_run(&ledger, None)
+        .expect("project timeout ledger terminal");
+    let result = terminal.run_result().expect("automation run result");
+    assert_eq!(result.task, AutomationTaskV1::SessionReflector);
+    assert!(matches!(
+        result.terminal,
+        AutomationRunTerminalV1::Skipped {
+            reason: AutomationSkipReasonV1::SessionEvidenceTimedOut,
+            ..
+        }
+    ));
 }
 
 #[test]
