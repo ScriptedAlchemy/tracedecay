@@ -4,6 +4,7 @@ use super::*;
 
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
+#[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
 pub(crate) async fn handle_recursion(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -18,76 +19,85 @@ pub(crate) async fn handle_recursion(
 
     require_positive_limit(limit, "tracedecay_recursion")?;
 
-    let symbols = verified_analysis_symbols(graph, path_prefix)?;
-    let symbol_by_id = symbols
-        .iter()
-        .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
-        .collect::<HashMap<_, _>>();
-    let call_edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
-
-    let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-    for edge in call_edges {
-        let src = edge.edge.from_occurrence.as_str().to_string();
-        let tgt = edge.edge.to_occurrence.as_str().to_string();
-        adj.entry(src).or_default().insert(tgt.clone());
-        adj.entry(tgt).or_default();
-    }
-
-    // Collect only the cyclic SCCs, then sort smallest-first so we keep
-    // shorter / more interesting cycles when the cap kicks in. We still need
-    // every cyclic SCC enumerated before sorting (truncating early would bias
-    // toward Tarjan emission order), but we cap the per-SCC path search.
-    let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_usecases::graph::scc::tarjan_scc(&adj)
-        .into_iter()
-        .filter(|scc| tracedecay_usecases::graph::scc::is_cyclic_scc(scc, &adj))
-        .collect();
-    cyclic_sccs.sort_by_key(Vec::len);
-
-    let mut cycles: Vec<Vec<String>> = Vec::new();
-    for mut scc in cyclic_sccs {
-        if cycles.len() >= limit {
-            break;
+    let (symbols, call_edges) = hotpath::measure_block!("mcp.analysis.recursion.graph", {
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let call_edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
+        (symbols, call_edges)
+    });
+    let (cycles, symbol_by_id) = hotpath::measure_block!("mcp.analysis.recursion.compute", {
+        let symbol_by_id = symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
+            .collect::<HashMap<_, _>>();
+        let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
+        for edge in call_edges {
+            let src = edge.edge.from_occurrence.as_str().to_string();
+            let tgt = edge.edge.to_occurrence.as_str().to_string();
+            adj.entry(src).or_default().insert(tgt.clone());
+            adj.entry(tgt).or_default();
         }
-        if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
-            cycles.push(path);
-        }
-    }
-    cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-    cycles.truncate(limit);
 
-    let mut cycle_items: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-    for cycle in &cycles {
-        let mut chain: Vec<Value> = Vec::new();
-        for node_id in cycle {
-            if let Some(symbol) = symbol_by_id.get(node_id) {
-                touched.push(symbol.path.clone());
-                chain.push(json!({
-                    "id": symbol.occurrence.as_str(),
-                    "name": symbol.metadata.simple_name,
-                    "kind": symbol.metadata.kind,
-                    "file": symbol.path,
-                    "line": symbol.metadata.start_line,
-                }));
-            } else {
-                return Err(verified_analysis_unavailable(
-                    "recursion",
-                    "a call-cycle endpoint is absent from the admitted symbol census",
-                ));
+        // Collect only the cyclic SCCs, then sort smallest-first so we keep
+        // shorter / more interesting cycles when the cap kicks in. We still need
+        // every cyclic SCC enumerated before sorting (truncating early would bias
+        // toward Tarjan emission order), but we cap the per-SCC path search.
+        let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_usecases::graph::scc::tarjan_scc(&adj)
+            .into_iter()
+            .filter(|scc| tracedecay_usecases::graph::scc::is_cyclic_scc(scc, &adj))
+            .collect();
+        cyclic_sccs.sort_by_key(Vec::len);
+
+        let mut cycles: Vec<Vec<String>> = Vec::new();
+        for mut scc in cyclic_sccs {
+            if cycles.len() >= limit {
+                break;
+            }
+            if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
+                cycles.push(path);
             }
         }
-        cycle_items.push(json!({
-            "length": cycle.len() - 1,
-            "chain": chain,
-        }));
-    }
+        cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        cycles.truncate(limit);
+        (cycles, symbol_by_id)
+    });
+
+    let (output, touched) = hotpath::measure_block!("mcp.analysis.recursion.assemble", {
+        let mut cycle_items: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
+        for cycle in &cycles {
+            let mut chain: Vec<Value> = Vec::new();
+            for node_id in cycle {
+                if let Some(symbol) = symbol_by_id.get(node_id) {
+                    touched.push(symbol.path.clone());
+                    chain.push(json!({
+                        "id": symbol.occurrence.as_str(),
+                        "name": symbol.metadata.simple_name,
+                        "kind": symbol.metadata.kind,
+                        "file": symbol.path,
+                        "line": symbol.metadata.start_line,
+                    }));
+                } else {
+                    return Err(verified_analysis_unavailable(
+                        "recursion",
+                        "a call-cycle endpoint is absent from the admitted symbol census",
+                    ));
+                }
+            }
+            cycle_items.push(json!({
+                "length": cycle.len() - 1,
+                "chain": chain,
+            }));
+        }
+        (
+            json!({
+                "cycle_count": cycle_items.len(),
+                "cycles": cycle_items,
+            }),
+            touched,
+        )
+    });
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-
-    let output = json!({
-        "cycle_count": cycle_items.len(),
-        "cycles": cycle_items,
-    });
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
