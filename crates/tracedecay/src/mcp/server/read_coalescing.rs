@@ -13,6 +13,11 @@ use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 use crate::mcp::tools::{ToolResult, mcp_dispatch_contract};
 use crate::support::weak_registry::WeakRegistry;
 
+#[cfg(feature = "hotpath")]
+type ReadFlightStateMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ReadFlightStateMutex<T> = std::sync::Mutex<T>;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ReadFlightKey([u8; 32]);
 
@@ -21,6 +26,7 @@ struct ReadCoalescingInner {
     flights: WeakRegistry<ReadFlightKey, ReadFlight>,
     leaders: AtomicU64,
     followers: AtomicU64,
+    active_followers: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Default)]
@@ -35,8 +41,9 @@ enum ReadFlightState {
 }
 
 pub(super) struct ReadFlight {
-    state: Mutex<ReadFlightState>,
+    state: ReadFlightStateMutex<ReadFlightState>,
     completed: tokio::sync::Notify,
+    active_followers: Arc<AtomicU64>,
 }
 
 pub(super) enum ReadFlightClaim {
@@ -51,10 +58,30 @@ pub(super) struct ReadFlightLeader {
     finished: bool,
 }
 
+struct ReadFollowerWaitGuard {
+    active: Arc<AtomicU64>,
+}
+
+impl ReadFollowerWaitGuard {
+    fn enter(active: Arc<AtomicU64>) -> Self {
+        active.fetch_add(1, Ordering::AcqRel);
+        hotpath::gauge!("mcp.server.read_coalescing.followers_active").inc(1_u64);
+        Self { active }
+    }
+}
+
+impl Drop for ReadFollowerWaitGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+        hotpath::gauge!("mcp.server.read_coalescing.followers_active").dec(1_u64);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadCoalescingSnapshot {
     pub(super) leaders: u64,
     pub(super) followers: u64,
+    pub(super) active_followers: u64,
     pub(super) active_flights: usize,
 }
 
@@ -69,8 +96,12 @@ impl IdenticalReadCoalescer {
         let key = read_flight_key(engine_identity, tool_name, arguments, scope_prefix);
         let (flight, hit) = self.inner.flights.get_or_insert_with(key, || {
             Arc::new(ReadFlight {
-                state: Mutex::new(ReadFlightState::Pending),
+                state: hotpath::mutex!(
+                    Mutex::new(ReadFlightState::Pending),
+                    label = "mcp.server.read_coalescing.state"
+                ),
                 completed: tokio::sync::Notify::new(),
+                active_followers: Arc::clone(&self.inner.active_followers),
             })
         });
         if hit {
@@ -95,13 +126,16 @@ impl IdenticalReadCoalescer {
         ReadCoalescingSnapshot {
             leaders: self.inner.leaders.load(Ordering::Relaxed),
             followers: self.inner.followers.load(Ordering::Relaxed),
+            active_followers: self.inner.active_followers.load(Ordering::Acquire),
             active_flights,
         }
     }
 }
 
 impl ReadFlight {
+    #[hotpath::measure(label = "mcp.server.read_coalescing.follower_wait", future = true)]
     pub(super) async fn wait(&self) -> Option<Arc<ToolResult>> {
+        let _active = ReadFollowerWaitGuard::enter(Arc::clone(&self.active_followers));
         loop {
             let completed = self.completed.notified();
             match &*self
@@ -253,6 +287,7 @@ mod tests {
             ReadCoalescingSnapshot {
                 leaders: 1,
                 followers: 1,
+                active_followers: 0,
                 active_flights: 0,
             }
         );
@@ -352,6 +387,43 @@ mod tests {
             ),
             ReadFlightClaim::Leader(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_follower_releases_the_active_waiter_count() {
+        let coalescer = IdenticalReadCoalescer::default();
+        let _leader = match coalescer.claim(
+            "graph-main",
+            "tracedecay_outline",
+            &json!({"file": "src/lib.rs"}),
+            None,
+        ) {
+            ReadFlightClaim::Leader(leader) => leader,
+            ReadFlightClaim::Follower(_) => panic!("first caller must lead"),
+        };
+        let follower = match coalescer.claim(
+            "graph-main",
+            "tracedecay_outline",
+            &json!({"file": "src/lib.rs"}),
+            None,
+        ) {
+            ReadFlightClaim::Follower(follower) => follower,
+            ReadFlightClaim::Leader(_) => panic!("identical caller must follow"),
+        };
+
+        let waiter = tokio::spawn(async move { follower.wait().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while coalescer.snapshot().active_followers == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("follower did not begin waiting");
+        assert_eq!(coalescer.snapshot().active_followers, 1);
+
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(coalescer.snapshot().active_followers, 0);
     }
 
     #[test]
