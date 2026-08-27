@@ -56,7 +56,7 @@ impl TokenSummary {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "temporal.context.estimate")]
     pub fn scan(
         policy: TokenPolicy,
         fragment: &str,

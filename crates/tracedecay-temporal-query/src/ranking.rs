@@ -115,7 +115,7 @@ impl<'a> SourcePartitionKey<'a> {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "temporal.rank")]
 pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
     let candidates = prepare_candidates(candidates)?;
     let mut by_channel_and_source: BTreeMap<
