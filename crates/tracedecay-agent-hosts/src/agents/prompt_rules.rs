@@ -228,37 +228,6 @@ pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> 
     })
 }
 
-/// Shared uninstall for the standard hosts: strips the managed block and
-/// deletes the file when nothing else remains.
-pub(crate) fn remove_prompt_rules(path: &Path, marker: &str) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if !contents.contains("tracedecay") {
-        eprintln!(
-            "  {} does not contain tracedecay rules, skipping",
-            path.display()
-        );
-        return;
-    }
-    let Some(new_contents) = strip_heading_block(&contents, marker) else {
-        return;
-    };
-    if new_contents.is_empty() {
-        std::fs::remove_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else {
-        std::fs::write(path, format!("{new_contents}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            path.display()
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
