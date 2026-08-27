@@ -30,7 +30,7 @@ Current (highest `vN`) plate per channel:
 | 01 | 01-brain/v4-measured-registry.png | Unscoped measured registry field. X=recency bucket. Y/size=indexed mass. Hub only when checkouts share git_common_dir. One-hop pulse. CONCEPT/SYNTHETIC. |
 | 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
 | 03 | 03-loom/v3-measured-weave.png | Time down, hosts across, thickness = messages. Causal crossings listed, not drawn. Playback over loaded LCM page. CONCEPT/SYNTHETIC. |
-| 04 | 04-sessions/v1-inspector.png | Session list with real headers + LCM inspector. |
+| 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
 | 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
 | 06 | 06-code/v1-cortex.png | Cortex → Trace → Core lens on a dark optical field. |
 | 07 | 07-knowledge/v2-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks, never faded text. |
