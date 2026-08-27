@@ -177,25 +177,6 @@ PY
     "$root_package/plugin"
 }
 
-assert_code_extraction_assets() {
-  local extraction_package=$1
-  local required
-  local -a assets=(
-    "vendor/tree-sitter-rust/LICENSE"
-    "vendor/tree-sitter-rust/queries/highlights.scm"
-    "vendor/tree-sitter-rust/queries/injections.scm"
-    "vendor/tree-sitter-rust/queries/tags.scm"
-    "vendor/tree-sitter-rust/src/node-types.json"
-    "vendor/tree-sitter-rust/src/parser.c"
-    "vendor/tree-sitter-rust/src/scanner.c"
-  )
-
-  for required in "${assets[@]}"; do
-    [[ -f "$extraction_package/$required" ]] ||
-      die "packaged tracedecay-code-extraction crate is missing $required"
-  done
-}
-
 verify_feature_wiring() {
   local source_manifest=$1
   local packaged_manifest=$2
@@ -584,24 +565,38 @@ semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package"
-assert_code_extraction_assets "$code_extraction_package"
 
 patch_config="$work/packaged-crates.toml"
-python3 - "$metadata" "$packages" >"$patch_config" <<'PY'
+python3 - "$metadata" "$packages" "$staged/Cargo.toml" >"$patch_config" <<'PY'
 import json
 import pathlib
 import sys
+import tomllib
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     metadata = json.load(handle)
 members = set(metadata["workspace_members"])
 packages = pathlib.Path(sys.argv[2])
+with open(sys.argv[3], "rb") as handle:
+    workspace_manifest = tomllib.load(handle)
 print("[patch.crates-io]")
 for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     if package["id"] not in members:
         continue
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
+# Packaged crates resolve outside the workspace, so the workspace manifest's
+# git patches (e.g. the pinned tree-sitter-rust fork) must be re-applied here
+# for the extracted trees to see the same patched dependencies.
+for name, spec in workspace_manifest.get("patch", {}).get("crates-io", {}).items():
+    if not isinstance(spec, dict) or "git" not in spec:
+        continue
+    entry = f'{json.dumps(name)} = {{ git = {json.dumps(spec["git"])}'
+    for key in ("rev", "branch", "tag"):
+        if key in spec:
+            entry += f", {key} = {json.dumps(spec[key])}"
+    entry += " }"
+    print(entry)
 PY
 
 verify_feature_wiring \
