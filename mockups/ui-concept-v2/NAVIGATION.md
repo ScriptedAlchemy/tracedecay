@@ -30,8 +30,8 @@ Observatory; Command Palette is an overlay, not channel 15.
 ## Persistent regions
 
 1. **Brand block:** trace-tail glyph and `TRACEDECAY` wordmark at the top of the
-   rail. Activation returns to Brain with project scope preserved. It never
-   visualizes activity, health, connectivity, or work.
+   rail. It is identity only and never visualizes activity, health,
+   connectivity, or work. Brain remains available through channel 01.
 2. **Navigation rail:** all fourteen numbered workspaces in the fixed order
    above; 192px expanded or 48px compact.
 3. **Scope/workspace register:** a 52px register containing `Project: all` or
@@ -51,14 +51,32 @@ Observatory; Command Palette is an overlay, not channel 15.
   selection, scope, measured values, or activity.
 - Keyboard: native Tab order and Enter activation. `Cmd/Ctrl+K` opens the
   command palette. Do not invent numeric or arrow-key global shortcuts.
-- Route changes preserve project scope and workspace query state unless an
-  explicit control changes them.
-- `/` resolves to Brain. Activating the logo returns to Brain and retains
-  scope; the logo has no status or activity behavior.
+- Route changes preserve global project scope unless an explicit control
+  changes it. View-local query persistence follows the shipping workspace; a
+  concept may not promise persistence without sidecar evidence.
+- `/` resolves to Brain. The Brain rail entry navigates to `/brain` while
+  retaining global project scope; the logo is not an additional control.
 - Clicking the scope indicator clears an explicit project and returns to
   `Project: all` only when that control is visibly offered.
 - Project rows in the command palette may set global project scope; workspace
   rows only navigate.
+
+## Production evidence
+
+- Workspace names/order and `/`'s Brain surface:
+  `dashboard/src/app/channels.ts`, `dashboard/src/app/routes.tsx`, and
+  `dashboard/src/app/workspaceRegistry.test.ts`.
+- Rail navigation and selected-route treatment:
+  `dashboard/src/app/shell/NavRail.tsx`.
+- Shell composition and the command-palette hotkey:
+  `dashboard/src/app/shell/Shell.tsx`.
+- Explicit scope clear and URL persistence:
+  `dashboard/src/app/shell/ScopeBar.tsx`,
+  `dashboard/src/data/scope/UrlSync.tsx`, and
+  `dashboard/src/data/scope/UrlSync.dom.test.tsx`.
+- Command-palette workspace navigation and registered-project scoping:
+  `dashboard/src/app/shell/CommandPalette.tsx` and
+  `dashboard/src/app/shell/CommandPalette.dom.test.tsx`.
 
 ## Truth constraints
 

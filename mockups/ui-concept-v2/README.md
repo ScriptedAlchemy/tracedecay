@@ -67,6 +67,7 @@ they represent different semantic states.
 4. When replacing a state, mark the prior asset `superseded`; when an image
    invents behavior or fails the visual brief, mark it `rejected` and say why.
    Never derive either result from its filename or version number.
-5. Visibly stamp fixture-based final plates `CONCEPT / SYNTHETIC`. Do not claim
-   counts, topology, freshness, health, controls, or success that no named
-   production authority supplies.
+5. Use synthetic data only and visibly stamp every final plate
+   `CONCEPT / SYNTHETIC`. Never use production, customer, operator, repository,
+   session, or event data. Do not claim counts, topology, freshness, health,
+   controls, or success that no named production authority supplies.

@@ -46,6 +46,27 @@ offline, denied, and unavailable remain visibly distinct.
    unavailable, source partial/unavailable, chain unavailable, linked-boundary
    partial.
 
+## Production evidence
+
+- Brain project-body/registry-row scoping, repository-hub exclusion, and exact
+  activity identity/one-hop propagation:
+  `dashboard/src/workspaces/brain/BrainPage.tsx`,
+  `dashboard/src/workspaces/brain/ScopedBrain.tsx`,
+  `dashboard/src/workspaces/brain/ScopedBrain.dom.test.tsx`, and
+  `dashboard/src/viz/graph/GraphCanvas.propagation.dom.test.tsx`.
+- Loom time-window zoom/pan/fit and visible-window culling:
+  `dashboard/src/workspaces/loom/WeaveCanvas.tsx` and
+  `dashboard/src/workspaces/loom/WeaveCanvas.dom.test.tsx`.
+- Loom loaded-page replay, pause/play, previous/next, seek, 0.5-4x presentation
+  speed, follow-loaded-tail, and return-to-latest:
+  `dashboard/src/workspaces/loom/ThreadPlayback.tsx`,
+  `dashboard/src/workspaces/loom/playback.ts`,
+  `dashboard/src/workspaces/loom/playback.test.ts`, and
+  `dashboard/src/workspaces/loom/LoomPage.dom.test.tsx`.
+- Loom thread-chain sources and separate coverage states:
+  `dashboard/src/workspaces/loom/ThreadChain.tsx` and
+  `dashboard/src/workspaces/loom/LoomPage.dom.test.tsx`.
+
 ## Remaining workspace coverage
 
 | Workspace | Canonical interaction plates | Honest-state concepts |

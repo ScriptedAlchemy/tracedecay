@@ -20,10 +20,10 @@ selection, time, or activity. Decorative firing is not.
 - Wordmark: `TRACEDECAY`, expanded grotesk, ice white, generous tracking.
 - Glyph: one origin point followed by three progressively smaller and dimmer
   trace-tail points. It is an identity mark, not a health indicator.
-- Logo activation: navigate to Brain while preserving the current project
-  scope. The logo has no other action.
-- Logo hover/focus: reveal `Brain / home`. It does not fire, breathe, pulse, or
-  report connectivity, health, or work.
+- The logo is identity only. Brain remains available through channel 01; do not
+  add a logo action until the shipping shell exposes one.
+- Logo hover/focus does not fire, breathe, pulse, or report connectivity,
+  health, or work.
 - Workspace icons are 14-16px monoline glyphs. An anatomical Brain icon may
   identify channel 01; it is never the product logo or the hero visualization.
 
@@ -128,11 +128,11 @@ Every final image prompt begins from this visual floor:
 > chassis, hairline cyan-gray frames, ice-white engraved labels, sparse cyan
 > signal and restrained amber measured activity, fixed fourteen-channel left
 > navigation rail, explicit project scope, separate transport/feed/authority
-> states, one luminous hero visualization derived from real data, deep
-> vignette, subtle sensor grain, 16:10 composition. If fixture data is used,
-> visibly stamp CONCEPT / SYNTHETIC.
+> states, one luminous hero visualization modeled on named production
+> authorities using synthetic data only, deep vignette, subtle sensor grain,
+> 16:10 composition. Visibly stamp every plate CONCEPT / SYNTHETIC.
 
 Negative floor: no flat generic dashboard, duplicate navigation, rounded SaaS
 cards, decorative neural particles, fake live badges, invented health, unlabeled
 graphs, Marvel marks, anatomical product logo, or motion unrelated to measured
-state.
+state. No production, customer, operator, repository, session, or event data.
