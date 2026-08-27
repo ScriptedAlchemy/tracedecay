@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRACE — live watershed (round two prototype)</title>
+<style>
+/* Token block transcribed from dashboard/src/theme/tokens.css, trimmed to what
+ * this page draws. The canvas cannot read custom properties, so the page
+ * resolves them once per theme flip and hands the renderer resolved strings —
+ * tokens.css stays the single source of the instrument's colour. */
+:root {
+  --raw-surface-0: oklch(0.145 0.003 260);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-text-primary: oklch(0.945 0.002 260);
+  --raw-text-secondary: oklch(0.79 0.003 260);
+  --raw-text-muted: oklch(0.685 0.004 260);
+  --raw-edge-subtle: oklch(0.315 0.004 260);
+  --raw-edge-strong: oklch(0.46 0.006 260);
+  --raw-accent: oklch(0.75 0.15 200);
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
+  --raw-state-partial: oklch(0.78 0.14 85);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-ready: oklch(0.72 0.14 155);
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.245 0.035 262 / 0.75) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.165 0.014 264) 0%, oklch(0.105 0.012 268) 100%);
+  --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
+  --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  --raw-raised: oklch(0.228 0.004 260);
+  --shadow-well: inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --relief-line: oklch(0.62 0.02 250 / 0.85);
+  --relief-line-index: oklch(0.86 0.03 250 / 0.9);
+  --relief-fill-lo: oklch(0.2 0.012 250);
+  --font-sans: 'Inter Variable', 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', monospace;
+  --grid-cell: 32px;
+}
+[data-theme='light'] {
+  --raw-surface-0: oklch(0.985 0.001 260);
+  --raw-surface-1: oklch(0.962 0.0015 260);
+  --raw-surface-2: oklch(0.936 0.002 260);
+  --raw-text-primary: oklch(0.2 0.004 260);
+  --raw-text-secondary: oklch(0.37 0.005 260);
+  --raw-text-muted: oklch(0.45 0.005 260);
+  --raw-edge-subtle: oklch(0.855 0.003 260);
+  --raw-edge-strong: oklch(0.7 0.005 260);
+  --raw-accent: oklch(0.47 0.14 220);
+  --raw-grid: oklch(0.895 0.002 260);
+  --raw-grid-minor: oklch(0.945 0.001 260);
+  --raw-state-partial: oklch(0.56 0.13 85);
+  --raw-state-unknown: oklch(0.46 0.015 260);
+  --raw-state-ready: oklch(0.52 0.14 155);
+  --raw-graph-field:
+    radial-gradient(85% 70% at 50% 42%, oklch(0.995 0.008 250 / 0.9) 0%, transparent 62%),
+    radial-gradient(140% 120% at 50% 45%, oklch(0.965 0.008 264) 0%, oklch(0.918 0.012 268) 100%);
+  --raw-membrane-lift: oklch(1 0 0 / 0.9);
+  --raw-depth: oklch(0.52 0.03 262 / 0.16);
+  --raw-raised: oklch(1 0 0);
+  --relief-line: oklch(0.55 0.025 250 / 0.55);
+  --relief-line-index: oklch(0.34 0.04 250 / 0.8);
+  --relief-fill-lo: oklch(0.955 0.004 250);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--raw-surface-0);
+  color: var(--raw-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+.page { width: 1440px; margin: 0 auto; padding: 0 0 28px; }
+
+.td-legend {
+  font-size: 9px; line-height: 1; letter-spacing: 0.16em; text-transform: uppercase;
+  font-weight: 500; color: var(--raw-text-muted); white-space: nowrap;
+}
+.td-caption { font-size: 11px; line-height: 1.45; color: var(--raw-text-secondary); }
+.td-caption b { font-weight: 600; color: var(--raw-text-primary); }
+.td-caption code, code { font-family: var(--font-mono); font-size: 0.94em; }
+.td-rule { flex: 1 1 0%; height: 1px; min-width: 8px; background: var(--raw-edge-subtle); }
+
+.spine {
+  display: flex; align-items: baseline; gap: 14px; padding: 18px 28px 12px;
+  border-bottom: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1);
+}
+.spine h1 {
+  margin: 0; font-family: var(--font-mono); font-size: 22px; letter-spacing: 0.24em;
+  font-weight: 500; text-transform: uppercase;
+}
+.spine .sub { font-size: 12px; color: var(--raw-text-secondary); max-width: 700px; }
+.spine .chan { font-family: var(--font-mono); font-size: 11px; color: var(--raw-accent); letter-spacing: 0.1em; }
+
+.readbar {
+  display: flex; align-items: stretch; border-bottom: 1px solid var(--raw-edge-subtle);
+  background: var(--raw-surface-1);
+}
+.readout {
+  padding: 9px 18px; border-right: 1px solid var(--raw-edge-subtle);
+  display: flex; flex-direction: column; gap: 5px; min-width: 0;
+}
+.readout .v {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px;
+  letter-spacing: -0.02em; color: var(--raw-text-primary); white-space: nowrap;
+}
+.readout.grow { flex: 1 1 auto; border-right: none; }
+
+.controls {
+  display: flex; align-items: center; gap: 14px; padding: 8px 18px;
+  border-bottom: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-2);
+}
+.controls button {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--raw-text-secondary); background: var(--raw-raised);
+  border: 1px solid var(--raw-edge-subtle); padding: 6px 11px; cursor: pointer;
+}
+.controls button:hover { color: var(--raw-text-primary); border-color: var(--raw-edge-strong); }
+.controls button[aria-pressed='true'] { color: var(--raw-accent); border-color: var(--raw-accent); }
+.controls .gauge {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px;
+  color: var(--raw-text-muted);
+}
+.controls .gauge b { color: var(--raw-text-primary); font-weight: 500; }
+
+.hero {
+  position: relative; width: 1440px; height: 1000px;
+  background: var(--raw-graph-field); box-shadow: var(--shadow-well);
+  background-image:
+    linear-gradient(to right, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--raw-grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--raw-grid-minor) 1px, transparent 1px),
+    var(--raw-graph-field);
+  background-size:
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    calc(var(--grid-cell) * 4) calc(var(--grid-cell) * 4),
+    var(--grid-cell) var(--grid-cell), var(--grid-cell) var(--grid-cell), auto;
+  background-position: center center;
+}
+#field { display: block; position: absolute; inset: 0; touch-action: none; cursor: grab; }
+#field.grabbing { cursor: grabbing; }
+
+.keystrip { display: flex; border-top: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1); }
+.keycell { padding: 11px 16px; border-right: 1px solid var(--raw-edge-subtle); flex: 1 1 0; min-width: 0; }
+.keycell:last-child { border-right: none; }
+.keycell .cap { font-size: 10.5px; line-height: 1.42; color: var(--raw-text-secondary); margin-top: 7px; }
+.keycell .cap b { color: var(--raw-text-primary); font-weight: 600; }
+.keyhead { display: flex; align-items: center; gap: 8px; }
+
+.note {
+  margin: 18px 28px 0; border: 1px solid var(--raw-edge-subtle); background: var(--raw-surface-1);
+  display: grid; grid-template-columns: 1.1fr 1fr 1fr;
+}
+.note section { padding: 13px 16px; border-right: 1px solid var(--raw-edge-subtle); }
+.note section:last-child { border-right: none; }
+.note h2 {
+  margin: 0 0 8px; font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase;
+  font-weight: 600; color: var(--raw-text-secondary);
+}
+.note p { margin: 0 0 7px; }
+.note p:last-child { margin-bottom: 0; }
+.note dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+.note dt {
+  font-family: var(--font-mono); font-size: 10px; color: var(--raw-accent);
+  letter-spacing: 0.04em; white-space: nowrap;
+}
+.note dd { margin: 0; font-size: 11px; line-height: 1.4; color: var(--raw-text-secondary); }
+#probe { position: absolute; left: -9999px; top: -9999px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="spine">
+    <span class="chan">02 · LIVE</span>
+    <h1>Trace</h1>
+    <span class="sub">The static watershed with its physics turned on. Every node is a body whose mass is its degree;
+      every channel is a spring whose stiffness is its call-site count. Hover to feel weight, drag to feel coupling,
+      release to watch it settle. Nothing here is eased for looks — the motion is the measurement.</span>
+  </header>
+
+  <div class="readbar">
+    <div class="readout"><span class="td-legend">Focus</span><span class="v" id="r-focus">—</span></div>
+    <div class="readout"><span class="td-legend">Callers ≤ 3 hops</span><span class="v" id="r-up">—</span></div>
+    <div class="readout"><span class="td-legend">Callees ≤ 3 hops</span><span class="v" id="r-down">—</span></div>
+    <div class="readout"><span class="td-legend">Depth limit</span><span class="v" id="r-depth">—</span></div>
+    <div class="readout"><span class="td-legend">Beyond the limit</span><span class="v" id="r-beyond">—</span></div>
+    <div class="readout"><span class="td-legend">Types entered</span><span class="v" id="r-mem">—</span></div>
+    <div class="readout grow"><span class="td-legend">Modules crossed</span><span class="v" id="r-mod">—</span></div>
+  </div>
+
+  <div class="controls">
+    <span class="td-legend">Instrument</span>
+    <button id="c-theme" type="button">Theme: dark</button>
+    <button id="c-motion" type="button" aria-pressed="false">Reduced motion: off</button>
+    <button id="c-reset" type="button">Reset field</button>
+    <button id="c-record" type="button" aria-pressed="false">Record</button>
+    <button id="c-export" type="button">Export take</button>
+    <span class="td-rule"></span>
+    <span class="gauge">frame <b id="g-frame">0</b></span>
+    <span class="gauge">max speed <b id="g-speed">0</b> px/s</span>
+    <span class="gauge">energy <b id="g-energy">0</b></span>
+    <span class="gauge">frame ms p95 <b id="g-p95">—</b></span>
+    <span class="gauge" id="g-state">settled</span>
+  </div>
+
+  <div class="hero"><canvas id="field"></canvas></div>
+
+  <div class="keystrip">
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Weight</span><span class="td-rule"></span></div>
+      <div class="cap"><b>Mass is degree.</b> Anchor stiffness rises as √mass, so hover latency and settle time rise
+        monotonically with connectedness: a 4-degree test leaf reaches half bloom in ~0.12 s, the 63-degree hub takes
+        ~0.40 s and keeps arriving. Hubs are slow and deep; leaves flick.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Tension</span><span class="td-rule"></span></div>
+      <div class="cap"><b>Stiffness is call sites.</b> Drag a node and its neighbourhood deforms in proportion: the
+        58-call channel drags its partner along as flesh, the 3-call channel trails. Channel brightness and stroke
+        weight report how far that spring is off its rest length, in px.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Rest</span><span class="td-rule"></span></div>
+      <div class="cap">Each channel's rest length is the distance between its two <b>layout anchors</b>, so the field at
+        rest is the static sheet exactly — no drift, no relayout. A channel only stores energy once a gesture has
+        displaced something.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Reduced motion</span><span class="td-rule"></span></div>
+      <div class="cap">Not a degradation: the same integrator, run to rest and drawn <b>once</b>. Final positions are
+        bit-identical to the animated path. Tension, which was carried by motion, becomes an amber <b>core rail whose
+        thickness is the stretch</b>, saturating at 60 px, with the figure printed beside it. Channels under 5 px of
+        stretch are at rest and get no rail.</div>
+    </div>
+    <div class="keycell">
+      <div class="keyhead"><span class="td-legend">Determinism</span><span class="td-rule"></span></div>
+      <div class="cap">One fixed 1/60 s step per animation frame, subdivided to 1/240 s inside the integrator. Wall
+        clock never reaches the physics — it is measured, in <code>frameMs</code>, and reported. Same seed plus same
+        gestures gives the same trajectory, which is what the QA gate replays.</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <section>
+      <h2>What round two adds</h2>
+      <p class="td-caption">Round one settled the spatial language. This page answers the only question a static sheet
+        cannot: does the structure <b>feel</b> like what it is. Weight and tension are the two channels of the sensory
+        contract that a spring field can carry honestly, and both are wired to numbers already on the payload —
+        <code>degree</code> and per-edge <code>call sites</code>.</p>
+      <p class="td-caption">Warmth (churn recency) and grain (cyclomatic complexity) are deliberately absent: they are
+        real channels in the contract but they need a time axis and a contour pass, and mixing them in here would make
+        it impossible to tell which mapping the reviewer is reacting to.</p>
+    </section>
+    <section>
+      <h2>Sensation → data</h2>
+      <dl>
+        <dt>mass</dt><dd>symbol <code>degree</code>, floored at 3 so an unresolved node still has inertia.</dd>
+        <dt>anchor k</dt><dd><code>90 · mass^0.5</code>. The exponent is the one compression on this page and it is a
+          tuning knob, not a measurement — see the README table.</dd>
+        <dt>channel k</dt><dd><code>6 · call sites</code> on that single edge.</dd>
+        <dt>damping</dt><dd>ratio 0.72 against each node's own anchor — one overshoot, no ringing.</dd>
+        <dt>bloom rate</dt><dd><code>9.5 / mass^0.42</code> per second, growing; <code>5.0 / mass^0.42</code> decaying.</dd>
+        <dt>rest length</dt><dd>anchor-to-anchor distance. Makes the layout an exact equilibrium.</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Honesty notes carried forward</h2>
+      <p class="td-caption">Rows are <b>hop rings, not elevation</b>. The dashed mouth at <code>dyn ContextSource</code>
+        is a real unresolved <code>calls</code> edge, drawn to full width and then stopped. The relief underlay is the
+        cortex sheet's regions, simplified to two contours here because this page is about motion; shorelines still move
+        with their members, so a crossing is still a cross-module call.</p>
+      <p class="td-caption">The underlay's blobs are seeded from the module name, never from the clock, so the coastline
+        does not shimmer frame to frame.</p>
+    </section>
+  </div>
+</div>
+
+<span id="probe" aria-hidden="true"></span>
+
+<script type="module">
+import { DATASET, buildSimSpec } from './dataset.js';
+import { createSimulation, bloomStep, hopDistances } from './sim.js';
+import { createRenderer, kindColor } from './render.js';
+import { createRecorder } from './recorder.js';
+
+const FIXED_DT = 1 / 60;
+const PICK_RADIUS = 34;          // world px, generous enough for a 10 px sill
+const query = new URLSearchParams(location.search);
+const REALTIME = query.get('realtime') === '1';
+const SEED = Number(query.get('seed') ?? 20260725);
+
+const canvas = document.getElementById('field');
+const hero = canvas.parentElement;
+const probe = document.getElementById('probe');
+const renderer = createRenderer(canvas, DATASET);
+
+let sim = createSimulation(buildSimSpec(DATASET, { seed: SEED }));
+const nodeIds = sim.nodeIds;
+const indexOfId = new Map(nodeIds.map((id, i) => [id, i]));
+const bloom = new Float64Array(sim.nodeCount);
+const bloomTarget = new Float64Array(sim.nodeCount);
+let hoverId = null;
+let draggingId = null;
+let framesSinceRelease = -1;
+
+/* ---- readbar ------------------------------------------------------------- */
+const readout = DATASET.readout;
+document.getElementById('r-focus').textContent = readout.focusName;
+document.getElementById('r-up').textContent = readout.callersUp;
+document.getElementById('r-down').textContent = readout.calleesDown;
+document.getElementById('r-depth').textContent = readout.depthLimit;
+document.getElementById('r-beyond').textContent = readout.beyondLimit;
+document.getElementById('r-mem').textContent = readout.membranes;
+document.getElementById('r-mod').textContent = readout.modules;
+
+/* ---- palette: resolve tokens once per theme flip ------------------------- */
+function resolveColor(expression) {
+  probe.style.color = expression;
+  const resolved = getComputedStyle(probe).color;
+  return resolved || expression;
+}
+let palette = null;
+function refreshPalette() {
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  palette = {
+    light,
+    surface0: resolveColor('var(--raw-surface-0)'),
+    textPrimary: resolveColor('var(--raw-text-primary)'),
+    textSecondary: resolveColor('var(--raw-text-secondary)'),
+    textMuted: resolveColor('var(--raw-text-muted)'),
+    edgeSubtle: resolveColor('var(--raw-edge-subtle)'),
+    edgeStrong: resolveColor('var(--raw-edge-strong)'),
+    accent: resolveColor('var(--raw-accent)'),
+    grid: resolveColor('var(--raw-grid)'),
+    statePartial: resolveColor('var(--raw-state-partial)'),
+    stateUnknown: resolveColor('var(--raw-state-unknown)'),
+    reliefLine: resolveColor('var(--relief-line)'),
+    reliefLineIndex: resolveColor('var(--relief-line-index)'),
+    reliefFillLo: resolveColor('var(--relief-fill-lo)'),
+    membraneFill: resolveColor('color-mix(in oklab, var(--raw-text-primary) 5%, transparent)'),
+    membraneHero: resolveColor('color-mix(in oklab, var(--raw-accent) 9%, transparent)'),
+    // Two hues off the same kindColor arc, far enough apart to tell at 1 px.
+    upstream: kindColor('upstream', light),
+    downstream: kindColor('downstream', light),
+  };
+  renderer.setPalette(palette);
+}
+
+/* ---- viewport ------------------------------------------------------------ */
+function fit() {
+  const rect = hero.getBoundingClientRect();
+  renderer.setViewport({ width: rect.width, height: rect.height, dpr: window.devicePixelRatio || 1 });
+}
+window.addEventListener('resize', () => {
+  fit();
+  paint();
+});
+
+/* ---- reduced motion ------------------------------------------------------ */
+const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+let reducedMotion = motionQuery.matches;
+motionQuery.addEventListener('change', (event) => setReducedMotion(event.matches));
+
+/* ---- painting ------------------------------------------------------------ */
+function paint() {
+  renderer.draw({
+    positions: sim.positions(),
+    stretches: sim.stretches(),
+    bloom,
+    draggingId,
+    reducedMotion,
+  });
+}
+
+const gauge = {
+  frame: document.getElementById('g-frame'),
+  speed: document.getElementById('g-speed'),
+  energy: document.getElementById('g-energy'),
+  p95: document.getElementById('g-p95'),
+  state: document.getElementById('g-state'),
+};
+function refreshGauges() {
+  gauge.frame.textContent = String(sim.stepCount);
+  gauge.speed.textContent = sim.maxSpeed().toFixed(1);
+  gauge.energy.textContent = sim.energy().total.toFixed(0);
+  const take = recorder.recording ? recorder.toJSON() : null;
+  gauge.p95.textContent = take && take.frameMs.p95 !== null ? take.frameMs.p95.toFixed(2) : '—';
+  gauge.state.textContent = draggingId
+    ? `dragging ${draggingId}`
+    : sim.isSettled()
+      ? framesSinceRelease >= 0
+        ? `settled after ${framesSinceRelease} frames`
+        : 'settled'
+      : 'in motion';
+}
+
+/* ---- the loop: one fixed step per animation frame ------------------------ */
+let rafId = 0;
+let accumulator = 0;
+let lastNow = null;
+
+function advance(dt) {
+  sim.step(dt);
+  for (let i = 0; i < bloom.length; i += 1) {
+    bloom[i] = bloomStep(bloom[i], bloomTarget[i], sim.massOf(nodeIds[i]), dt, sim.params);
+  }
+  if (framesSinceRelease >= 0 && !sim.isSettled()) framesSinceRelease += 1;
+}
+
+function frame(now) {
+  const workStart = performance.now();
+  if (REALTIME) {
+    // Opt-in wall-clock mode, for judging feel on a machine that is not holding
+    // 60 Hz. Determinism is knowingly given up here and nowhere else.
+    const wall = lastNow === null ? FIXED_DT : Math.min((now - lastNow) / 1000, 0.25);
+    lastNow = now;
+    accumulator += wall;
+    while (accumulator >= FIXED_DT) {
+      advance(FIXED_DT);
+      accumulator -= FIXED_DT;
+    }
+  } else {
+    advance(FIXED_DT);
+  }
+  paint();
+  // Measured BEFORE the recorder's own copying cost, so the reported work is
+  // the page's, not the instrument's.
+  recorder.capture(performance.now() - workStart);
+  refreshGauges();
+  rafId = requestAnimationFrame(frame);
+}
+
+function startLoop() {
+  if (rafId || reducedMotion) return;
+  lastNow = null;
+  accumulator = 0;
+  rafId = requestAnimationFrame(frame);
+}
+function stopLoop() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = 0;
+}
+
+/**
+ * Reduced motion runs the identical integrator to rest and paints once. Bloom
+ * jumps to its target because a bloom that approached over time would be the
+ * animation this mode exists to remove.
+ */
+function settleAndPaint() {
+  const workStart = performance.now();
+  const frames = sim.settle({ dt: FIXED_DT });
+  for (let i = 0; i < bloom.length; i += 1) bloom[i] = bloomTarget[i];
+  if (framesSinceRelease >= 0) framesSinceRelease = frames;
+  paint();
+  recorder.capture(performance.now() - workStart);
+  refreshGauges();
+}
+
+function setReducedMotion(value) {
+  reducedMotion = Boolean(value);
+  const button = document.getElementById('c-motion');
+  button.setAttribute('aria-pressed', String(reducedMotion));
+  button.textContent = `Reduced motion: ${reducedMotion ? 'on' : 'off'}`;
+  if (reducedMotion) {
+    stopLoop();
+    settleAndPaint();
+  } else {
+    startLoop();
+  }
+}
+
+/* ---- gestures ------------------------------------------------------------ */
+function worldFromEvent(event) {
+  const rect = canvas.getBoundingClientRect();
+  return renderer.toWorld(event.clientX - rect.left, event.clientY - rect.top);
+}
+function pick(world) {
+  const positions = sim.positions();
+  let best = null;
+  let bestDistance = PICK_RADIUS;
+  nodeIds.forEach((id, i) => {
+    const distance = Math.hypot(positions[i * 2] - world.x, positions[i * 2 + 1] - world.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = id;
+    }
+  });
+  return best;
+}
+function setHover(id) {
+  if (id === hoverId) return;
+  hoverId = id;
+  bloomTarget.fill(0);
+  if (id) bloomTarget[indexOfId.get(id)] = 1;
+  if (reducedMotion) settleAndPaint();
+}
+
+canvas.addEventListener('pointermove', (event) => {
+  const world = worldFromEvent(event);
+  if (draggingId) {
+    sim.applyDrag(draggingId, world.x, world.y);
+    if (reducedMotion) settleAndPaint();
+    return;
+  }
+  setHover(pick(world));
+});
+canvas.addEventListener('pointerleave', () => {
+  if (!draggingId) setHover(null);
+});
+canvas.addEventListener('pointerdown', (event) => {
+  const world = worldFromEvent(event);
+  const id = pick(world);
+  if (!id) return;
+  draggingId = id;
+  framesSinceRelease = -1;
+  canvas.classList.add('grabbing');
+  canvas.setPointerCapture(event.pointerId);
+  setHover(id);
+  sim.applyDrag(id, world.x, world.y);
+  recorder.mark('drag-start', { id });
+  if (reducedMotion) settleAndPaint();
+});
+function endDrag(event) {
+  if (!draggingId) return;
+  recorder.mark('release', { id: draggingId });
+  draggingId = null;
+  framesSinceRelease = 0;
+  canvas.classList.remove('grabbing');
+  if (event && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  sim.release();
+  if (reducedMotion) settleAndPaint();
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+/* ---- recorder ------------------------------------------------------------ */
+const recorder = createRecorder({ getPositions: () => sim.positions(), nodeIds });
+window.__traceRecorder = recorder;
+
+document.getElementById('c-record').addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  if (recorder.recording) {
+    recorder.stop();
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = 'Record';
+  } else {
+    recorder.start();
+    button.setAttribute('aria-pressed', 'true');
+    button.textContent = 'Recording…';
+  }
+});
+document.getElementById('c-export').addEventListener('click', () => {
+  const link = document.createElement('a');
+  link.href = recorder.toBlobUrl();
+  link.download = 'trace-take.json';
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+/* ---- theme, reset -------------------------------------------------------- */
+function setTheme(theme) {
+  if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  document.getElementById('c-theme').textContent = `Theme: ${theme}`;
+  refreshPalette();
+  paint();
+}
+document.getElementById('c-theme').addEventListener('click', () => {
+  setTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+});
+document.getElementById('c-motion').addEventListener('click', () => setReducedMotion(!reducedMotion));
+document.getElementById('c-reset').addEventListener('click', () => resetField());
+
+function resetField() {
+  sim = createSimulation(buildSimSpec(DATASET, { seed: SEED }));
+  bloom.fill(0);
+  bloomTarget.fill(0);
+  hoverId = null;
+  draggingId = null;
+  framesSinceRelease = -1;
+  if (reducedMotion) settleAndPaint();
+  else paint();
+}
+
+/* ---- QA harness ---------------------------------------------------------- */
+/* Everything the Playwright driver needs to aim a real gesture at a real mark,
+ * and nothing it could use to fake one: it can ask WHERE a node is, never move
+ * it. All motion in a QA run comes from synthesised pointer events. */
+window.__traceHarness = {
+  ready: true,
+  nodeIds: () => nodeIds.slice(),
+  massOf: (id) => sim.massOf(id),
+  heaviestId() {
+    return nodeIds.reduce((best, id) => (sim.massOf(id) > sim.massOf(best) ? id : best), nodeIds[0]);
+  },
+  /** Lightest node with exactly one channel — a true leaf, not just a light hub. */
+  leafId() {
+    const leaves = nodeIds.filter((id) => sim.springsOf(id).length === 1 && sim.massOf(id) > 3);
+    return leaves.reduce((best, id) => (sim.massOf(id) < sim.massOf(best) ? id : best), leaves[0]);
+  },
+  stiffestNeighbour(id) {
+    return sim.springsOf(id).reduce((best, edge) => (!best || edge.stiffness > best.stiffness ? edge : best), null);
+  },
+  springsOf: (id) => sim.springsOf(id),
+  hopsFrom: (id) => Object.fromEntries(hopDistances(sim, id)),
+  worldOf: (id) => sim.positionOf(id),
+  /** Client coordinates of a node, for Playwright's mouse. */
+  screenOf(id) {
+    const rect = canvas.getBoundingClientRect();
+    const world = sim.positionOf(id);
+    const screen = renderer.toScreen(world.x, world.y);
+    return { x: rect.left + screen.x, y: rect.top + screen.y };
+  },
+  clientFromWorld(x, y) {
+    const rect = canvas.getBoundingClientRect();
+    const screen = renderer.toScreen(x, y);
+    return { x: rect.left + screen.x, y: rect.top + screen.y };
+  },
+  world: () => ({ ...DATASET.world }),
+  frameIndex: () => sim.stepCount,
+  maxSpeed: () => sim.maxSpeed(),
+  energy: () => sim.energy(),
+  /** `restSpeed` is overridable so the QA gate can demand a tighter rest than
+   * the gauge does: a "before" reading taken while the field is still drifting
+   * would credit the drag with motion the startup settle had not finished. */
+  isSettled: (restSpeed) => sim.isSettled(restSpeed),
+  reducedMotion: () => reducedMotion,
+  setReducedMotion,
+  setTheme,
+  reset: resetField,
+  params: () => sim.params,
+};
+
+/* ---- boot ---------------------------------------------------------------- */
+fit();
+setTheme(query.get('theme') === 'light' ? 'light' : 'dark');
+if (reducedMotion) {
+  setReducedMotion(true);
+} else {
+  paint();
+  startLoop();
+}
+</script>
+</body>
+</html>
