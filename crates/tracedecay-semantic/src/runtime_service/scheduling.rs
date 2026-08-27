@@ -165,8 +165,10 @@ impl SemanticRuntimeScheduleCancellationV1 {
     }
 
     pub fn set_completed_units(&self, completed_units: u64) {
+        let completed_units = completed_units.min(self.total_units);
         self.completed_units
-            .fetch_max(completed_units.min(self.total_units), Ordering::AcqRel);
+            .fetch_max(completed_units, Ordering::AcqRel);
+        hotpath::gauge!("semantic_generation_completed_units").set(completed_units);
     }
 
     pub(crate) fn completed_units(&self) -> u64 {
@@ -342,6 +344,21 @@ pub struct SemanticRuntimeSchedulingHandleV1 {
     workers: Arc<Mutex<BTreeMap<u64, JoinHandle<()>>>>,
 }
 
+struct SemanticGenerationActiveGaugeV1;
+
+impl SemanticGenerationActiveGaugeV1 {
+    fn enter() -> Self {
+        hotpath::gauge!("semantic_generation_active_workers").inc(1.0);
+        Self
+    }
+}
+
+impl Drop for SemanticGenerationActiveGaugeV1 {
+    fn drop(&mut self) {
+        hotpath::gauge!("semantic_generation_active_workers").dec(1.0);
+    }
+}
+
 impl Default for SemanticRuntimeSchedulingHandleV1 {
     fn default() -> Self {
         Self {
@@ -376,6 +393,8 @@ impl SemanticRuntimeSchedulingHandleV1 {
             let sequence = state.sequence;
             let cancellation =
                 Arc::new(SemanticRuntimeScheduleCancellationV1::new(work.total_units));
+            hotpath::gauge!("semantic_generation_total_units").set(work.total_units);
+            hotpath::gauge!("semantic_generation_completed_units").set(0_u64);
             state.status = SemanticRuntimeScheduleStatusV1::Indexing {
                 target_generation: work.target_generation.clone(),
                 target_projection_key: work.target_projection_key.clone(),
@@ -393,46 +412,80 @@ impl SemanticRuntimeSchedulingHandleV1 {
         let handle = self.clone();
         let watcher = self.clone();
         let worker = tokio::spawn(async move {
-            let worker = tokio::spawn(async move {
-                let prepared = (work.prepare)(Arc::clone(&cancellation)).await;
-                let prepared = match prepared {
-                    Ok(prepared) if !cancellation.cancelled() => prepared,
-                    Ok(_) => {
-                        handle
-                            .finish_failure(sequence, SemanticRuntimeScheduleFailureV1::Cancelled);
-                        return;
-                    }
-                    Err(reason) => {
-                        handle.finish_failure(sequence, reason);
-                        return;
-                    }
-                };
+            let worker = tokio::spawn(hotpath::future!(
+                async move {
+                    let _active = SemanticGenerationActiveGaugeV1::enter();
+                    let prepared = hotpath::future!(
+                        (work.prepare)(Arc::clone(&cancellation)),
+                        label = "semantic.runtime.generation.prepare"
+                    )
+                    .await;
+                    let prepared = match prepared {
+                        Ok(prepared) if !cancellation.cancelled() => prepared,
+                        Ok(_) => {
+                            handle.finish_failure(
+                                sequence,
+                                SemanticRuntimeScheduleFailureV1::Cancelled,
+                            );
+                            return;
+                        }
+                        Err(reason) => {
+                            handle.finish_failure(sequence, reason);
+                            return;
+                        }
+                    };
 
-                {
-                    let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-                    if state.sequence != sequence || cancellation.cancelled() || state.committing {
-                        return;
-                    }
-                    state.committing = true;
-                }
-
-                let committed = prepared.commit().await;
-                let published = {
-                    let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-                    if state.sequence != sequence
-                        || cancellation.cancelled()
-                        || !state.accepting_work
                     {
-                        state.committing = false;
-                        return;
+                        let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        if state.sequence != sequence
+                            || cancellation.cancelled()
+                            || state.committing
+                        {
+                            return;
+                        }
+                        state.committing = true;
                     }
-                    let published = match committed {
-                        Ok((pointer, install, published)) => {
-                            if let Some(install) = install
-                                && let Err(reason) = install(&pointer)
-                            {
-                                state.committing = false;
-                                state.cancellation = None;
+
+                    let committed = hotpath::future!(
+                        prepared.commit(),
+                        label = "semantic.runtime.generation.publish"
+                    )
+                    .await;
+                    let published = {
+                        let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        if state.sequence != sequence
+                            || cancellation.cancelled()
+                            || !state.accepting_work
+                        {
+                            state.committing = false;
+                            return;
+                        }
+                        let published = match committed {
+                            Ok((pointer, install, published)) => {
+                                if let Some(install) = install
+                                    && let Err(reason) = hotpath::measure_block!(
+                                        "semantic.runtime.generation.install",
+                                        install(&pointer)
+                                    )
+                                {
+                                    state.committing = false;
+                                    state.cancellation = None;
+                                    state.status = SemanticRuntimeScheduleStatusV1::Failed {
+                                        reason,
+                                        prior_generation: state
+                                            .current
+                                            .as_ref()
+                                            .map(|pointer| pointer.generation.clone()),
+                                    };
+                                    return;
+                                }
+                                state.current = Some(pointer.clone());
+                                state.status = SemanticRuntimeScheduleStatusV1::Current {
+                                    generation: pointer.generation.clone(),
+                                };
+                                published.map(|published| (published, pointer))
+                            }
+                            Err(reason) => {
                                 state.status = SemanticRuntimeScheduleStatusV1::Failed {
                                     reason,
                                     prior_generation: state
@@ -440,33 +493,23 @@ impl SemanticRuntimeSchedulingHandleV1 {
                                         .as_ref()
                                         .map(|pointer| pointer.generation.clone()),
                                 };
-                                return;
+                                None
                             }
-                            state.current = Some(pointer.clone());
-                            state.status = SemanticRuntimeScheduleStatusV1::Current {
-                                generation: pointer.generation.clone(),
-                            };
-                            published.map(|published| (published, pointer))
-                        }
-                        Err(reason) => {
-                            state.status = SemanticRuntimeScheduleStatusV1::Failed {
-                                reason,
-                                prior_generation: state
-                                    .current
-                                    .as_ref()
-                                    .map(|pointer| pointer.generation.clone()),
-                            };
-                            None
-                        }
+                        };
+                        state.committing = false;
+                        state.cancellation = None;
+                        published
                     };
-                    state.committing = false;
-                    state.cancellation = None;
-                    published
-                };
-                if let Some((published, pointer)) = published {
-                    published(pointer).await;
-                }
-            });
+                    if let Some((published, pointer)) = published {
+                        hotpath::future!(
+                            published(pointer),
+                            label = "semantic.runtime.generation.observe_published"
+                        )
+                        .await;
+                    }
+                },
+                label = "semantic.runtime.generation"
+            ));
             let mut abort_on_drop = AbortWorkerOnDrop::new(worker.abort_handle());
             let outcome = worker.await;
             abort_on_drop.disarm();

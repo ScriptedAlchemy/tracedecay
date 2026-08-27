@@ -2891,10 +2891,16 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
         {
             return Err(RetrievalPortError::IncompatibleProjection);
         }
-        for row in &self.rows {
-            examine()?;
-            visit(row)?;
-        }
+        hotpath::gauge!("semantic_exact_flat_scan_rows").set(self.rows.len());
+        hotpath::gauge!("semantic_exact_flat_scan_dimensions")
+            .set(self.rows.first().map_or(0, |row| row.values.len()));
+        hotpath::measure_block!("semantic.vector.scan_exact_flat", {
+            for row in &self.rows {
+                examine()?;
+                visit(row)?;
+            }
+            Ok::<(), RetrievalPortError>(())
+        })?;
         Ok(SemanticVectorScanSummaryV1 {
             examined: self.rows.len() as u64,
             eligible: self.rows.len() as u64,
