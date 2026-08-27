@@ -34,7 +34,7 @@ Current (highest `vN`) plate per channel:
 | 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
 | 06 | 06-code/v1-cortex.png | Cortex → Trace → Core lens on a dark optical field. |
 | 07 | 07-knowledge/v2-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks, never faded text. |
-| 08 | 08-delivery/v1-recency-field.png | Same recency field as Brain; bodies are branches and PRs. |
+| 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
 | 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
 | 10 | 10-observatory/v2-overview-stack.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. |
 | 11 | 11-costs/v1-provider-burn.png | Provider/model spend, tokens, latency. Segmented bars, not pies. |
