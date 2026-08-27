@@ -592,6 +592,17 @@ fn unavailable_problem(code: &'static str, message: &'static str) -> Application
 }
 
 impl RetainedSurfaceExecutionErrorV1 {
+    pub fn cursor_stale_refusal() -> Self {
+        Self::ApplicationProblem(ApplicationProblem::Stale {
+            diagnostic: diagnostic(
+                "application.retained.cursor-stale",
+                "The retrieval cursor no longer matches the current candidate cohort. Restart the request without a cursor.",
+            ),
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::RestartWithoutCursor],
+        })
+    }
+
     /// Fail-closed structural budget refusal. True concurrent saturation stays
     /// [`Self::Saturated`] and retryable; this path never is.
     pub fn structural_budget_refusal() -> Self {
@@ -807,6 +818,25 @@ mod tests {
             );
             assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
         }
+    }
+
+    #[test]
+    fn cursor_stale_refusal_requires_restart_without_cursor() {
+        let problem = retained_surface_execution_problem(
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal(),
+        );
+        assert_eq!(problem.kind(), ApplicationProblemKind::Stale);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("application.retained.cursor-stale")
+        );
+        assert_eq!(
+            problem.legal_actions(),
+            &[LegalAction::RestartWithoutCursor]
+        );
     }
 
     #[test]

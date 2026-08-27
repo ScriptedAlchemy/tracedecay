@@ -779,6 +779,7 @@ pub(super) fn describe_retrieval_outcome(
         },
         SessionRetrievalOutcome::TimedOut => LcmDescribeServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
         SessionRetrievalOutcome::Stale { freshness } => LcmDescribeServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
@@ -830,6 +831,7 @@ pub(super) fn expand_retrieval_outcome(
         },
         SessionRetrievalOutcome::TimedOut => LcmExpandServiceOutcome::TimedOut,
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
         SessionRetrievalOutcome::Stale { freshness } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),

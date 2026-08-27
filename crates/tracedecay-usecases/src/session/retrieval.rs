@@ -633,7 +633,6 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::GenerationMismatch
             | CursorError::ParticipantManifestMismatch
             | CursorError::EpochMismatch
-            | CursorError::CandidateCohortMismatch
             | CursorError::SourceWatermarkMismatch
             | CursorError::ProjectionWatermarkMismatch
             | CursorError::IndexWatermarkMismatch
@@ -642,6 +641,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::KeyVersionMismatch
             | CursorError::KeyUnavailable
             | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable,
+            CursorError::CandidateCohortMismatch => SessionRetrievalOutcome::CursorStale,
         },
         TemporalKernelError::Hydration(error) => match error {
             HydrationError::BudgetExceeded { .. } => {
@@ -1067,6 +1067,16 @@ mod tests {
                 message: "unavailable".to_owned(),
             })),
             SessionRetrievalOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn candidate_cohort_cursor_mismatch_requires_cursorless_restart() {
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cursor(
+                CursorError::CandidateCohortMismatch,
+            )),
+            SessionRetrievalOutcome::CursorStale
         );
     }
 }

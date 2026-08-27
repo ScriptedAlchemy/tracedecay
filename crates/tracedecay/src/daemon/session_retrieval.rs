@@ -516,6 +516,7 @@ impl DaemonSessionRetrievalService {
                 temporal: self.empty_temporal(),
                 freshness,
             },
+            SessionRetrievalOutcome::CursorStale => SessionRetrievalServiceOutcome::CursorStale,
             SessionRetrievalOutcome::Partial {
                 items,
                 freshness,

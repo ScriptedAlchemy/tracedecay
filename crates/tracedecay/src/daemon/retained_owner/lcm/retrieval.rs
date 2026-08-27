@@ -624,6 +624,9 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         | SessionRetrievalServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
+        SessionRetrievalServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
+        }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
             observed,
@@ -665,6 +668,9 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         LcmDescribeServiceOutcome::BudgetExhausted => {
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
+        LcmDescribeServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
+        }
         LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
             kind,
             observed,
@@ -697,6 +703,9 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         }
         LcmExpandServiceOutcome::BudgetExhausted => {
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        }
+        LcmExpandServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
         }
         LcmExpandServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -1105,4 +1114,35 @@ fn bounded_limit(
     default: usize,
 ) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
     bounded_value(value, default, MAX_RESULTS)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_application::{
+        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
+    };
+
+    use super::*;
+
+    #[test]
+    fn cursor_stale_lcm_refusals_require_cursorless_restart() {
+        for error in [
+            describe_error(LcmDescribeServiceOutcome::CursorStale),
+            expand_error(LcmExpandServiceOutcome::CursorStale),
+        ] {
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::Stale);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(
+                problem.legal_actions(),
+                &[LegalAction::RestartWithoutCursor]
+            );
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some("application.retained.cursor-stale")
+            );
+        }
+    }
 }

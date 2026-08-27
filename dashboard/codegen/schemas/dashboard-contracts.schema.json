@@ -12168,6 +12168,7 @@
         "retry",
         "reconcile",
         "reset",
+        "restart_without_cursor",
         "contact_administrator"
       ],
       "type": "string"

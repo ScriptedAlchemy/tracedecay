@@ -105,6 +105,9 @@ fn map_outcome(
         SessionRetrievalServiceOutcome::Stale { .. } => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
         )),
+        SessionRetrievalServiceOutcome::CursorStale => Ok(RetrievalPortOutcome::Unavailable(
+            terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
+        )),
         SessionRetrievalServiceOutcome::Redacted => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Redacted, None)?,
         )),

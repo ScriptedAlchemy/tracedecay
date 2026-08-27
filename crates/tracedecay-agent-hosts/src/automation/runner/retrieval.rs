@@ -491,6 +491,9 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::Stale { .. } => {
             AutomationTemporalRetrieval::Rejected("session_evidence_stale")
         }
+        SessionRetrievalOutcome::CursorStale => {
+            AutomationTemporalRetrieval::Rejected("session_cursor_stale")
+        }
         SessionRetrievalOutcome::Partial { .. } => {
             AutomationTemporalRetrieval::Rejected("session_evidence_partial")
         }

@@ -2722,7 +2722,7 @@ export const LeakOwnerClassV1Schema = z.enum(["delivery", "git", "unknown", "wor
 export type LeakOwnerClassV1 = z.infer<typeof LeakOwnerClassV1Schema>;
 
 /** Bounded action an adapter may offer without inferring executable authority. */
-export const LegalActionSchema = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "retry"]);
+export const LegalActionSchema = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "restart_without_cursor", "retry"]);
 export type LegalAction = z.infer<typeof LegalActionSchema>;
 
 export const LinkAcceptedWorkAttemptRequestV1Schema = z.object({

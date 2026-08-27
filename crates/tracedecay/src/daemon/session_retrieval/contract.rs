@@ -375,6 +375,7 @@ pub(crate) enum LcmDescribeServiceOutcome {
         temporal: SessionTemporalMetadataView,
         retrieval: LcmRetrievalOutcome,
     },
+    CursorStale,
     WrongScope,
     Locked,
     Redacted,
@@ -415,6 +416,7 @@ pub(crate) enum LcmExpandServiceOutcome {
         temporal: SessionTemporalMetadataView,
         retrieval: LcmRetrievalOutcome,
     },
+    CursorStale,
     WrongScope,
     Locked,
     Redacted,
@@ -454,6 +456,7 @@ pub(crate) enum SessionRetrievalServiceOutcome {
         temporal: SessionTemporalMetadataView,
         freshness: SessionDataFreshness,
     },
+    CursorStale,
     Partial {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,

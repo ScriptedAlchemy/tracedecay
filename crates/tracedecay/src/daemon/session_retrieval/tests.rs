@@ -800,6 +800,44 @@ fn stale_lcm_retrieval_remains_typed_instead_of_generic_unavailable() {
 }
 
 #[test]
+fn cursor_stale_lcm_retrieval_requires_cursorless_restart() {
+    let describe = describe_retrieval_outcome(
+        SessionRetrievalOutcome::CursorStale,
+        RetrievalGrainV1::Summary,
+        SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
+    );
+    let expand = expand_retrieval_outcome(
+        SessionRetrievalOutcome::CursorStale,
+        RetrievalGrainV1::Summary,
+        SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
+    );
+
+    assert_eq!(describe, LcmDescribeServiceOutcome::CursorStale);
+    assert_eq!(expand, LcmExpandServiceOutcome::CursorStale);
+}
+
+#[tokio::test]
+async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
+    let harness =
+        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
+    let service = DaemonSessionRetrievalService::new(
+        harness.registered.clone(),
+        DaemonSessionRetrievalRoot::profile().expect("profile retrieval root"),
+        None,
+    )
+    .expect("registered retrieval service");
+
+    assert_eq!(
+        service
+            .public_outcome(SessionRetrievalOutcome::CursorStale)
+            .await,
+        SessionRetrievalServiceOutcome::CursorStale
+    );
+}
+
+#[test]
 fn reset_required_lcm_retrieval_preserves_the_owning_store_scope() {
     let describe = describe_retrieval_outcome(
         SessionRetrievalOutcome::ResetRequired,

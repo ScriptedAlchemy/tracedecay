@@ -153,6 +153,9 @@ impl DashboardLcmReadAdapter {
                         "lcm_temporal_projection_stale",
                     );
                 }
+                SessionRetrievalServiceOutcome::CursorStale => {
+                    return not_ready(DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale");
+                }
                 SessionRetrievalServiceOutcome::WrongScope => return wrong_scope_not_ready(),
                 SessionRetrievalServiceOutcome::Locked => {
                     return not_ready(DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked");
@@ -547,6 +550,9 @@ impl DashboardLcmReadAdapter {
                 DashboardLcmReadStateV1::Stale,
                 "lcm_temporal_projection_stale",
             )),
+            LcmDescribeServiceOutcome::CursorStale => {
+                Err((DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale"))
+            }
             LcmDescribeServiceOutcome::WrongScope => Err(wrong_scope_error()),
             LcmDescribeServiceOutcome::Locked => {
                 Err((DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked"))

@@ -554,6 +554,9 @@ pub enum SessionRetrievalOutcome<T> {
     Stale {
         freshness: SessionDataFreshness,
     },
+    /// The cursor's frozen candidate cohort no longer matches the authorized
+    /// snapshot. Replaying this cursor cannot succeed; restart without it.
+    CursorStale,
     Partial {
         items: Vec<T>,
         freshness: SessionDataFreshness,
@@ -1498,13 +1501,14 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 14] = [
+        let states: [SessionRetrievalOutcome<()>; 15] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
             SessionRetrievalOutcome::Stale {
                 freshness: SessionDataFreshness::Stored { generation_lag: 1 },
             },
+            SessionRetrievalOutcome::CursorStale,
             SessionRetrievalOutcome::Partial {
                 items: vec![],
                 freshness: SessionDataFreshness::Fresh,

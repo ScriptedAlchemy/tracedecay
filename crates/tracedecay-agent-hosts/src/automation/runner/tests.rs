@@ -291,6 +291,10 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
             "session_evidence_stale",
         ),
         (
+            SessionRetrievalOutcome::CursorStale,
+            "session_cursor_stale",
+        ),
+        (
             SessionRetrievalOutcome::Partial {
                 items: Vec::new(),
                 freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
