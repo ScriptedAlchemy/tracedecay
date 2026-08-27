@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Settings: v3 hud pass light
 
 - **Asset:** `v3-hud-pass-light.png`

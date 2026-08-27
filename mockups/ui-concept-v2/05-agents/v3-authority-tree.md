@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Agents: v3 authority tree
 
 - **Asset:** `v3-authority-tree.png`

@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Explorer: v4 lane lifecycle
 
 - **Asset:** `v4-lane-lifecycle.png`

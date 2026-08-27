@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Work: v4 six cameras
 
 - **Asset:** `v4-six-cameras.png`

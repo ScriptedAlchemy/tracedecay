@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Workflows: v2 hud pass dark
 
 - **Asset:** `v2-hud-pass-dark.png`

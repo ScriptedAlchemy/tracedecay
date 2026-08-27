@@ -6,11 +6,11 @@ Created a same-stem Markdown explainer for each original V2 PNG and one README f
 
 ## Lifecycle basis
 
-The pre-Task-1 canonical table is the conservative basis: one current plate per workspace. Brain v5, v6, and v7 plus Loom v4 are retained first-party explorations documented as rejected for known defects; higher version numbers have no lifecycle effect.
+Lifecycle remains an explicit editorial decision rather than a version-number inference. Brain v8 and Loom v5 are rejected because their explainers record unresolved still defects. Brain v9 and Loom v6 clear those blockers but are superseded shell-harmonization intermediates. Brain v10 and Loom v7 are the current paired plates, replacing the former pre-Task-1 Brain v4 and Loom v3 canonicals. Every other screen retains its documented single current plate.
 
 ## Verification
 
-Executed from the isolated worktree. The following literal fail-fast `zsh` check scans the current tree, includes the initial Task 2 commit in its PNG-immutability range, scopes every PNG reference to the `## Asset ledger` section, and requires exactly one anchored `design_status:` field per sidecar.
+Executed from the isolated worktree. The following literal fail-fast `zsh` check scans the current tree, includes the initial Task 2 commit in its PNG-immutability and whitespace ranges, proves PNG/sidecar parity, rejects orphan or duplicate ledger labels and targets, scopes every PNG reference to the `## Asset ledger` section, requires ledger/sidecar lifecycle agreement with exactly one current plate per screen, and requires one frontmatter-anchored `design_status:` field plus the six required sections per sidecar.
 
 ```zsh
 set -euo pipefail
@@ -30,9 +30,22 @@ sidecar_stems() {
 # Full-tree PNG-to-sidecar parity; diff failure proves a missing or orphan sidecar.
 diff -u <(png_stems) <(sidecar_stems)
 
-# Every PNG must appear exactly once inside its screen's Asset ledger.
+# Every ledger label and target must match the screen's PNG set exactly.
 for screen in "$root"/[0-9][0-9]-*; do
   ledger=$(sed -n '/^## Asset ledger$/,/^## Historical decisions$/p' "$screen/README.md")
+  diff -u \
+    <(for png in "$screen"/*.png; do print -r -- "${png:t}"; done | sort) \
+    <(print -r -- "$ledger" | sed -n 's/^| \[\([^]]*\.png\)\](\([^)]*\.png\)) |.*$/\1/p' | sort)
+  diff -u \
+    <(for png in "$screen"/*.png; do print -r -- "${png:t}"; done | sort) \
+    <(print -r -- "$ledger" | sed -n 's/^| \[\([^]]*\.png\)\](\([^)]*\.png\)) |.*$/\2/p' | sort)
+
+  current_count=$(print -r -- "$ledger" | grep -F -c '| `current` |' || true)
+  if [ "$current_count" -ne 1 ]; then
+    print -r -- "FAIL: $screen/README.md has $current_count current plates; expected 1"
+    exit 1
+  fi
+
   for png in "$screen"/*.png; do
     stem=${png##*/}
     stem=${stem%.png}
@@ -41,10 +54,18 @@ for screen in "$root"/[0-9][0-9]-*; do
       print -r -- "FAIL: $screen/README.md indexes $stem.png $count times in Asset ledger"
       exit 1
     fi
+
+    row=$(print -r -- "$ledger" | grep -F "[$stem.png]($stem.png)")
+    ledger_status=$(print -r -- "$row" | awk -F '|' '{value=$4; gsub(/[` ]/, "", value); print value}')
+    sidecar_status=$(awk -F ': ' '$1 == "design_status" {print $2}' "$screen/$stem.md")
+    if [ -z "$ledger_status" ] || [ "$ledger_status" != "$sidecar_status" ]; then
+      print -r -- "FAIL: lifecycle mismatch for $screen/$stem (ledger=$ledger_status sidecar=$sidecar_status)"
+      exit 1
+    fi
   done
 done
 
-# Exactly one anchored lifecycle field, with no other design_status line.
+# Exactly one frontmatter-anchored lifecycle field, with no other design_status line.
 for sidecar in "$root"/[0-9][0-9]-*/*.md; do
   [[ ${sidecar:t} == README.md ]] && continue
   status_lines=$(grep -E -c '^design_status: (current|superseded|rejected)$' "$sidecar" || true)
@@ -53,29 +74,31 @@ for sidecar in "$root"/[0-9][0-9]-*/*.md; do
     print -r -- "FAIL: $sidecar needs exactly one anchored design_status field"
     exit 1
   fi
+  if [ "$(sed -n '1p' "$sidecar")" != '---' ] || \
+     ! sed -n '2p' "$sidecar" | grep -Ex 'design_status: (current|superseded|rejected)' >/dev/null || \
+     [ "$(sed -n '3p' "$sidecar")" != '---' ]; then
+    print -r -- "FAIL: $sidecar design_status is not the sole YAML frontmatter field"
+    exit 1
+  fi
   for heading in '## Intent' '## Entry condition' '## Visible state' '## Supported interactions' '## Truth boundary' '## Lifecycle history'; do
     grep -Fx "$heading" "$sidecar" >/dev/null
   done
 done
 
-# This range starts before the initial Task 2 commit.
-git diff --quiet "$task_base..HEAD" -- ":(glob)$root/**/*.png"
-git diff --check "$task_base..HEAD"
-print -r -- "PASS: screens=14 pngs=$(png_stems | wc -l | tr -d ' ') sidecars=$(sidecar_stems | wc -l | tr -d ' '); full-tree parity, exact ledger indexing, lifecycle, sections, and PNG immutability verified."
+# This range starts before the initial Task 2 commit and includes the working tree.
+git diff --quiet "$task_base" -- ":(glob)$root/**/*.png"
+git diff --check "$task_base"
+print -r -- "PASS: screens=14 pngs=$(png_stems | wc -l | tr -d ' ') sidecars=$(sidecar_stems | wc -l | tr -d ' '); full-tree parity, no orphans, exact ledger indexing, lifecycle exclusivity, sections, PNG immutability, and whitespace verified."
 ```
 
 ## Actual result
 
-The corrected command was run. It fails fast at full-tree ledger indexing:
+The corrected command was run from the isolated worktree:
 
 ```text
-pngs=76 sidecars=76
-parity=0
-FAIL: mockups/ui-concept-v2/01-brain/README.md indexes v10-activity-becomes-synapse.png 0 times in Asset ledger
+PASS: screens=14 pngs=76 sidecars=76; full-tree parity, no orphans, exact ledger indexing, lifecycle exclusivity, sections, PNG immutability, and whitespace verified.
 ```
-
-Independent preflight counts also found `design_status=0` and `Lifecycle=70`; therefore the anchored `design_status:` invariant would fail after the six missing ledger rows are resolved. PNG immutability passes for `798c311df^..HEAD`.
 
 ## Result
 
-This report now records the full-tree invariant and its actual failing state. Per the report-only constraint, it does not alter the later iteration plates, README ledgers, or sidecar metadata needed to make this check pass.
+All 76 original PNGs have exactly one same-stem sidecar and exactly one same-screen Asset-ledger row. All 76 sidecars have one lifecycle YAML field that agrees with the ledger; each of the fourteen screens has exactly one current plate. Brain v10 and Loom v7 are current, their intermediate and rejected history is explicit, the original PNG range remains byte-unchanged, and the documentation diff is whitespace-clean.

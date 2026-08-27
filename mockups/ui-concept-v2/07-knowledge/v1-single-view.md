@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Knowledge: v1 single view
 
 - **Asset:** `v1-single-view.png`

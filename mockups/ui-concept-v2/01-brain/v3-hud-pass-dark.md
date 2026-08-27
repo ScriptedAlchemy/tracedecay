@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Brain: v3 hud pass dark
 
 - **Asset:** `v3-hud-pass-dark.png`

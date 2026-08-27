@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Brain: v2 hook synapses
 
 - **Asset:** `v2-hook-synapses.png`

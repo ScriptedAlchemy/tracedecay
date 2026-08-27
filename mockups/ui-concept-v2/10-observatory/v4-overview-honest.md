@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Observatory: v4 overview honest
 
 - **Asset:** `v4-overview-honest.png`

@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Costs: v1 provider burn
 
 - **Asset:** `v1-provider-burn.png`

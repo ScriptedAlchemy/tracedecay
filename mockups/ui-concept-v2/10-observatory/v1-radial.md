@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Observatory: v1 radial
 
 - **Asset:** `v1-radial.png`

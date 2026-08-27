@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Brain: synapse fired
 
 - **Asset:** `showcase-synapse-fired.png`

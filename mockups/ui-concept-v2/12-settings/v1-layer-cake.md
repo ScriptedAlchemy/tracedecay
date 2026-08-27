@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Settings: v1 layer cake
 
 - **Asset:** `v1-layer-cake.png`

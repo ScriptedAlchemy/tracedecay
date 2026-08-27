@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Loom: v1 weave
 
 - **Asset:** `v1-weave.png`

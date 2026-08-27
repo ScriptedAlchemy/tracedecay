@@ -1,4 +1,11 @@
+---
+design_status: rejected
+---
+
 # 03 Loom — v5 host weave overview
+
+- **Asset:** `v5-host-weave-overview.png`
+- **Lifecycle:** `rejected`
 
 Lookbook still. CONCEPT / SYNTHETIC. Not a visual-audit golden. Not acceptance.
 
@@ -33,3 +40,27 @@ loading · partial · stale · offline · unavailable · denied · unsupported_s
 - Strands read horizontal across hosts. Time-down requires vertical strands under each host.
 - Legend “live tail” fights “loaded LCM page”.
 - Causal list as host-pair counts (`alpha → beta 3`) is not a served crossing identity.
+
+## Intent
+
+Study a host-oriented session weave over one loaded LCM page without inventing a live stream or drawing unsupported causal links.
+
+## Entry condition
+
+Historical design review only; this rejected plate supplies no production runtime entry condition.
+
+## Visible state
+
+The plate places hosts across the view, session strands in the weave, open/recorded end caps, loaded-page authority, and a separate causal evidence list.
+
+## Supported interactions
+
+None are executed by this overview still. Session hover, selection, and zoomed time range are separate sequence states.
+
+## Truth boundary
+
+This is a synthetic concept, not loaded-page runtime evidence. Horizontal strands, live-tail language, and aggregate host-pair counts contradict the intended production semantics.
+
+## Lifecycle history
+
+Rejected for the three recorded still defects. Loom v6 clears those blockers, and v7 is the current shared-shell plate; version order alone did not determine this status.

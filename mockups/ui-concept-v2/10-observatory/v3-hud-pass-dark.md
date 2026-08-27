@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Observatory: v3 hud pass dark
 
 - **Asset:** `v3-hud-pass-dark.png`

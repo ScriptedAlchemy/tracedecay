@@ -1,7 +1,11 @@
+---
+design_status: superseded
+---
+
 # Brain: v4 measured registry
 
 - **Asset:** `v4-measured-registry.png`
-- **Lifecycle:** `current`
+- **Lifecycle:** `superseded`
 
 ## Intent
 
@@ -26,4 +30,4 @@ This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establi
 
 ## Lifecycle history
 
-Pre-Task-1 canonical selection for Brain. Lifecycle is an explicit editorial decision; the version stem records iteration order only.
+Former pre-Task-1 canonical selection for Brain; superseded by `v10-activity-becomes-synapse`, which adds the admitted-activity state and the shared Brain/Loom shell. Lifecycle is an explicit editorial decision; the version stem records iteration order only.

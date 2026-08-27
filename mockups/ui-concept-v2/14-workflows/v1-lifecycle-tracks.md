@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Workflows: v1 lifecycle tracks
 
 - **Asset:** `v1-lifecycle-tracks.png`

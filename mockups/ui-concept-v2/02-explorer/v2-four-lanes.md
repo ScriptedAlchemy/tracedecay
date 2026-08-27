@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Explorer: v2 four lanes
 
 - **Asset:** `v2-four-lanes.png`

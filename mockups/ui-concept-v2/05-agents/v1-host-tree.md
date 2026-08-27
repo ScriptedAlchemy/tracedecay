@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Agents: v1 host tree
 
 - **Asset:** `v1-host-tree.png`

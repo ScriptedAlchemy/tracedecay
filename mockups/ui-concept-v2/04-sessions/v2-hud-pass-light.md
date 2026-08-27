@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Sessions: v2 hud pass light
 
 - **Asset:** `v2-hud-pass-light.png`

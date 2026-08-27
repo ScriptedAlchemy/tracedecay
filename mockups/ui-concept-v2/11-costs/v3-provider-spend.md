@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Costs: v3 provider spend
 
 - **Asset:** `v3-provider-spend.png`

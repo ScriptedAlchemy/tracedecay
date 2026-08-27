@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Delivery: v1 recency field
 
 - **Asset:** `v1-recency-field.png`

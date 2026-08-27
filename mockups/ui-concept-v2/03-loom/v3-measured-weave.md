@@ -1,7 +1,11 @@
+---
+design_status: superseded
+---
+
 # Loom: v3 measured weave
 
 - **Asset:** `v3-measured-weave.png`
-- **Lifecycle:** `current`
+- **Lifecycle:** `superseded`
 
 ## Intent
 
@@ -26,4 +30,4 @@ This is a `CONCEPT / SYNTHETIC` lookbook plate, not runtime evidence. It establi
 
 ## Lifecycle history
 
-Pre-Task-1 canonical selection for Loom. Lifecycle is an explicit editorial decision; the version stem records iteration order only.
+Former pre-Task-1 canonical selection for Loom; superseded by `v7-host-weave-overview`, which adds vertical host strands, truthful end states, and the shared Brain/Loom shell. Lifecycle is an explicit editorial decision; the version stem records iteration order only.

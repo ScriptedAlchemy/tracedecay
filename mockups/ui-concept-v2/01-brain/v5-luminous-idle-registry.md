@@ -1,3 +1,7 @@
+---
+design_status: rejected
+---
+
 # Brain: v5 luminous idle registry
 
 - **Asset:** `v5-luminous-idle-registry.png`

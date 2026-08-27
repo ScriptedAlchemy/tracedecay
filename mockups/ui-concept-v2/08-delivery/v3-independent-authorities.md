@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Delivery: v3 independent authorities
 
 - **Asset:** `v3-independent-authorities.png`

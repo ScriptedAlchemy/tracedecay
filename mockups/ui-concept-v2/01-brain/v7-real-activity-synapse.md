@@ -1,3 +1,7 @@
+---
+design_status: rejected
+---
+
 # Brain: v7 real activity synapse
 
 - **Asset:** `v7-real-activity-synapse.png`

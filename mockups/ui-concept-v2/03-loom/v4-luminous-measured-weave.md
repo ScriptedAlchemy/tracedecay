@@ -1,3 +1,7 @@
+---
+design_status: rejected
+---
+
 # Loom: v4 luminous measured weave
 
 - **Asset:** `v4-luminous-measured-weave.png`

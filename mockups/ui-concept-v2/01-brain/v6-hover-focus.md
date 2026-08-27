@@ -1,3 +1,7 @@
+---
+design_status: rejected
+---
+
 # Brain: v6 hover focus
 
 - **Asset:** `v6-hover-focus.png`

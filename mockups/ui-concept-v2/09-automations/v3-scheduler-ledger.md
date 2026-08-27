@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Automations: v3 scheduler ledger
 
 - **Asset:** `v3-scheduler-ledger.png`

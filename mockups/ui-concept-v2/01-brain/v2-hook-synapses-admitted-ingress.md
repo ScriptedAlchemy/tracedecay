@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Brain: v2 hook synapses admitted ingress
 
 - **Asset:** `v2-hook-synapses-admitted-ingress.png`

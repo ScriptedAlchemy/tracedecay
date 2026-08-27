@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Automations: v1 cron strip
 
 - **Asset:** `v1-cron-strip.png`

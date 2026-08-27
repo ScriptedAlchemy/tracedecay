@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Settings: v4 effective only
 
 - **Asset:** `v4-effective-only.png`

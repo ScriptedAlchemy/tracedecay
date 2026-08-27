@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Observatory: v3 hud pass light
 
 - **Asset:** `v3-hud-pass-light.png`

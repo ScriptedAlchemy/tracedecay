@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Work: v2 six cameras
 
 - **Asset:** `v2-six-cameras.png`

@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Code: v1 cortex
 
 - **Asset:** `v1-cortex.png`

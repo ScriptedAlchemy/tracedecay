@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Settings: v2 effective values
 
 - **Asset:** `v2-effective-values.png`

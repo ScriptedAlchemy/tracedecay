@@ -1,3 +1,7 @@
+---
+design_status: rejected
+---
+
 # Brain: v2 hook synapses meat rejected
 
 - **Asset:** `v2-hook-synapses-meat-rejected.png`

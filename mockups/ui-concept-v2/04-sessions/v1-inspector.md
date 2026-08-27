@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Sessions: v1 inspector
 
 - **Asset:** `v1-inspector.png`

@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Observatory: v2 overview stack
 
 - **Asset:** `v2-overview-stack.png`

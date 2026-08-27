@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Sessions: v3 provenance inspector
 
 - **Asset:** `v3-provenance-inspector.png`

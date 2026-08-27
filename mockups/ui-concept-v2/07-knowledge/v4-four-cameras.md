@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Knowledge: v4 four cameras
 
 - **Asset:** `v4-four-cameras.png`

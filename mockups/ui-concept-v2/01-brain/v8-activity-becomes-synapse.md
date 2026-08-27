@@ -1,4 +1,11 @@
+---
+design_status: rejected
+---
+
 # 01 Brain — v8 activity becomes synapse
+
+- **Asset:** `v8-activity-becomes-synapse.png`
+- **Lifecycle:** `rejected`
 
 Lookbook still. CONCEPT / SYNTHETIC. Not a visual-audit golden. Not acceptance.
 
@@ -43,3 +50,27 @@ loading · partial · stale · offline · unavailable · denied · unsupported_s
 - `streamId: toolcall.main` on the PNG is not a wire stream id.
 - Recency rendered as chips; the field itself is the recency axis.
 - Background dotted edges are decorative. Only hub→checkout edges exist.
+
+## Intent
+
+Study how one admitted activity becomes a project synapse and propagates only over an evidenced checkout-to-repository relation.
+
+## Entry condition
+
+Historical design review only; this rejected plate supplies no production runtime entry condition.
+
+## Visible state
+
+An unscoped project registry receives one ToolCall pulse, blooms the exact project, and carries one-third energy to its repository hub while sibling projects remain dark.
+
+## Supported interactions
+
+None are executed by this still. Hover, repository zoom, and scoped-project views are separate sequence states.
+
+## Truth boundary
+
+This is a synthetic browser-projection concept, not runtime evidence. Its non-wire stream id, chip-based recency treatment, and decorative edges prevent it from representing the production contract.
+
+## Lifecycle history
+
+Rejected for the three recorded still defects. Brain v9 clears those blockers, and v10 is the current shared-shell plate; version order alone did not determine this status.

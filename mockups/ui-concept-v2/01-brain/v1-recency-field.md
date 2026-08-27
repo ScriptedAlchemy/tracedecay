@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Brain: v1 recency field
 
 - **Asset:** `v1-recency-field.png`

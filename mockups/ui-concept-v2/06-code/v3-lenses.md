@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Code: v3 lenses
 
 - **Asset:** `v3-lenses.png`

@@ -1,3 +1,7 @@
+---
+design_status: current
+---
+
 # Workflows: v3 definition ledger
 
 - **Asset:** `v3-definition-ledger.png`

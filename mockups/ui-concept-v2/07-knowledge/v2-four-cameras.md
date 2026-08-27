@@ -1,3 +1,7 @@
+---
+design_status: superseded
+---
+
 # Knowledge: v2 four cameras
 
 - **Asset:** `v2-four-cameras.png`
