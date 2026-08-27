@@ -32,7 +32,7 @@ Current (highest `vN`) plate per channel:
 | 03 | 03-loom/v3-measured-weave.png | Time down, hosts across, thickness = messages. Causal crossings listed, not drawn. Playback over loaded LCM page. CONCEPT/SYNTHETIC. |
 | 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
 | 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
-| 06 | 06-code/v1-cortex.png | Cortex → Trace → Core lens on a dark optical field. |
+| 06 | 06-code/v3-lenses.png | CORTEX/TRACE/CORE with direct labels. Graph totals, symbol path, strata, freshness, diagnostic warming/stale/unavailable. CONCEPT/SYNTHETIC. |
 | 07 | 07-knowledge/v2-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks, never faded text. |
 | 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
 | 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
