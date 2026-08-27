@@ -89,7 +89,7 @@ pub(super) fn remote_query_result_observation(
     )
 }
 
-const MAX_REGISTERED_REMOTE_NODES: usize = 128;
+pub(crate) const MAX_REGISTERED_REMOTE_NODES: usize = 128;
 const MAX_REGISTERED_REMOTE_CREDENTIALS: usize = 8_192;
 
 #[derive(Clone)]
