@@ -2816,6 +2816,70 @@ function loomTemporalPayload(): Record<string, unknown> {
 }
 
 /* ==========================================================================
+ * GET /api/delivery/overview (delivery_api.rs::overview) — the Delivery
+ * pipeline plate. Local git-authority stages are measured; the stages that
+ * require an external forge authority are modeled `not_published` with the
+ * authority named, which is the honest reading of a local-only daemon and
+ * exactly the state the plate must render without pretending it is zero.
+ * ========================================================================== */
+
+function deliveryOverviewPayload(): Record<string, unknown> {
+  const notPublished = (authority: string) => ({
+    state: 'not_published',
+    reason: `no landed read route serves this projection without ${authority}`,
+    required_authority: authority,
+  });
+  return {
+    changes: {
+      state: 'ready',
+      value: {
+        schema_version: 'delivery.git-status.v1',
+        repository: '/fast/projects/tracedecay',
+        head: { state: 'attached', branch: 'master', commit: 'a1c3f09'.padEnd(40, '0') },
+        operation: 'none',
+        staged: 3,
+        unstaged: 7,
+        untracked: 2,
+        conflicted: 0,
+        ignored: 41,
+        changed_paths: [
+          'dashboard/src/theme/tokens.css',
+          'dashboard/src/workspaces/observatory/ObservatoryPage.tsx',
+          'crates/tracedecay/src/daemon/doctor_kernel.rs',
+        ],
+      },
+    },
+    commits: {
+      state: 'ready',
+      value: {
+        truncated: false,
+        items: Array.from({ length: 5 }, (_, i) => ({
+          commit: `${(0xb2d4e0 + i * 0x73).toString(16)}`.padEnd(40, '0'),
+          subject: pick(LOOM_TITLES, i),
+          author_name: 'Zack Jackson',
+          author_email: 'zack@example.com',
+          author_at_micros: nowMicros - i * 5_400_000_000,
+          committer_at_micros: nowMicros - i * 5_400_000_000,
+        })),
+      },
+    },
+    generation_freshness: {
+      state: 'ready',
+      value: {
+        comparison: 'current',
+        head_commit: 'a1c3f09'.padEnd(40, '0'),
+        indexed_commit: 'a1c3f09'.padEnd(40, '0'),
+      },
+    },
+    pull_requests: notPublished('github_read_authority'),
+    review_comments: notPublished('github_read_authority'),
+    ci_checks: notPublished('ci_provider_read_authority'),
+    releases: notPublished('github_read_authority'),
+    failure_localization: notPublished('ci_provider_read_authority'),
+  };
+}
+
+/* ==========================================================================
  * GET /api/plugins/graph/strata (graph_structure_api.rs::strata) — the CORTEX
  * relief's one reading: file depth strata plus per-directory boundary totals,
  * wrapped in the measurement-grade `StructureReadV1` union. Modeled as a real
@@ -3083,6 +3147,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/strata': envelope(strataPayload()),
   // Loom's canonical temporal read.
   '/api/loom/temporal': envelope(loomTemporalPayload()),
+  // Delivery's pipeline overview: local git stages measured, forge-authority
+  // stages explicitly not_published.
+  '/api/delivery/overview': envelope(deliveryOverviewPayload()),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),

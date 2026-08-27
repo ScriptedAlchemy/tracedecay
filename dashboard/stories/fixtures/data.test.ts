@@ -36,6 +36,7 @@ import {
   AutomationSchedulerStatusV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
   CostsReadModelV1Schema,
+  DeliveryOverviewV1Schema,
   DoctorFindingsPayloadV1Schema,
   DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
@@ -111,6 +112,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   // variant carries `StrataMeasurementV1`.
   '/api/plugins/graph/strata': DashboardEnvelopeV1Schema(StructureReadV12Schema),
   '/api/loom/temporal': DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
+  '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
