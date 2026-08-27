@@ -146,7 +146,7 @@
       "semantic_weight_ppm": 0
     },
     {
-      "calibration_threshold_ppm": 400000,
+      "calibration_threshold_ppm": 635000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-conservative",
@@ -154,7 +154,7 @@
       "semantic_weight_ppm": 250000
     },
     {
-      "calibration_threshold_ppm": 400000,
+      "calibration_threshold_ppm": 635000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-reranked",
