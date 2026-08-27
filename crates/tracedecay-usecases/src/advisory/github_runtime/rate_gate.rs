@@ -70,18 +70,19 @@ impl GitHubRateLimitTrackerV1 {
                 return GitHubRequestAdmissionV1::Unavailable;
             };
             if state
-                .checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.reset_at.0 <= now.0)
-            {
-                state.checkpoint = None;
-                state.unknown_probe_failed_closed = false;
-            }
-            if state
                 .blocked_until
                 .is_some_and(|blocked_until| blocked_until.0 <= now.0)
             {
                 state.blocked_until = None;
+            }
+            if state.blocked_until.is_none()
+                && state
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.reset_at.0 <= now.0)
+            {
+                state.checkpoint = None;
+                state.unknown_probe_failed_closed = false;
             }
             if let Some(blocked_until) = state.blocked_until {
                 state.checkpoint.as_ref().cloned().map_or(
@@ -354,6 +355,28 @@ mod tests {
         assert_eq!(blocked.reset_at, UtcMicros(2_000));
         assert!(matches!(
             Arc::clone(&tracker).acquire(UtcMicros(2_000)),
+            GitHubRequestAdmissionV1::Granted(_)
+        ));
+    }
+
+    #[test]
+    fn secondary_limit_remains_typed_after_the_primary_window_expires() {
+        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
+        tracker.record(&checkpoint(4_000, 3_000));
+        let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
+        permit.finish(Some(&checkpoint(3_999, 3_000)), Some(UtcMicros(6_000)));
+
+        for now in [UtcMicros(3_000), UtcMicros(5_999)] {
+            let GitHubRequestAdmissionV1::RateLimited(blocked) = Arc::clone(&tracker).acquire(now)
+            else {
+                panic!("secondary limit must remain typed through its deadline");
+            };
+            assert_eq!(blocked.limit, 5_000);
+            assert_eq!(blocked.remaining, 3_999);
+            assert_eq!(blocked.reset_at, UtcMicros(6_000));
+        }
+        assert!(matches!(
+            Arc::clone(&tracker).acquire(UtcMicros(6_000)),
             GitHubRequestAdmissionV1::Granted(_)
         ));
     }
