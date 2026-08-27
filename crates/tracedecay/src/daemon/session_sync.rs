@@ -131,6 +131,15 @@ impl DaemonSessionSyncService {
         context: Arc<SessionSyncProjectContext>,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncOutcomeV1 {
+        if crate::daemon::session_ingest_disabled() {
+            tracing::info!(
+                event = "session_sync_ingest_disabled",
+                "session sync refused: TRACEDECAY_SESSION_INGEST_DISABLED is set"
+            );
+            return SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_ingest_disabled_by_env",
+            };
+        }
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
         match context.registry.read_session_sync_journal(&key).await {
@@ -773,7 +782,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::measure]
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let project_gate = self.project_gate(control.scope());
         let _project = project_gate.lock().await;
@@ -789,19 +797,31 @@ impl DaemonSessionSyncService {
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::measure_block!("session_sync.execute", self.execute_request(request).await)
+            hotpath::future!(
+                self.execute_request(request),
+                label = "daemon.session_sync.execute"
+            )
+            .await
         })
     }
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::measure_block!("session_sync.status", self.status_request(control).await)
+            hotpath::future!(
+                self.status_request(control),
+                label = "daemon.session_sync.status"
+            )
+            .await
         })
     }
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::measure_block!("session_sync.cancel", self.cancel_request(control).await)
+            hotpath::future!(
+                self.cancel_request(control),
+                label = "daemon.session_sync.cancel"
+            )
+            .await
         })
     }
 
