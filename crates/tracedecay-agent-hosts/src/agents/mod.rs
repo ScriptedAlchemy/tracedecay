@@ -1460,14 +1460,20 @@ fn safe_write_bytes_file_guarded(
     safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
 }
 
-/// Run a strict UTF-8 read-transform-write while holding the host-file lock.
+pub(crate) enum TextFileMutation {
+    Unchanged,
+    Write(String),
+    Remove,
+}
+
+/// Run a strict UTF-8 read-transform-mutate while holding the host-file lock.
 ///
 /// `None` means the transform observed no semantic change. A replacement is
 /// published only after its write intent and exact source snapshot remain
 /// valid, including content, permissions, ACLs, and filesystem identity.
 pub(crate) fn update_text_file_transactionally<T>(
     path: &Path,
-    update: impl FnOnce(&str) -> Result<(T, Option<String>)>,
+    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
 ) -> Result<T> {
     let _lock = lock_host_file_write(path)?;
     let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
@@ -1481,11 +1487,45 @@ pub(crate) fn update_text_file_transactionally<T>(
         }
         None => "",
     };
-    let (output, replacement) = update(existing)?;
-    if let Some(replacement) = replacement {
-        safe_write_bytes_file_from_snapshot(path, replacement.as_bytes(), None, None, &observed)?;
+    let (output, mutation) = update(existing)?;
+    match mutation {
+        TextFileMutation::Unchanged => {}
+        TextFileMutation::Write(replacement) => {
+            safe_write_bytes_file_from_snapshot(
+                path,
+                replacement.as_bytes(),
+                None,
+                None,
+                &observed,
+            )?;
+        }
+        TextFileMutation::Remove => {
+            remove_host_file_from_snapshot(path, &observed)?;
+        }
     }
     Ok(output)
+}
+
+fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> Result<()> {
+    if matches!(observed, HostFileSnapshot::Missing) {
+        return Ok(());
+    }
+    persist_host_config_remove_intent(path)?;
+    tracedecay_private_fs::framed_log::remove_conditionally(
+        path,
+        || {
+            #[cfg(test)]
+            test_pause_host_config_write(path, TestHostConfigWriteBoundary::Publication);
+        },
+        |displaced| {
+            let displaced = capture_host_file_snapshot(displaced)?;
+            Ok(displaced.same_after_move(observed))
+        },
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to conditionally remove {}: {error}", path.display()),
+    })
 }
 
 fn safe_write_bytes_file_from_snapshot(

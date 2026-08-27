@@ -620,6 +620,68 @@ fn claude_prompt_install_refuses_a_symlink_without_touching_its_target() {
     assert_eq!(std::fs::read(&outside).unwrap(), b"operator rules\n");
 }
 
+#[test]
+fn claude_uninstall_refuses_a_concurrent_edit_before_nonempty_rewrite() {
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    std::fs::write(&claude_md, b"operator rules\n").unwrap();
+    install_claude_md_rules(&claude_md).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&claude_md);
+    let writer_path = claude_md.clone();
+    let remover = std::thread::spawn(move || {
+        uninstall_claude_md_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Claude edit\n";
+    std::fs::write(&claude_md, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), foreign);
+}
+
+#[test]
+fn claude_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    install_claude_md_rules(&claude_md).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&claude_md);
+    let writer_path = claude_md.clone();
+    let remover = std::thread::spawn(move || {
+        uninstall_claude_md_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Claude edit\n";
+    std::fs::write(&claude_md, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&claude_md).unwrap(), foreign);
+}
+
+#[test]
+fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
+    let root = tempfile::tempdir().unwrap();
+    let nonempty = root.path().join("nonempty.md");
+    std::fs::write(&nonempty, b"operator rules\n").unwrap();
+    install_claude_md_rules(&nonempty).unwrap();
+
+    uninstall_claude_md_rules(&nonempty).unwrap();
+
+    assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
+
+    let empty = root.path().join("empty.md");
+    install_claude_md_rules(&empty).unwrap();
+
+    uninstall_claude_md_rules(&empty).unwrap();
+
+    assert!(!empty.exists());
+}
+
 /// Every managed subagent definition the plugin ships must have valid
 /// frontmatter and reference tracedecay.
 #[test]

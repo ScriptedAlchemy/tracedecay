@@ -166,6 +166,91 @@ fn steering_install_refuses_a_symlink_without_touching_its_target() {
     assert_eq!(std::fs::read(&outside).unwrap(), b"operator rules\n");
 }
 
+#[test]
+fn steering_uninstall_refuses_a_concurrent_edit_before_nonempty_rewrite() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    std::fs::write(&steering, b"operator rules\n").unwrap();
+    install_steering_rules(&steering).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&steering);
+    let writer_path = steering.clone();
+    let remover = std::thread::spawn(move || {
+        remove_steering_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Kiro edit\n";
+    std::fs::write(&steering, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), foreign);
+}
+
+#[test]
+fn steering_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    install_steering_rules(&steering).unwrap();
+    let pause = crate::agents::pause_next_host_config_write_at_publication(&steering);
+    let writer_path = steering.clone();
+    let remover = std::thread::spawn(move || {
+        remove_steering_rules(&writer_path).map_err(|error| error.to_string())
+    });
+    pause.wait_until_reached();
+
+    let foreign = b"foreign Kiro edit\n";
+    std::fs::write(&steering, foreign).unwrap();
+    pause.resume();
+    let error = remover.join().unwrap().unwrap_err();
+
+    assert!(error.contains("changed since it was read"), "{error}");
+    assert_eq!(std::fs::read(&steering).unwrap(), foreign);
+}
+
+#[test]
+fn steering_empty_deletion_requires_a_persisted_remove_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    install_steering_rules(&steering).unwrap();
+    let original = std::fs::read(&steering).unwrap();
+    let blocked_intent_root = root.path().join("blocked-intent-root");
+    std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
+
+    let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
+        remove_steering_rules(&steering)
+    })
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("could not create host config remove intent directory"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&steering).unwrap(), original);
+}
+
+#[test]
+fn steering_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
+    let root = tempfile::tempdir().unwrap();
+    let nonempty = root.path().join("nonempty.md");
+    std::fs::write(&nonempty, b"operator rules\n").unwrap();
+    install_steering_rules(&nonempty).unwrap();
+
+    remove_steering_rules(&nonempty).unwrap();
+
+    assert_eq!(std::fs::read(&nonempty).unwrap(), b"operator rules\n");
+
+    let empty = root.path().join("empty.md");
+    install_steering_rules(&empty).unwrap();
+
+    remove_steering_rules(&empty).unwrap();
+
+    assert!(!empty.exists());
+}
+
 /// Install a fake `kiro-cli` that appends each invocation's argv to `log` and
 /// then performs `body`.
 #[cfg(unix)]
