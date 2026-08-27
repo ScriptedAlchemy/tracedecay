@@ -35,7 +35,7 @@ Current (highest `vN`) plate per channel:
 | 06 | 06-code/v1-cortex.png | Cortex → Trace → Core lens on a dark optical field. |
 | 07 | 07-knowledge/v2-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks, never faded text. |
 | 08 | 08-delivery/v1-recency-field.png | Same recency field as Brain; bodies are branches and PRs. |
-| 09 | 09-automations/v1-cron-strip.png | Schedule strip, run history, artifacts, approvals. |
+| 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
 | 10 | 10-observatory/v2-overview-stack.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. |
 | 11 | 11-costs/v1-provider-burn.png | Provider/model spend, tokens, latency. Segmented bars, not pies. |
 | 12 | 12-settings/v2-effective-values.png | Effective values only. Provenance named. No invented layer cake. |
