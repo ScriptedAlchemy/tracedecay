@@ -9,19 +9,19 @@ This plate studies workflow lifecycle tracks.
 
 ## Entry condition
 
-Historical design review: track-like definition status.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses transition reading.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It predates immutable definitions, pinned digests, and CAS refusal detail.; it asserts no shipping control.
+No shipping interaction is asserted. It predates immutable definitions, pinned digests, and CAS refusal detail.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This lifecycle tracks study is concept art only. It predates immutable definitions, pinned digests, and CAS refusal detail. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

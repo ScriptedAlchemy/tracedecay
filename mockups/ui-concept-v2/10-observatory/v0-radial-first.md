@@ -9,19 +9,19 @@ This plate studies radial observatory entry.
 
 ## Entry condition
 
-Historical design review: radial source-family visualization.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses center-out source scanning.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It implies aggregate health where coverage must stay separate.; it asserts no shipping control.
+No shipping interaction is asserted. It implies aggregate health where coverage must stay separate.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This radial first study is concept art only. It implies aggregate health where coverage must stay separate. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

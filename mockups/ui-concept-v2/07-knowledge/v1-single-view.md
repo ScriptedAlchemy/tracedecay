@@ -9,19 +9,19 @@ This plate studies consolidated knowledge view.
 
 ## Entry condition
 
-Historical design review: one combined knowledge panel.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses unified reading.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It collapses the four independent authorities.; it asserts no shipping control.
+No shipping interaction is asserted. It collapses the four independent authorities.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This single view study is concept art only. It collapses the four independent authorities. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

@@ -9,19 +9,19 @@ This plate studies dark agents hud.
 
 ## Entry condition
 
-Historical design review: dark chrome around early agent panels.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses hierarchy contrast review.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It does not establish analytics or work-graph responses.; it asserts no shipping control.
+No shipping interaction is asserted. It does not establish analytics or work-graph responses.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hud pass dark study is concept art only. It does not establish analytics or work-graph responses. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

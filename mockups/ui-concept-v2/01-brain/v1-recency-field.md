@@ -9,19 +9,19 @@ This plate studies recency-first registry geometry.
 
 ## Entry condition
 
-Historical design review: buckets organized by age.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses reading ageing buckets.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It lacks the selected indexed-mass and authority distinctions.; it asserts no shipping control.
+No shipping interaction is asserted. It lacks the selected indexed-mass and authority distinctions.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This recency field study is concept art only. It lacks the selected indexed-mass and authority distinctions. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

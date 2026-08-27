@@ -9,19 +9,19 @@ This plate studies light explorer hud.
 
 ## Entry condition
 
-Historical design review: light shell around early lanes.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses lane-label contrast review.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It carries no lifecycle or selected-result state.; it asserts no shipping control.
+No shipping interaction is asserted. It carries no lifecycle or selected-result state.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hud pass light study is concept art only. It carries no lifecycle or selected-result state. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

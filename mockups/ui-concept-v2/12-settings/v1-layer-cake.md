@@ -9,19 +9,19 @@ This plate studies configuration layer-cake metaphor.
 
 ## Entry condition
 
-Historical design review: stacked configuration layers.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses override drill-in.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is Effective-values wire data cannot prove per-key provenance.; it asserts no shipping control.
+No shipping interaction is asserted. Effective-values wire data cannot prove per-key provenance.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This layer cake study is concept art only. Effective-values wire data cannot prove per-key provenance. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

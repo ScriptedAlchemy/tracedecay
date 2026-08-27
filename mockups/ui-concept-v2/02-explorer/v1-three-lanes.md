@@ -9,19 +9,19 @@ This plate studies compact three-source comparison.
 
 ## Entry condition
 
-Historical design review: three parallel result lanes.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses cross-source reading.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It cannot show the semantic lane or its typed absence.; it asserts no shipping control.
+No shipping interaction is asserted. It cannot show the semantic lane or its typed absence.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This three lanes study is concept art only. It cannot show the semantic lane or its typed absence. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

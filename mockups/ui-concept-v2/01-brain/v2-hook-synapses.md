@@ -9,19 +9,19 @@ This plate studies free-form hook-synapse network.
 
 ## Entry condition
 
-Historical design review: connected hook nodes without registry grouping.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses node-to-node inspection.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It has no scoped-project rule or independent Feed/Authority disclosure.; it asserts no shipping control.
+No shipping interaction is asserted. It has no scoped-project rule or independent Feed/Authority disclosure.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hook synapses study is concept art only. It has no scoped-project rule or independent Feed/Authority disclosure. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

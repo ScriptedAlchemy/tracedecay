@@ -9,19 +9,19 @@ This plate studies light code hud.
 
 ## Entry condition
 
-Historical design review: light graph-canvas chrome.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses graph label review.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It has no selected lens, symbol path, or index response.; it asserts no shipping control.
+No shipping interaction is asserted. It has no selected lens, symbol path, or index response.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hud pass light study is concept art only. It has no selected lens, symbol path, or index response. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

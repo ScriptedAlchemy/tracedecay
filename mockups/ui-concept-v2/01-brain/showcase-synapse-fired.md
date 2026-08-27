@@ -9,19 +9,19 @@ This plate studies single firing synapse as an expressive brain hero.
 
 ## Entry condition
 
-Historical design review: one bright synapse in an otherwise unqualified field.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses suggests event inspection.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is No project identity, admission receipt, Feed state, or Authority state is pictured.; it asserts no shipping control.
+No shipping interaction is asserted. No project identity, admission receipt, Feed state, or Authority state is pictured.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This synapse fired study is concept art only. No project identity, admission receipt, Feed state, or Authority state is pictured. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

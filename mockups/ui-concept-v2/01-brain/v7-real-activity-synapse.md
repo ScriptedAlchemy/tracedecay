@@ -9,19 +9,19 @@ This plate studies activity synapse treatment.
 
 ## Entry condition
 
-Historical design review: bright synapse/pulse centered on an event.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses proposed one-hop activity trace.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It lacks separate Feed and Authority disclosure for an admitted activity claim.; it asserts no shipping control.
+No shipping interaction is asserted. It lacks separate Feed and Authority disclosure for an admitted activity claim.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This real activity synapse study is concept art only. It lacks separate Feed and Authority disclosure for an admitted activity claim. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

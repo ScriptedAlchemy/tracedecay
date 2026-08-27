@@ -9,19 +9,19 @@ This plate studies hook ingress as a synapse narrative.
 
 ## Entry condition
 
-Historical design review: ingress marks around a hook edge.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses following a proposed event.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It cannot establish the exact admitted project identity or permitted hop.; it asserts no shipping control.
+No shipping interaction is asserted. It cannot establish the exact admitted project identity or permitted hop.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hook synapses admitted ingress study is concept art only. It cannot establish the exact admitted project identity or permitted hop. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

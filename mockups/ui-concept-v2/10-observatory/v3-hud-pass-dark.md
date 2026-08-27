@@ -9,19 +9,19 @@ This plate studies dark observatory hud.
 
 ## Entry condition
 
-Historical design review: dark overview-stack chrome.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses severity contrast review.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It does not make the five sources independently typed.; it asserts no shipping control.
+No shipping interaction is asserted. It does not make the five sources independently typed.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hud pass dark study is concept art only. It does not make the five sources independently typed. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

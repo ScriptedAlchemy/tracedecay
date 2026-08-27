@@ -10,7 +10,7 @@ Route: `/work`.
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
 - [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/work/WorkPage.tsx` uses `useWorkGraphViews`, `useWorkAttempts`, and `useWorkTopology`; `WorkProjectionSwitcher.tsx`, `WorkBoard.tsx`, and `workViewsModel.ts` bind projections to one graph read.
+- At `975a0acb`, `dashboard/src/workspaces/work/WorkPage.tsx` uses `useWorkGraphViews`, `useWorkAttempts`, and `useWorkTopology`; `dashboard/src/workspaces/work/views/WorkProjectionSwitcher.tsx`, `WorkBoard.tsx`, and `workViewsModel.ts` bind projections to one graph read.
 - The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix

@@ -9,19 +9,19 @@ This plate studies compressed scheduler strip.
 
 ## Entry condition
 
-Historical design review: narrow cron-like schedule marks.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses due-time scanning.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It cannot show the independent scheduler, jobs, skills, receipts, runs, and artifacts.; it asserts no shipping control.
+No shipping interaction is asserted. It cannot show the independent scheduler, jobs, skills, receipts, runs, and artifacts.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This cron strip study is concept art only. It cannot show the independent scheduler, jobs, skills, receipts, runs, and artifacts. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

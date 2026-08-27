@@ -9,19 +9,19 @@ This plate studies focused neighborhood treatment.
 
 ## Entry condition
 
-Historical design review: bright focused neighborhood with outsiders dimmed.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses proposed hover inspection.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is The still does not prove the supported inspect path and risks equating hover/focus with activity.; it asserts no shipping control.
+No shipping interaction is asserted. The still does not prove the supported inspect path and risks equating hover/focus with activity.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hover focus study is concept art only. The still does not prove the supported inspect path and risks equating hover/focus with activity. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

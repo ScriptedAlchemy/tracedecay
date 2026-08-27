@@ -10,7 +10,7 @@ Route: `/delivery`.
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
 - [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/delivery/DeliveryPage.tsx`, `DeliveryField.tsx`, `field.ts`, and `time.ts` are the delivery-field authority; its DOM test fixes independent local/provider behavior.
+- At `975a0acb`, `dashboard/src/workspaces/delivery/DeliveryPage.tsx`, `DeliveryField.tsx`, and `field.ts` are the delivery-field authority; `time.test.ts` is test coverage, not a runtime authority.
 - The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
 
 ## Canonical semantic-state matrix

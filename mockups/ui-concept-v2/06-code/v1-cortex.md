@@ -9,19 +9,19 @@ This plate studies cortex-first graph overview.
 
 ## Entry condition
 
-Historical design review: single cortex-like graph field.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses neighborhood exploration.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It predates direct lens, node-evidence, freshness, and diagnostic boundaries.; it asserts no shipping control.
+No shipping interaction is asserted. It predates direct lens, node-evidence, freshness, and diagnostic boundaries.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This cortex study is concept art only. It predates direct lens, node-evidence, freshness, and diagnostic boundaries. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

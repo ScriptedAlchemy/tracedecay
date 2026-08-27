@@ -9,19 +9,19 @@ This plate studies luminous treatment for an idle registry.
 
 ## Entry condition
 
-Historical design review: ambient glow over an otherwise idle field.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses visual inspection while idle.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is Glow can be misread as activity or health; the plate is rejected.; it asserts no shipping control.
+No shipping interaction is asserted. Glow can be misread as activity or health; the plate is rejected.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This luminous idle registry study is concept art only. Glow can be misread as activity or health; the plate is rejected. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

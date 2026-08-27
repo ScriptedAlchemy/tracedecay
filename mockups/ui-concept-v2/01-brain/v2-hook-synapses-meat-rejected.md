@@ -9,19 +9,19 @@ This plate studies organic hook-synapse metaphor.
 
 ## Entry condition
 
-Historical design review: meat-like organic material around hook nodes.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses tactile graph inspection.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It obscures named authorities and typed states; explicit rejection is retained.; it asserts no shipping control.
+No shipping interaction is asserted. It obscures named authorities and typed states; explicit rejection is retained.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hook synapses meat rejected study is concept art only. It obscures named authorities and typed states; explicit rejection is retained. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

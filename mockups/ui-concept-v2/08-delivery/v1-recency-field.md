@@ -9,19 +9,19 @@ This plate studies delivery recency field.
 
 ## Entry condition
 
-Historical design review: repository marks grouped by age.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses age-bucket comparison.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It cannot distinguish local Git from provider evidence.; it asserts no shipping control.
+No shipping interaction is asserted. It cannot distinguish local Git from provider evidence.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This recency field study is concept art only. It cannot distinguish local Git from provider evidence. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

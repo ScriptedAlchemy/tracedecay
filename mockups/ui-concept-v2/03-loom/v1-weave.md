@@ -9,19 +9,19 @@ This plate studies initial time-and-host weave.
 
 ## Entry condition
 
-Historical design review: broad strands across a time field.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses strand comparison.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It predates explicit recorded/open/unknown and loaded-page boundaries.; it asserts no shipping control.
+No shipping interaction is asserted. It predates explicit recorded/open/unknown and loaded-page boundaries.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This weave study is concept art only. It predates explicit recorded/open/unknown and loaded-page boundaries. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

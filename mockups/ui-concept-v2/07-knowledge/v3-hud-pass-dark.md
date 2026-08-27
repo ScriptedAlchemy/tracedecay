@@ -9,19 +9,19 @@ This plate studies dark knowledge hud.
 
 ## Entry condition
 
-Historical design review: dark early camera chrome.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses camera contrast review.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It has no authoritative camera coverage.; it asserts no shipping control.
+No shipping interaction is asserted. It has no authoritative camera coverage.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This hud pass dark study is concept art only. It has no authoritative camera coverage. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

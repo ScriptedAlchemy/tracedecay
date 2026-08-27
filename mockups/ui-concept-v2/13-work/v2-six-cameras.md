@@ -9,19 +9,19 @@ This plate studies early six-camera layout.
 
 ## Entry condition
 
-Historical design review: six camera tabs/panels.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses projection switching.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It predates explicit shared immutable revision and unavailable-camera state.; it asserts no shipping control.
+No shipping interaction is asserted. It predates explicit shared immutable revision and unavailable-camera state.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This six cameras study is concept art only. It predates explicit shared immutable revision and unavailable-camera state. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 

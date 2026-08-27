@@ -9,19 +9,19 @@ This plate studies early four-camera layout.
 
 ## Entry condition
 
-Historical design review: four camera apertures.
+Historical design review only; this plate supplies no production runtime entry condition.
 
 ## Visible state
 
-The image uses camera switching.
+This synthetic still preserves that design study for comparison; it is not a current semantic-state plate.
 
 ## Supported interactions
 
-The intended reading is It predates explicit per-camera unavailable, partial, and loading states.; it asserts no shipping control.
+No shipping interaction is asserted. It predates explicit per-camera unavailable, partial, and loading states.
 
 ## Truth boundary
 
-undefined It remains a CONCEPT / SYNTHETIC plate, not evidence of production data, health, freshness, or a live control.
+This four cameras study is concept art only. It predates explicit per-camera unavailable, partial, and loading states. It establishes no production data, authority availability, health, freshness, or live control.
 
 ## Lifecycle history
 
