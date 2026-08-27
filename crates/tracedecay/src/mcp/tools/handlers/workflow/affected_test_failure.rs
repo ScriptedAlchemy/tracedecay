@@ -14,6 +14,7 @@ use super::{
     parse_libtest_output, run_affected_tests_body,
 };
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
     args: &Value,
