@@ -3620,7 +3620,7 @@ mod tests {
                 .profile
                 .minimum_calibrated_feature_micros
                 .get(&RetrieverKind::Semantic),
-            Some(&700_000)
+            Some(&690_000)
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
