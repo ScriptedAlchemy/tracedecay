@@ -2,7 +2,7 @@
 
 ## Scope
 
-Created a same-stem Markdown explainer for each original V2 PNG and one README for each of the fourteen screen folders. No Task 2 PNG was generated, moved, or edited. Later Brain v8-v10 and Loom v5-v7 iterations are intentionally outside this task's 70-asset baseline.
+Created a same-stem Markdown explainer for each original V2 PNG and one README for each of the fourteen screen folders. No Task 2 PNG was generated, moved, or edited.
 
 ## Lifecycle basis
 
@@ -10,64 +10,72 @@ The pre-Task-1 canonical table is the conservative basis: one current plate per 
 
 ## Verification
 
-Executed from the isolated worktree. This literal fail-fast `zsh` check uses the original 70-image baseline (`asset_base`) and the Task 2 sidecar manifest (`task_base`), so later iterations do not enter Task 2 parity or orphan checks. The final diff check covers every Task 2 repair commit after `task_base`.
+Executed from the isolated worktree. The following literal fail-fast `zsh` check scans the current tree, includes the initial Task 2 commit in its PNG-immutability range, scopes every PNG reference to the `## Asset ledger` section, and requires exactly one anchored `design_status:` field per sidecar.
 
 ```zsh
 set -euo pipefail
 root=mockups/ui-concept-v2
-asset_base=4f2352665
-task_base=798c311df
+task_base=798c311df^
 
 png_stems() {
-  git ls-tree -r --name-only "$asset_base" -- "$root" | while IFS= read -r asset; do
-    case "$asset" in *.png) print -r -- "${asset%.png}";; esac
-  done | sort
+  while IFS= read -r asset; do print -r -- "${asset%.png}"; done \
+    < <(find "$root"/[0-9][0-9]-* -maxdepth 1 -type f -name '*.png' -print | sort)
 }
 
 sidecar_stems() {
-  git show --format= --name-only "$task_base" | while IFS= read -r asset; do
-    case "$asset" in
-      "$root"/[0-9][0-9]-*/README.md) ;;
-      "$root"/[0-9][0-9]-*/*.md) print -r -- "${asset%.md}";;
-    esac
-  done | sort
+  while IFS= read -r asset; do print -r -- "${asset%.md}"; done \
+    < <(find "$root"/[0-9][0-9]-* -maxdepth 1 -type f -name '*.md' ! -name README.md -print | sort)
 }
 
-# PNG-to-sidecar parity and no orphan Task 2 sidecars.
+# Full-tree PNG-to-sidecar parity; diff failure proves a missing or orphan sidecar.
 diff -u <(png_stems) <(sidecar_stems)
 
-# Every original PNG appears exactly once in its folder README ledger.
+# Every PNG must appear exactly once inside its screen's Asset ledger.
 for screen in "$root"/[0-9][0-9]-*; do
-  for png in $(git ls-tree -r --name-only "$asset_base" -- "$screen" | grep -F '.png'); do
+  ledger=$(sed -n '/^## Asset ledger$/,/^## Historical decisions$/p' "$screen/README.md")
+  for png in "$screen"/*.png; do
     stem=${png##*/}
     stem=${stem%.png}
-    test "$(grep -F -c "[$stem.png]($stem.png)" "$screen/README.md")" -eq 1
+    count=$(print -r -- "$ledger" | grep -F -c "[$stem.png]($stem.png)" || true)
+    if [ "$count" -ne 1 ]; then
+      print -r -- "FAIL: $screen/README.md indexes $stem.png $count times in Asset ledger"
+      exit 1
+    fi
   done
 done
 
-# Each Task 2 sidecar uses the permitted lifecycle vocabulary and all required sections.
-for sidecar in $(git show --format= --name-only "$task_base" | grep -F "$root/" | grep -F '.md' | grep -Fv README.md); do
-  grep -F '**Lifecycle:** `current`' "$sidecar" >/dev/null ||
-    grep -F '**Lifecycle:** `superseded`' "$sidecar" >/dev/null ||
-    grep -F '**Lifecycle:** `rejected`' "$sidecar" >/dev/null
+# Exactly one anchored lifecycle field, with no other design_status line.
+for sidecar in "$root"/[0-9][0-9]-*/*.md; do
+  [[ ${sidecar:t} == README.md ]] && continue
+  status_lines=$(grep -E -c '^design_status: (current|superseded|rejected)$' "$sidecar" || true)
+  all_status_lines=$(grep -F -c 'design_status:' "$sidecar" || true)
+  if [ "$status_lines" -ne 1 ] || [ "$all_status_lines" -ne 1 ]; then
+    print -r -- "FAIL: $sidecar needs exactly one anchored design_status field"
+    exit 1
+  fi
   for heading in '## Intent' '## Entry condition' '## Visible state' '## Supported interactions' '## Truth boundary' '## Lifecycle history'; do
     grep -Fx "$heading" "$sidecar" >/dev/null
   done
 done
 
-# No Task 2 PNG path or blob changed after the Task 2 base commit.
+# This range starts before the initial Task 2 commit.
 git diff --quiet "$task_base..HEAD" -- ":(glob)$root/**/*.png"
 git diff --check "$task_base..HEAD"
-
-print -r -- "PASS: screens=14 pngs=$(png_stems | wc -l | tr -d ' ') sidecars=$(sidecar_stems | wc -l | tr -d ' '); exact README indexing, lifecycle vocabulary, required sections, and no Task 2 PNG changes."
+print -r -- "PASS: screens=14 pngs=$(png_stems | wc -l | tr -d ' ') sidecars=$(sidecar_stems | wc -l | tr -d ' '); full-tree parity, exact ledger indexing, lifecycle, sections, and PNG immutability verified."
 ```
 
-Output summary:
+## Actual result
+
+The corrected command was run. It fails fast at full-tree ledger indexing:
 
 ```text
-PASS: screens=14 pngs=70 sidecars=70; exact README indexing, lifecycle vocabulary, required sections, and no Task 2 PNG path/blob changes.
+pngs=76 sidecars=76
+parity=0
+FAIL: mockups/ui-concept-v2/01-brain/README.md indexes v10-activity-becomes-synapse.png 0 times in Asset ledger
 ```
+
+Independent preflight counts also found `design_status=0` and `Lifecycle=70`; therefore the anchored `design_status:` invariant would fail after the six missing ledger rows are resolved. PNG immutability passes for `798c311df^..HEAD`.
 
 ## Result
 
-Documentation is limited to `mockups/ui-concept-v2/` and this report. The follow-up commit SHA is in the task handoff.
+This report now records the full-tree invariant and its actual failing state. Per the report-only constraint, it does not alter the later iteration plates, README ledgers, or sidecar metadata needed to make this check pass.
