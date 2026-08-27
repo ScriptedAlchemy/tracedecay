@@ -82,7 +82,11 @@ impl AutomationSkipReasonV1 {
             "session_evidence_denied" => Self::SessionEvidenceDenied,
             "session_evidence_locked" => Self::SessionEvidenceLocked,
             "session_evidence_reset_required" => Self::SessionEvidenceResetRequired,
-            "session_cursor_manifest_limit_exceeded" => Self::SessionCursorManifestLimitExceeded,
+            "session_cursor_manifest_limit_exceeded"
+            | "session_cursor_manifest_participants_limit_exceeded"
+            | "session_cursor_manifest_canonical_bytes_limit_exceeded" => {
+                Self::SessionCursorManifestLimitExceeded
+            }
             SESSION_EVIDENCE_BUDGET_EXHAUSTED => Self::SessionEvidenceBudgetExhausted,
             SESSION_EVIDENCE_BUDGET_SUPPRESSED => Self::SessionEvidenceBudgetSuppressed,
             "session_evidence_cancelled" => Self::SessionEvidenceCancelled,
