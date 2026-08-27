@@ -1584,7 +1584,7 @@ impl GitHubCiReadOnlyClientV1 {
                                 etag,
                             );
                         }
-                        GitHubCiTransportOutcomeV1::Response(entry.body)
+                        GitHubCiTransportOutcomeV1::Response(entry.body.as_ref().to_vec())
                     })
                 }
                 Some(HttpResponseV1::RateLimited {
@@ -2746,6 +2746,98 @@ mod tests {
         }
     }
 
+    async fn assert_ci_quota_bootstrap_fails_closed(
+        response: Vec<u8>,
+        expected_first: GitHubCiTransportOutcomeV1,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe = listener.try_clone().unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            stream.write_all(&response).unwrap();
+        });
+        let client = ci_fixture_client(address);
+        let request_scope = scope("ci-quota-bootstrap");
+        let request_context = context(&request_scope);
+
+        let first = client.read_workflow_run(&request_context, 93).await;
+        server.join().unwrap();
+        assert_eq!(first, expected_first);
+        probe.set_nonblocking(true).unwrap();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let second_request = std::thread::spawn(move || {
+            loop {
+                match probe.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = read_http_request_with_headers(&mut stream);
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                        )
+                        .unwrap();
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("second request probe failed: {error}"),
+                }
+                if stop_rx.try_recv().is_ok() {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+        });
+        let second = client.read_workflow_run(&request_context, 94).await;
+        stop_tx.send(()).unwrap();
+        let sent_second_request = second_request.join().unwrap();
+
+        assert_eq!(second, GitHubCiTransportOutcomeV1::Unavailable);
+        assert!(!sent_second_request, "page two must not reach the provider");
+    }
+
+    #[tokio::test]
+    async fn a_headerless_ci_bootstrap_fails_closed_before_page_two() {
+        let body = b"{}".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{}}",
+            body.len()
+        )
+        .into_bytes();
+
+        assert_ci_quota_bootstrap_fails_closed(
+            response,
+            GitHubCiTransportOutcomeV1::Response(body),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_ci_rate_headers_fail_closed_before_page_two() {
+        let body = b"{}".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nX-RateLimit-Limit: 10\r\nX-RateLimit-Remaining: 11\r\nX-RateLimit-Reset: 9\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{}}",
+            body.len()
+        )
+        .into_bytes();
+
+        assert_ci_quota_bootstrap_fails_closed(
+            response,
+            GitHubCiTransportOutcomeV1::Response(body),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retry_after_only_ci_limit_is_typed_unavailable_and_fails_closed() {
+        assert_ci_quota_bootstrap_fails_closed(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            GitHubCiTransportOutcomeV1::Unavailable,
+        )
+        .await;
+    }
+
     /// A repeated CI poll must send `If-None-Match` and reuse the retained body
     /// when the provider answers `304`. The assertion is on the bytes and the
     /// request headers, never on elapsed time.
@@ -2761,7 +2853,7 @@ mod tests {
             let (first_headers, _) = read_http_request_with_headers(&mut first);
             write!(
                 first,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: {CI_ETAG_V1}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: {CI_ETAG_V1}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 served.len()
             )
             .unwrap();
@@ -2772,7 +2864,7 @@ mod tests {
             let (second_headers, _) = read_http_request_with_headers(&mut second);
             write!(
                 second,
-                "HTTP/1.1 304 Not Modified\r\nETag: {CI_ETAG_V1}\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 304 Not Modified\r\nETag: {CI_ETAG_V1}\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4998\r\nX-RateLimit-Reset: 2000000000\r\nConnection: close\r\n\r\n"
             )
             .unwrap();
             drop(second);
