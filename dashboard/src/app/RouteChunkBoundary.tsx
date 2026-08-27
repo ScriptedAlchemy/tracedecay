@@ -89,30 +89,69 @@ type RouteChunkBoundaryProps = {
 type RouteChunkBoundaryState = {
   error: Error | null;
   attempt: number;
+  /** The loader the current `error`/`attempt` belong to. Every route mounts
+   * this same component type at the same Outlet position, so React reconciles
+   * a navigation as a PROP change — the boundary must notice the new loader
+   * itself rather than assuming a fresh mount. */
+  loadedFor: RouteChunkLoader;
 };
 
 /**
- * Per-route lazy boundary. React `lazy()` caches a rejected import on that
- * instance, so retry allocates a new `lazy(load)` and remounts it.
+ * One lazy component per loader, shared across renders and navigations.
+ *
+ * `lazy()` memoizes its resolved module on the instance, so a per-loader cache
+ * means revisiting a workspace renders it synchronously instead of suspending
+ * again. A rejected import is also cached on the instance, which is why
+ * `retry` evicts the entry and allocates a fresh one.
+ */
+const CHUNKS = new WeakMap<RouteChunkLoader, LazyExoticComponent<ComponentType>>();
+
+function lazyFor(load: RouteChunkLoader): LazyExoticComponent<ComponentType> {
+  let page = CHUNKS.get(load);
+  if (page === undefined) {
+    page = lazy(load);
+    CHUNKS.set(load, page);
+  }
+  return page;
+}
+
+/**
+ * Per-route lazy boundary.
+ *
+ * THE PROP CAN CHANGE WITHOUT A REMOUNT. React Router keeps the `<Outlet>`
+ * slot's component type identical across workspace navigations, so switching
+ * from `/brain` to `/code` updates `load` on the existing instance. The first
+ * version of this class computed `lazy(props.load)` once in its constructor,
+ * which pinned every client-side navigation to whichever workspace loaded
+ * first — the URL and the nav rail moved, the content never did.
  */
 export class RouteChunkBoundary extends Component<
   RouteChunkBoundaryProps,
   RouteChunkBoundaryState
 > {
-  state: RouteChunkBoundaryState = { error: null, attempt: 0 };
-  private Page: LazyExoticComponent<ComponentType>;
-
   constructor(props: RouteChunkBoundaryProps) {
     super(props);
-    this.Page = lazy(props.load);
+    this.state = { error: null, attempt: 0, loadedFor: props.load };
   }
 
   static getDerivedStateFromError(error: unknown): Pick<RouteChunkBoundaryState, 'error'> {
     return { error: asError(error) };
   }
 
+  static getDerivedStateFromProps(
+    props: RouteChunkBoundaryProps,
+    state: RouteChunkBoundaryState,
+  ): Partial<RouteChunkBoundaryState> | null {
+    // A navigation to a different route: drop the previous route's failure so
+    // one broken chunk does not paint every workspace unavailable.
+    if (props.load !== state.loadedFor) {
+      return { error: null, attempt: 0, loadedFor: props.load };
+    }
+    return null;
+  }
+
   private retry = () => {
-    this.Page = lazy(this.props.load);
+    CHUNKS.delete(this.props.load);
     this.setState((state) => ({ error: null, attempt: state.attempt + 1 }));
   };
 
@@ -120,7 +159,7 @@ export class RouteChunkBoundary extends Component<
     if (this.state.error) {
       return <RouteChunkUnavailable error={this.state.error} onRetry={this.retry} />;
     }
-    const Page = this.Page;
+    const Page = lazyFor(this.props.load);
     return (
       <Suspense fallback={<ChunkFallback />}>
         <Page key={this.state.attempt} />

@@ -28,6 +28,12 @@
   --raw-edge-strong: oklch(0.46 0.006 260);
   --raw-accent: oklch(0.75 0.15 200);
   --raw-accent-emphasis: oklch(0.64 0.16 200);
+  /* The second signal hue: amber is ALERT AND ACTIVITY — elevated but not
+   * broken. Cyan stays the live/selected signal, red stays critical-only;
+   * amber is the register in between, for captured provenance, attention
+   * counts, and activity that wants an eye without an alarm. */
+  --raw-alert: oklch(0.78 0.15 75);
+  --raw-alert-emphasis: oklch(0.68 0.16 65);
 
   /* Graticule: the instrument grid drawn behind canvases and readout fields.
    * Must stay at the edge of visibility — discipline, never texture. */
@@ -93,6 +99,7 @@
   --raw-graph-text: oklch(0.84 0.035 248);
   --raw-graph-edge: oklch(0.43 0.075 245);
   --raw-graph-accent: oklch(0.82 0.16 205);
+  --raw-graph-alert: oklch(0.8 0.15 75);
   --raw-graph-dim: oklch(0.28 0.035 252);
   /* Five layers, front to back: a vignette that pulls the corners down so the
    * field has a centre to look INTO rather than an even wash; the central lift
@@ -242,6 +249,9 @@
    * type can now wear it. */
   --raw-accent: oklch(0.47 0.14 220);
   --raw-accent-emphasis: oklch(0.43 0.15 220);
+  /* Amber as ink on paper needs the same darkening the accent got. */
+  --raw-alert: oklch(0.55 0.14 70);
+  --raw-alert-emphasis: oklch(0.5 0.15 65);
   --raw-grid: oklch(0.895 0.002 260);
   --raw-grid-minor: oklch(0.945 0.001 260);
   /* Complete first-class light mappings for every domain state (plan 11a:
@@ -273,6 +283,7 @@
   --raw-graph-text: oklch(0.86 0.035 248);
   --raw-graph-edge: oklch(0.47 0.075 245);
   --raw-graph-accent: oklch(0.84 0.16 205);
+  --raw-graph-alert: oklch(0.8 0.15 75);
   --raw-graph-dim: oklch(0.3 0.035 252);
   --raw-graph-field:
     radial-gradient(125% 125% at 50% 44%, transparent 34%, oklch(0.045 0.012 272 / 0.58) 100%),
@@ -348,6 +359,28 @@
  * field: it draws no points or lines that could be read as graph entities. */
 .td-graph-field {
   background: var(--raw-graph-field);
+}
+
+/** The night optical window: EVERY analytical drawing in the product — chart,
+ * map, canvas, distribution well — is projected light on this recessed dark
+ * glass, inside either shell theme. The graph canvas gets the full five-layer
+ * field above; this is the flat-glass sibling for the smaller apertures, so a
+ * 70px sparkline pays for a hairline and a vignette rather than nebulae.
+ *
+ * It is a class, not a per-surface style, because the claim it makes is
+ * global: bloom and brightness encodings only mean anything on a dark field,
+ * so no quantitative mark may sit directly on paper. */
+.td-optic {
+  position: relative;
+  background:
+    radial-gradient(130% 130% at 50% 40%, transparent 40%, oklch(0.05 0.012 272 / 0.5) 100%),
+    linear-gradient(160deg, oklch(0.135 0.022 268) 0%, var(--raw-graph-substrate) 60%, oklch(0.08 0.018 272) 100%);
+  border: 1px solid oklch(0.32 0.05 250 / 0.55);
+  box-shadow: var(--shadow-field);
+}
+[data-contrast='more'] .td-optic {
+  background: var(--raw-surface-0);
+  border-color: var(--raw-edge-strong);
 }
 
 /** Sensor grain over a field, so no region of it is perfectly even.

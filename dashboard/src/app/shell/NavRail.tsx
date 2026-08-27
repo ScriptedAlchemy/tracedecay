@@ -19,7 +19,7 @@ import { NavLink } from 'react-router';
 import type { StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { cn } from '../../ui/cn';
-import { CHANNELS, channelNumber } from '../channels.ts';
+import { CHANNELS, channelNumber, type ChannelGroup } from '../channels.ts';
 
 const ICONS: Record<string, LucideIcon> = {
   brain: Brain,
@@ -40,7 +40,13 @@ const ICONS: Record<string, LucideIcon> = {
   workflows: Waypoints,
 };
 
-const MAIN = CHANNELS.filter((channel) => channel.path !== 'settings');
+/** The dock's two scrolling registers, in rail order. `config` (Settings) is
+ * pinned to the rail's foot rather than filed here. Channels keep their
+ * numbers — grouping arranges the dock, it never renumbers an instrument. */
+const REGISTERS: readonly { group: ChannelGroup; label: string }[] = [
+  { group: 'workspace', label: 'Workspace' },
+  { group: 'ops', label: 'Ops' },
+];
 
 /**
  * What the app-wide Doctor dot is allowed to say.
@@ -238,18 +244,41 @@ export function NavRail() {
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {MAIN.map((channel) => (
-          <RailLink
-            key={channel.path}
-            path={channel.path}
-            label={channel.label}
-            health={channel.path === 'observatory' ? health : undefined}
-          />
+        {REGISTERS.map((register) => (
+          <section key={register.group} aria-label={register.label}>
+            <RailRegisterLabel label={register.label} />
+            {CHANNELS.filter((channel) => channel.group === register.group).map(
+              (channel) => (
+                <RailLink
+                  key={channel.path}
+                  path={channel.path}
+                  label={channel.label}
+                  health={channel.path === 'observatory' ? health : undefined}
+                />
+              ),
+            )}
+          </section>
         ))}
       </div>
       <div className="shrink-0 border-t border-edge-subtle">
+        <RailRegisterLabel label="Config" />
         <RailLink path="settings" label="Settings" />
       </div>
     </nav>
+  );
+}
+
+/** A register divider: the engraved group stamp over its channels. Collapsed
+ * rails keep the hairline so the grouping survives at icon width, they just
+ * lose the word. */
+function RailRegisterLabel({ label }: { label: string }) {
+  return (
+    <div
+      aria-hidden
+      className="flex h-6 items-center gap-2 border-b border-edge-subtle bg-surface-0 px-3.5 max-md:justify-center max-md:px-0"
+    >
+      <span className="td-legend text-3xs text-text-muted max-md:hidden">{label}</span>
+      <span aria-hidden className="td-rule opacity-60" />
+    </div>
   );
 }

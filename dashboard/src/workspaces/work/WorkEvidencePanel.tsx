@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type {
   TemporalModeV1,
   WorkEvidenceContinuationV1,
+  WorkEvidenceOmissionReasonV1,
   WorkEvidenceRetrievalV1,
   WorkEvidenceSourceV1,
   WorkGraphReadV1,
@@ -25,6 +26,19 @@ function qualifiedSession(source: WorkEvidenceSourceV1): string | null {
 function contentText(content: number[] | null): string | null {
   if (content === null) return null;
   return new TextDecoder('utf-8', { fatal: false }).decode(Uint8Array.from(content));
+}
+
+/** An omission reason as one printable sentence fragment. Most reasons are
+ * bare wire words; the structural refusals carry their own evidence (which
+ * stage of the budget ran out, or which manifest ceiling was crossed and by
+ * how much) and that evidence is the actionable part of the reason. */
+function omissionReasonText(reason: WorkEvidenceOmissionReasonV1): string {
+  if (typeof reason === 'string') return reason;
+  const refusal = reason.structural_refusal;
+  if (refusal.refusal === 'budget_exhausted') {
+    return `structural refusal: ${refusal.stage.replaceAll('_', ' ')} budget exhausted`;
+  }
+  return `structural refusal: ${refusal.kind} manifest limit exceeded (${refusal.observed} observed, maximum ${refusal.maximum})`;
 }
 
 function EvidenceResult({ value }: { value: WorkEvidenceRetrievalV1 }) {
@@ -90,8 +104,8 @@ function EvidenceResult({ value }: { value: WorkEvidenceRetrievalV1 }) {
       {value.omissions.length === 0 ? null : (
         <ul className="mt-2 grid gap-0.5 text-3xs text-text-muted" aria-label="Evidence omissions">
           {value.omissions.map((omission, index) => (
-            <li key={`${omission.relation}:${omission.reason}:${index}`}>
-              {omission.relation}: {omission.reason}
+            <li key={`${omission.relation}:${omissionReasonText(omission.reason)}:${index}`}>
+              {omission.relation}: {omissionReasonText(omission.reason)}
             </li>
           ))}
         </ul>
@@ -142,7 +156,7 @@ export function WorkEvidencePanel({
         <label className="grid gap-1 text-3xs text-text-muted">
           Evidence time
           <select
-            className="min-h-[36px] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+            className="min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
             value={draftKind}
             onChange={(event) => {
               setDraftKind(event.target.value as WorkEvidenceTemporalKind);
@@ -161,7 +175,7 @@ export function WorkEvidencePanel({
             <input
               type="datetime-local"
               step="0.001"
-              className="min-h-[36px] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+              className="min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
               value={cutoffUtc}
               onChange={(event) => {
                 setCutoffUtc(event.target.value);
@@ -180,7 +194,7 @@ export function WorkEvidencePanel({
         )}
         <button
           type="submit"
-          className="min-h-[36px] self-end rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="min-h-[var(--touch-target-min)] self-end rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         >
           Retrieve evidence
         </button>

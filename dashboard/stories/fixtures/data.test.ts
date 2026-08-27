@@ -36,6 +36,7 @@ import {
   AutomationSchedulerStatusV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
   CostsReadModelV1Schema,
+  DeliveryOverviewV1Schema,
   DoctorFindingsPayloadV1Schema,
   DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
@@ -43,6 +44,9 @@ import {
   GraphSearchPayloadV1Schema,
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
+  LcmOverviewPayloadV1Schema,
+  LcmTimelinePayloadV1Schema,
+  LoomTemporalPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
@@ -55,6 +59,8 @@ import {
   SettingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
+  StructureReadV12Schema,
+  WorkflowDefinitionSchema,
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
@@ -96,11 +102,17 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/holographic': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/overview': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/status': DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
-  '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(z.null()),
+  '/api/plugins/hermes-lcm/overview': DashboardEnvelopeV1Schema(LcmOverviewPayloadV1Schema),
+  '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(LcmTimelinePayloadV1Schema),
   '/api/plugins/graph/overview': DashboardEnvelopeV1Schema(GraphOverviewPayloadV1Schema),
   '/api/plugins/graph/search': DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
   '/api/plugins/graph/subgraph': DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
   '/api/plugins/graph/path': DashboardEnvelopeV1Schema(GraphPathPayloadV1Schema),
+  // `StructureReadV12` is the schemars-deduplicated alias whose `measured`
+  // variant carries `StrataMeasurementV1`.
+  '/api/plugins/graph/strata': DashboardEnvelopeV1Schema(StructureReadV12Schema),
+  '/api/loom/temporal': DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
+  '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
@@ -150,14 +162,15 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   // The work-product graph read. Two workspaces derive from it: the Work
   // projections, and the Agents handoff frontier and attempt failures.
   '/api/work/views': WorkGraphReadV1Schema,
+  // A workflow read answers through the same application wrapper Work reads
+  // use; the walked payload is the definitions array itself.
+  '/api/application/workflow/list-definitions': z.array(WorkflowDefinitionSchema),
 };
 
 const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/capabilities': 'mod.rs `capabilities` builds the bundle with `json!`',
-  '/api/plugins/hermes-lcm/overview':
-    'temporal retrieval is not mounted, so the canonical envelope has no payload',
   '/api/plugins/hermes-lcm/search':
-    'temporal retrieval is not mounted, so the canonical envelope has no payload',
+    'temporal retrieval search is modeled unavailable, so the canonical envelope has no payload',
   '/api/plugins/analytics/hints': 'analytics_api::hints answers with a bare Value',
   '/api/plugins/analytics/underused': 'analytics_api::underused answers with a bare Value',
   '/api/plugins/analytics/diagnostics':

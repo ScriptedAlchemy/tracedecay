@@ -32,10 +32,17 @@ function themedOption(
   const style = getComputedStyle(container);
   const token = (name: string, fallback: string) =>
     style.getPropertyValue(name).trim() || fallback;
-  const text = token('--raw-text-secondary', '#aab0bd');
-  const muted = token('--raw-text-muted', '#8a90a0');
-  const edge = token('--raw-edge-subtle', '#333a46');
-  const accent = token('--raw-accent', '#7aa2f7');
+  // Night-window palette, not shell ink: every chart canvas is projected
+  // light on the dark optical glass (`.td-optic`), inside either shell
+  // theme, so its marks sample the graph tokens. Under
+  // `data-contrast='more'` those tokens collapse to the shell palette and
+  // the chart flattens with the rest of the atmosphere.
+  const text = token('--raw-graph-text', '#aab0bd');
+  // Axis labels are the smallest type on the glass, so they take the full
+  // night-text ink; only the ruled split lines drop to the dim register.
+  const muted = text;
+  const edge = token('--raw-graph-edge', '#333a46');
+  const accent = token('--raw-graph-accent', '#7aa2f7');
   // The chart's type has to come from the same token as the rest of the app.
   // This used to name Inter directly, which meant a chart axis silently kept
   // typing in the old face after the design system changed its body face --
@@ -54,7 +61,9 @@ function themedOption(
     yAxis: undefined,
     grid: { left: 8, right: 8, top: 24, bottom: 8, containLabel: true },
     tooltip: {
-      backgroundColor: token('--raw-surface-2', '#22252d'),
+      // The tooltip floats over the night glass, so it is dark glass too —
+      // a paper tooltip over the optical window would blow the exposure.
+      backgroundColor: token('--raw-graph-substrate', '#0b0d14'),
       borderColor: edge,
       textStyle: { color: text, fontSize: 11 },
     },
@@ -170,5 +179,19 @@ export const Chart = memo(function Chart({
     );
   }
 
-  return <div ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} />;
+  return (
+    // The night optical window: the canvas is inset a hairline from the
+    // glass so axis ink never touches the bezel, and the sensor grain keeps
+    // the field from reading as a flat fill. `td-optic` carries the
+    // positioned ancestor `td-grain` requires.
+    <div className="td-optic td-grain">
+      <div
+        ref={containerRef}
+        className="relative"
+        style={{ height }}
+        role="img"
+        aria-label={ariaLabel}
+      />
+    </div>
+  );
 });
