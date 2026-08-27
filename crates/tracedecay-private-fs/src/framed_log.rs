@@ -207,9 +207,16 @@ pub enum ConditionalPublishExpectation {
     Present,
 }
 
-pub struct ConditionalPublishCallbacks<Prepare, BeforePublish, VerifyDisplaced, VerifyPublished> {
+pub struct ConditionalPublishCallbacks<
+    Prepare,
+    BeforePublish,
+    AfterPublish,
+    VerifyDisplaced,
+    VerifyPublished,
+> {
     pub prepare: Prepare,
     pub before_publish: BeforePublish,
+    pub after_publish: AfterPublish,
     pub verify_displaced: VerifyDisplaced,
     pub verify_published: VerifyPublished,
 }
@@ -457,6 +464,7 @@ pub fn atomic_write_prepared(
 pub fn atomic_write_prepared_conditionally<
     Prepare,
     BeforePublish,
+    AfterPublish,
     VerifyDisplaced,
     VerifyPublished,
 >(
@@ -467,6 +475,7 @@ pub fn atomic_write_prepared_conditionally<
     callbacks: ConditionalPublishCallbacks<
         Prepare,
         BeforePublish,
+        AfterPublish,
         VerifyDisplaced,
         VerifyPublished,
     >,
@@ -475,12 +484,14 @@ pub fn atomic_write_prepared_conditionally<
 where
     Prepare: FnOnce(&Path) -> io::Result<()>,
     BeforePublish: FnOnce(),
+    AfterPublish: FnOnce(),
     VerifyDisplaced: FnOnce(&Path) -> io::Result<bool>,
     VerifyPublished: FnOnce(&Path) -> io::Result<bool>,
 {
     let ConditionalPublishCallbacks {
         prepare,
         before_publish,
+        after_publish,
         verify_displaced,
         verify_published,
     } = callbacks;
@@ -504,12 +515,14 @@ where
                         error
                     }
                 })?;
+                after_publish();
             }
             ConditionalPublishExpectation::Present => {
                 let publish_backup = unused_temporary_path(destination, "conditional-backup")?;
                 let displaced_path =
                     replace_existing_with_backup(&temporary, destination, &publish_backup)?;
                 published_existing.set(true);
+                after_publish();
                 let displaced = verify_displaced(&displaced_path);
                 if !matches!(displaced, Ok(true)) {
                     let rollback_backup =
@@ -525,31 +538,29 @@ where
                             displaced_path.display()
                         ))
                     })?;
-                    if !matches!(verify_published(&rolled_back_published), Ok(true)) {
-                        let restore_backup =
-                            unused_temporary_path(destination, "conditional-restore")?;
-                        let restored_destination = replace_existing_with_backup(
-                            &rolled_back_published,
-                            destination,
-                            &restore_backup,
-                        )
-                        .map_err(|error| {
-                            io::Error::other(format!(
-                                "failed to restore a concurrent destination edit retained at {}: {error}",
-                                rolled_back_published.display()
-                            ))
-                        })?;
-                        if let Err(error) = fs::remove_file(&restored_destination) {
+                    match verify_published(&rolled_back_published) {
+                        Ok(true) => {
+                            if let Err(error) = fs::remove_file(&rolled_back_published) {
+                                return Err(io::Error::other(format!(
+                                    "rolled back conditional publication but could not remove the staged file retained at {}: {error}",
+                                    rolled_back_published.display()
+                                )));
+                            }
+                        }
+                        Ok(false) => {
+                            sync_parent_directory(destination, directory_policy)?;
                             return Err(io::Error::other(format!(
-                                "restored the concurrent destination edit but could not remove the displaced file retained at {}: {error}",
-                                restored_destination.display()
+                                "conditional publication was ambiguous; the boundary destination was restored and the changed staged file is retained at {}",
+                                rolled_back_published.display()
                             )));
                         }
-                    } else if let Err(error) = fs::remove_file(&rolled_back_published) {
-                        return Err(io::Error::other(format!(
-                            "rolled back conditional publication but could not remove the staged file retained at {}: {error}",
-                            rolled_back_published.display()
-                        )));
+                        Err(error) => {
+                            sync_parent_directory(destination, directory_policy)?;
+                            return Err(io::Error::other(format!(
+                                "conditional publication was ambiguous; the boundary destination was restored and the unverifiable staged file is retained at {}: {error}",
+                                rolled_back_published.display()
+                            )));
+                        }
                     }
                     sync_parent_directory(destination, directory_policy)?;
                     return match displaced {
