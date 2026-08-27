@@ -261,6 +261,9 @@ impl TraceDecay {
         )
     }
 
+    // The four flags mirror the resolver evidence computed by the sole
+    // caller; a params struct would outlive this soon-to-move code.
+    #[allow(clippy::fn_params_excessive_bools)]
     async fn choose_identity_layout(
         project_root: &Path,
         selected: Option<StoreLayout>,
@@ -1576,9 +1579,8 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
         tree_has_files(&layout.lcm_payload_root),
         tree_has_files(&layout.response_handle_root),
     );
-    let (automation_files, payload_files, response_files) = match tree_presence {
-        (Ok(automation), Ok(payloads), Ok(responses)) => (automation, payloads, responses),
-        _ => return false,
+    let (Ok(automation_files), Ok(payload_files), Ok(response_files)) = tree_presence else {
+        return false;
     };
 
     graph_is_populated
@@ -1600,11 +1602,10 @@ fn branch_inventory(data_root: &Path) -> std::result::Result<usize, ()> {
     let path = data_root.join(storage::BRANCH_META_FILENAME);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(_) => Err(()),
         Ok(metadata) if metadata.file_type().is_file() => branch_meta::load_branch_meta(data_root)
             .map(|meta| meta.branches.len())
             .ok_or(()),
-        Ok(_) => Err(()),
+        Err(_) | Ok(_) => Err(()),
     }
 }
 
