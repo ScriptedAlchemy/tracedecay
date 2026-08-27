@@ -37,7 +37,7 @@ Current (highest `vN`) plate per channel:
 | 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
 | 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
 | 10 | 10-observatory/v4-overview-honest.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. Each source own coverage/error. No invented heartbeat. CONCEPT/SYNTHETIC. |
-| 11 | 11-costs/v1-provider-burn.png | Provider/model spend, tokens, latency. Segmented bars, not pies. |
+| 11 | 11-costs/v3-provider-spend.png | Actual provider spend first. Unpriced/null ≠ zero. Saved tokens ≠ dollars. CONCEPT/SYNTHETIC. |
 | 12 | 12-settings/v2-effective-values.png | Effective values only. Provenance named. No invented layer cake. |
 | 13 | 13-work/v2-six-cameras.png | Six cameras: Board / DAG / Timeline / Causal / Workload / Topology. |
 | 14 | 14-workflows/v3-definition-ledger.png | Definition ledger. Immutable versions, pinned digests, CAS activate/retire/reject, on-demand run lookup. No ARM/PAUSE/CANCEL. CONCEPT/SYNTHETIC. |
