@@ -160,13 +160,26 @@ impl DashboardLcmReadAdapter {
                         "lcm_temporal_authority_unavailable",
                     );
                 }
-                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-                | SessionRetrievalServiceOutcome::BudgetExhausted { .. }
-                | SessionRetrievalServiceOutcome::TimedOut
-                | SessionRetrievalServiceOutcome::Cancelled => {
+                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
+                    let (state, reason) = cursor_manifest_not_ready(kind);
+                    return not_ready(state, reason);
+                }
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
                     return not_ready(
-                        DashboardLcmReadStateV1::Unavailable,
-                        "lcm_temporal_read_incomplete",
+                        DashboardLcmReadStateV1::BudgetExhausted,
+                        session_budget_reason(stage),
+                    );
+                }
+                SessionRetrievalServiceOutcome::TimedOut => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::TimedOut,
+                        "lcm_temporal_read_timed_out",
+                    );
+                }
+                SessionRetrievalServiceOutcome::Cancelled => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Cancelled,
+                        "lcm_temporal_read_cancelled",
                     );
                 }
             };
@@ -534,13 +547,24 @@ impl DashboardLcmReadAdapter {
             LcmDescribeServiceOutcome::Partial {
                 description: None, ..
             }
-            | LcmDescribeServiceOutcome::Unavailable(_)
-            | LcmDescribeServiceOutcome::CursorManifestLimitExceeded { .. }
-            | LcmDescribeServiceOutcome::BudgetExhausted
-            | LcmDescribeServiceOutcome::TimedOut
-            | LcmDescribeServiceOutcome::Cancelled => Err((
+            | LcmDescribeServiceOutcome::Unavailable(_) => Err((
                 DashboardLcmReadStateV1::Unavailable,
                 "lcm_session_description_unavailable",
+            )),
+            LcmDescribeServiceOutcome::CursorManifestLimitExceeded { kind, .. } => {
+                Err(cursor_manifest_not_ready(kind))
+            }
+            LcmDescribeServiceOutcome::BudgetExhausted => Err((
+                DashboardLcmReadStateV1::BudgetExhausted,
+                "lcm_temporal_budget_exhausted",
+            )),
+            LcmDescribeServiceOutcome::TimedOut => Err((
+                DashboardLcmReadStateV1::TimedOut,
+                "lcm_temporal_read_timed_out",
+            )),
+            LcmDescribeServiceOutcome::Cancelled => Err((
+                DashboardLcmReadStateV1::Cancelled,
+                "lcm_temporal_read_cancelled",
             )),
         }
     }
@@ -598,6 +622,65 @@ impl DashboardLcmReadAdapter {
         )
         .map_err(|_| "lcm_dashboard_admission_invalid")?;
         Ok((context, cancellation))
+    }
+}
+
+fn cursor_manifest_not_ready(
+    kind: tracedecay_domain::CursorManifestLimitKindV1,
+) -> (DashboardLcmReadStateV1, &'static str) {
+    let reason = match kind {
+        tracedecay_domain::CursorManifestLimitKindV1::Participants => {
+            "lcm_temporal_cursor_manifest_participants_limit_exceeded"
+        }
+        tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes => {
+            "lcm_temporal_cursor_manifest_canonical_bytes_limit_exceeded"
+        }
+    };
+    (DashboardLcmReadStateV1::CursorManifestLimitExceeded, reason)
+}
+
+const fn session_budget_reason(
+    stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1,
+) -> &'static str {
+    use tracedecay_usecases::session::SessionRetrievalBudgetStageV1;
+
+    match stage {
+        SessionRetrievalBudgetStageV1::RequestResultLimit => {
+            "lcm_temporal_budget_request_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
+            "lcm_temporal_budget_request_hydration_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestContextBytes => {
+            "lcm_temporal_budget_request_context_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
+            "lcm_temporal_budget_request_candidate_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
+            "lcm_temporal_budget_request_record_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
+            "lcm_temporal_budget_request_hydration_bytes"
+        }
+        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
+            "lcm_temporal_budget_estimator_version_mismatch"
+        }
+        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
+            "lcm_temporal_budget_execution_work_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::KernelResultLimit => {
+            "lcm_temporal_budget_kernel_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
+            "lcm_temporal_budget_participant_manifest_participants"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
+            "lcm_temporal_budget_participant_manifest_canonical_bytes"
+        }
+        SessionRetrievalBudgetStageV1::HydrationBytes => "lcm_temporal_budget_hydration_bytes",
+        SessionRetrievalBudgetStageV1::ContextBytes => "lcm_temporal_budget_context_bytes",
+        SessionRetrievalBudgetStageV1::ContextTokens => "lcm_temporal_budget_context_tokens",
     }
 }
 
@@ -788,6 +871,40 @@ mod tests {
                 DashboardLcmReadStateV1::Unavailable,
                 "lcm_temporal_wrong_scope"
             )
+        );
+    }
+
+    #[test]
+    fn cursor_manifest_refusals_keep_distinct_dashboard_diagnostics() {
+        assert_eq!(
+            cursor_manifest_not_ready(tracedecay_domain::CursorManifestLimitKindV1::Participants),
+            (
+                DashboardLcmReadStateV1::CursorManifestLimitExceeded,
+                "lcm_temporal_cursor_manifest_participants_limit_exceeded",
+            )
+        );
+        assert_eq!(
+            cursor_manifest_not_ready(tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes),
+            (
+                DashboardLcmReadStateV1::CursorManifestLimitExceeded,
+                "lcm_temporal_cursor_manifest_canonical_bytes_limit_exceeded",
+            )
+        );
+    }
+
+    #[test]
+    fn dashboard_budget_refusal_preserves_stage_in_reason() {
+        assert_eq!(
+            session_budget_reason(
+                tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens
+            ),
+            "lcm_temporal_budget_context_tokens"
+        );
+        assert_eq!(
+            session_budget_reason(
+                tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted
+            ),
+            "lcm_temporal_budget_execution_work_exhausted"
         );
     }
 
