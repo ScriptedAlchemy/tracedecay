@@ -210,7 +210,7 @@ mod wire_bound_tests {
                     mcp,
                     BrokerStreamTransport::new(server),
                     initialize,
-                    pending,
+                    pending.into_iter().collect(),
                     None,
                     false,
                     &lifecycle,
