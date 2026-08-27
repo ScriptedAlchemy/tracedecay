@@ -555,8 +555,10 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
-        // Every stage after staging reads only the identity and these row
-        // counts, never a manifest row.
+        // The identity and row counts are taken once, up front. Everything
+        // after staging reads only these, so the bulk manifest can be handed
+        // to staging and released there instead of living until this function
+        // returns.
         let identity = manifest.identity();
         let (entity_rows, relation_rows) = manifest.row_counts();
         crate::hotpath_observe::record_counts(entity_rows, relation_rows, 1, 0);
@@ -602,9 +604,12 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
+                            // Staging consumes the manifest and drops its rows
+                            // once the last page commit is durable, so the
+                            // close/reopen below no longer overlaps them.
                             let staged = database
                                 .apply_generation_unverified_with_digest_observed(
-                                    &manifest,
+                                    manifest,
                                     sealed_digest,
                                     &check,
                                 )?;
@@ -620,20 +625,26 @@ impl GraphDbRegistry {
                             )?;
                             (commit, recovered)
                         }
-                        (false, true) => database.reopen_and_verify_existing_generation(
-                            &identity,
-                            sealed_digest,
-                            row_counts,
-                            &check,
-                        )?,
-                        (false, false) if reopen_metadata => database
-                            .reopen_and_verify_existing_generation(
+                        (false, true) => {
+                            drop(manifest);
+                            database.reopen_and_verify_existing_generation(
                                 &identity,
                                 sealed_digest,
                                 row_counts,
                                 &check,
-                            )?,
+                            )?
+                        }
+                        (false, false) if reopen_metadata => {
+                            drop(manifest);
+                            database.reopen_and_verify_existing_generation(
+                                &identity,
+                                sealed_digest,
+                                row_counts,
+                                &check,
+                            )?
+                        }
                         (false, false) => {
+                            drop(manifest);
                             database.verify_existing_generation(&identity, sealed_digest, &check)?
                         }
                     };
@@ -689,9 +700,13 @@ impl GraphDbRegistry {
             // A supplied manifest for a metadata-only replay carries the
             // native rows (vectors) the canonical source omits; a first
             // commit must install them natively before verification.
+            //
+            // Staging consumes the manifest and releases its bulk rows at the
+            // last durable page commit, so the close/reopen and the streamed
+            // recovered-digest proof below run without them resident.
             (true, _) | (false, true) => {
                 let staged = database.apply_generation_unverified_with_digest_observed(
-                    &manifest,
+                    manifest,
                     sealed_digest,
                     &check,
                 )?;
@@ -708,13 +723,19 @@ impl GraphDbRegistry {
                     )
                     .map(|(_, recovered)| (commit, recovered))
             }
-            (false, false) if reopen_metadata => database.reopen_and_verify_existing_generation(
-                &identity,
-                sealed_digest,
-                row_counts,
-                &check,
-            ),
-            (false, false) => database.verify_existing_generation(&identity, sealed_digest, &check),
+            (false, false) if reopen_metadata => {
+                drop(manifest);
+                database.reopen_and_verify_existing_generation(
+                    &identity,
+                    sealed_digest,
+                    row_counts,
+                    &check,
+                )
+            }
+            (false, false) => {
+                drop(manifest);
+                database.verify_existing_generation(&identity, sealed_digest, &check)
+            }
         };
         let (commit, recovered_digest) = match verified {
             Ok(verified) => verified,
@@ -1001,8 +1022,11 @@ impl GraphDbRegistry {
         };
         // Only the identity is needed from here on: the closure walk, the
         // readability check, and the recovered-digest proof all read metadata
-        // or stream stored rows.
+        // or stream stored rows. Releasing the decoded manifest here keeps a
+        // dependency hydration from holding a second full row set alive while
+        // the proof runs.
         let identity = manifest.identity();
+        drop(manifest);
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(lease) = database.verified_generation(&locator)? {
