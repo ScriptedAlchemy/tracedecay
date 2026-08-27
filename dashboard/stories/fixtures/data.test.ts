@@ -43,6 +43,8 @@ import {
   GraphSearchPayloadV1Schema,
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
+  LcmOverviewPayloadV1Schema,
+  LcmTimelinePayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
@@ -96,7 +98,8 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/holographic': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/overview': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/status': DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
-  '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(z.null()),
+  '/api/plugins/hermes-lcm/overview': DashboardEnvelopeV1Schema(LcmOverviewPayloadV1Schema),
+  '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(LcmTimelinePayloadV1Schema),
   '/api/plugins/graph/overview': DashboardEnvelopeV1Schema(GraphOverviewPayloadV1Schema),
   '/api/plugins/graph/search': DashboardEnvelopeV1Schema(GraphSearchPayloadV1Schema),
   '/api/plugins/graph/subgraph': DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
@@ -154,10 +157,8 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
 
 const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/capabilities': 'mod.rs `capabilities` builds the bundle with `json!`',
-  '/api/plugins/hermes-lcm/overview':
-    'temporal retrieval is not mounted, so the canonical envelope has no payload',
   '/api/plugins/hermes-lcm/search':
-    'temporal retrieval is not mounted, so the canonical envelope has no payload',
+    'temporal retrieval search is modeled unavailable, so the canonical envelope has no payload',
   '/api/plugins/analytics/hints': 'analytics_api::hints answers with a bare Value',
   '/api/plugins/analytics/underused': 'analytics_api::underused answers with a bare Value',
   '/api/plugins/analytics/diagnostics':

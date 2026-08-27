@@ -10,6 +10,9 @@ import {
   AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
+  type AnalyticsDiagnosticsPayloadV1,
+  type AnalyticsUnderusedPayloadV1,
+  type AnalyticsUsageSummaryV1,
 } from '../../contracts/generated.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
@@ -234,9 +237,9 @@ function UsageRegister({
   underused,
 }: {
   usagePending: boolean;
-  usageResult: ReturnType<typeof useEnvelope<typeof AnalyticsUsageSummaryV1Schema>>['data'];
-  diagnostics: ReturnType<typeof useEnvelope<typeof AnalyticsDiagnosticsPayloadV1Schema>>;
-  underused: ReturnType<typeof useEnvelope<typeof AnalyticsUnderusedPayloadV1Schema>>;
+  usageResult: ReturnType<typeof useEnvelope<AnalyticsUsageSummaryV1>>['data'];
+  diagnostics: ReturnType<typeof useEnvelope<AnalyticsDiagnosticsPayloadV1>>;
+  underused: ReturnType<typeof useEnvelope<AnalyticsUnderusedPayloadV1>>;
 }) {
   return (
     <section aria-label="Tool telemetry" className="border-t border-edge-subtle">

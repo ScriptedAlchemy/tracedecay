@@ -38,6 +38,8 @@ import {
   GraphSearchPayloadV1Schema,
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
+  LcmOverviewPayloadV1Schema,
+  LcmTimelinePayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
@@ -472,10 +474,30 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect((data.holographic?.facts ?? []).length).toBeGreaterThanOrEqual(25);
   });
 
-  it('GET LCM browse routes — temporal retrieval unavailable', () => {
-    for (const route of [
+  it('GET /api/plugins/hermes-lcm/{overview,timeline} — the Sessions ledger renders populated', () => {
+    const overview = parse(
+      DashboardEnvelopeV1Schema(LcmOverviewPayloadV1Schema),
       '/api/plugins/hermes-lcm/overview',
+    );
+    expect(overview.payload.exists).toBe(true);
+    expect(overview.payload.latest_sessions.length).toBeGreaterThanOrEqual(30);
+    // The list is a list of sizes; a flat fixture would never show the
+    // magnitude rails needed their log-ish skew.
+    const counts = overview.payload.latest_sessions.map((row) => row.message_count);
+    expect(Math.max(...counts)).toBeGreaterThan(Math.min(...counts) * 20);
+
+    const timeline = parse(
+      DashboardEnvelopeV1Schema(LcmTimelinePayloadV1Schema),
       '/api/plugins/hermes-lcm/timeline',
+    );
+    expect(timeline.payload.exists).toBe(true);
+    expect(timeline.payload.buckets.length).toBeGreaterThanOrEqual(40);
+    // At least one zero day, so the columns exercise their empty rendering.
+    expect(timeline.payload.buckets.some((bucket) => bucket.count === 0)).toBe(true);
+  });
+
+  it('GET LCM search/session routes — the refusal state stays modeled', () => {
+    for (const route of [
       '/api/plugins/hermes-lcm/search',
       '/api/plugins/hermes-lcm/session/session-fixture',
     ]) {

@@ -2500,6 +2500,141 @@ function loomSessionsPayload(): Record<string, unknown> {
   };
 }
 
+/* ==========================================================================
+ * /api/plugins/hermes-lcm/{overview,timeline} (lcm_api.rs overview / timeline).
+ *
+ * The Sessions workspace's two standing reads, modeled as a MOUNTED temporal
+ * retrieval store: wire-true to `LcmOverviewPayloadV1` / `LcmTimelinePayloadV1`
+ * and populated with the same skewed distribution the Loom fixture carries, so
+ * the audited surface renders a real session ledger rather than the
+ * `lcm_temporal_retrieval_not_mounted` refusal (which the search and
+ * session-detail routes below still model — those states must stay reachable).
+ * ========================================================================== */
+
+/** ISO day bucket `daysAgo` days back — the timeline's bucket key. */
+function lcmDateBucket(daysAgo: number): string {
+  return new Date((nowSecs - daysAgo * DAY) * 1000).toISOString().slice(0, 10);
+}
+
+/** Deterministic skewed daily volume: a few heavy days, a long tail, and two
+ * zero days so the columns exercise their empty rendering. */
+function lcmDailyCount(daysAgo: number): number {
+  if (daysAgo % 17 === 3) return 0;
+  if (daysAgo % 11 === 0) return 640 - daysAgo * 4;
+  return Math.max(18, 190 - daysAgo * 3 - (daysAgo % 5) * 11);
+}
+
+function lcmTimelinePayload(): Record<string, unknown> {
+  const buckets = Array.from({ length: 46 }, (_, index) => {
+    const daysAgo = 45 - index;
+    const count = lcmDailyCount(daysAgo);
+    // Roughly one message in twelve predates token accounting.
+    const unknown = Math.floor(count / 12);
+    const known = count - unknown;
+    return {
+      bucket: lcmDateBucket(daysAgo),
+      count,
+      known_message_count: known,
+      unknown_message_count: unknown,
+      token_count: known > 0 ? known * 212 : null,
+      token_count_provenance: known > 0 ? 'o200k_approximate' : 'unavailable',
+    };
+  });
+  return {
+    bucket: 'day',
+    buckets,
+    coverage: {
+      limit: 60,
+      next_before_bucket: null,
+      ordering: 'newest_last',
+      returned_buckets: buckets.length,
+      total_dated_buckets: buckets.length,
+      truncated: false,
+    },
+    exists: true,
+    node_buckets: [
+      { bucket: lcmDateBucket(2), count: 14 },
+      { bucket: lcmDateBucket(1), count: 9 },
+      { bucket: null, count: 3 },
+    ],
+    path: '/home/zack/.tracedecay/lcm.db',
+    session_id: null,
+    storage_scope: 'profile_sharded',
+    undated: {
+      count: 12,
+      known_message_count: 10,
+      token_count: 2_120,
+      token_count_provenance: 'o200k_approximate',
+      unknown_message_count: 2,
+    },
+  };
+}
+
+const LCM_SUMMARY_CATEGORIES = ['decision', 'code_area', 'workflow'] as const;
+
+function lcmOverviewPayload(): Record<string, unknown> {
+  // The same identity scheme and skew as the Loom threads: three heavy
+  // sessions and a long tail, so the per-row magnitude rails have a shape.
+  const latestSessions = Array.from({ length: 40 }, (_, i) => ({
+    session_id: loomSessionId(i),
+    message_count: i === 0 ? 998 : i === 3 ? 405 : i === 7 ? 169 : Math.max(2, 44 - i),
+    last_timestamp: nowSecs - i * 5 * 3600 - (i % 7) * 1300,
+    last_store_id: 181_402 - i * 97,
+  }));
+  return {
+    exists: true,
+    latest_sessions: latestSessions,
+    latest_summary_nodes: Array.from({ length: 3 }, (_, i) => ({
+      category: pick(LCM_SUMMARY_CATEGORIES, i),
+      created_at: nowSecs - i * 7_200,
+      depth: i === 2 ? 1 : 0,
+      expand_hint: 'lcm_expand',
+      latest_at: nowSecs - i * 7_100,
+      node_id: `node.summary.${i + 1}`,
+      recency: i,
+      session_id: loomSessionId(i),
+      snippet: 'compressed span of the session transcript',
+      source_token_count: 48_000 - i * 9_000,
+      source_type: 'messages',
+      summary: pick(LOOM_TITLES, i),
+      token_count: 1_800 - i * 300,
+    })),
+    limit: 40,
+    matches: { messages: [], summary_nodes: [] },
+    overview: {
+      compression: {
+        node_count: 412,
+        ratio: 0.18,
+        source_token_count: 8_400_000,
+        token_count: 1_512_000,
+      },
+      depth_counts: [
+        { depth: 0, count: 331 },
+        { depth: 1, count: 68 },
+        { depth: 2, count: 13 },
+      ],
+      max_summary_depth: 2,
+      messages_total: 181_402,
+      role_counts: [
+        { role: 'assistant', count: 88_290 },
+        { role: 'user', count: 64_112 },
+        { role: 'tool', count: 29_000 },
+      ],
+      sessions_total: 6_053,
+      source_counts: [
+        { source: 'claude', count: 2_401 },
+        { source: 'codex', count: 2_204 },
+        { source: 'cursor', count: 1_448 },
+      ],
+      summary_node_sessions_total: 512,
+      summary_nodes_total: 412,
+    },
+    path: '/home/zack/.tracedecay/lcm.db',
+    query: '',
+    storage_scope: 'profile_sharded',
+  };
+}
+
 const LOOM_CHAIN_TOOLS = [
   'Read',
   'Bash',
@@ -2683,14 +2818,11 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/holographic/': envelope(memoryPayload()),
   '/api/plugins/holographic': envelope(memoryPayload()),
   '/api/plugins/holographic/overview': envelope(memoryPayload()),
-  // LCM browse reads remain explicitly unavailable until canonical temporal
-  // retrieval and redaction hydration are mounted.
-  '/api/plugins/hermes-lcm/overview': unavailableEnvelope(
-    'lcm_temporal_retrieval_not_mounted',
-  ),
-  '/api/plugins/hermes-lcm/timeline': unavailableEnvelope(
-    'lcm_temporal_retrieval_not_mounted',
-  ),
+  // LCM standing reads model a MOUNTED temporal-retrieval store, so the
+  // Sessions ledger renders populated; search stays explicitly unavailable so
+  // the refusal state remains a modeled, reachable surface.
+  '/api/plugins/hermes-lcm/overview': envelope(lcmOverviewPayload()),
+  '/api/plugins/hermes-lcm/timeline': envelope(lcmTimelinePayload()),
   '/api/plugins/hermes-lcm/search': unavailableEnvelope(
     'lcm_temporal_retrieval_not_mounted',
   ),
