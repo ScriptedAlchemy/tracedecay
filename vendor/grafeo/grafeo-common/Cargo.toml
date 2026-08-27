@@ -9,6 +9,12 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
+# TraceDecay patch. Declares this vendored crate its own workspace root so
+# `cargo test` can be run from inside this directory. Without it cargo walks up,
+# finds the TraceDecay workspace, and refuses to build a package that is not a
+# member -- and a `[patch.crates-io]` entry does not make one.
+[workspace]
+
 [package]
 edition = "2024"
 rust-version = "1.91.1"

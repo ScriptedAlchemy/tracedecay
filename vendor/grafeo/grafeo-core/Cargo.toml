@@ -9,6 +9,19 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
+# TraceDecay patch. Declares this vendored crate its own workspace root so
+# `cargo test` can be run from inside this directory; without it cargo walks up,
+# finds the TraceDecay workspace, and refuses to build a package that is not a
+# member -- and a `[patch.crates-io]` entry does not make one. The nested patch
+# points the sibling grafeo crate at its vendored copy, so a standalone run here
+# tests the patched arena rather than the registry's. Cargo honours `[patch]`
+# only in the root manifest of the build it is driving, so this section is
+# inert when the TraceDecay workspace builds this crate as a dependency.
+[workspace]
+
+[patch.crates-io]
+grafeo-common = { path = "../grafeo-common" }
+
 [package]
 edition = "2024"
 rust-version = "1.91.1"
