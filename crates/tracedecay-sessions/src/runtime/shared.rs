@@ -16,6 +16,11 @@ use tracedecay_runtime_core::worktree::GitRepoIdentityOutcome;
 use crate::runtime::SessionMessageRecord;
 pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 
+#[cfg(feature = "hotpath")]
+type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledMutex<T> = Mutex<T>;
+
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
 ///
@@ -24,19 +29,23 @@ pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 /// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
 #[derive(Clone)]
 pub struct SqliteReadConn {
-    inner: Arc<Mutex<rusqlite::Connection>>,
+    inner: Arc<ProfiledMutex<rusqlite::Connection>>,
 }
 
 impl SqliteReadConn {
     pub fn new(conn: rusqlite::Connection) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(conn)),
+            inner: Arc::new(hotpath::mutex!(
+                Mutex::new(conn),
+                label = "sessions.shared.sqlite_conn"
+            )),
         }
     }
 
     /// Runs `body` against the connection on a blocking thread. Returns `None`
     /// only if the blocking task itself fails (cancellation/panic), which
     /// callers degrade to the same outcome as any SQL error.
+    #[hotpath::measure(label = "sessions.shared.sqlite_with", future = true)]
     pub async fn with<T, F>(&self, body: F) -> Option<T>
     where
         T: Send + 'static,
@@ -84,6 +93,7 @@ where
         .flatten()
 }
 
+#[hotpath::measure(label = "sessions.shared.read_new_rows_sync")]
 fn read_new_rows_sync<T>(
     conn: &rusqlite::Connection,
     select_sql: &str,
@@ -228,6 +238,7 @@ impl ProjectRootMatcher {
         )
     }
 
+    #[hotpath::measure(label = "sessions.shared.matcher_new")]
     pub fn new_with_identity_resolver(
         project_root: &Path,
         identity_resolver: GitIdentityResolver,
@@ -277,6 +288,7 @@ impl ProjectRootMatcher {
         )
     }
 
+    #[hotpath::measure(label = "sessions.shared.membership_resolve")]
     fn contains_uncached_with(
         &self,
         path: &Path,
@@ -443,6 +455,7 @@ impl ProjectRootMatcherCache {
         )
     }
 
+    #[hotpath::measure(label = "sessions.shared.git_worktree")]
     fn git_worktree_root_at(
         &self,
         cwd: &Path,
@@ -673,6 +686,7 @@ pub fn message_storage_text(content: &Value) -> String {
 
 /// Return lossless storage text plus tool names discovered in either structured
 /// content blocks or a sibling `tool_calls` field.
+#[hotpath::measure(label = "sessions.shared.content_storage")]
 pub fn content_storage_text_and_tools(
     content: &Value,
     tool_calls: Option<&Value>,
@@ -727,6 +741,7 @@ impl io::Write for ByteCountSink {
 /// Records bounded per-call tool metadata (byte counts and identifiers only,
 /// never content) for `tool_use`/`tool_result` blocks found in `content`.
 /// Inserts the `tool_events` key only when at least one entry was collected.
+#[hotpath::measure(label = "sessions.shared.append_tool_events")]
 pub fn append_tool_event_metadata(map: &mut serde_json::Map<String, Value>, content: &Value) {
     let Some(items) = content.as_array() else {
         return;

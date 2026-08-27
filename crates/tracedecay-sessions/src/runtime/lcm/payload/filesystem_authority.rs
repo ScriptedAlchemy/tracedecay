@@ -123,6 +123,7 @@ pub(super) fn remove_verified_payload_file(
     remove_verified_payload_file_with(authority, || Ok(()))
 }
 
+#[hotpath::measure(label = "sessions.lcm_fs_authority.remove")]
 fn remove_verified_payload_file_with<F>(
     authority: &VerifiedPayloadAuthority,
     before_verify: F,
@@ -184,6 +185,7 @@ fn read_payload_file_for_verify_bounded(
     read_payload_file_for_verify_bounded_with_checkpoint(path, max_bytes, &mut || Ok(()))
 }
 
+#[hotpath::measure(label = "sessions.lcm_fs_authority.read_verify")]
 fn read_payload_file_for_verify_bounded_with_checkpoint(
     path: &Path,
     max_bytes: u64,
@@ -274,6 +276,7 @@ fn open_verified_payload_file_for_delete(
     open_verified_payload_file_with(path, &mut delete_file_options())
 }
 
+#[hotpath::measure(label = "sessions.lcm_fs_authority.open")]
 fn open_verified_payload_file_with(
     path: &Path,
     options: &mut fs::OpenOptions,
@@ -614,6 +617,7 @@ fn classify_directory_path_error(path: &Path, error: std::io::Error) -> LcmError
     }
 }
 
+#[hotpath::measure(label = "sessions.lcm_fs_authority.prepare_dir")]
 pub(super) fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let root = super::canonical_storage_root(storage_root)?;
     #[cfg(windows)]
@@ -661,6 +665,7 @@ pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
 /// reports as `None` instead of an I/O error. Invalid configurations —
 /// symlinked dir, wrong file type, dir escaping the storage root — still
 /// error.
+#[hotpath::measure(label = "sessions.lcm_fs_authority.existing_dir")]
 pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
     let root = super::canonical_storage_root(storage_root)?;
     #[cfg(windows)]
@@ -759,6 +764,7 @@ pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     same_windows_handle_identity(&root_handle, &parent_handle)
 }
 
+#[hotpath::measure(label = "sessions.lcm_fs_authority.write")]
 pub(super) fn write_private_file(
     path: &Path,
     content: &[u8],

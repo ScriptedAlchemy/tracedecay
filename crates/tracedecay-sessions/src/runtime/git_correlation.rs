@@ -166,6 +166,7 @@ pub struct GitEvidenceProjectionV1 {
 }
 
 impl GitEvidenceProjectionV1 {
+    #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
     pub fn new(
         source_watermark: impl Into<String>,
         mut spans: Vec<SessionGitSpan>,
@@ -237,6 +238,7 @@ impl GitEvidenceProjectionV1 {
         &self.commit_sessions
     }
 
+    #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
     pub fn sessions_for(
         &self,
         query: &SessionsForQuery,
@@ -254,6 +256,7 @@ impl GitEvidenceProjectionV1 {
         }
     }
 
+    #[hotpath::measure(label = "sessions.git_correlation.session_ids_for_scope")]
     pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         if filter.is_empty() {
             return None;
@@ -576,6 +579,7 @@ pub fn span_debounce_key(
 /// Parses each message's `metadata_json` once for both commit evidence and
 /// ingest span observations. The repository is discovered only after a
 /// message actually carries commit candidates.
+#[hotpath::measure(label = "sessions.git_correlation.transcript_evidence")]
 pub fn transcript_git_evidence(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,
@@ -689,6 +693,7 @@ pub fn direct_commit_records(
     transcript_git_evidence(messages, project_root).0
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.ingest_spans")]
 pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
     messages
         .iter()
@@ -731,6 +736,7 @@ fn span_observation_from_metadata(
 }
 
 /// Installs only relational receipts used by bounded history convergence.
+#[hotpath::measure(label = "sessions.git_correlation.ensure_schema", future = true)]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
@@ -759,6 +765,7 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     Ok(())
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.read_meta", future = true)]
 pub async fn read_meta_value(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
@@ -775,6 +782,7 @@ pub async fn read_meta_value(
         .transpose()
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.write_meta", future = true)]
 pub async fn write_meta_value(
     conn: &(impl Executor + ?Sized),
     key: &str,

@@ -207,6 +207,7 @@ impl RepositoryProvenanceAdmissionContext {
     /// The mutex covers the miss and capture, coalescing concurrent records
     /// without a second repository traversal. A changed watermark invalidates
     /// immediately; unstable reads are returned but never cached.
+    #[hotpath::measure(label = "sessions.provenance.snapshot")]
     pub fn capture_snapshot(&self, captured_at: UtcMicros) -> CapturedRepositoryProvenanceV1 {
         let Some(before) = repository_provenance_watermark(&self.project_root) else {
             return self.capture_snapshot_uncached(captured_at);
@@ -369,6 +370,7 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
 pub struct NativeRepositoryProvenanceProbe;
 
 impl NativeRepositoryProvenanceProbe {
+    #[hotpath::measure(label = "sessions.provenance.capture")]
     pub fn capture(
         &self,
         request: &RepositoryProvenanceProbeRequest<'_>,
@@ -465,6 +467,7 @@ pub fn capture_repository_provenance(
     NativeRepositoryProvenanceProbe.capture(request)
 }
 
+#[hotpath::measure(label = "sessions.provenance.bind")]
 fn prepare_generation_binding(
     captured: EvidenceAvailabilityV1<RepositoryProvenanceV1>,
     observation: &DurableObservationV1,

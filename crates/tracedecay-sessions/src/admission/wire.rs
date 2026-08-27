@@ -122,6 +122,7 @@ fn capture_inspect_prefix(retained: &[u8], next: &[u8]) -> Vec<u8> {
 /// Streams hostile tails through a fixed scratch buffer and discards them once
 /// the cap is exceeded so the retained allocation never grows with attacker
 /// input size beyond `max_bytes`.
+#[hotpath::measure(label = "sessions.admission.read_end")]
 pub fn read_bounded_to_end(
     reader: &mut impl Read,
     max_bytes: usize,
@@ -278,6 +279,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "sessions.admission.read_line", future = true)]
     async fn read_bounded(
         &mut self,
         max_bytes: usize,

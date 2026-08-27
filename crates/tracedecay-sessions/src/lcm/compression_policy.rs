@@ -80,6 +80,7 @@ pub fn effective_assembly_token_cap(input: AssemblyCapInput) -> Option<i64> {
         .map(|cap| cap.max(1))
 }
 
+#[hotpath::measure(label = "sessions.lcm.overflow_cap")]
 pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Option<i64> {
     let assembly_cap = input.max_assembly_tokens?;
     let Some(current_tokens) = input.current_tokens.filter(|tokens| *tokens > 0) else {
@@ -126,6 +127,7 @@ pub fn effective_leaf_chunk_tokens(
     Some(working)
 }
 
+#[hotpath::measure(label = "sessions.lcm.leaf_chunk")]
 pub fn bounded_leaf_chunk_len(
     backlog: &[LcmRawMessage],
     leaf_chunk_tokens: Option<i64>,

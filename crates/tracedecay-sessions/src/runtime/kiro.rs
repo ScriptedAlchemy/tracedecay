@@ -114,6 +114,7 @@ impl TranscriptSource for KiroSource {
         PROVIDER
     }
 
+    #[hotpath::measure(label = "sessions.kiro.transcript_paths")]
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         if let Some(registered_roots) = &self.user_registered_roots {
             let mut out = collect_user_workspace_session_files(
@@ -172,6 +173,7 @@ impl TranscriptSource for KiroSource {
 }
 
 impl KiroSource {
+    #[hotpath::measure(label = "sessions.kiro.parse_snapshot")]
     fn parse_snapshot(
         &self,
         path: &Path,
@@ -248,6 +250,7 @@ impl KiroSource {
     }
 }
 
+#[hotpath::measure(label = "sessions.kiro.collect_user_workspace_sessions")]
 fn collect_user_workspace_session_files(
     sessions_root: &Path,
     registered_roots: &[PathBuf],
@@ -303,6 +306,7 @@ fn collect_user_workspace_session_files(
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
+#[hotpath::measure(label = "sessions.kiro.capture", future = true)]
 pub async fn capture_kiro_snapshot_observations(
     facade: &dyn HostAdmission,
     source: &KiroSource,
@@ -345,6 +349,7 @@ fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult
 }
 
 impl KiroSource {
+    #[hotpath::measure(label = "sessions.kiro.snapshot_input_bytes")]
     fn snapshot_input_bytes(&self, path: &Path) -> TranscriptIngestResult<u64> {
         let transcript_bytes = bounded_snapshot_input_len(PROVIDER, path, MAX_SNAPSHOT_FILE_BYTES)?;
         let metadata_bytes = workspace_hash_from_path(path).map_or(Ok(0), |hash| {
@@ -362,6 +367,7 @@ fn non_durable(path: &Path, reason: &'static str) -> TranscriptIngestError {
     non_durable_snapshot_record(PROVIDER, path, reason)
 }
 
+#[hotpath::measure(label = "sessions.kiro.collect_workspace_sessions")]
 fn collect_workspace_session_files(
     sessions_root: &Path,
     project_root: &Path,
@@ -405,6 +411,7 @@ fn collect_workspace_session_files(
     out
 }
 
+#[hotpath::measure(label = "sessions.kiro.collect_agent_storage")]
 fn collect_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
@@ -467,6 +474,7 @@ fn collect_agent_storage_files(
     out
 }
 
+#[hotpath::measure(label = "sessions.kiro.collect_user_agent_storage")]
 fn collect_user_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
@@ -583,6 +591,7 @@ fn workspace_hash_from_path(path: &Path) -> Option<String> {
     })
 }
 
+#[hotpath::measure(label = "sessions.kiro.workspace_path_from_hash")]
 fn workspace_path_from_hash(workspace_storage_dir: &Path, hash: &str) -> Option<PathBuf> {
     let workspace_json = workspace_metadata_path(workspace_storage_dir, hash);
     let contents =
@@ -692,6 +701,7 @@ fn model_from_transcript(value: &Value) -> Option<String> {
     })
 }
 
+#[hotpath::measure(label = "sessions.kiro.messages_from_transcript")]
 fn messages_from_transcript(
     value: &Value,
     session_id: &str,
@@ -883,6 +893,7 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
+#[hotpath::measure(label = "sessions.kiro.normalize")]
 pub fn normalize_kiro_snapshot_observations(
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<KiroSnapshotObservationRecord>> {
