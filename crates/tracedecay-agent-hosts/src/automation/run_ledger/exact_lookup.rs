@@ -161,6 +161,7 @@ pub(super) fn read_logical_run_lifecycle(
     read_logical_run_lifecycles(file, path, &selected, true).map(|mut rows| rows.remove(run_id))
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.logical_lifecycles")]
 pub(super) fn read_logical_run_lifecycles(
     file: &std::fs::File,
     path: &Path,
@@ -257,6 +258,10 @@ pub(super) struct ExactRunIdentity {
     pub(super) payload_len: u64,
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "hosts.automation.run_ledger_lookup.exact_bounded"
+)]
 pub async fn find_run_record_exact_bounded(
     dashboard_root: &Path,
     run_id: &str,
@@ -274,6 +279,7 @@ pub async fn find_run_record_exact_bounded(
     })?
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.exact_bounded_blocking")]
 pub fn find_run_record_exact_bounded_blocking(
     dashboard_root: &Path,
     run_id: &str,
@@ -291,6 +297,7 @@ pub fn find_run_record_exact_bounded_blocking(
     result.and_then(|record| unlock.map(|()| record))
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.decode")]
 fn read_exact_run_record_bounded(
     path: &Path,
     run_id: &str,
@@ -372,6 +379,7 @@ fn open_exact_ledger(path: &Path) -> Result<Option<std::fs::File>> {
     open_stabilized_run_ledger(path, false)
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.open")]
 pub(super) fn open_stabilized_run_ledger(
     path: &Path,
     create: bool,
@@ -390,6 +398,7 @@ pub(super) fn open_stabilized_run_ledger(
     Ok(Some(file))
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.scan")]
 fn read_exact_run_match(
     file: &std::fs::File,
     path: &Path,
@@ -485,6 +494,7 @@ pub(super) fn validate_jsonl_row_schema(
     JsonRangeReader::new(file, path, span.clone()).validate_ledger_record()
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.decode_row")]
 pub(super) fn decode_jsonl_row(
     file: &std::fs::File,
     path: &Path,
@@ -640,6 +650,7 @@ impl<'a> ReverseJsonlScanner<'a> {
     }
 }
 
+#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.extract_pointer")]
 pub(super) fn extract_json_pointer_bounded(
     file: &std::fs::File,
     path: &Path,

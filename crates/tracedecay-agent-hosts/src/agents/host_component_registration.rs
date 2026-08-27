@@ -1387,6 +1387,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_preflight")]
     fn preflight(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
@@ -1497,6 +1498,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_stage")]
     fn stage(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
@@ -1532,6 +1534,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_apply")]
     fn apply(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,

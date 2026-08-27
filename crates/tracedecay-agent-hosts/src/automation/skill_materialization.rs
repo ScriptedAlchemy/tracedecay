@@ -507,6 +507,7 @@ fn package_lock_path(package_dir: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
+#[hotpath::measure(label = "hosts.automation.skill_materialization.lock")]
 fn lock_package(package_dir: &Path) -> Result<PackageLock> {
     use fs2::FileExt;
     let path = package_lock_path(package_dir);
@@ -904,6 +905,7 @@ fn apply_pending_materialization(
     Ok(MaterializeAction::Written)
 }
 
+#[hotpath::measure(label = "hosts.automation.skill_materialization.commit")]
 fn commit_materialization_transaction(
     dir: &Path,
     skill: &ManagedSkill,
@@ -1057,6 +1059,7 @@ pub fn materialize_skill(
 /// Materializes one skill into an explicit host slug. `reconcile_scope` passes a
 /// collision-disambiguated slug here; the public entry point uses the skill's
 /// own base slug.
+#[hotpath::measure(label = "hosts.automation.skill_materialization.materialize")]
 fn materialize_skill_into(
     scope: &MaterializationScope,
     skill: &ManagedSkill,
@@ -1214,6 +1217,7 @@ fn package_is_foreign_to_installation(
 /// user-edited managed file is preserved; a foreign file is never touched; a
 /// committed project-scope package authored by a different installation is
 /// left in place.
+#[hotpath::measure(label = "hosts.automation.skill_materialization.remove")]
 pub fn remove_materialized_skill(
     scope: &MaterializationScope,
     slug: &str,
@@ -1343,6 +1347,7 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
 /// every active skill and removes managed files whose skill is no longer
 /// active. Fork- and foreign-safe throughout. A single failing package is
 /// recorded in `report.errors` and never aborts the rest of the sweep.
+#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile")]
 pub fn reconcile_scope(
     scope: &MaterializationScope,
     active_skills: &[ManagedSkill],
@@ -1487,6 +1492,7 @@ pub struct ScopeReconcileResult {
 /// Reconciles every detected scope against the profile's active managed skills.
 /// Returns one result per scope. Errors from a single scope are surfaced in
 /// `errors` rather than aborting the whole sweep.
+#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile_detected")]
 pub fn reconcile_detected_scopes(
     profile_root: &Path,
     home: &Path,

@@ -80,7 +80,8 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     #[hotpath::measure(
-        label = "context_scout_owner_startup",
+        future = true,
+        label = "hosts.agent.context_scout.startup",
         impl_type = "ProjectContextScoutOwnerV1"
     )]
     pub async fn startup(
@@ -124,7 +125,8 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     #[hotpath::measure(
-        label = "context_scout_claim_ready",
+        future = true,
+        label = "hosts.agent.context_scout.claim_ready",
         impl_type = "ProjectContextScoutOwnerV1"
     )]
     pub async fn claim_ready_guidance(
@@ -230,7 +232,8 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     #[hotpath::measure(
-        label = "context_scout_record_delivery",
+        future = true,
+        label = "hosts.agent.context_scout.record_delivery",
         impl_type = "ProjectContextScoutOwnerV1"
     )]
     pub async fn record_delivery(
@@ -256,6 +259,11 @@ impl ProjectContextScoutOwnerV1 {
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "hosts.agent.context_scout.record_feedback",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn record_feedback(
         &self,
         receipt: &ContextScoutDeliveryReceiptV1,
@@ -344,6 +352,11 @@ impl ProjectContextScoutOwnerV1 {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "hosts.agent.context_scout.install_configuration",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn install_configuration(
         &self,
         pin: ContextScoutConfigurationPinV1,
@@ -378,6 +391,11 @@ impl ProjectContextScoutOwnerV1 {
 
     /// Installs only an admitted active/paused control transition while
     /// preserving the already-selected model authority.
+    #[hotpath::measure(
+        future = true,
+        label = "hosts.agent.context_scout.install_state_transition",
+        impl_type = "ProjectContextScoutOwnerV1"
+    )]
     pub async fn install_state_transition(
         &self,
         pin: ContextScoutConfigurationPinV1,
@@ -406,7 +424,8 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     #[hotpath::measure(
-        label = "context_scout_recent",
+        future = true,
+        label = "hosts.agent.context_scout.recent",
         impl_type = "ProjectContextScoutOwnerV1"
     )]
     pub async fn recent(

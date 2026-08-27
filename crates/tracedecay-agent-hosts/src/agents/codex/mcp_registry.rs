@@ -168,7 +168,7 @@ pub(super) fn codex_mcp_remove_with(codex_cli: &Path, home: &Path) -> Result<()>
 /// The exact post-command bytes are recorded through the active host
 /// transaction so its existing rollback authority can restore the pre-command
 /// document when the command fails or a later verification step rejects it.
-#[hotpath::measure(label = "codex_mcp_registry_step")]
+#[hotpath::measure(label = "hosts.agent.codex.mcp_registry_step")]
 fn run_codex_mcp_step(codex_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
     let config_path = codex_config_path(home);
     let regions_before = preserved_regions(&config_path)?;

@@ -96,6 +96,7 @@ impl AgentIntegration for KimiIntegration {
         true
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.project_install")]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -162,7 +163,7 @@ impl AgentIntegration for KimiIntegration {
             &agents_md,
             crate::automation::skill_targets::SkillInstallTarget::Kimi,
         )?;
-        uninstall_prompt_rules(&agents_md);
+        uninstall_prompt_rules(&agents_md)?;
         Ok(())
     }
 
@@ -388,7 +389,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .collect()
 }
 
-#[hotpath::measure(label = "kimi_plugin_deploy")]
+#[hotpath::measure(label = "hosts.agent.kimi.plugin_deploy")]
 fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&managed_dir.join(relative), &rendered, None)?;
@@ -486,8 +487,24 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Remove tracedecay rules from AGENTS.md.
-fn uninstall_prompt_rules(agents_md: &Path) {
-    super::prompt_rules::remove_prompt_rules(agents_md, PROMPT_RULE_MARKER);
+fn uninstall_prompt_rules(agents_md: &Path) -> Result<()> {
+    super::prompt_rules::remove_prompt_rules_with(agents_md, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(new_contents) =
+            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
+        else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

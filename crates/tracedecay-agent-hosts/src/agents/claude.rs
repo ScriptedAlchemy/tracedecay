@@ -62,6 +62,7 @@ impl AgentIntegration for ClaudeIntegration {
     // deferral arms in `host_component_registration::preflight` and block the
     // very lifecycle this integration can complete on its own.
 
+    #[hotpath::measure(label = "hosts.agent.claude.project_install")]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -428,7 +429,7 @@ fn require_claude_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "claude_plugin_activate")]
+#[hotpath::measure(label = "hosts.agent.claude.plugin_activate")]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
     let deploy_dir = plugin_deploy_dir(home);
     let deploy_arg = deploy_dir.to_string_lossy().into_owned();
@@ -446,6 +447,7 @@ fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
 /// The plugin is addressed by its selection name (`tracedecay`) while the
 /// install side addresses `<plugin>@<marketplace>`; that asymmetry is Claude
 /// Code's own CLI contract, not a TraceDecay convention.
+#[hotpath::measure(label = "hosts.agent.claude.plugin_deactivate")]
 fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
     run_claude_plugin_step(
         claude,
@@ -461,7 +463,6 @@ fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
 
 /// Run one `claude plugin ...` step, converting a failed invocation into the
 /// host's own diagnosis.
-#[hotpath::measure(label = "claude_plugin_registry_step")]
 fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<()> {
     super::host_cli::require_host_cli_success(super::host_cli::run_host_cli(claude, args, home)?)
 }
@@ -511,7 +512,7 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 
 /// Deploy every embedded bundle file into the stable marketplace dir,
 /// stamping the plugin version and substituting the binary path.
-#[hotpath::measure(label = "claude_plugin_deploy")]
+#[hotpath::measure(label = "hosts.agent.claude.plugin_deploy")]
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     if std::fs::symlink_metadata(home.join(".claude"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -928,65 +929,42 @@ fn claude_md_rules_text() -> String {
 /// Install or refresh the CLAUDE.md rules block.
 fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     let block = claude_md_rules_text();
-    let existing_md = if claude_md_path.is_file() {
-        std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {}: {e}", claude_md_path.display()),
-        })?
-    } else {
-        String::new()
-    };
-    if existing_md.contains(&block) {
-        eprintln!("  CLAUDE.md already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    if let Some(range) = claude_md_rules_block_range(&existing_md, CLAUDE_MD_RECONCILE_MARKERS) {
-        let stripped = super::prompt_rules::splice_out(&existing_md, range.start, range.end);
-        return super::prompt_rules::write_refreshed(claude_md_path, &stripped, &block);
-    }
-    let new_contents = format!("{existing_md}\n{block}\n");
-    safe_write_text_file(claude_md_path, &new_contents, None)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
-        claude_md_path.display()
-    );
-    Ok(())
+    super::prompt_rules::reconcile_prompt_rules_with(claude_md_path, |existing| {
+        if existing.contains(&block) {
+            return Ok(super::prompt_rules::PromptRulesEdit::Unchanged);
+        }
+        if let Some(range) = claude_md_rules_block_range(existing, CLAUDE_MD_RECONCILE_MARKERS) {
+            let stripped = super::prompt_rules::splice_out(existing, range.start, range.end);
+            return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
+                super::prompt_rules::refreshed_contents(&stripped, &block),
+            ));
+        }
+        Ok(super::prompt_rules::PromptRulesEdit::Added(format!(
+            "{existing}\n{block}\n"
+        )))
+    })
 }
 
 /// Remove tracedecay rules from CLAUDE.md.
 ///
 /// Handles the steady marker plus display-case product name.
 fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
-    if !claude_md_path.exists() {
-        return Ok(());
-    }
-    let contents =
-        std::fs::read_to_string(claude_md_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to read {}: {error}", claude_md_path.display()),
-        })?;
-    if !contents.contains("tracedecay") {
-        eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
-        return Ok(());
-    }
-    let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
-        return Ok(());
-    };
-    let new_contents = super::prompt_rules::splice_out(&contents, range.start, range.end);
-    if new_contents.is_empty() {
-        super::safe_remove_host_file(claude_md_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", claude_md_path.display()),
-        })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            claude_md_path.display()
-        );
-    } else {
-        safe_write_text_file(claude_md_path, &format!("{new_contents}\n"), None)?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
-            claude_md_path.display()
-        );
-    }
-    Ok(())
+    super::prompt_rules::remove_prompt_rules_with(claude_md_path, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(range) = claude_md_rules_block_range(contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

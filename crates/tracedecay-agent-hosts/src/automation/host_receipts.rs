@@ -132,7 +132,7 @@ fn with_locked_state<T>(
 /// read-modify-write of the dashboard state file. This is the per-tool-call
 /// disk boundary, so it is measured as one unit rather than its internal
 /// dedupe/serialize steps.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.record")]
 pub async fn record(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -173,7 +173,7 @@ pub async fn record(
 
 /// Per-turn boundary write: the same locked state file as [`record`], but
 /// gated on transcript ingestion rather than the raw tool-call receipt.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.turn_ingested")]
 pub async fn mark_turn_ingested(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,

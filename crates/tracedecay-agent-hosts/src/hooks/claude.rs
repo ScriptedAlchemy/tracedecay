@@ -19,6 +19,7 @@ use super::{
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
+#[hotpath::measure(label = "hosts.hooks.claude.pre_tool_use")]
 pub fn hook_pre_tool_use() {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
     let parsed: Value = serde_json::from_str(&tool_input).unwrap_or(Value::Null);
@@ -129,6 +130,7 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 }
 
 /// Claude Code `SessionStart` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.session_start")]
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
     let (root, output) = claude_session_start_response(&event).await;
@@ -206,6 +208,7 @@ enum ClaudeSubagentStartContextOutcome {
 /// fresh subagent reaches for tracedecay before a broad native scan. Emission is
 /// skipped when the project root cannot be resolved (a non-project workspace has
 /// nothing to steer toward). Analytics are fire-and-forget like `SessionStart`.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.subagent_start")]
 pub async fn hook_claude_subagent_start() -> i32 {
     let event = read_hook_event!();
     let started = Instant::now();
@@ -282,6 +285,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
 /// compacted source frontier. The daemon therefore treats this event as a
 /// read-only capability probe and returns typed unavailable without publishing
 /// transcript or summary state.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
 pub async fn hook_claude_post_compact() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -346,6 +350,7 @@ where
 }
 
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.post_tool_use")]
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let (root, response) = claude_post_tool_use_response(&event).await;
@@ -396,6 +401,7 @@ async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<
 
 /// `UserPromptSubmit` hook handler: resets the project counter; a projectless
 /// session is ingested into the profile store.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.prompt_submit")]
 pub async fn hook_prompt_submit() -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -445,6 +451,7 @@ pub async fn hook_prompt_submit() -> i32 {
 }
 
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
+#[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
 pub async fn hook_stop() -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,

@@ -46,6 +46,7 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 }
 
 /// Codex `SessionStart` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -92,6 +93,7 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 /// Codex `UserPromptSubmit` hook handler.
 ///
 /// Resets the local counter and injects steering context for the new turn.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -160,6 +162,7 @@ async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option
 }
 
 /// Codex `SubagentStart` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.subagent_start")]
 pub async fn hook_codex_subagent_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -197,6 +200,7 @@ pub async fn hook_codex_subagent_start() -> i32 {
 /// The native event enters the canonical V2 admission/replay journey. Only
 /// daemon-approved ready guidance is rendered in Codex's documented
 /// `additionalContext` shape; unavailable or guidance-free admission is silent.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
     // One parse supplies exact scope and analytics attribution.
@@ -239,6 +243,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// The daemon lands the session's rollout through the canonical transcript
 /// ingest route and then runs the daemon-owned compression journey; the hook
 /// itself only forwards the boundary and fails open.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -279,6 +284,7 @@ const CODEX_STOP_RETENTION_BUDGET: Duration = Duration::from_secs(3);
 /// Codex emits this after the assistant finishes a turn. Projectless sessions
 /// need this terminal receipt because the prompt hook runs before the final
 /// assistant message has been appended to the rollout.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.stop")]
 pub async fn hook_codex_stop() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -339,6 +345,7 @@ pub async fn hook_codex_stop() -> i32 {
 /// and user review as cancellable daemon-owned work keyed to this exact
 /// session. The hook only waits (bounded) for the acknowledgement; an
 /// unavailable daemon fails open.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.retain_stop")]
 async fn retain_codex_stop_in_daemon(
     session_id: Option<&str>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
@@ -415,6 +422,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 }
 
 /// Records a Codex `SubagentStart` and returns the session-local count.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.record_subagent_start")]
 pub async fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = event_project_root_with_identity(&parsed).await?;
@@ -612,6 +620,7 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
     rels
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.compact_daemon")]
 async fn codex_post_compact(
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,

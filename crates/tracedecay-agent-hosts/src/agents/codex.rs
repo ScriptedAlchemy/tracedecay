@@ -92,6 +92,7 @@ impl AgentIntegration for CodexIntegration {
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 
+    #[hotpath::measure(label = "hosts.agent.codex.project_install")]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -340,6 +341,7 @@ impl AgentIntegration for CodexIntegration {
         self.host_registration_paths(home)
     }
 
+    #[hotpath::measure(label = "hosts.agent.codex.plugin_activate")]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
@@ -535,7 +537,7 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-#[hotpath::measure(label = "codex_plugin_install")]
+#[hotpath::measure(label = "hosts.agent.codex.plugin_install")]
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
     eprintln!(
@@ -557,7 +559,7 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
     Ok(install_dir)
 }
 
-#[hotpath::measure(label = "codex_repo_plugin_install")]
+#[hotpath::measure(label = "hosts.agent.codex.repo_plugin_install")]
 fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     install_codex_plugin_bundle(
@@ -733,7 +735,7 @@ pub fn export_codex_plugin_artifact(
     )
 }
 
-#[hotpath::measure(label = "codex_plugin_bundle_write")]
+#[hotpath::measure(label = "hosts.agent.codex.plugin_bundle_write")]
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,

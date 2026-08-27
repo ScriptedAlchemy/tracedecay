@@ -58,6 +58,7 @@ impl AgentIntegration for OpenCodeIntegration {
         true
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.project_install")]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -112,7 +113,7 @@ impl AgentIntegration for OpenCodeIntegration {
             &agents_md,
             crate::automation::skill_targets::SkillInstallTarget::OpenCode,
         )?;
-        uninstall_prompt_rules(&agents_md);
+        uninstall_prompt_rules(&agents_md)?;
         Ok(())
     }
 
@@ -288,7 +289,7 @@ impl AgentIntegration for OpenCodeIntegration {
                 &prompt,
                 crate::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
-            uninstall_prompt_rules(&prompt);
+            uninstall_prompt_rules(&prompt)?;
         }
         remove_external_opencode_assets(&ctx.home, components)?;
         Ok(())
@@ -577,7 +578,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
 /// origin beside this file rather than replace it (see [`plugin_cli`]). The
 /// destination is checked rather than assumed so a future refactor cannot
 /// quietly deploy where the host never scans.
-#[hotpath::measure(label = "opencode_plugin_install")]
+#[hotpath::measure(label = "hosts.agent.opencode.plugin_install")]
 fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
     if !plugin_cli::is_host_discovered_plugin_path(path) {
         return Err(TraceDecayError::Config {
@@ -642,6 +643,7 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// declines to drive, so forging its effect is refused on both the install and
 /// uninstall paths — see
 /// [`plugin_cli::ensure_host_owned_plugin_registration_untouched`].
+#[hotpath::measure(label = "hosts.agent.opencode.registration_install")]
 fn install_registration_entries(
     config_path: &Path,
     tracedecay_bin: &str,
@@ -898,8 +900,24 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
-fn uninstall_prompt_rules(prompt_path: &Path) {
-    super::prompt_rules::remove_prompt_rules(prompt_path, PROMPT_RULE_MARKER);
+fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
+    super::prompt_rules::remove_prompt_rules_with(prompt_path, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        }
+        let Some(new_contents) =
+            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
+        else {
+            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
+        };
+        if new_contents.is_empty() {
+            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
+        } else {
+            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
+                "{new_contents}\n"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -399,7 +399,7 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
     ))
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "hosts.hooks.dispatch")]
 pub(crate) async fn dispatch(
     host: HookHostV1,
     event_json: &str,
@@ -435,7 +435,6 @@ pub(crate) async fn dispatch(
 /// Dispatches a native event through its exact project binding when one is
 /// known, or through the authenticated daemon profile when the host has no
 /// project identity. Both paths send only the closed event material.
-#[hotpath::measure]
 pub(crate) async fn dispatch_for_scope(
     host: HookHostV1,
     event_json: &str,
@@ -511,6 +510,7 @@ async fn dispatch_profile_scoped(
     }
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_tool_after")]
 pub(crate) async fn dispatch_opencode_tool_after(
     event_json: &str,
     project_root: &Path,
@@ -547,6 +547,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
     dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_lsp_updated")]
 pub(crate) async fn dispatch_opencode_lsp_updated(
     event_json: &str,
     project_root: &Path,
@@ -616,7 +617,7 @@ fn prepare_bound_hook(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "hosts.hooks.dispatch_decoded")]
 async fn dispatch_decoded(
     prepared: PreparedBoundHook,
     project_root: &Path,

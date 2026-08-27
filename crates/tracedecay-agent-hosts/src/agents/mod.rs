@@ -31,6 +31,8 @@ pub mod kiro;
 pub mod opencode;
 pub mod plugin_bundle;
 pub mod prompt_rules;
+mod text_file_transaction;
+pub(crate) use text_file_transaction::{TextFileMutation, update_text_file_transactionally};
 pub(crate) mod retired_memory_digest;
 pub mod roo_code;
 pub mod vibe;
@@ -68,6 +70,7 @@ pub use roo_code::RooCodeIntegration;
 pub use vibe::VibeIntegration;
 pub use zed::ZedIntegration;
 
+#[hotpath::measure(label = "agent_hosts.agents.managed_skill.install_index")]
 pub(crate) fn install_managed_skill_prompt_index(
     profile_home: &Path,
     prompt_path: &Path,
@@ -80,6 +83,7 @@ pub(crate) fn install_managed_skill_prompt_index(
     Ok(())
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.managed_skill.remove_index")]
 pub(crate) fn remove_managed_skill_prompt_index(
     profile_home: &Path,
     prompt_path: &Path,
@@ -115,6 +119,7 @@ pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> boo
 /// export for one host must not block the others (or the lifecycle action
 /// that triggered the refresh). Agents with no export destinations are
 /// omitted from the result.
+#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export")]
 pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
@@ -147,6 +152,7 @@ pub fn export_managed_skills_to_agents(
 /// Re-runs managed-skill exports for global installs under `home` plus
 /// project-local installs under `project_root`. Reports are merged per agent
 /// so dashboard callers can present one lifecycle refresh result per host.
+#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export_hosts")]
 pub fn export_managed_skills_to_agent_hosts(
     home: &Path,
     project_root: &Path,
@@ -689,6 +695,7 @@ impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInsp
     }
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.host_bundle.inspect")]
 pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,
@@ -758,6 +765,7 @@ pub fn load_json_file(path: &Path) -> serde_json::Value {
 ///
 /// Returns `Ok(json!({}))` only when the file does not exist or is empty,
 /// which is safe for creating a new config from scratch.
+#[hotpath::measure(label = "agent_hosts.agents.config.load_json")]
 pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
@@ -795,6 +803,7 @@ pub fn config_backup_path(path: &Path) -> PathBuf {
 /// - File exists but cannot be read (permissions, I/O error).
 /// - Staging file cannot be written (disk full, permissions).
 /// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
+#[hotpath::measure(label = "agent_hosts.agents.host_config.backup")]
 pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -1042,6 +1051,7 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>
     safe_write_bytes_file_with_metadata(path, contents, backup, None)
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.host_config.write")]
 pub fn safe_write_bytes_file_with_metadata(
     path: &Path,
     contents: &[u8],
@@ -1141,6 +1151,7 @@ pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf
 /// its bytes first, checks peer ownership, and then records exactly those
 /// bytes. If a foreign writer races after the snapshot, rollback compares the
 /// recorded digest to the live state and refuses instead of restoring over it.
+#[hotpath::measure(label = "agent_hosts.agents.host_config.observe")]
 pub(crate) fn record_host_config_observation_bytes(
     path: &Path,
     contents: Option<&[u8]>,
@@ -1163,6 +1174,7 @@ pub(crate) fn record_host_config_observation_bytes(
     }
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.host_config.remove")]
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
     persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
     std::fs::remove_file(path)?;
@@ -1182,6 +1194,7 @@ struct HostConfigWriteIntentV2<'a> {
     metadata: Option<&'a HostFileMetadataIdentityV1>,
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.host_config.persist")]
 fn persist_host_config_write_intent(
     path: &Path,
     contents: &[u8],
@@ -1219,6 +1232,7 @@ fn persist_host_config_write_intent(
     })
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.host_config.persist_remove")]
 fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
     let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
         return Ok(());
@@ -1246,6 +1260,7 @@ fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
 
 /// Write a JSON value to a file with pretty formatting.
 /// Creates a backup, writes atomically, and restores on failure.
+#[hotpath::measure(label = "agent_hosts.agents.config.write_json")]
 pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
     let backup = backup_config_file(path)?;
     safe_write_json_file(path, value, backup.as_deref())?;
@@ -1282,6 +1297,7 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
 /// [`load_jsonc_file_strict`]): a config that exists but cannot be parsed is
 /// an error rather than a silent overwrite. `agent_label` names the host in
 /// the directory-creation error.
+#[hotpath::measure(label = "agent_hosts.agents.mcp.install")]
 pub fn install_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
@@ -1353,6 +1369,7 @@ pub struct McpUninstallPolicy {
 /// behind (issue #63). [`McpUninstallPolicy::durable_remove`] is the fail-closed
 /// exception (Kiro workspace `mcp.json`): backup, atomic remove/rewrite, and
 /// parent-directory sync errors propagate.
+#[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
@@ -1624,6 +1641,7 @@ pub fn which_tracedecay() -> Option<String> {
 }
 
 /// Finds the tracedecay binary without converting its platform-native path.
+#[hotpath::measure(label = "agent_hosts.agents.which_tracedecay")]
 pub fn which_tracedecay_path() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
@@ -1786,6 +1804,7 @@ pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
 /// prefix alone is never ownership evidence. A sibling is removed only when it
 /// is a real directory, its suffix is known to have been created by
 /// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
+#[hotpath::measure(label = "agent_hosts.agents.plugin.sweep_siblings")]
 pub(crate) fn sweep_superseded_plugin_siblings(
     current_dir: &Path,
     ownership_manifests: &[&str],
@@ -1852,6 +1871,7 @@ pub(crate) fn sweep_superseded_plugin_siblings(
 
 /// Recursively collect every regular file under `root` (following the same
 /// hand-rolled walk both the Cursor and Codex installers rely on).
+#[hotpath::measure(label = "agent_hosts.agents.fs.collect_regular_files")]
 pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     collect_regular_files_inner(root, &mut out)?;
@@ -1912,6 +1932,7 @@ fn relative_project_path(
         .map(Path::to_path_buf)
 }
 
+#[hotpath::measure(label = "agent_hosts.agents.fs.ensure_project_local")]
 pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
     let root = project_root
         .canonicalize()
@@ -2133,6 +2154,7 @@ pub fn load_jsonc_file(path: &Path) -> serde_json::Value {
 /// - File exists and has content but contains invalid JSONC.
 ///
 /// Returns `Ok(json!({}))` only when the file does not exist or is empty.
+#[hotpath::measure(label = "agent_hosts.agents.config.load_jsonc")]
 pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
@@ -2261,6 +2283,7 @@ pub fn pick_integrations_interactive(
 /// Returns an empty table when the file does not exist. When the file exists
 /// but cannot be parsed as a TOML document, returns a [`TraceDecayError::Config`]
 /// so callers do not silently overwrite the user's data (see issue #63).
+#[hotpath::measure(label = "agent_hosts.agents.config.load_toml")]
 pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::map::Map::new()));
@@ -2308,6 +2331,7 @@ fn backup_file(path: &Path) -> Result<()> {
 }
 
 /// Write a TOML value to a file, backing up any existing file first.
+#[hotpath::measure(label = "agent_hosts.agents.config.write_toml")]
 pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
     backup_file(path)?;
     let contents = toml::to_string_pretty(value).unwrap_or_else(|_| String::new());
@@ -2345,6 +2369,7 @@ fn post_commit_snippet(tracedecay_bin: &str) -> String {
 /// interactively asks the user whether to install one. Silently succeeds if
 /// the hook is already present, if stdin is not a terminal, or if the user
 /// declines.
+#[hotpath::measure(label = "agent_hosts.agents.git.offer_post_commit")]
 pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
     let Some(home) = home_dir() else { return };
 
