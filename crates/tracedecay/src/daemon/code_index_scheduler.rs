@@ -37,9 +37,8 @@ use tracedecay_private_fs::{
     framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryReservationV1,
+    ProcessResidentMemoryV1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryReservationV1, detected_process_resident_memory_limit_v1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -4110,7 +4109,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             #[cfg(test)]
             reconcile_fault: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
-                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+                detected_process_resident_memory_limit_v1(),
             )),
             publication,
             production_config,

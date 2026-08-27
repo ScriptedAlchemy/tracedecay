@@ -5,10 +5,41 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, Weak};
 
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
+/// Conservative fallback when the host cannot report physical memory.
+///
+/// Production normally derives the authority from the machine. This fallback
+/// is not a project-size ceiling: the authority governs concurrently live
+/// resident allocations, while project data must remain paged or durable.
 pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
     NonZeroU64::MIN.saturating_add(6 * 1024 * 1024 * 1024 - 1);
+
+/// Derive the concurrent resident-allocation authority for a known host size.
+#[must_use]
+pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> NonZeroU64 {
+    NonZeroU64::new(total_memory_bytes.saturating_sub(total_memory_bytes / 4))
+        .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+}
+
+/// Size the shared resident-allocation authority from this machine.
+///
+/// TraceDecay retains one quarter of physical RAM outside its modeled
+/// concurrent allocations for the OS, agent hosts, and allocations that do
+/// not yet participate in this authority. The remaining authority throttles
+/// simultaneous scratch ownership; it never limits repository bytes on disk.
+#[must_use]
+pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
+    let system = System::new_with_specifics(
+        RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
+    );
+    let total_memory_bytes = system.total_memory();
+    let limit = process_resident_memory_limit_for_system_v1(total_memory_bytes);
+    hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
+    hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
+    limit
+}
 
 /// Stable component label inside one exact generation identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

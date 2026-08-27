@@ -10,7 +10,7 @@ use serde_json::Value;
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
 use crate::errors::{Result, TraceDecayError};
@@ -50,7 +50,7 @@ impl DaemonInvocationState {
     /// progress is ordered by the existing durable daemon-authority epoch.
     pub(super) fn with_progress_producer_incarnation(producer_incarnation: u64) -> Self {
         let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
-            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            detected_process_resident_memory_limit_v1(),
         ));
         let code_index_schedulers = code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory_and_progress_producer_incarnation(
             MAX_CACHED_PROJECT_SERVERS,
@@ -1028,8 +1028,8 @@ mod resident_memory_tests {
         assert!(Arc::ptr_eq(&state_memory, &cloned_memory));
         assert_eq!(
             state_memory.snapshot().limit_bytes,
-            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
-                .get(),
+            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
+                .get()
         );
     }
 }
