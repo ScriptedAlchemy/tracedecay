@@ -278,6 +278,7 @@ impl<P> GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
+    #[hotpath::measure(label = "query.graph.enforce")]
     fn enforce_batch(
         &self,
         request: &GraphLaneRequest,
