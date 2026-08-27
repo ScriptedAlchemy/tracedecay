@@ -198,7 +198,8 @@ impl VerifiedGraphSnapshot {
                 Ok(())
             }
         };
-        database.apply_generation_unverified(&manifest, &check)?;
+        let manifest = Arc::new(manifest);
+        database.apply_generation_unverified(Arc::clone(&manifest), &check)?;
         let recovered_digest = database.verify_generation_in_place(&manifest, &check)?;
         let projection = GraphProjectionIdentityV1 {
             shard_id: StoreShardIdV1::project(
@@ -234,10 +235,12 @@ impl VerifiedGraphSnapshot {
         };
         let lease = generation_lease(&manifest.identity(), head, BTreeMap::new());
         database.install_verified_generation(Arc::clone(&lease))?;
+        let projection = manifest.projection.clone();
+        drop(manifest);
         Ok(Self::new(
             database,
             Arc::clone(&lease),
-            BTreeMap::from([(manifest.projection, lease)]),
+            BTreeMap::from([(projection, lease)]),
         ))
     }
 

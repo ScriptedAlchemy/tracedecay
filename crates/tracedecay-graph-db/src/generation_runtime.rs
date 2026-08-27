@@ -148,7 +148,7 @@ impl GraphDb {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn apply_generation_unverified(
         &self,
-        manifest: &GraphGenerationManifest,
+        manifest: Arc<GraphGenerationManifest>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         let expected = manifest.expected_recovered_digest(check)?;
@@ -158,7 +158,7 @@ impl GraphDb {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn apply_generation_unverified_with_digest(
         &self,
-        manifest: &GraphGenerationManifest,
+        manifest: Arc<GraphGenerationManifest>,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
@@ -166,10 +166,19 @@ impl GraphDb {
             .map(GenerationStageOutcome::commit)
     }
 
+    /// Stages `manifest`, consuming it.
+    ///
+    /// The manifest is taken by value: once the last page transaction and its
+    /// receipt are durable the staged rows are recoverable from the database
+    /// alone, so this releases them before the empty finalization batch runs.
+    /// On a first index that reclaims gigabytes at exactly the point where the
+    /// caller is about to close, reopen, and rebuild the in-RAM store -- the
+    /// overlap that made publication the peak-RSS moment. Every later stage
+    /// reads only the identity, which the caller keeps.
     #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
     pub(crate) fn apply_generation_unverified_with_digest_observed(
         &self,
-        manifest: &GraphGenerationManifest,
+        manifest: Arc<GraphGenerationManifest>,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GenerationStageOutcome, GraphDbError> {
@@ -186,11 +195,14 @@ impl GraphDb {
             dependency_digest: identity.dependency_closure_digest(check)?,
         };
         if let Some(commit) = self.reseat_complete_staged_generation(&identity, &context)? {
+            // A complete durable generation is already seated; these rows were
+            // never needed.
+            drop(manifest);
             return Ok(GenerationStageOutcome::Reseated(commit));
         }
-        let pages = generation_stage_pages(manifest)?;
+        let pages = generation_stage_pages(&manifest)?;
         let adopt_legacy_partial = self.has_exact_legacy_stage_prefix(
-            manifest,
+            &manifest,
             &identity,
             expected,
             &context,
@@ -199,12 +211,8 @@ impl GraphDb {
         #[cfg(feature = "hotpath")]
         {
             let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
-            crate::hotpath_observe::record_counts(
-                manifest.entities.len(),
-                manifest.relations.len(),
-                0,
-                generation_bytes,
-            );
+            let (entities, relations) = manifest.row_counts();
+            crate::hotpath_observe::record_counts(entities, relations, 0, generation_bytes);
             crate::hotpath_observe::record_hydration_source(
                 crate::hotpath_observe::HydrationSource::Staged,
             );
@@ -212,7 +220,7 @@ impl GraphDb {
         for (index, page) in pages.iter().enumerate() {
             check()?;
             self.apply_generation_stage_page_with_context(
-                manifest,
+                &manifest,
                 &identity,
                 expected,
                 &context,
@@ -225,6 +233,10 @@ impl GraphDb {
             // and receipt are durable, while no verified lease/head exists.
             check()?;
         }
+        // Every page is durable and receipted, so the rows are now recoverable
+        // from the database alone. Release them here rather than carrying them
+        // through finalization, reopen, and the recovered-digest proof.
+        drop(manifest);
         self.finalize_staged_generation(&identity, expected, &context, pages.last(), check)
             .map(GenerationStageOutcome::Applied)
     }
@@ -1454,6 +1466,12 @@ fn generation_dependency_locators(
 
 #[cfg(test)]
 mod tests {
+    /// Staging now consumes the manifest, while test call sites keep an
+    /// owned one for later assertions, so they hand over a private clone.
+    fn arc_manifest(manifest: &GraphGenerationManifest) -> Arc<GraphGenerationManifest> {
+        Arc::new(manifest.clone())
+    }
+
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
@@ -1524,7 +1542,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (_owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified(&manifest("source:old", "watermark:one"), &|| Ok(()))
+            .apply_generation_unverified(
+                arc_manifest(&manifest("source:old", "watermark:one")),
+                &|| Ok(()),
+            )
             .unwrap();
 
         let changed = manifest("source:new", "watermark:one");
@@ -1544,7 +1565,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (_owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified(&manifest("source:one", "watermark:old"), &|| Ok(()))
+            .apply_generation_unverified(
+                arc_manifest(&manifest("source:one", "watermark:old")),
+                &|| Ok(()),
+            )
             .unwrap();
 
         let changed = manifest("source:one", "watermark:new");
@@ -1565,7 +1589,7 @@ mod tests {
         let (_owner, database) = persistent_database(&temp);
         let original = manifest("source:one", "watermark:one");
         database
-            .apply_generation_unverified(&original, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&original), &|| Ok(()))
             .unwrap();
         let mut changed = original;
         changed.dependencies.push(GraphGenerationDependency::new(
@@ -1622,7 +1646,7 @@ mod tests {
         )
         .unwrap();
         database
-            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest), &|| Ok(()))
             .unwrap();
 
         let sealed = sealed_digest(&manifest);
@@ -1661,7 +1685,7 @@ mod tests {
         let manifest = large_manifest(namespace);
         reset_batch_canonicalizations();
         database
-            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest), &|| Ok(()))
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
@@ -1890,7 +1914,11 @@ mod tests {
         let manifest = large_manifest("retry-admission");
         let sealed = sealed_digest(&manifest);
         let first = database
-            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
             .unwrap();
         let GenerationStageOutcome::Applied(first) = first else {
             panic!("a fresh generation must report durable native staging");
@@ -1903,7 +1931,11 @@ mod tests {
         reset_manifest_canonicalizations();
         reset_batch_canonicalizations();
         let reapplied = database
-            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
             .unwrap();
         let GenerationStageOutcome::Reseated(reapplied) = reapplied else {
             panic!("an exact retry must resume from durable staging receipts");
@@ -1964,7 +1996,7 @@ mod tests {
 
         reset_batch_canonicalizations();
         let commit_b = database
-            .apply_generation_unverified(&manifest_b, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest_b), &|| Ok(()))
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
@@ -1992,7 +2024,7 @@ mod tests {
         // A same-generation retry of A still takes the cheap re-seat.
         reset_batch_canonicalizations();
         let retried_a = database
-            .apply_generation_unverified(&manifest_a, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest_a), &|| Ok(()))
             .unwrap();
         assert_eq!(batch_canonicalizations(), 0);
         assert_eq!(retried_a.source_generation.as_str(), "source-large");
@@ -2009,7 +2041,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (_owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified(&manifest("source:one", "watermark:one"), &|| Ok(()))
+            .apply_generation_unverified(
+                arc_manifest(&manifest("source:one", "watermark:one")),
+                &|| Ok(()),
+            )
             .unwrap();
 
         // Same projection and generation id (same physical namespace), but a
@@ -2019,7 +2054,7 @@ mod tests {
         let divergent = manifest("source:two", "watermark:two");
         reset_batch_canonicalizations();
         let commit = database
-            .apply_generation_unverified(&divergent, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&divergent), &|| Ok(()))
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
@@ -2032,7 +2067,7 @@ mod tests {
         // Retrying the now-stored identity takes the cheap re-seat.
         reset_batch_canonicalizations();
         let retried = database
-            .apply_generation_unverified(&divergent, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&divergent), &|| Ok(()))
             .unwrap();
         assert_eq!(batch_canonicalizations(), 0);
         assert_eq!(retried.source_generation.as_str(), "source:two");
@@ -2074,7 +2109,7 @@ mod tests {
         let (owner, database) = persistent_database(&temp);
         reset_batch_canonicalizations();
         database
-            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest), &|| Ok(()))
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
@@ -2147,7 +2182,7 @@ mod tests {
         };
         assert!(matches!(
             second_database.apply_generation_unverified_with_digest_observed(
-                &manifest,
+                arc_manifest(&manifest),
                 &sealed,
                 &cancel_after_first_page
             ),
@@ -2173,7 +2208,11 @@ mod tests {
 
         reset_batch_canonicalizations();
         let resumed = second_database
-            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
             .unwrap();
         let GenerationStageOutcome::Applied(resumed) = resumed else {
             panic!("a partial stage must finish its durable pages before yielding to reopen");
@@ -2187,7 +2226,11 @@ mod tests {
         reset_recovered_generation_enumerations();
         reset_batch_canonicalizations();
         let exact = second_database
-            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
             .unwrap();
         let GenerationStageOutcome::Reseated(exact) = exact else {
             panic!("the boundary retry must re-seat the exact durable stage");
@@ -2288,7 +2331,7 @@ mod tests {
         assert!(
             matches!(
                 database.apply_generation_unverified_with_digest_observed(
-                    &divergent,
+                    arc_manifest(&divergent),
                     &divergent_sealed,
                     &|| Ok(())
                 ),
@@ -2304,7 +2347,11 @@ mod tests {
 
         reset_batch_canonicalizations();
         let outcome = database
-            .apply_generation_unverified_with_digest_observed(&manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
             .expect("an exact legacy partial stage must migrate to the wider page layout");
         assert!(outcome.was_applied());
         assert_eq!(
@@ -2356,7 +2403,7 @@ mod tests {
         };
         assert_eq!(
             database.apply_generation_unverified_with_digest(
-                &manifest,
+                arc_manifest(&manifest),
                 &sealed,
                 &cancel_before_finalization
             ),
@@ -2447,7 +2494,7 @@ mod tests {
         .unwrap();
         let database = owner.issue_lease().unwrap();
         database
-            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .apply_generation_unverified(arc_manifest(&manifest), &|| Ok(()))
             .unwrap();
 
         assert_eq!(
