@@ -1,0 +1,64 @@
+# Experimental: hotpath performance CI (https://hotpath.rs/github_ci).
+# Manually triggered while the workload is the bounded MCP conformance
+# smoke; swap in a daemon-free indexing benchmark before enabling on
+# pull_request. Pinned to hotpath 0.24.0 like the workspace.
+name: hotpath-profile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create metrics directory
+        run: mkdir -p /tmp/metrics
+
+      - name: Head profile (timing)
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/head_timing.json
+          HOTPATH_REPORT: functions-timing
+        run: |
+          cargo build --locked -p tracedecay-cli --bin tracedecay \
+            --no-default-features --features production,hotpath
+          TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+
+      - name: Checkout base
+        run: git checkout ${{ github.event.pull_request.base.sha || 'origin/master' }}
+
+      - name: Base profile (timing)
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/base_timing.json
+          HOTPATH_REPORT: functions-timing
+        run: |
+          cargo build --locked -p tracedecay-cli --bin tracedecay \
+            --no-default-features --features production,hotpath
+          TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+
+      - name: Save PR metadata
+        run: |
+          echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
+          echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
+          echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profile-metrics
+          path: /tmp/metrics/
+          retention-days: 1
