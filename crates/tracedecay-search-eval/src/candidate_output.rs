@@ -1169,7 +1169,9 @@ impl PublishedCorpusCache {
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    generate_candidate_outputs_sharing_corpora(options, &mut PublishedCorpusCache::default())
+    hotpath::measure_block!("search_eval.generate_candidates", {
+        generate_candidate_outputs_sharing_corpora(options, &mut PublishedCorpusCache::default())
+    })
 }
 
 fn generate_candidate_outputs_sharing_corpora(
@@ -1324,24 +1326,28 @@ pub fn generate_candidate_outputs_with_native(
             .iter()
             .filter(|query| query.partition == output.partition)
             .collect::<Vec<_>>();
-        let (rows, current) = measure_native_partition(
-            published,
-            profile,
-            &queries,
-            authority,
-            &generated.workload_digest,
-            &corpus_digest,
-            "current",
-        )?;
-        let (_, ten_x) = measure_native_partition(
-            ten_x_published,
-            profile,
-            &queries,
-            authority,
-            &generated.workload_digest,
-            &corpus_digest,
-            "10x",
-        )?;
+        let (rows, current) = hotpath::measure_block!("search_eval.native_partition.current", {
+            measure_native_partition(
+                published,
+                profile,
+                &queries,
+                authority,
+                &generated.workload_digest,
+                &corpus_digest,
+                "current",
+            )
+        })?;
+        let (_, ten_x) = hotpath::measure_block!("search_eval.native_partition.ten_x", {
+            measure_native_partition(
+                ten_x_published,
+                profile,
+                &queries,
+                authority,
+                &generated.workload_digest,
+                &corpus_digest,
+                "10x",
+            )
+        })?;
         let evidence = SemanticNativeResourceEvidenceV1 {
             samples: BTreeMap::from([("current".to_owned(), current), ("10x".to_owned(), ten_x)]),
         };
@@ -1370,17 +1376,20 @@ fn measure_native_partition(
     ),
     CandidateOutputError,
 > {
+    hotpath::gauge!("search_eval_queries_total").set(queries.len());
+    hotpath::gauge!("search_eval_queries_completed").set(0_usize);
     let mut rows = None;
     let generation = &published.generation;
     let mut execute_queries = || {
         let mut measured_rows = Vec::with_capacity(queries.len());
         let mut latency_samples_us = Vec::with_capacity(queries.len());
-        for query in queries {
+        for (index, query) in queries.iter().enumerate() {
             let started = Instant::now();
             measured_rows.push(retrieve_one_native_query(
                 published, profile, query, authority,
             )?);
             latency_samples_us.push(elapsed_micros(started));
+            hotpath::gauge!("search_eval_queries_completed").set(index.saturating_add(1));
         }
         rows = Some(measured_rows);
         Ok(latency_samples_us)

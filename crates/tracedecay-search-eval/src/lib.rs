@@ -274,13 +274,17 @@ pub fn compare_direct(
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let path = workload_path.map_or_else(|| default_workload_path(repo_root), Path::to_path_buf);
     let workload = load_candidate_workload(&path)?;
-    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root,
-        workload_path: Some(&path),
-        profile_ids,
-        admitted_scope,
+    let generated = hotpath::measure_block!("search_eval.generate_candidates", {
+        generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root,
+            workload_path: Some(&path),
+            profile_ids,
+            admitted_scope,
+        })
     })?;
-    evaluate_generated_outputs(repo_root, &workload, &generated)
+    hotpath::measure_block!("search_eval.compare", {
+        evaluate_generated_outputs(repo_root, &workload, &generated)
+    })
 }
 
 pub fn compare_default_direct(
@@ -288,13 +292,17 @@ pub fn compare_default_direct(
     profile_ids: Option<&[String]>,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let assets = load_authoritative_default_workload()?;
-    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root: assets.root(),
-        workload_path: Some(&assets.workload_path()),
-        profile_ids,
-        admitted_scope: packaged_assets::admitted_scope,
+    let generated = hotpath::measure_block!("search_eval.generate_candidates", {
+        generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+            repo_root: assets.root(),
+            workload_path: Some(&assets.workload_path()),
+            profile_ids,
+            admitted_scope: packaged_assets::admitted_scope,
+        })
     })?;
-    evaluate_generated_outputs(assets.root(), assets.workload(), &generated)
+    hotpath::measure_block!("search_eval.compare", {
+        evaluate_generated_outputs(assets.root(), assets.workload(), &generated)
+    })
 }
 
 /// Run the exact checked-in activation matrix through genuine native
@@ -420,6 +428,7 @@ pub(crate) fn evaluate_generated_outputs_against_corpus(
     })
 }
 
+#[hotpath::measure]
 fn evaluate_profile(
     workload: &CandidateWorkloadV1,
     queries: &BTreeMap<&str, &WorkloadQueryV1>,
@@ -782,6 +791,7 @@ fn validate_output_matrix(
     Ok(())
 }
 
+#[hotpath::measure]
 fn evaluate_query(
     query: &WorkloadQueryV1,
     row: &candidate_output::QueryCandidateRowV1,
@@ -1101,6 +1111,7 @@ fn mean_ppm(values: impl Iterator<Item = u32>, support: u64) -> u32 {
     u32::try_from(total / u128::from(support)).unwrap_or(METRIC_SCALE_PPM as u32)
 }
 
+#[hotpath::measure]
 fn evaluate_resources(
     workload: &CandidateWorkloadV1,
     output: &ProductionCandidateOutputV1,
