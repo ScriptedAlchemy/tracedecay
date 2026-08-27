@@ -189,6 +189,46 @@ struct CachedPublishedVectorsV1 {
     port: Arc<PublishedSemanticVectorReadPortV1>,
 }
 
+impl CachedPublishedVectorsV1 {
+    fn matches(
+        &self,
+        generation: &VectorGenerationIdV1,
+        projection_key: &tracedecay_domain::ProjectionKeyV1,
+        search_index_key: &SemanticSearchIndexKeyV1,
+        source_generation: &CodeGenerationId,
+        capability_manifest_digest: &ManifestDigest,
+    ) -> bool {
+        self.generation == *generation
+            && self.search_index_key == *search_index_key
+            && self.source_generation == *source_generation
+            && self.port.projection_key == *projection_key
+            && self.port.capability_manifest_digest == *capability_manifest_digest
+    }
+}
+
+fn retained_vector_read_port(
+    cache: &Mutex<Option<CachedPublishedVectorsV1>>,
+    generation: &VectorGenerationIdV1,
+    projection_key: &tracedecay_domain::ProjectionKeyV1,
+    search_index_key: &SemanticSearchIndexKeyV1,
+    source_generation: &CodeGenerationId,
+    capability_manifest_digest: &ManifestDigest,
+) -> Option<Arc<PublishedSemanticVectorReadPortV1>> {
+    let cached = cache.lock().ok()?;
+    cached
+        .as_ref()
+        .filter(|cached| {
+            cached.matches(
+                generation,
+                projection_key,
+                search_index_key,
+                source_generation,
+                capability_manifest_digest,
+            )
+        })
+        .map(|cached| Arc::clone(&cached.port))
+}
+
 /// The handles every stage of one scheduled projection shares.
 ///
 /// A scheduled generation runs as four callbacks — load, resume, per-batch
@@ -206,6 +246,7 @@ struct ScheduledProjectionHandlesV1 {
     /// Build, store, and checkpoint carried across batch commits.
     commit_state: Arc<tokio::sync::Mutex<BatchCommitStateV1>>,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
+    vector_read_cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,7 +330,12 @@ pub struct PreparedProductionSemanticCacheCommitV1 {
 
 enum PreparedProductionSemanticCacheActionV1 {
     Observation(PreparedSemanticRuntimeObservationV1),
-    Restore(PreparedSemanticRuntimeRestoreV1),
+    Restore {
+        prepared: PreparedSemanticRuntimeRestoreV1,
+        cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
+        vectors: CachedPublishedVectorsV1,
+        lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
+    },
 }
 
 impl PreparedProductionSemanticCacheCommitV1 {
@@ -298,8 +344,24 @@ impl PreparedProductionSemanticCacheCommitV1 {
             PreparedProductionSemanticCacheActionV1::Observation(prepared) => {
                 self.handle.commit_current_observation(prepared)
             }
-            PreparedProductionSemanticCacheActionV1::Restore(prepared) => {
-                self.handle.commit_restore(prepared)
+            PreparedProductionSemanticCacheActionV1::Restore {
+                prepared,
+                cache,
+                vectors,
+                lifecycle,
+            } => {
+                let Ok(mut cached) = cache.lock() else {
+                    return false;
+                };
+                let previous = cached.replace(vectors);
+                let committed = self.handle.commit_restore(prepared);
+                if !committed {
+                    *cached = previous;
+                    return false;
+                }
+                drop(cached);
+                let _ = lifecycle.mark_ready();
+                true
             }
         }
     }
@@ -413,6 +475,24 @@ impl ProductionSemanticRuntimeV1 {
         {
             return Ok(None);
         }
+        let pointer = SemanticGenerationPointerV1 {
+            generation: active.generation_id().clone(),
+            source_generation: active.source_generation().clone(),
+            projection_key: active.projection_key().clone(),
+        };
+        let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        let port = Arc::new(
+            PublishedSemanticVectorReadPortV1::new(active, search_index_key.clone(), generation)
+                .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
+        );
+        let vectors = CachedPublishedVectorsV1 {
+            generation: port.generation.clone(),
+            search_index_key,
+            source_generation: port.source_generation.clone(),
+            port,
+        };
         let lifecycle = Arc::clone(&self.lifecycle);
         let manifest = generation.manifest().clone();
         let resources = self.resources;
@@ -424,21 +504,20 @@ impl ProductionSemanticRuntimeV1 {
         if artifact.projection() != &projection {
             return Ok(None);
         }
-        let pointer = SemanticGenerationPointerV1 {
-            generation: active.generation_id().clone(),
-            source_generation: active.source_generation().clone(),
-            projection_key: active.projection_key().clone(),
-        };
         let handle = self.handle.clone();
         let prepared_handle = handle.clone();
         let prepared =
             tokio::task::spawn_blocking(move || prepared_handle.prepare_restore(pointer, artifact))
                 .await
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
-        let _ = self.lifecycle.mark_ready();
         Ok(Some(PreparedProductionSemanticCacheCommitV1 {
             handle,
-            prepared: PreparedProductionSemanticCacheActionV1::Restore(prepared),
+            prepared: PreparedProductionSemanticCacheActionV1::Restore {
+                prepared,
+                cache: Arc::clone(&self.vector_read_cache),
+                vectors,
+                lifecycle: Arc::clone(&self.lifecycle),
+            },
         }))
     }
 
@@ -462,7 +541,23 @@ impl ProductionSemanticRuntimeV1 {
     /// Evict one exact process-local generation while retaining every durable
     /// graph snapshot and staging record.
     pub fn unbind_cache_if_current(&self, generation: &VectorGenerationIdV1) -> bool {
-        self.handle.unbind_query_runtime_if_current(generation)
+        let runtime_unbound = self.handle.unbind_query_runtime_if_current(generation);
+        let vectors_unbound = self
+            .vector_read_cache
+            .lock()
+            .map(|mut cached| {
+                if cached
+                    .as_ref()
+                    .is_some_and(|cached| cached.generation == *generation)
+                {
+                    *cached = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        runtime_unbound || vectors_unbound
     }
 
     /// Enqueue one saved code generation. Model verification, ORT startup,
@@ -1418,13 +1513,24 @@ impl ProductionSemanticRuntimeV1 {
         pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
         source_generation: &CodeGenerationId,
     ) -> bool {
-        self.handle
+        let model_ready = self
+            .handle
             .query_factory(
                 source_generation,
                 &pins.vector_generation_id,
                 pins.projection.projection_key(),
             )
-            .is_some()
+            .is_some();
+        let vectors_ready = retained_vector_read_port(
+            &self.vector_read_cache,
+            &pins.vector_generation_id,
+            pins.projection.projection_key(),
+            &pins.search_index_key,
+            source_generation,
+            &pins.calibration.capability_manifest_digest,
+        )
+        .is_some();
+        model_ready && vectors_ready
     }
 
     #[hotpath::measure]
@@ -1546,6 +1652,12 @@ impl ProductionSemanticRuntimeV1 {
             expected_chunk_ids: expected_chunk_ids.into(),
             base_generation: base_generation.clone(),
         };
+        let search_index_key = match SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+        {
+            Ok(search_index_key) => search_index_key,
+            Err(_) => return false,
+        };
         // Every stage of one scheduled projection — load, resume, per-batch
         // commit, stage, publish — reaches the same five handles. Bundling them
         // once means each closure clones a single `Arc` instead of restating the
@@ -1556,6 +1668,7 @@ impl ProductionSemanticRuntimeV1 {
             generation,
             commit_state: Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default())),
             lifecycle: Arc::clone(&self.lifecycle),
+            vector_read_cache: Arc::clone(&self.vector_read_cache),
         });
         let publication_failure = SemanticPublicationFailureRecorderV1::default();
         let resume_failure = publication_failure.clone();
@@ -1694,16 +1807,39 @@ impl ProductionSemanticRuntimeV1 {
                     let publication = match published {
                         Some(publication) => publication,
                         None => store
-                            .publish_generation(&build, cancellation)
+                            .publish_generation(&build, Arc::clone(&cancellation))
                             .await
                             .map_err(|error| publish_failure.publish_generation(&error))?,
                     };
-                    let _ = stage_handles.lifecycle.mark_ready();
-                    Ok(SemanticGenerationPointerV1 {
-                        generation: publication.generation_id,
+                    let active = store
+                        .generation(&publication.generation_id, Arc::clone(&cancellation))
+                        .await
+                        .map_err(|error| publish_failure.publish_generation(&error))?
+                        .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let port = Arc::new(
+                        PublishedSemanticVectorReadPortV1::new(
+                            active,
+                            search_index_key.clone(),
+                            stage_handles.generation.as_ref(),
+                        )
+                        .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
+                    );
+                    let pointer = SemanticGenerationPointerV1 {
+                        generation: port.generation.clone(),
                         source_generation: published_source_generation,
                         projection_key: published_projection_key,
-                    })
+                    };
+                    let mut cached = stage_handles
+                        .vector_read_cache
+                        .lock()
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+                    *cached = Some(CachedPublishedVectorsV1 {
+                        generation: port.generation.clone(),
+                        search_index_key,
+                        source_generation: port.source_generation.clone(),
+                        port,
+                    });
+                    Ok(pointer)
                 }))
             },
         ) {
@@ -1763,13 +1899,15 @@ impl ProductionSemanticRuntimeV1 {
         search_index_key: SemanticSearchIndexKeyV1,
         code_generation: &CodeIndexPublishedGenerationV1,
     ) -> Result<Arc<PublishedSemanticVectorReadPortV1>, SemanticQueryServiceError> {
-        if let Ok(guard) = self.vector_read_cache.lock()
-            && let Some(cached) = guard.as_ref()
-            && cached.generation == *active.generation_id()
-            && cached.search_index_key == search_index_key
-            && cached.source_generation == *active.source_generation()
-        {
-            return Ok(Arc::clone(&cached.port));
+        if let Some(cached) = retained_vector_read_port(
+            &self.vector_read_cache,
+            active.generation_id(),
+            active.projection_key(),
+            &search_index_key,
+            active.source_generation(),
+            &code_generation.capability().manifest_digest,
+        ) {
+            return Ok(cached);
         }
         let port = Arc::new(
             PublishedSemanticVectorReadPortV1::new(
@@ -1807,6 +1945,36 @@ impl ProductionSemanticRuntimeV1 {
     {
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
+        if request.code_generation == code_generation.manifest().generation_id
+            && request.capability_manifest_digest == code_generation.capability().manifest_digest
+            && let Some(vectors) = retained_vector_read_port(
+                &self.vector_read_cache,
+                &request.vector_generation,
+                request.projection.projection_key(),
+                request.search_index_key,
+                &request.code_generation,
+                &request.capability_manifest_digest,
+            )
+        {
+            let complete = CompleteSemanticGenerationV1::new(
+                request.projection.projection_key().clone(),
+                request.search_index_key.clone(),
+                request.vector_generation.clone(),
+                request.code_generation.clone(),
+                request.capability_manifest_digest.clone(),
+            )
+            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+            return compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
+                handle: &self.handle,
+                request,
+                generation: &complete,
+                calibration,
+                vectors: vectors.as_ref(),
+                control,
+                mode,
+                fallback,
+            });
+        }
         let Ok(retained) = self.graph.graph_for_generation(code_generation).await else {
             return execute_calibrated_semantic_query(
                 &NeverCalledSemanticLane,
@@ -3706,6 +3874,89 @@ mod tests {
                 .and_then(|profile| profile.index_key())
                 .expect("exact-flat search index key")
         })
+    }
+
+    #[test]
+    fn retained_vector_cache_matches_complete_query_identity() {
+        let source = source_generation('r');
+        let vector = vector_generation('r');
+        let capability = test_digest('f');
+        let port = Arc::new(PublishedSemanticVectorReadPortV1 {
+            generation: vector.clone(),
+            projection_key: projection_key(),
+            search_index_key: search_index_key().clone(),
+            source_generation: source.clone(),
+            capability_manifest_digest: capability.clone(),
+            rows: Vec::new(),
+        });
+        let cached = CachedPublishedVectorsV1 {
+            generation: vector.clone(),
+            search_index_key: search_index_key().clone(),
+            source_generation: source.clone(),
+            port,
+        };
+
+        assert!(cached.matches(
+            &vector,
+            &projection_key(),
+            search_index_key(),
+            &source,
+            &capability,
+        ));
+        assert!(!cached.matches(
+            &vector_generation('s'),
+            &projection_key(),
+            search_index_key(),
+            &source,
+            &capability,
+        ));
+        assert!(!cached.matches(
+            &vector,
+            &projection_key(),
+            search_index_key(),
+            &source_generation('s'),
+            &capability,
+        ));
+        assert!(!cached.matches(
+            &vector,
+            &projection_key(),
+            search_index_key(),
+            &source,
+            &test_digest('e'),
+        ));
+    }
+
+    #[test]
+    fn retained_vector_cache_returns_port_without_durable_load() {
+        let source = source_generation('r');
+        let vector = vector_generation('r');
+        let capability = test_digest('f');
+        let port = Arc::new(PublishedSemanticVectorReadPortV1 {
+            generation: vector.clone(),
+            projection_key: projection_key(),
+            search_index_key: search_index_key().clone(),
+            source_generation: source.clone(),
+            capability_manifest_digest: capability.clone(),
+            rows: Vec::new(),
+        });
+        let cache = Mutex::new(Some(CachedPublishedVectorsV1 {
+            generation: vector.clone(),
+            search_index_key: search_index_key().clone(),
+            source_generation: source.clone(),
+            port: Arc::clone(&port),
+        }));
+
+        let retained = retained_vector_read_port(
+            &cache,
+            &vector,
+            &projection_key(),
+            search_index_key(),
+            &source,
+            &capability,
+        )
+        .expect("exact retained vector port");
+
+        assert!(Arc::ptr_eq(&retained, &port));
     }
 
     fn pointer(vector: char, source: char) -> SemanticGenerationPointerV1 {
