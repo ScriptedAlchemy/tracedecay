@@ -205,6 +205,112 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
 }
 
 #[tokio::test]
+async fn lazy_preparation_mutex_wait_is_operation_cancellable() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().expect("temp directory");
+    let path = temp.path().join("cancel-lazy-mutex.jsonl");
+    std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    let (page, _) = super::shared_jsonl_page(
+        &path,
+        StoredCursor::default(),
+        Some(1024),
+        None,
+        super::SharedJsonlFramePreparation::Lazy,
+    )
+    .await
+    .expect("lazy page");
+    let preparations_before = super::shared_jsonl_frame_preparations_for_test(page.file_identity);
+    let held = page.lazy_preparation.lock().await;
+    let task_page = Arc::clone(&page);
+    let cancellation = ObservationCancellation::default();
+    let task_cancellation = cancellation.clone();
+    let preparation = tokio::spawn(async move {
+        super::prepare_shared_jsonl_window(task_page.as_ref(), 0, &task_cancellation, "codex").await
+    });
+    tokio::task::yield_now().await;
+    cancellation.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(100), preparation)
+        .await
+        .expect("cancelled mutex wait must settle before the holder releases")
+        .expect("preparation task must join");
+    drop(held);
+
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::Cancelled { provider: "codex" })
+    ));
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
+        preparations_before,
+        "a cancelled mutex waiter must never start frame preparation"
+    );
+}
+
+#[tokio::test]
+async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
+    use std::num::NonZeroUsize;
+
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().expect("temp directory");
+    let path = temp.path().join("cancel-lazy-cpu.jsonl");
+    std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    let (page, _) = super::shared_jsonl_page(
+        &path,
+        StoredCursor::default(),
+        Some(1024),
+        None,
+        super::SharedJsonlFramePreparation::Lazy,
+    )
+    .await
+    .expect("lazy page");
+    let preparations_before = super::shared_jsonl_frame_preparations_for_test(page.file_identity);
+    let background_cpu = tracedecay_runtime_core::background_cpu::test_process_background_cpu(
+        NonZeroUsize::new(1).expect("nonzero CPU width"),
+    );
+    let held = background_cpu.acquire();
+    let task_page = Arc::clone(&page);
+    let task_cpu = Arc::clone(&background_cpu);
+    let cancellation = ObservationCancellation::default();
+    let task_cancellation = cancellation.clone();
+    let preparation = tokio::spawn(async move {
+        super::prepare_shared_jsonl_window_with_background_cpu(
+            task_page.as_ref(),
+            0,
+            &task_cancellation,
+            "codex",
+            task_cpu,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while background_cpu.waiting_work_units() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("lazy preparation reached saturated CPU authority");
+    cancellation.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(100), preparation)
+        .await
+        .expect("cancelled CPU wait must settle before capacity is released")
+        .expect("preparation task must join");
+    drop(held);
+
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::Cancelled { provider: "codex" })
+    ));
+    assert_eq!(background_cpu.waiting_work_units(), 0);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
+        preparations_before,
+        "a cancelled CPU waiter must never start frame preparation"
+    );
+}
+
+#[tokio::test]
 async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().expect("temp directory");
@@ -499,6 +605,115 @@ fn speculative_preparation_reserves_capacity_for_exact_cursor_demand() {
     assert_eq!(super::shared_jsonl_speculative_capacity_from(48), 47);
     assert_eq!(super::shared_jsonl_speculative_capacity_from(2), 1);
     assert_eq!(super::shared_jsonl_speculative_capacity_from(1), 0);
+}
+
+#[test]
+fn small_lazy_pages_release_build_headroom_for_exact_demand() {
+    use std::num::NonZeroU64;
+
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+    };
+
+    super::install_test_shared_jsonl_preparation_authority();
+    let reservation_bytes = super::SHARED_JSONL_WORKER_RESERVATION_BYTES;
+    let memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(reservation_bytes * 2).expect("nonzero memory limit"),
+    ));
+    let component = ResidentMemoryComponentIdV1::new("sessions.codex.test-small-pages")
+        .expect("canonical component id");
+    let background_cpu = super::shared_jsonl_background_cpu().expect("background CPU authority");
+    let temp = tempfile::tempdir().expect("temp directory");
+    let mut pages = Vec::new();
+
+    for ordinal in 0..8 {
+        let path = temp.path().join(format!("small-{ordinal}.jsonl"));
+        std::fs::write(&path, b"{}\n").expect("small JSONL page");
+        let reservation = memory
+            .reserve_process_shared(
+                component,
+                NonZeroU64::new(reservation_bytes).expect("nonzero reservation"),
+            )
+            .expect("small lazy pages must not exhaust demand headroom");
+        pages.push(
+            super::build_shared_jsonl_page(
+                path,
+                StoredCursor::default(),
+                Some(1024),
+                None,
+                super::SharedJsonlBuildOptions {
+                    prepare_frames: false,
+                    background_cpu: Arc::clone(&background_cpu),
+                    memory: Some(reservation),
+                    cancellation: None,
+                },
+            )
+            .expect("small lazy page"),
+        );
+    }
+
+    assert!(
+        memory.snapshot().used_bytes < 1024 * 1024,
+        "raw page authority must retain measured bytes, not build reservations"
+    );
+    let exact_demand = memory
+        .reserve_process_shared(
+            component,
+            NonZeroU64::new(reservation_bytes).expect("nonzero reservation"),
+        )
+        .expect("one exact-demand build reservation must remain available");
+    drop(exact_demand);
+    drop(pages);
+    assert_eq!(memory.snapshot().used_bytes, 0);
+}
+
+#[tokio::test]
+async fn lazy_preparation_retains_only_its_measured_memory_charge() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().expect("temp directory");
+    let path = temp.path().join("lazy-memory.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"measured\"}}\n",
+    )
+    .expect("JSONL fixture");
+    let page = super::build_shared_jsonl_page(
+        path,
+        StoredCursor::default(),
+        Some(1024),
+        None,
+        super::SharedJsonlBuildOptions {
+            prepare_frames: false,
+            background_cpu: super::shared_jsonl_background_cpu().expect("background CPU authority"),
+            memory: super::reserve_shared_jsonl_page().expect("page reservation"),
+            cancellation: None,
+        },
+    )
+    .expect("lazy page");
+    super::prepare_shared_jsonl_window(
+        page.as_ref(),
+        0,
+        &ObservationCancellation::default(),
+        "codex",
+    )
+    .await
+    .expect("lazy preparation");
+
+    let lazy_charge = page
+        .lazy_memory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1::reserved_bytes)
+        .sum::<u64>();
+    assert!(
+        lazy_charge > 0,
+        "prepared values require an authority charge"
+    );
+    assert!(
+        lazy_charge < 1024 * 1024,
+        "lazy preparation must shrink its bounded reservation to measured bytes"
+    );
 }
 
 #[test]

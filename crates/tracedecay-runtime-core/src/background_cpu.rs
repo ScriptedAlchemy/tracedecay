@@ -11,7 +11,9 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Debug)]
 struct BackgroundCpuWaiterV1 {
@@ -136,6 +138,22 @@ impl ProcessBackgroundCpuV1 {
         })
     }
 
+    /// Acquire one CPU unit in FIFO order while the owning operation remains
+    /// live. Cancellation removes this exact waiter so it cannot pin later
+    /// work behind abandoned demand.
+    pub fn acquire_cancellable(
+        self: &Arc<Self>,
+        cancellation: &AtomicBool,
+    ) -> Option<BackgroundCpuPermitV1> {
+        if !self.admit_units_cancellable(1, cancellation) {
+            return None;
+        }
+        Some(BackgroundCpuPermitV1 {
+            authority: Arc::clone(self),
+            units: 1,
+        })
+    }
+
     /// Run one active work unit under the process budget. Nested work on the
     /// same thread reuses a sufficient parent admission instead of waiting on
     /// itself.
@@ -230,6 +248,41 @@ impl ProcessBackgroundCpuV1 {
             state = self
                 .available
                 .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn admit_units_cancellable(&self, units: usize, cancellation: &AtomicBool) -> bool {
+        const CANCELLATION_POLL: Duration = Duration::from_millis(5);
+
+        let waiter = Arc::new(BackgroundCpuWaiterV1 { units });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.waiters.push_back(Arc::clone(&waiter));
+        record_state(&state, self.width);
+        loop {
+            if cancellation.load(Ordering::Acquire) {
+                state.waiters.retain(|queued| !Arc::ptr_eq(queued, &waiter));
+                record_state(&state, self.width);
+                self.available.notify_all();
+                return false;
+            }
+            let is_front = state
+                .waiters
+                .front()
+                .is_some_and(|front| Arc::ptr_eq(front, &waiter));
+            if is_front && state.active_units.saturating_add(waiter.units) <= self.width.get() {
+                state.waiters.pop_front();
+                state.active_units += waiter.units;
+                record_state(&state, self.width);
+                self.available.notify_all();
+                return true;
+            }
+            (state, _) = self
+                .available
+                .wait_timeout(state, CANCELLATION_POLL)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
@@ -331,6 +384,14 @@ fn compare_installed_width(
 #[must_use]
 pub fn process_background_cpu() -> Option<Arc<ProcessBackgroundCpuV1>> {
     PROCESS_BACKGROUND_CPU.get().map(Arc::clone)
+}
+
+/// Isolated authority for dependent-crate behavioral tests. Production code
+/// must use the one process authority installed by the daemon worker plan.
+#[cfg(feature = "test-helpers")]
+#[must_use]
+pub fn test_process_background_cpu(width: NonZeroUsize) -> Arc<ProcessBackgroundCpuV1> {
+    Arc::new(ProcessBackgroundCpuV1::new(width))
 }
 
 #[cfg(test)]

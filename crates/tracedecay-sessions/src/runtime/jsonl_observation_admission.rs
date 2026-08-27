@@ -463,6 +463,7 @@ struct SharedJsonlPage {
     retained_bytes: u64,
     _prepared_bytes: Option<SharedJsonlPreparedBytesGuard>,
     lazy_prepared_bytes: Mutex<Vec<SharedJsonlPreparedBytesGuard>>,
+    lazy_memory: Mutex<Vec<ProcessSharedMemoryReservationV1>>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
 }
 
@@ -828,7 +829,6 @@ pub(super) fn shared_jsonl_file_identity(
 
 struct SharedJsonlBuildOptions {
     prepare_frames: bool,
-    reserve_lazy_preparation: bool,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     memory: Option<ProcessSharedMemoryReservationV1>,
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -843,7 +843,6 @@ fn build_shared_jsonl_page(
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
     let SharedJsonlBuildOptions {
         prepare_frames,
-        reserve_lazy_preparation,
         background_cpu,
         mut memory,
         cancellation,
@@ -990,9 +989,7 @@ fn build_shared_jsonl_page(
                 .ok_or(TranscriptIngestError::InvalidFrameState { provider: "codex" })
         },
     )?;
-    if let Some(reservation) = &mut memory
-        && !reserve_lazy_preparation
-    {
+    if let Some(reservation) = &mut memory {
         reservation
             .shrink_to(retained_bytes)
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
@@ -1019,6 +1016,7 @@ fn build_shared_jsonl_page(
         retained_bytes,
         _prepared_bytes: prepared_bytes,
         lazy_prepared_bytes: Mutex::new(Vec::new()),
+        lazy_memory: Mutex::new(Vec::new()),
         _memory: memory,
     }))
 }
@@ -1029,10 +1027,37 @@ async fn prepare_shared_jsonl_window(
     cancellation: &ObservationCancellation,
     provider: &'static str,
 ) -> TranscriptIngestResult<()> {
+    let background_cpu = shared_jsonl_background_cpu()?;
+    prepare_shared_jsonl_window_with_background_cpu(
+        page,
+        start,
+        cancellation,
+        provider,
+        background_cpu,
+    )
+    .await
+}
+
+async fn prepare_shared_jsonl_window_with_background_cpu(
+    page: &SharedJsonlPage,
+    start: usize,
+    cancellation: &ObservationCancellation,
+    provider: &'static str,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+) -> TranscriptIngestResult<()> {
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-    let _preparation = page.lazy_preparation.lock().await;
+    let _preparation = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            return Err(TranscriptIngestError::Cancelled { provider });
+        }
+        preparation = page.lazy_preparation.lock() => preparation,
+    };
+    if cancellation.is_cancelled() {
+        return Err(TranscriptIngestError::Cancelled { provider });
+    }
     let mut jobs = Vec::new();
     let mut job_bytes = 0_u64;
     for (index, frame) in page.frames.iter().enumerate().skip(start) {
@@ -1060,7 +1085,10 @@ async fn prepare_shared_jsonl_window(
     if jobs.is_empty() {
         return Ok(());
     }
-    let background_cpu = shared_jsonl_background_cpu()?;
+    let mut preparation_memory = reserve_shared_jsonl_bytes(
+        SHARED_JSONL_WORKER_RESERVATION_BYTES,
+        "lazy shared JSONL preparation resident-memory capacity",
+    )?;
     let task_cancellation = cancellation.clone();
     #[cfg(test)]
     let preparation_file_identity = page.file_identity;
@@ -1075,10 +1103,15 @@ async fn prepare_shared_jsonl_window(
                 } else {
                     hotpath::gauge!("jsonl_shared_backpressure_cpu").inc(1.0);
                     let waiting = SharedJsonlPreparationWaitGuard::new();
-                    let permit = background_cpu.acquire();
+                    let permit = background_cpu
+                        .acquire_cancellable(task_cancellation.cancellation_flag())
+                        .ok_or(TranscriptIngestError::Cancelled { provider })?;
                     drop(waiting);
                     permit
                 };
+                if task_cancellation.is_cancelled() {
+                    return Err(TranscriptIngestError::Cancelled { provider });
+                }
                 hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
                 let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
@@ -1108,11 +1141,24 @@ async fn prepare_shared_jsonl_window(
                 .map_or(0, PreparedObservationRecordV1::retained_bytes),
         )
     });
+    if let Some(reservation) = &mut preparation_memory {
+        reservation
+            .shrink_to(newly_prepared_bytes)
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
+    }
     for (index, prepared) in prepared {
         page.frames[index]
             .prepared
             .set(prepared)
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
+    }
+    if let Some(reservation) = preparation_memory
+        && reservation.reserved_bytes() != 0
+    {
+        page.lazy_memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(reservation);
     }
     let mut lazy_prepared_bytes = page
         .lazy_prepared_bytes
@@ -1345,8 +1391,6 @@ async fn shared_jsonl_page_with_cancellation(
             resume_state,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
-                reserve_lazy_preparation: preparation != SharedJsonlFramePreparation::None
-                    && !prepare_frames_eagerly,
                 background_cpu,
                 memory,
                 cancellation,
