@@ -346,6 +346,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
+    #[hotpath::measure(label = "daemon.session_retrieval.hydrate")]
     pub(super) async fn execute_lcm_expand_admitted(
         &self,
         context: &RequestContext,
@@ -758,7 +759,9 @@ pub(super) fn describe_retrieval_outcome(
         SessionRetrievalOutcome::ResetRequired => {
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalOutcome::BudgetExhausted => LcmDescribeServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::BudgetExhausted { .. } => {
+            LcmDescribeServiceOutcome::BudgetExhausted
+        }
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
         }
@@ -802,7 +805,7 @@ pub(super) fn expand_retrieval_outcome(
         SessionRetrievalOutcome::ResetRequired => {
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalOutcome::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::BudgetExhausted { .. } => LcmExpandServiceOutcome::BudgetExhausted,
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             LcmExpandServiceOutcome::BudgetExhausted
         }

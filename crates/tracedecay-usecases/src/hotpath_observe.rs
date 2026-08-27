@@ -128,3 +128,27 @@ pub(crate) fn admission_capture_frames(frames: usize) {
 pub(crate) fn admission_persist_frames(frames: usize) {
     hotpath::gauge!("usecases.admission.persist_frames").set(frames as f64);
 }
+
+/// Count one bounded session-retrieval budget stage. Keys stay static; the
+/// stage is never a dynamic label.
+#[inline]
+pub(crate) fn session_retrieval_budget_stage(stage: crate::session::SessionRetrievalBudgetStageV1) {
+    use crate::session::SessionRetrievalBudgetStageV1;
+    match stage {
+        SessionRetrievalBudgetStageV1::RequestBudgetMismatch => {
+            hotpath::gauge!("session.retrieval.budget.request_mismatch").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
+            hotpath::gauge!("session.retrieval.budget.execution_work").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestLimit => {
+            hotpath::gauge!("session.retrieval.budget.participant_manifest").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::HydrationBytes => {
+            hotpath::gauge!("session.retrieval.budget.hydration_bytes").inc(1.0);
+        }
+        SessionRetrievalBudgetStageV1::ContextBytes => {
+            hotpath::gauge!("session.retrieval.budget.context_bytes").inc(1.0);
+        }
+    }
+}

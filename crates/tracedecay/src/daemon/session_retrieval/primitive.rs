@@ -111,9 +111,14 @@ fn map_outcome(
         | SessionRetrievalServiceOutcome::Denied
         | SessionRetrievalServiceOutcome::Unavailable(_)
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalServiceOutcome::BudgetExhausted => Ok(RetrievalPortOutcome::Unavailable(
-            terminal_evidence(request, finished_at, OmissionReason::Unavailable, None)?,
-        )),
+        | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
+            Ok(RetrievalPortOutcome::Unavailable(terminal_evidence(
+                request,
+                finished_at,
+                OmissionReason::Unavailable,
+                None,
+            )?))
+        }
     }
 }
 

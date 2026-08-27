@@ -445,6 +445,7 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
+    #[hotpath::measure(label = "daemon.session_retrieval.search")]
     async fn execute_temporal_query_with_context(
         &self,
         context: &RequestContext,
@@ -532,8 +533,8 @@ impl DaemonSessionRetrievalService {
                 observed,
                 maximum,
             },
-            SessionRetrievalOutcome::BudgetExhausted => {
-                SessionRetrievalServiceOutcome::BudgetExhausted
+            SessionRetrievalOutcome::BudgetExhausted { stage } => {
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage }
             }
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
         }
@@ -562,7 +563,9 @@ impl DaemonSessionRetrievalService {
                 }
             }
             SessionTemporalExecutionError::BudgetExhausted => {
-                SessionRetrievalServiceOutcome::BudgetExhausted
+                SessionRetrievalServiceOutcome::BudgetExhausted {
+                    stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
             SessionTemporalExecutionError::Stale { generation_lag } => {
@@ -588,6 +591,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
+    #[hotpath::measure(label = "daemon.session_retrieval.hydrate")]
     async fn page(
         &self,
         items: Vec<TemporalKernelResult>,

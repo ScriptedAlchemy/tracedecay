@@ -29,6 +29,7 @@ pub use serving::{
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,
     SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
-    SessionRetrievalError, SessionRetrievalOutcome, SessionRetrievalRequest, SessionRetrievalScope,
-    SessionRetrievalTarget, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRetrievalBudgetStageV1, SessionRetrievalError, SessionRetrievalOutcome,
+    SessionRetrievalRequest, SessionRetrievalScope, SessionRetrievalTarget,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };

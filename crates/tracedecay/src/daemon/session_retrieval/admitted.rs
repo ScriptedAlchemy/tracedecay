@@ -330,9 +330,13 @@ fn task_session_binding_outcome(
             TaskSessionRetrievalOutcomeV1::ResetRequired
         }
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
-        SessionRetrievalServiceOutcome::BudgetExhausted
-        | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
-            TaskSessionRetrievalOutcomeV1::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
+        }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
+            TaskSessionRetrievalOutcomeV1::BudgetExhausted {
+                stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
+            }
         }
         _ => TaskSessionRetrievalOutcomeV1::Unavailable,
     }
@@ -346,7 +350,7 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
         SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { .. }
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
         }
@@ -365,7 +369,7 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
         SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { .. }
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
             LcmExpandServiceOutcome::BudgetExhausted
         }
