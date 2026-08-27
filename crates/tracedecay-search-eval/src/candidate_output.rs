@@ -3276,7 +3276,10 @@ fn fusion_profile(
             RetrieverKind::Graph,
             tracedecay_query::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
         ),
-        (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
+        (
+            RetrieverKind::Semantic,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+        ),
     ]
     .into_iter()
     .filter(|(lane, _)| weights.contains_key(lane))
@@ -3592,6 +3595,14 @@ mod tests {
                 .profile
                 .weights_micros
                 .contains_key(&RetrieverKind::Semantic)
+        );
+        assert!(
+            semantic.profile.score_domain_calibrations.contains_key(
+                &id::<ScoreDomainId>(
+                    tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+                )
+                .expect("evaluation semantic score domain")
+            )
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")

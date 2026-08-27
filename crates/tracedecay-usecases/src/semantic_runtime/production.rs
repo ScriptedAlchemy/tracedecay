@@ -2775,8 +2775,10 @@ impl PublishedSemanticVectorReadPortV1 {
                 retriever: RetrieverKind::Semantic,
                 retriever_revision: ComponentRevision::new("retriever.semantic-flat.evaluation.v1")
                     .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-                score_domain: ScoreDomainId::new("score.semantic-distance.evaluation.v1")
-                    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                score_domain: ScoreDomainId::new(
+                    tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+                )
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
                 raw_score: FixedPointScore::ZERO,
                 ordinal_rank: ordinal as u32,
                 exact_admission_proof: None,

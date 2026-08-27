@@ -64,6 +64,7 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
 
 #[cfg(test)]
 mod tests;
