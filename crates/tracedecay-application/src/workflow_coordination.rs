@@ -402,23 +402,25 @@ where
         context: &RequestContext,
         definition: WorkflowDefinition,
     ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
-        let definition = prepare_workflow_definition_registration(context, definition)?;
-        match self.authority.insert(&definition) {
-            Ok(()) => Ok(definition),
-            Err(WorkflowDefinitionAuthorityError::AlreadyExists) => {
-                let existing = self
-                    .authority
-                    .load(definition.definition_id(), definition.definition_version())
-                    .map_err(coordination_authority_error)?
-                    .ok_or(WorkflowCoordinationError::ImmutableDefinitionConflict)?;
-                if existing == definition {
-                    Ok(existing)
-                } else {
-                    Err(WorkflowCoordinationError::ImmutableDefinitionConflict)
+        hotpath::measure_block!("application.workflow.definition.register", {
+            let definition = prepare_workflow_definition_registration(context, definition)?;
+            match self.authority.insert(&definition) {
+                Ok(()) => Ok(definition),
+                Err(WorkflowDefinitionAuthorityError::AlreadyExists) => {
+                    let existing = self
+                        .authority
+                        .load(definition.definition_id(), definition.definition_version())
+                        .map_err(coordination_authority_error)?
+                        .ok_or(WorkflowCoordinationError::ImmutableDefinitionConflict)?;
+                    if existing == definition {
+                        Ok(existing)
+                    } else {
+                        Err(WorkflowCoordinationError::ImmutableDefinitionConflict)
+                    }
                 }
+                Err(error) => Err(coordination_authority_error(error)),
             }
-            Err(error) => Err(coordination_authority_error(error)),
-        }
+        })
     }
 
     /// The preflight for activation: structural shape plus tool-catalog
@@ -427,12 +429,14 @@ where
         &self,
         definition: WorkflowDefinition,
     ) -> Result<WorkflowDefinitionValidation, WorkflowCoordinationError> {
-        definition
-            .validate()
-            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
-        admit_workflow_definition_operations(&definition)
-            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)?;
-        Ok(WorkflowDefinitionValidation { definition })
+        hotpath::measure_block!("application.workflow.definition.validate", {
+            definition
+                .validate()
+                .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+            admit_workflow_definition_operations(&definition)
+                .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)?;
+            Ok(WorkflowDefinitionValidation { definition })
+        })
     }
 
     pub fn get(
@@ -440,28 +444,34 @@ where
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
-        if definition_version == 0 {
-            return Err(WorkflowCoordinationError::InvalidDefinition);
-        }
-        self.authority
-            .load(definition_id, definition_version)
-            .map_err(coordination_authority_error)?
-            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+        hotpath::measure_block!("application.workflow.definition.get", {
+            if definition_version == 0 {
+                return Err(WorkflowCoordinationError::InvalidDefinition);
+            }
+            self.authority
+                .load(definition_id, definition_version)
+                .map_err(coordination_authority_error)?
+                .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+        })
     }
 
     pub fn list(&self) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
-        self.authority
-            .list(None)
-            .map_err(coordination_authority_error)
+        hotpath::measure_block!("application.workflow.definition.list", {
+            self.authority
+                .list(None)
+                .map_err(coordination_authority_error)
+        })
     }
 
     pub fn history(
         &self,
         definition_id: &WorkflowDefinitionId,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
-        self.authority
-            .list(Some(definition_id))
-            .map_err(coordination_authority_error)
+        hotpath::measure_block!("application.workflow.definition.history", {
+            self.authority
+                .list(Some(definition_id))
+                .map_err(coordination_authority_error)
+        })
     }
 
     /// Admission every activation must clear before its lifecycle transition
@@ -473,12 +483,14 @@ where
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<(), WorkflowCoordinationError> {
-        let definition = self.get(definition_id, definition_version)?;
-        definition
-            .validate()
-            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
-        admit_workflow_definition_operations(&definition)
-            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
+        hotpath::measure_block!("application.workflow.definition.admit_activation", {
+            let definition = self.get(definition_id, definition_version)?;
+            definition
+                .validate()
+                .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+            admit_workflow_definition_operations(&definition)
+                .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
+        })
     }
 
     /// Advances a registered definition version to `active`.
@@ -496,13 +508,15 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        self.admit_activation(definition_id, definition_version)?;
-        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-            definition_id: definition_id.clone(),
-            definition_version,
-            operation: WorkflowLifecycleOperation::Activate,
-            expected_revision,
-            transitioned_at,
+        hotpath::measure_block!("application.workflow.definition.activate", {
+            self.admit_activation(definition_id, definition_version)?;
+            self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+                definition_id: definition_id.clone(),
+                definition_version,
+                operation: WorkflowLifecycleOperation::Activate,
+                expected_revision,
+                transitioned_at,
+            })
         })
     }
 
@@ -516,13 +530,15 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        self.get(definition_id, definition_version)?;
-        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-            definition_id: definition_id.clone(),
-            definition_version,
-            operation: WorkflowLifecycleOperation::Retire,
-            expected_revision,
-            transitioned_at,
+        hotpath::measure_block!("application.workflow.definition.retire", {
+            self.get(definition_id, definition_version)?;
+            self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+                definition_id: definition_id.clone(),
+                definition_version,
+                operation: WorkflowLifecycleOperation::Retire,
+                expected_revision,
+                transitioned_at,
+            })
         })
     }
 
@@ -535,13 +551,15 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        self.get(definition_id, definition_version)?;
-        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-            definition_id: definition_id.clone(),
-            definition_version,
-            operation: WorkflowLifecycleOperation::Reject,
-            expected_revision,
-            transitioned_at,
+        hotpath::measure_block!("application.workflow.definition.reject", {
+            self.get(definition_id, definition_version)?;
+            self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+                definition_id: definition_id.clone(),
+                definition_version,
+                operation: WorkflowLifecycleOperation::Reject,
+                expected_revision,
+                transitioned_at,
+            })
         })
     }
 
@@ -550,13 +568,15 @@ where
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        if definition_version == 0 {
-            return Err(WorkflowCoordinationError::InvalidDefinition);
-        }
-        self.authority
-            .load_disposition(definition_id, definition_version)
-            .map_err(coordination_authority_error)?
-            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+        hotpath::measure_block!("application.workflow.definition.disposition", {
+            if definition_version == 0 {
+                return Err(WorkflowCoordinationError::InvalidDefinition);
+            }
+            self.authority
+                .load_disposition(definition_id, definition_version)
+                .map_err(coordination_authority_error)?
+                .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+        })
     }
 
     pub fn lifecycle_history(
@@ -564,12 +584,14 @@ where
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowCoordinationError> {
-        if definition_version == 0 {
-            return Err(WorkflowCoordinationError::InvalidDefinition);
-        }
-        self.authority
-            .transition_history(definition_id, definition_version)
-            .map_err(coordination_authority_error)
+        hotpath::measure_block!("application.workflow.definition.lifecycle_history", {
+            if definition_version == 0 {
+                return Err(WorkflowCoordinationError::InvalidDefinition);
+            }
+            self.authority
+                .transition_history(definition_id, definition_version)
+                .map_err(coordination_authority_error)
+        })
     }
 
     fn apply_lifecycle(
@@ -604,36 +626,38 @@ where
         from_version: u64,
         to_version: u64,
     ) -> Result<WorkflowDefinitionDiff, WorkflowCoordinationError> {
-        let from = self.get(definition_id, from_version)?;
-        let to = self.get(definition_id, to_version)?;
-        let from_by_id = from
-            .steps()
-            .iter()
-            .map(|step| (&step.step_id, step))
-            .collect::<BTreeMap<_, _>>();
-        let to_by_id = to
-            .steps()
-            .iter()
-            .map(|step| (&step.step_id, step))
-            .collect::<BTreeMap<_, _>>();
-        let changed_steps = from_by_id
-            .keys()
-            .copied()
-            .chain(to_by_id.keys().copied())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
-            .cloned()
-            .collect();
-        Ok(WorkflowDefinitionDiff {
-            definition_id: definition_id.clone(),
-            from_version,
-            to_version,
-            changed_steps,
-            policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
-            configuration_changed: from.pinned_configuration_digest()
-                != to.pinned_configuration_digest(),
-            catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
+        hotpath::measure_block!("application.workflow.definition.diff", {
+            let from = self.get(definition_id, from_version)?;
+            let to = self.get(definition_id, to_version)?;
+            let from_by_id = from
+                .steps()
+                .iter()
+                .map(|step| (&step.step_id, step))
+                .collect::<BTreeMap<_, _>>();
+            let to_by_id = to
+                .steps()
+                .iter()
+                .map(|step| (&step.step_id, step))
+                .collect::<BTreeMap<_, _>>();
+            let changed_steps = from_by_id
+                .keys()
+                .copied()
+                .chain(to_by_id.keys().copied())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
+                .cloned()
+                .collect();
+            Ok(WorkflowDefinitionDiff {
+                definition_id: definition_id.clone(),
+                from_version,
+                to_version,
+                changed_steps,
+                policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
+                configuration_changed: from.pinned_configuration_digest()
+                    != to.pinned_configuration_digest(),
+                catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
+            })
         })
     }
 }
@@ -1104,11 +1128,13 @@ where
         issued_at: UtcMicros,
         frontier: WorkHandoffFrontierV1,
     ) -> Result<TaskHandoffGrant, TaskHandoffError> {
-        let grant = prepare_task_handoff_issue(context, scope, token, issued_at, frontier)?;
-        self.authority
-            .issue(&grant)
-            .map_err(handoff_authority_error)?;
-        Ok(grant)
+        hotpath::measure_block!("application.workflow.handoff.issue", {
+            let grant = prepare_task_handoff_issue(context, scope, token, issued_at, frontier)?;
+            self.authority
+                .issue(&grant)
+                .map_err(handoff_authority_error)?;
+            Ok(grant)
+        })
     }
 
     /// Consumes the grant once and answers the redemption receipt.
@@ -1124,28 +1150,30 @@ where
         expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffRedeemed, TaskHandoffError> {
-        let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
-        match self
-            .authority
-            .consume(&token_digest, expected_scope, consumed_at)
-            .map_err(handoff_authority_error)?
-        {
-            TaskHandoffConsumeOutcome::Consumed { frontier } => {
-                let frontier_digest = frontier
-                    .digest()
-                    .map_err(|_| TaskHandoffError::InvalidFrontier)?;
-                Ok(TaskHandoffRedeemed {
-                    scope: expected_scope.clone(),
-                    frontier: *frontier,
-                    frontier_digest,
-                    redeemed_at: consumed_at,
-                })
+        hotpath::measure_block!("application.workflow.handoff.redeem", {
+            let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
+            match self
+                .authority
+                .consume(&token_digest, expected_scope, consumed_at)
+                .map_err(handoff_authority_error)?
+            {
+                TaskHandoffConsumeOutcome::Consumed { frontier } => {
+                    let frontier_digest = frontier
+                        .digest()
+                        .map_err(|_| TaskHandoffError::InvalidFrontier)?;
+                    Ok(TaskHandoffRedeemed {
+                        scope: expected_scope.clone(),
+                        frontier: *frontier,
+                        frontier_digest,
+                        redeemed_at: consumed_at,
+                    })
+                }
+                TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
+                TaskHandoffConsumeOutcome::ScopeMismatch => Err(TaskHandoffError::ScopeMismatch),
+                TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
+                TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
             }
-            TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
-            TaskHandoffConsumeOutcome::ScopeMismatch => Err(TaskHandoffError::ScopeMismatch),
-            TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
-            TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
-        }
+        })
     }
 }
 

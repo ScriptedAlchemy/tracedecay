@@ -497,6 +497,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.evidence.retrieve", future = true)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,

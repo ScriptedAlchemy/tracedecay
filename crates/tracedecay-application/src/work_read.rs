@@ -76,6 +76,7 @@ where
         Self { port }
     }
 
+    #[hotpath::measure(label = "application.work.read.exact_snapshot")]
     pub fn exact_snapshot(
         &self,
         context: &RequestContext,
@@ -88,6 +89,7 @@ where
             .map_err(Into::into)
     }
 
+    #[hotpath::measure(label = "application.work.read.snapshot")]
     pub fn snapshot(
         &self,
         context: &RequestContext,
@@ -101,6 +103,7 @@ where
             .map_err(Into::into)
     }
 
+    #[hotpath::measure(label = "application.work.read.delta")]
     pub fn delta(
         &self,
         context: &RequestContext,

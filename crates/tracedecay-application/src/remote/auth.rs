@@ -461,6 +461,7 @@ where
         Self { authority }
     }
 
+    #[hotpath::measure(label = "application.remote.enroll")]
     pub fn enroll(
         &self,
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
@@ -694,6 +695,7 @@ pub struct EnrollmentIssueRequestV1 {
     pub scope: RemoteRepositoryScopeV1,
 }
 
+#[hotpath::measure(label = "application.remote.issue_enrollment")]
 pub fn issue_enrollment(
     grant: &EnrollmentGrantV1,
     presented_grant: &OpaqueRemoteCredential,
@@ -759,6 +761,7 @@ pub trait RemoteAuthorityAuthenticationPort {
 
 /// Authenticate both sides of a remote request and reauthorize exact scope.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "application.remote.authenticate_request")]
 pub fn authenticate_remote_request(
     authority_port: &dyn RemoteAuthorityAuthenticationPort,
     expected_authority: &CurrentRemoteAuthorityV1,
@@ -843,6 +846,7 @@ fn validate_authority_credential(
     Ok(())
 }
 
+#[hotpath::measure(label = "application.remote.rotate_credential")]
 pub fn rotate_credential(
     current: &EnrollmentCredentialRecordV1,
     expected_revision: u64,
@@ -894,6 +898,7 @@ pub fn rotate_credential(
 /// Revoke a credential after the surrounding authority command has been
 /// authenticated and authorized. Revocation is monotone and idempotent at an
 /// already-revoked timestamp.
+#[hotpath::measure(label = "application.remote.revoke_credential")]
 pub fn revoke_credential(
     current: &EnrollmentCredentialRecordV1,
     expected_revision: u64,

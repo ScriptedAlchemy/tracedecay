@@ -195,7 +195,7 @@ where
         self.admit_with_fan_out(run_id, definition, admission, Vec::new(), context)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.workflow.run.admit")]
     pub fn admit_with_fan_out(
         &self,
         run_id: RunId,
@@ -230,7 +230,7 @@ where
             .into_projection())
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.workflow.run.apply")]
     pub fn apply(
         &self,
         run_id: &RunId,

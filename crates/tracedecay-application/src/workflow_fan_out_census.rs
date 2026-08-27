@@ -105,7 +105,7 @@ pub trait WorkflowFanOutCensusStoragePort: Send + Sync {
     ) -> Result<(), WorkflowFanOutCensusError>;
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "application.workflow.census.derive")]
 pub fn derive_workflow_fan_out_census(
     projection: &WorkflowRunProjection,
     evidence: &WorkflowFanOutCensusEvidenceV1<'_>,

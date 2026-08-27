@@ -140,6 +140,7 @@ where
     /// stale, a scope with no Work at all is the explicit `Absent` state,
     /// and an authorized scope with no attempts is an explicit zero-complete
     /// page.
+    #[hotpath::measure(label = "application.work.artifact.hydrate")]
     pub fn hydrate(
         &self,
         context: &RequestContext,

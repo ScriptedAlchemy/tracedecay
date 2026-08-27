@@ -70,7 +70,7 @@ pub fn build_empty_execution_topology_daily_rollup(
 /// Refuses non-exact, stale, partial, oversized, or duplicate daily evidence.
 /// A capped page becomes a durable typed Capped artifact with zero cells, so a
 /// storage adapter never publishes values from its observed prefix.
-#[hotpath::measure]
+#[hotpath::measure(label = "application.topology.rollup.build")]
 pub fn build_execution_topology_daily_rollup(
     authorized_scope_ref: &str,
     exact_day_horizon: &ObservabilityHorizonV1,

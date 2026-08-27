@@ -161,6 +161,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.evidence.select")]
     pub fn select(
         &self,
         context: &RequestContext,
@@ -191,6 +192,7 @@ where
         Ok(selected)
     }
 
+    #[hotpath::measure(label = "application.work.evidence.expand")]
     pub fn expand(
         &self,
         context: &RequestContext,
@@ -314,6 +316,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.history.read")]
     pub fn read(
         &self,
         context: &RequestContext,

@@ -446,6 +446,7 @@ where
         Self { attempts }
     }
 
+    #[hotpath::measure(label = "application.work.attempt.status")]
     pub fn status(
         &self,
         context: &RequestContext,
@@ -471,6 +472,7 @@ where
     /// request, a cursor minted under a superseded topology generation is
     /// stale, a scope with no Work at all is the explicit `Absent` state, and
     /// an authorized scope with no attempts is an explicit zero-complete page.
+    #[hotpath::measure(label = "application.work.attempt.list")]
     pub fn list(
         &self,
         context: &RequestContext,
@@ -540,6 +542,7 @@ where
     /// recovery-required attempt can be cancelled before provider startup;
     /// the daemon runtime observes the durable request and produces no
     /// provider effect.
+    #[hotpath::measure(label = "application.work.attempt.request_cancellation")]
     pub fn request_cancellation(
         &self,
         context: &RequestContext,
@@ -603,6 +606,7 @@ where
     /// exit, PID, or elapsed time is accepted as proof of anything.
     /// Attempts with an in-flight cancellation complete their cancellation,
     /// because the process they were cancelling is gone.
+    #[hotpath::measure(label = "application.work.attempt.resume")]
     pub fn resume(
         &self,
         context: &RequestContext,
@@ -650,6 +654,7 @@ where
 
     /// Marks negotiation success: the provider process is running under the
     /// exact admitted route.
+    #[hotpath::measure(label = "application.work.attempt.mark_running")]
     pub fn mark_running(
         &self,
         context: &RequestContext,
@@ -694,6 +699,7 @@ where
     /// Records a typed provider-availability denial before the process ever
     /// started. This is a product state, not a transport error, and it never
     /// routes to a different provider.
+    #[hotpath::measure(label = "application.work.attempt.mark_provider_unavailable")]
     pub fn mark_provider_unavailable(
         &self,
         context: &RequestContext,
@@ -713,6 +719,7 @@ where
     }
 
     /// Acknowledges a durable cancellation request from inside the runtime.
+    #[hotpath::measure(label = "application.work.attempt.acknowledge_cancellation")]
     pub fn acknowledge_cancellation(
         &self,
         context: &RequestContext,
@@ -749,6 +756,7 @@ where
     }
 
     /// Escalates an acknowledged cancellation to forced termination.
+    #[hotpath::measure(label = "application.work.attempt.escalate_cancellation")]
     pub fn escalate_cancellation(
         &self,
         context: &RequestContext,
@@ -798,6 +806,7 @@ where
         self.settle_with_artifacts(context, identity, evidence, Vec::new())
     }
 
+    #[hotpath::measure(label = "application.work.attempt.settle")]
     pub fn settle_with_artifacts(
         &self,
         context: &RequestContext,
@@ -839,6 +848,7 @@ where
     }
 
     /// Fails an attempt that cannot be recovered, sealing denial evidence.
+    #[hotpath::measure(label = "application.work.attempt.fail_recovery")]
     pub fn fail_recovery(
         &self,
         context: &RequestContext,

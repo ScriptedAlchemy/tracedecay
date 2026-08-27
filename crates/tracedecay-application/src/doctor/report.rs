@@ -487,6 +487,7 @@ impl<'a> DoctorReportComposerV1<'a> {
     }
 
     /// Gather findings across every family and assemble the report.
+    #[hotpath::measure(label = "application.doctor.compose", future = true)]
     pub async fn compose(
         &self,
         context: &RequestContext,

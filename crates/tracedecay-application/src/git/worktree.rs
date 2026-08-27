@@ -576,6 +576,7 @@ where
         Ok(scope_set)
     }
 
+    #[hotpath::measure(label = "application.git.worktree.inventory")]
     pub fn inventory(
         &self,
         request: &WorktreeInventoryRequestV1,
@@ -586,6 +587,7 @@ where
         self.port.inventory(request, &scope_set, cancellation)
     }
 
+    #[hotpath::measure(label = "application.git.worktree.inspect")]
     pub fn inspect(
         &self,
         request: &WorktreeCleanupInspectRequestV1,
@@ -596,6 +598,7 @@ where
         self.port.inspect(request, &scope_set, cancellation)
     }
 
+    #[hotpath::measure(label = "application.git.worktree.confirm")]
     pub fn confirm(
         &self,
         request: &WorktreeCleanupConfirmRequestV1,
@@ -606,6 +609,7 @@ where
         self.port.confirm(request, &scope_set, cancellation)
     }
 
+    #[hotpath::measure(label = "application.git.worktree.remove")]
     pub fn remove(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
@@ -616,6 +620,7 @@ where
         self.port.remove(request, &scope_set, cancellation)
     }
 
+    #[hotpath::measure(label = "application.git.worktree.reconcile")]
     pub fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,

@@ -200,6 +200,7 @@ where
         Self { storage }
     }
 
+    #[hotpath::measure(label = "application.work.attempt_effect.record_dispatch")]
     pub fn record_dispatch(
         &self,
         context: &RequestContext,
@@ -217,6 +218,7 @@ where
             .map_err(effect_problem)
     }
 
+    #[hotpath::measure(label = "application.work.attempt_effect.settle")]
     pub fn settle(
         &self,
         context: &RequestContext,
@@ -230,6 +232,7 @@ where
             .map_err(effect_problem)
     }
 
+    #[hotpath::measure(label = "application.work.attempt_effect.load")]
     pub fn load(
         &self,
         context: &RequestContext,

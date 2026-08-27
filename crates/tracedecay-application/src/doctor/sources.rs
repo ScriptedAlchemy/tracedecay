@@ -133,6 +133,7 @@ pub enum ConfigurationAuthorityReadV1 {
 }
 
 /// Map a configuration-authority read into its `Configuration`-family finding.
+#[hotpath::measure(label = "application.doctor_sources.configuration")]
 pub fn configuration_finding(
     read: &ConfigurationAuthorityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -230,6 +231,7 @@ pub enum RuntimeHealthReadV1 {
 }
 
 /// Map a runtime-health read into its `StorageRuntime`-family finding.
+#[hotpath::measure(label = "application.doctor_sources.runtime")]
 pub fn runtime_health_finding(
     read: &RuntimeHealthReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -358,6 +360,7 @@ pub struct OperationalAuditReadV1 {
     pub profile_authority: ProfileAuthorityReadV1,
 }
 
+#[hotpath::measure(label = "application.doctor_sources.operational_audit")]
 pub fn operational_audit_findings(
     read: &OperationalAuditReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
@@ -517,6 +520,7 @@ pub enum HostIntegrationReadV1 {
 }
 
 /// Map a host-integration conformance read into its `Advisory`-family finding.
+#[hotpath::measure(label = "application.doctor_sources.host")]
 pub fn host_integration_finding(
     read: &HostIntegrationReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -929,6 +933,7 @@ fn advisory_feedback_observation_is_consistent(
 
 /// Map the mounted canonical feedback-owner read into distinct Advisory
 /// findings. Host conformance is deliberately not part of this producer.
+#[hotpath::measure(label = "application.doctor_sources.advisory")]
 pub fn advisory_feedback_findings(
     read: &AdvisoryFeedbackReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
@@ -1019,6 +1024,7 @@ pub enum CodeIndexMountReadV1 {
 }
 
 /// Map a code-index mount read into its `SemanticIndex`-family finding.
+#[hotpath::measure(label = "application.doctor_sources.code_index")]
 pub fn code_index_finding(
     read: &CodeIndexMountReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1134,6 +1140,7 @@ pub enum LanguageServerReadV1 {
 }
 
 /// Map a live analyzer read into its `LanguageServer`-family finding.
+#[hotpath::measure(label = "application.doctor_sources.language_server")]
 pub fn language_server_finding(
     read: &LanguageServerReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1248,6 +1255,7 @@ pub enum ObservabilityReadV1 {
 }
 
 /// Map the canonical durable read model into its `Observability` finding.
+#[hotpath::measure(label = "application.doctor_sources.observability")]
 pub fn observability_finding(
     read: &ObservabilityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1343,6 +1351,7 @@ pub enum IngestRefusalCensusReadV1 {
 }
 
 /// Map the durable refusal census into its `Observability` finding.
+#[hotpath::measure(label = "application.doctor_sources.ingest_refusal")]
 pub fn ingest_refusal_finding(
     read: &IngestRefusalCensusReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {

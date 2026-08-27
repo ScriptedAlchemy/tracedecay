@@ -88,6 +88,7 @@ where
     /// A later submit still performs normal graph-version and revision CAS, so
     /// state that changes between prepare and submit is rejected as stale.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "application.work.product.prepare_mutation")]
     pub fn prepare_mutation(
         &self,
         context: &RequestContext,
@@ -273,6 +274,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "application.work.product.create")]
     pub fn create(
         &self,
         context: &RequestContext,
@@ -288,6 +290,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.decide_proposal")]
     pub fn decide_proposal(
         &self,
         context: &RequestContext,
@@ -315,6 +318,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.add_task")]
     pub fn add_task(
         &self,
         context: &RequestContext,
@@ -336,6 +340,7 @@ where
     /// graph bootstrap; later tasks use the same version-checked event path
     /// and may reuse byte-identical containers. No daemon-side default
     /// hierarchy or separate bootstrap authority exists.
+    #[hotpath::measure(label = "application.work.product.create_task")]
     pub fn create_task(
         &self,
         context: &RequestContext,
@@ -377,6 +382,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.product.decide_relation_replan")]
     pub fn decide_relation_replan(
         &self,
         context: &RequestContext,
@@ -397,6 +403,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.apply_relation_replan")]
     pub fn apply_relation_replan(
         &self,
         context: &RequestContext,
@@ -416,6 +423,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.accept_task")]
     pub fn accept_task(
         &self,
         context: &RequestContext,
@@ -436,6 +444,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.admit_execution")]
     pub fn admit_execution(
         &self,
         context: &RequestContext,
@@ -458,6 +467,7 @@ where
 
     /// Links one exact admitted attempt identity. Terminal evidence remains
     /// owned by the attempt and task evidence is linked independently.
+    #[hotpath::measure(label = "application.work.product.link_accepted_attempt")]
     pub fn link_accepted_attempt(
         &self,
         context: &RequestContext,
@@ -479,6 +489,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.product.record_handoff")]
     pub fn record_handoff(
         &self,
         context: &RequestContext,

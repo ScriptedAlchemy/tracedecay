@@ -150,7 +150,6 @@ impl SessionSyncRequestV1 {
         self.command
     }
 
-    #[hotpath::measure]
     pub fn admit_at(&self, observed_at: UtcMicros) -> Result<(), SessionSyncAdmissionErrorV1> {
         if self.cancellation.is_cancelled() {
             return Err(SessionSyncAdmissionErrorV1::Cancelled);
@@ -301,7 +300,6 @@ pub struct SessionSyncJournalV1 {
 }
 
 impl SessionSyncJournalV1 {
-    #[hotpath::measure]
     pub fn queued(request: &SessionSyncRequestV1, accepted_at: UtcMicros) -> Self {
         Self {
             admission: SessionSyncAdmissionReceiptV1 {
@@ -333,7 +331,6 @@ impl SessionSyncJournalV1 {
         journal
     }
 
-    #[hotpath::measure]
     pub fn outcome(&self) -> SessionSyncOutcomeV1 {
         match (&self.status, &self.completion) {
             (SessionSyncJournalStatusV1::Queued | SessionSyncJournalStatusV1::Running, _) => {

@@ -116,6 +116,7 @@ where
     /// Reads one coherent capacity snapshot for a canonical task set. Inputs
     /// must be strictly sorted and unique so callers cannot hide duplicate
     /// census work or produce order-dependent evidence.
+    #[hotpath::measure(label = "application.work.attempt.admission_capacities")]
     pub fn admission_capacities_against_registered_topology(
         &self,
         context: &RequestContext,

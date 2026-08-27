@@ -306,7 +306,7 @@ pub fn check_execution_topology_rollup_retention_json(
 /// `authorized_scope_ref`; this function never reads storage or performs
 /// authorization itself. A capped source page settles its exact watermark as
 /// a durable Capped fragment without retaining its partial events.
-#[hotpath::measure]
+#[hotpath::measure(label = "application.topology.rollup.fragment")]
 pub fn build_execution_topology_rollup_fragment(
     authorized_scope_ref: &str,
     exact_day_horizon: &ObservabilityHorizonV1,
@@ -361,7 +361,7 @@ pub fn build_execution_topology_rollup_fragment(
 /// Builds a fresh, non-persistable boundary page for an arbitrary requested
 /// horizon. Whole UTC days must use [`build_execution_topology_rollup_fragment`]
 /// so a transient page can never enter daily retention by accident.
-#[hotpath::measure]
+#[hotpath::measure(label = "application.topology.rollup.boundary")]
 pub fn build_execution_topology_boundary_fragment(
     authorized_scope_ref: &str,
     boundary_horizon: &ObservabilityHorizonV1,
@@ -409,7 +409,7 @@ pub fn project_execution_topology_fragments(
 /// contiguous coverage is required after ordering, and a boundary may occur
 /// only at either end of the requested horizon.
 #[must_use]
-#[hotpath::measure]
+#[hotpath::measure(label = "application.topology.rollup.project")]
 pub fn project_execution_topology_fragments_with_boundaries(
     authorized_scope_ref: &str,
     requested_horizon: &ObservabilityHorizonV1,

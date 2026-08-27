@@ -91,6 +91,7 @@ impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotServ
         Self { port }
     }
 
+    #[hotpath::measure(label = "application.git.native_integration.stack_snapshot")]
     pub fn snapshot(
         &self,
         request: NativeIntegrationStackResolutionRequestV1,

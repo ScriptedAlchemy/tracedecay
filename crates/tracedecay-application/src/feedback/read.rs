@@ -357,6 +357,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.feedback.diagnostics", future = true)]
     pub async fn diagnostics(
         &self,
         context: &RequestContext,
@@ -377,6 +378,7 @@ where
         .await
     }
 
+    #[hotpath::measure(label = "application.feedback.get", future = true)]
     pub async fn get(
         &self,
         context: &RequestContext,
@@ -397,6 +399,7 @@ where
         .await
     }
 
+    #[hotpath::measure(label = "application.feedback.expand", future = true)]
     pub async fn expand(
         &self,
         context: &RequestContext,
@@ -421,6 +424,7 @@ where
         .await
     }
 
+    #[hotpath::measure(label = "application.feedback.list", future = true)]
     pub async fn list(
         &self,
         context: &RequestContext,
