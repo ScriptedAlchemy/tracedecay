@@ -188,7 +188,9 @@ describe('AgentsPage read coverage', () => {
     renderAgents();
 
     expect(await screen.findByText('Handoff frontier')).toBeTruthy();
-    expect(screen.getByText('Tool activity')).toBeTruthy();
+    // Tool activity lives on the demoted telemetry register, which renders
+    // once its own usage read lands — awaited rather than assumed.
+    expect(await screen.findByText('Tool activity')).toBeTruthy();
     expect(screen.getByText('Failure context')).toBeTruthy();
 
     // Tool activity is fed by the diagnostics read that landed.

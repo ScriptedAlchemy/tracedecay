@@ -54,11 +54,72 @@ import {
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
+import {
+  OBSERVATORY_WING_PANEL_ID,
+  ObservatoryWingSwitcher,
+  observatoryWingNote,
+  observatoryWingTabId,
+  useObservatoryWing,
+  type ObservatoryWingKind,
+} from './ObservatoryWings.tsx';
 import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
 /** Observatory storage health: independent typed telemetry and Doctor finding
- * read models. A failed source never hides the other source or becomes empty. */
+ * read models behind four contextual wings. A failed source never hides the
+ * other source or becomes empty; a wing only pays for its own reads. */
 export function ObservatoryPage() {
+  const [wing, selectWing] = useObservatoryWing();
+  return (
+    // The page column is the scroll container, and wide telemetry read-out
+    // (paths, byte figures) can overflow it horizontally with nothing
+    // focusable inside — so it takes the tab stop and a name, the same shape
+    // Costs and Agents use (axe: scrollable-region-focusable).
+    <div
+      className="flex h-full flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Observatory content"
+    >
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 px-4 py-2">
+        <h1 className="text-sm font-semibold tracking-tight">Observatory</h1>
+        <ObservatoryWingSwitcher active={wing} onSelect={selectWing} />
+        <span className="min-w-0 text-2xs text-text-muted">{observatoryWingNote(wing)}</span>
+      </header>
+      <div
+        id={OBSERVATORY_WING_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={observatoryWingTabId(wing)}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <ObservatoryWing kind={wing} />
+      </div>
+    </div>
+  );
+}
+
+/** The camera, applied. Exhaustive so a wing added to the switcher cannot be
+ * left without something to draw. */
+function ObservatoryWing({ kind }: { kind: ObservatoryWingKind }) {
+  switch (kind) {
+    case 'diagnosis':
+      return <DiagnosisWing />;
+    case 'adoption':
+      return <AdoptionWing />;
+    case 'performance':
+      return <PerformanceWing />;
+    case 'signals':
+      return <SignalsWing />;
+    default: {
+      const unhandled: never = kind;
+      return unhandled;
+    }
+  }
+}
+
+/** The default wing: the canonical Doctor report, the storage-family
+ * projection (budgets, orphans, debris, retention, growth), live store
+ * telemetry, and the code-index pipeline. */
+function DiagnosisWing() {
   const scope = useScope((s) => s.scope);
   const codeIndexScopeKey = scopeKey(scope);
   const telemetry = useQuery({
@@ -76,78 +137,24 @@ export function ObservatoryPage() {
   // Shared with the nav rail's Doctor dot, through the module that owns the
   // key, the route, and the poll: one entry, one period, one contract.
   const findings = useStorageFindings();
-  const accountingSnapshot = useEnvelope(
-    ['observatory', 'accounting-snapshot'],
-    '/api/observatory',
-    ObservatoryReadModelV1Schema,
-    { staleTime: 30_000 },
-  );
-  const accountingDiagnostics = useEnvelope(
-    ['observatory', 'accounting-diagnostics'],
-    '/api/plugins/analytics/diagnostics',
-    AnalyticsDiagnosticsPayloadV1Schema,
-    { staleTime: 30_000 },
-  );
-  const accountingReads: ObservatoryAccountingReads = {
-    observatory: {
-      result: accountingSnapshot.data,
-      pending: accountingSnapshot.isPending,
-      refreshing: accountingSnapshot.isFetching,
-      refresh: () => void accountingSnapshot.refetch(),
-    },
-    diagnostics: {
-      result: accountingDiagnostics.data,
-      pending: accountingDiagnostics.isPending,
-      refreshing: accountingDiagnostics.isFetching,
-      refresh: () => void accountingDiagnostics.refetch(),
-    },
-  };
-
   return (
-    // The page column is the scroll container, and wide telemetry read-out
-    // (paths, byte figures) can overflow it horizontally with nothing
-    // focusable inside — so it takes the tab stop and a name, the same shape
-    // Costs and Agents use (axe: scrollable-region-focusable).
-    <div
-      className="flex h-full flex-col overflow-auto"
-      tabIndex={0}
-      role="region"
-      aria-label="Observatory content"
-    >
-      <header className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-tight">Observatory</h1>
-        <span className="text-2xs text-text-muted">
-          event flow, latency, storage size, reclaimable pages, and Doctor retention evidence
-        </span>
-      </header>
-
+    <>
       <DoctorInspector />
 
-      <CanonicalObservations />
-
-      <AdoptionCoverage reads={accountingReads} />
-
-      <AdoptionOutcomes reads={accountingReads} />
-
-      <RetrievalQuality reads={accountingReads} />
-
-      <HookHints />
-
-      <RejectedArguments reads={accountingReads} />
-
-      <PerformanceBudgets />
-
-      <PerformanceComparisons />
-
-      <ExecutionTopologyMetrics />
-
-      <AnalyticsControls reads={accountingReads} />
-
-      <CodeIndexPipeline
-        result={codeIndexFreshness.data}
-        pending={codeIndexFreshness.isPending}
-        scopeKey={codeIndexScopeKey}
-      />
+      <EnvelopeSection
+        title="Doctor storage findings"
+        result={findings.data}
+        pending={findings.isPending}
+        loadingDetail="requesting doctor storage findings"
+      >
+        {(envelope) => (
+          <FindingsReadModel
+            envelope={envelope}
+            refreshing={findings.isFetching}
+            onRefresh={() => void findings.refetch()}
+          />
+        )}
+      </EnvelopeSection>
 
       <EnvelopeSection
         title="Store telemetry"
@@ -164,21 +171,76 @@ export function ObservatoryPage() {
         )}
       </EnvelopeSection>
 
-      <EnvelopeSection
-        title="Doctor storage findings"
-        result={findings.data}
-        pending={findings.isPending}
-        loadingDetail="requesting doctor storage findings"
-      >
-        {(envelope) => (
-          <FindingsReadModel
-            envelope={envelope}
-            refreshing={findings.isFetching}
-            onRefresh={() => void findings.refetch()}
-          />
-        )}
-      </EnvelopeSection>
-    </div>
+      <CodeIndexPipeline
+        result={codeIndexFreshness.data}
+        pending={codeIndexFreshness.isPending}
+        scopeKey={codeIndexScopeKey}
+      />
+    </>
+  );
+}
+
+/** One accounting snapshot shared by every view on a wing that reads it, so
+ * the ledgers cannot sit under different watermarks. */
+function useAccountingReads(): ObservatoryAccountingReads {
+  const accountingSnapshot = useEnvelope(
+    ['observatory', 'accounting-snapshot'],
+    '/api/observatory',
+    ObservatoryReadModelV1Schema,
+    { staleTime: 30_000 },
+  );
+  const accountingDiagnostics = useEnvelope(
+    ['observatory', 'accounting-diagnostics'],
+    '/api/plugins/analytics/diagnostics',
+    AnalyticsDiagnosticsPayloadV1Schema,
+    { staleTime: 30_000 },
+  );
+  return {
+    observatory: {
+      result: accountingSnapshot.data,
+      pending: accountingSnapshot.isPending,
+      refreshing: accountingSnapshot.isFetching,
+      refresh: () => void accountingSnapshot.refetch(),
+    },
+    diagnostics: {
+      result: accountingDiagnostics.data,
+      pending: accountingDiagnostics.isPending,
+      refreshing: accountingDiagnostics.isFetching,
+      refresh: () => void accountingDiagnostics.refetch(),
+    },
+  };
+}
+
+function AdoptionWing() {
+  const accountingReads = useAccountingReads();
+  return (
+    <>
+      <CanonicalObservations />
+      <AdoptionCoverage reads={accountingReads} />
+      <AdoptionOutcomes reads={accountingReads} />
+      <RetrievalQuality reads={accountingReads} />
+      <RejectedArguments reads={accountingReads} />
+    </>
+  );
+}
+
+function PerformanceWing() {
+  return (
+    <>
+      <PerformanceBudgets />
+      <PerformanceComparisons />
+      <ExecutionTopologyMetrics />
+    </>
+  );
+}
+
+function SignalsWing() {
+  const accountingReads = useAccountingReads();
+  return (
+    <>
+      <HookHints />
+      <AnalyticsControls reads={accountingReads} />
+    </>
   );
 }
 

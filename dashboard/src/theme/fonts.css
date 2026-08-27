@@ -8,10 +8,12 @@
  *
  * The three faces and why each is here:
  *
- *   Archivo (display) — SIL OFL 1.1. A signage grotesque with a real width
- *     axis. Set expanded at the uppercase letterspaced tiers it reads as an
- *     engraved faceplate legend, which is the one thing Inter cannot do at
- *     10px. Two axes (wght + wdth) ship in one file.
+ *   Chakra Petch (display) — SIL OFL 1.1. A squared industrial grotesque with
+ *     chamfered terminals, drawn for engineering signage. At the 10-11px
+ *     uppercase letterspaced tiers this console engraves everywhere, the
+ *     clipped corners survive where a round grotesque blurs into anybody's
+ *     sans — it is the stamp face of the instrument, the one register the
+ *     body face cannot reach.
  *   IBM Plex Sans (body) — SIL OFL 1.1. Drawn for engineering documentation,
  *     so it holds its counters at the 11-13px this console actually sets, and
  *     its flared stems and single-storey detailing are unmistakably not Inter.
@@ -31,27 +33,69 @@
  * missing glyph rather than reveal it.
  */
 
-/* ---- Archivo Variable: display (wght 100-900, wdth 62-125%) ---- */
+/* ---- Chakra Petch: display / stamps (500 legends, 600 titles, 700 marks) ---- */
 @font-face {
-  font-family: 'Archivo Variable';
+  font-family: 'Chakra Petch';
   font-style: normal;
   font-display: swap;
-  font-weight: 100 900;
-  font-stretch: 62% 125%;
-  src: url('@fontsource-variable/archivo/files/archivo-latin-ext-wdth-normal.woff2')
-    format('woff2-variations');
+  font-weight: 500;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-ext-500-normal.woff2')
+    format('woff2');
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
     U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
     U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 @font-face {
-  font-family: 'Archivo Variable';
+  font-family: 'Chakra Petch';
   font-style: normal;
   font-display: swap;
-  font-weight: 100 900;
-  font-stretch: 62% 125%;
-  src: url('@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2')
-    format('woff2-variations');
+  font-weight: 500;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-500-normal.woff2')
+    format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-ext-600-normal.woff2')
+    format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-600-normal.woff2')
+    format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-ext-700-normal.woff2')
+    format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('@fontsource/chakra-petch/files/chakra-petch-latin-700-normal.woff2')
+    format('woff2');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
     U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
     U+2215, U+FEFF, U+FFFD;
