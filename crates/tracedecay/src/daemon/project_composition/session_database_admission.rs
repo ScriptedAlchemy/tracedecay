@@ -6,6 +6,7 @@ use crate::errors::Result;
 
 use super::log_daemon_event;
 
+#[hotpath::measure(label = "daemon.project.compose.join_sessions", future = true)]
 pub(super) async fn join_independent_session_opens<Project, Profile, ProjectOpen, ProfileOpen>(
     project_open: ProjectOpen,
     profile_open: ProfileOpen,

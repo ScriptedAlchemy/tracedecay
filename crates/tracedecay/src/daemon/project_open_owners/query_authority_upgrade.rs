@@ -45,37 +45,40 @@ pub(super) fn spawn_deferred_query_authority_mount(
     scope: ResolvedScope,
     mount: DeferredQueryAuthorityMountV1,
 ) -> bool {
-    owner.spawn_background_task(async move {
-        let mut publications = invocation
-            .code_index_schedulers
-            .subscribe_generation_publications();
-        let mut ready_poll = tokio::time::interval(std::time::Duration::from_secs(1));
-        ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            if invocation
+    owner.spawn_background_task(hotpath::future!(
+        async move {
+            let mut publications = invocation
                 .code_index_schedulers
-                .latest_text_serving_for_scope(&scope)
-                .await
-                .is_some()
-                && try_deferred_mount(&invocation, &project_root, &scope, &mount).await
-                    != DeferredMountAttemptV1::AwaitNextPublication
-            {
-                return;
-            }
-            tokio::select! {
-                _ = ready_poll.tick() => {}
-                publication = publications.recv() => match publication {
-                    Ok(publication) if publication.project_root == project_root => {}
-                    // Another project's publication; loop for the next signal.
-                    Ok(_) => {}
-                    // A lagged receiver dropped publications; one of them may have
-                    // been this project's, so attempt the mount anyway.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                .subscribe_generation_publications();
+            let mut ready_poll = tokio::time::interval(std::time::Duration::from_secs(1));
+            ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                if invocation
+                    .code_index_schedulers
+                    .latest_text_serving_for_scope(&scope)
+                    .await
+                    .is_some()
+                    && try_deferred_mount(&invocation, &project_root, &scope, &mount).await
+                        != DeferredMountAttemptV1::AwaitNextPublication
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = ready_poll.tick() => {}
+                    publication = publications.recv() => match publication {
+                        Ok(publication) if publication.project_root == project_root => {}
+                        // Another project's publication; loop for the next signal.
+                        Ok(_) => {}
+                        // A lagged receiver dropped publications; one of them may have
+                        // been this project's, so attempt the mount anyway.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
                 }
             }
-        }
-    })
+        },
+        label = "daemon.project.query_authority_deferred"
+    ))
 }
 
 /// One deferred mount attempt, terminal unless the generation is still
@@ -86,6 +89,7 @@ enum DeferredMountAttemptV1 {
     AwaitNextPublication,
 }
 
+#[hotpath::measure(label = "daemon.project.query_authority_retry", future = true)]
 async fn try_deferred_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,

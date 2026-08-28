@@ -15,6 +15,7 @@ use crate::daemon::{DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationErr
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 
+#[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]
 pub(super) async fn open_and_register_project_primitive_runtime(
     invocation: &DaemonInvocationState,
     project_root: &Path,

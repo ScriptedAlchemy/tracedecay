@@ -176,9 +176,12 @@ impl ProfileHostAdmissionReplayRegistry {
             self.bootstrap_retry_budget,
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio::spawn(async move {
-            task_worker.run(operation).await;
-        });
+        let task = tokio::spawn(hotpath::future!(
+            async move {
+                task_worker.run(operation).await;
+            },
+            label = "daemon.authority.host_admission.bootstrap.run"
+        ));
         workers.insert(
             profile_root.to_path_buf(),
             ProfileHostAdmissionBootstrapEntry { worker, task },
@@ -253,19 +256,22 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker_path = broker_path.to_path_buf();
         let workers_weak = Arc::downgrade(&self.workers);
         let idle_eviction_after = self.idle_eviction_after;
-        let task = tokio::spawn(async move {
-            worker.run(idle_eviction_after).await;
-            let Some(workers) = workers_weak.upgrade() else {
-                return;
-            };
-            let mut workers = workers.lock().await;
-            if workers
-                .get(&worker_path)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.worker, &worker))
-            {
-                workers.remove(&worker_path);
-            }
-        });
+        let task = tokio::spawn(hotpath::future!(
+            async move {
+                worker.run(idle_eviction_after).await;
+                let Some(workers) = workers_weak.upgrade() else {
+                    return;
+                };
+                let mut workers = workers.lock().await;
+                if workers
+                    .get(&worker_path)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.worker, &worker))
+                {
+                    workers.remove(&worker_path);
+                }
+            },
+            label = "daemon.authority.host_admission.replay.run"
+        ));
         workers.insert(
             broker_path.to_path_buf(),
             ReplayWorkerEntry {

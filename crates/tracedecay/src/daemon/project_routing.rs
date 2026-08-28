@@ -67,6 +67,7 @@ pub(super) fn project_route_for_handshake(
     Ok((canonical_project_path, route))
 }
 
+#[hotpath::measure(label = "daemon.project.bind.identity", future = true)]
 pub(super) async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
@@ -136,6 +137,7 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
+#[hotpath::measure(label = "daemon.project.route.resolve", future = true)]
 pub(super) async fn resolved_project_server_key(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,

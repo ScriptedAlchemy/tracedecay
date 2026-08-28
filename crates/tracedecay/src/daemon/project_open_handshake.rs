@@ -6,6 +6,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
