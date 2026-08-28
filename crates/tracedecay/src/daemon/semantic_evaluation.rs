@@ -280,7 +280,13 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
             label = "daemon.semantic.evaluation.candidate.vector_generation"
         ))
         .await?
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
+        .map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                "semantic evaluation candidate vector generation is unavailable"
+            );
+            SemanticActivationCoordinationErrorV1::Unavailable
+        })?
         .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
     if vector.source_generation() != &snapshot.source_generation
         || vector.source_manifest_digest() != &snapshot.source_manifest_digest
