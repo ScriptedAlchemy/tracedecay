@@ -57,3 +57,20 @@ this section. `crates/tracedecay-graph-db/src/runtime.rs:622`
 (`GraphDb::close`, span `graph_db.runtime.close`) is the tracedecay-side
 caller whose cost this removes; the `daemon.shutdown.store_close` span is the
 outer view.
+
+## REFUTED: grafeo-close-checkpoint-dirty-only.patch — DO NOT APPLY
+
+Empirically falsified on the fork (2026-08-28): `Section::mark_dirty()` has
+no production caller (all 7 call sites are `#[cfg(test)]`), and
+`build_sections()` constructs fresh sections with `dirty: false` on every
+flush - so a `FlushReason::Checkpoint` close persists essentially nothing,
+ever. Applying the patch fails `wal_disabled_single_file_persists_on_close`
+and `deleted_base_nodes_stay_deleted_across_reopen` in grafeo-engine. The
+patch's safety argument (close escalates to a full Explicit retry) is
+`#[cfg(feature = "wal")]` and gated on `wal.record_count() > 0`, so with WAL
+disabled the close silently loses data. A correct fix needs real dirtiness:
+wire `mark_dirty` into mutation paths, or gate the close-skip on
+`wal.record_count() == 0`. The streaming-serialize work on fork branch
+`tracedecay/0.5.42-compact-stream` (rev 654bedd4ad) already removes the
+second full copy at close, which was most of the pain. The patch file is
+retained as a record of the refuted approach only.
