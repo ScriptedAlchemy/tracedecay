@@ -88,6 +88,11 @@ pub use registry::{
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
 
+/// What hydration decoded on **this thread** since the last take.
+///
+/// Scoped to the calling thread so that a reading is exactly the work that
+/// thread drove, and a test running in parallel cannot contribute to another
+/// test's counts.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphDbHydrationCounters {
@@ -103,11 +108,16 @@ pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
     hotpath_observe::take_hydration_counters()
 }
 
-/// How sealed-generation verification resolved since the last take.
+/// How sealed-generation verification resolved on **this thread** since the
+/// last take.
 ///
 /// Independent of the Hotpath feature on purpose: a test that asserts a marker
 /// hit skipped the row enumeration must be able to observe that in an ordinary
 /// build.
+///
+/// Scoped to the calling thread so that a reading is exactly the verification
+/// work that thread drove, and a test running in parallel cannot contribute to
+/// another test's counts.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphDbVerificationCounters {

@@ -226,40 +226,83 @@ pub(crate) fn record_grafeo_memory(database: &grafeo_engine::GrafeoDB, phase: Gr
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+/// Test-observable counters for hydration and sealed-generation verification.
+///
+/// Every counter here is **thread-local**. Both surfaces are drained by tests
+/// that assert on exact counts, and the work they count runs synchronously on
+/// whichever thread called into the store. Process-global counters therefore
+/// let a concurrently running test's publication land inside another test's
+/// reading -- a flake that tracks the scheduler rather than the code under
+/// test. Scoping to the calling thread makes each reading exactly the work
+/// that thread drove, at any `--test-threads`.
+///
+/// The one thing this cannot see is work performed on a thread the caller did
+/// not drive. That fails a counting assertion loudly rather than silently
+/// miscounting, which is the failure mode to prefer.
 mod counters {
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
     use super::HydrationSource;
 
-    static NODES: AtomicU64 = AtomicU64::new(0);
-    static EDGES: AtomicU64 = AtomicU64::new(0);
-    static REPLAY_ROWS: AtomicU64 = AtomicU64::new(0);
-    static GENERATION_BYTES: AtomicU64 = AtomicU64::new(0);
-    static LAST_SOURCE: AtomicU8 = AtomicU8::new(0);
-    static MARKER_HITS: AtomicU64 = AtomicU64::new(0);
-    static MARKER_HIT_BYTES: AtomicU64 = AtomicU64::new(0);
-    static FULL_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
-    static FULL_VERIFICATION_BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Verification outcomes are counted **per thread**, not per process.
+    ///
+    /// A test that proves a marker hit skipped the row enumeration asserts on
+    /// an exact count, and sealed-generation verification runs synchronously on
+    /// whichever thread called `publish_verified` or
+    /// `recover_verified_snapshot`. Process-global counters therefore let any
+    /// concurrently running test's publications land in another test's reading,
+    /// which is a flake that appears and disappears with the scheduler rather
+    /// than with the code under test. Scoping to the calling thread makes each
+    /// reading exactly the work that thread performed, at any `--test-threads`.
+    ///
+    /// The one thing this cannot see is a verification performed on a thread
+    /// the caller did not drive. That fails a counting assertion loudly rather
+    /// than silently miscounting, which is the failure mode to prefer.
+    #[derive(Clone, Copy, Default)]
+    struct VerificationCounts {
+        marker_hits: u64,
+        marker_hit_bytes: u64,
+        full_verifications: u64,
+        full_verification_bytes: u64,
+    }
+
+    thread_local! {
+        static VERIFICATION: std::cell::Cell<VerificationCounts> =
+            const { std::cell::Cell::new(VerificationCounts {
+                marker_hits: 0,
+                marker_hit_bytes: 0,
+                full_verifications: 0,
+                full_verification_bytes: 0,
+            }) };
+    }
 
     pub(super) fn record_verification(
         outcome: crate::verified_marker::GenerationVerification,
         canonical_bytes: u64,
     ) {
         use crate::verified_marker::GenerationVerification;
-        let (count, bytes) = match outcome {
-            GenerationVerification::VerifiedFresh => (&MARKER_HITS, &MARKER_HIT_BYTES),
-            GenerationVerification::Reverified => (&FULL_VERIFICATIONS, &FULL_VERIFICATION_BYTES),
-        };
-        count.fetch_add(1, Ordering::Relaxed);
-        bytes.fetch_add(canonical_bytes, Ordering::Relaxed);
+        VERIFICATION.with(|cell| {
+            let mut counts = cell.get();
+            match outcome {
+                GenerationVerification::VerifiedFresh => {
+                    counts.marker_hits += 1;
+                    counts.marker_hit_bytes += canonical_bytes;
+                }
+                GenerationVerification::Reverified => {
+                    counts.full_verifications += 1;
+                    counts.full_verification_bytes += canonical_bytes;
+                }
+            }
+            cell.set(counts);
+        });
     }
 
+    /// Drains this thread's verification counts, leaving them at zero.
     pub(crate) fn take_verification() -> crate::GraphDbVerificationCounters {
+        let counts = VERIFICATION.with(|cell| cell.replace(VerificationCounts::default()));
         crate::GraphDbVerificationCounters {
-            marker_hits: MARKER_HITS.swap(0, Ordering::Relaxed),
-            marker_hit_bytes: MARKER_HIT_BYTES.swap(0, Ordering::Relaxed),
-            full_verifications: FULL_VERIFICATIONS.swap(0, Ordering::Relaxed),
-            full_verification_bytes: FULL_VERIFICATION_BYTES.swap(0, Ordering::Relaxed),
+            marker_hits: counts.marker_hits,
+            marker_hit_bytes: counts.marker_hit_bytes,
+            full_verifications: counts.full_verifications,
+            full_verification_bytes: counts.full_verification_bytes,
         }
     }
 
@@ -294,24 +337,54 @@ mod counters {
         }
     }
 
+    #[derive(Clone, Copy, Default)]
+    struct HydrationCounts {
+        nodes: u64,
+        edges: u64,
+        replay_rows: u64,
+        generation_bytes: u64,
+        last_source: u8,
+    }
+
+    thread_local! {
+        static HYDRATION: std::cell::Cell<HydrationCounts> =
+            const { std::cell::Cell::new(HydrationCounts {
+                nodes: 0,
+                edges: 0,
+                replay_rows: 0,
+                generation_bytes: 0,
+                last_source: 0,
+            }) };
+    }
+
     pub(super) fn record(nodes: usize, edges: usize, replay_rows: usize, generation_bytes: usize) {
-        NODES.fetch_add(nodes as u64, Ordering::Relaxed);
-        EDGES.fetch_add(edges as u64, Ordering::Relaxed);
-        REPLAY_ROWS.fetch_add(replay_rows as u64, Ordering::Relaxed);
-        GENERATION_BYTES.fetch_add(generation_bytes as u64, Ordering::Relaxed);
+        HYDRATION.with(|cell| {
+            let mut counts = cell.get();
+            counts.nodes += nodes as u64;
+            counts.edges += edges as u64;
+            counts.replay_rows += replay_rows as u64;
+            counts.generation_bytes += generation_bytes as u64;
+            cell.set(counts);
+        });
     }
 
     pub(super) fn record_source(source: HydrationSource) {
-        LAST_SOURCE.store(source_code(source), Ordering::Relaxed);
+        HYDRATION.with(|cell| {
+            let mut counts = cell.get();
+            counts.last_source = source_code(source);
+            cell.set(counts);
+        });
     }
 
+    /// Drains this thread's hydration counts, leaving them at zero.
     pub(crate) fn take() -> crate::GraphDbHydrationCounters {
+        let counts = HYDRATION.with(|cell| cell.replace(HydrationCounts::default()));
         crate::GraphDbHydrationCounters {
-            nodes: NODES.swap(0, Ordering::Relaxed),
-            edges: EDGES.swap(0, Ordering::Relaxed),
-            replay_rows: REPLAY_ROWS.swap(0, Ordering::Relaxed),
-            generation_bytes: GENERATION_BYTES.swap(0, Ordering::Relaxed),
-            hydration_source: source_from_code(LAST_SOURCE.swap(0, Ordering::Relaxed)),
+            nodes: counts.nodes,
+            edges: counts.edges,
+            replay_rows: counts.replay_rows,
+            generation_bytes: counts.generation_bytes,
+            hydration_source: source_from_code(counts.last_source),
         }
     }
 }
