@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=019d353b14ef4afefd5b689a4ed0416100601ff2#019d353b14ef4afefd5b689a4ed0416100601ff2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=f38218653dfc69fda67f9c669371036fde1ed5fe#f38218653dfc69fda67f9c669371036fde1ed5fe"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2744,7 +2744,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=019d353b14ef4afefd5b689a4ed0416100601ff2#019d353b14ef4afefd5b689a4ed0416100601ff2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=f38218653dfc69fda67f9c669371036fde1ed5fe#f38218653dfc69fda67f9c669371036fde1ed5fe"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=019d353b14ef4afefd5b689a4ed0416100601ff2#019d353b14ef4afefd5b689a4ed0416100601ff2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=f38218653dfc69fda67f9c669371036fde1ed5fe#f38218653dfc69fda67f9c669371036fde1ed5fe"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2789,7 +2789,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=019d353b14ef4afefd5b689a4ed0416100601ff2#019d353b14ef4afefd5b689a4ed0416100601ff2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=f38218653dfc69fda67f9c669371036fde1ed5fe#f38218653dfc69fda67f9c669371036fde1ed5fe"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=019d353b14ef4afefd5b689a4ed0416100601ff2#019d353b14ef4afefd5b689a4ed0416100601ff2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=f38218653dfc69fda67f9c669371036fde1ed5fe#f38218653dfc69fda67f9c669371036fde1ed5fe"
 dependencies = [
  "bincode",
  "byteorder",
@@ -6179,6 +6179,7 @@ dependencies = [
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
+ "hotpath",
  "schemars",
  "serde",
  "serde_json",
