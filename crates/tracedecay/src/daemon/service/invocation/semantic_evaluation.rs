@@ -239,7 +239,13 @@ impl DaemonInvocationService {
                             )
                             .await?;
                             if qualification.evaluated_profile_id() != candidate.evaluated_profile_id {
-                                return Err(SemanticActivationCoordinationErrorV1::Rejected);
+                                return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    format!(
+                                        "semantic qualification evaluated profile {} instead of the requested {}",
+                                        qualification.evaluated_profile_id(),
+                                        candidate.evaluated_profile_id,
+                                    ),
+                                ));
                             }
                             let snapshot = qualification.snapshot().clone();
                             let validated_candidate = qualification.candidate().clone();

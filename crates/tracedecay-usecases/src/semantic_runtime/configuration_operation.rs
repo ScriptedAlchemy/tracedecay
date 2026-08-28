@@ -597,11 +597,13 @@ fn native_qualification_expectations(
     snapshot: &SemanticEvaluationPublicationSnapshotV1,
     candidate: &SemanticEvaluationProfileCandidateV1,
 ) -> Result<NativeQualificationExpectationsV1, SemanticActivationCoordinationErrorV1> {
-    let semantic = snapshot
-        .runtime
-        .semantic
-        .as_ref()
-        .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
+    let semantic = snapshot.runtime.semantic.as_ref().ok_or_else(|| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "semantic evaluation profile {} requires semantic runtime pins, but the verified \
+             snapshot carries none",
+            candidate.evaluated_profile_id
+        ))
+    })?;
     let runtime = NativeQualificationRuntimeKeyV1 {
         implementation_revision: semantic.implementation_revision.clone(),
         fusion_revision: semantic.fusion_revision.clone(),
@@ -633,22 +635,12 @@ fn map_packaged_qualification_error(
         PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable => {
             SemanticActivationCoordinationErrorV1::Unavailable
         }
-        PackagedNativeQualificationErrorV1::CorruptBytes
-        | PackagedNativeQualificationErrorV1::UnsupportedSchema
-        | PackagedNativeQualificationErrorV1::InvalidQualificationKey
-        | PackagedNativeQualificationErrorV1::StaleWorkload
-        | PackagedNativeQualificationErrorV1::StaleCorpus
-        | PackagedNativeQualificationErrorV1::StaleExecutionRevision
-        | PackagedNativeQualificationErrorV1::ModelMismatch
-        | PackagedNativeQualificationErrorV1::BuildMismatch
-        | PackagedNativeQualificationErrorV1::SearchIndexMismatch
-        | PackagedNativeQualificationErrorV1::RuntimeMismatch
-        | PackagedNativeQualificationErrorV1::PlatformMismatch
-        | PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence
-        | PackagedNativeQualificationErrorV1::IncompleteNativeEvidence
-        | PackagedNativeQualificationErrorV1::FailedQualification => {
-            SemanticActivationCoordinationErrorV1::Rejected
-        }
+        // Every remaining variant is a distinct failed invariant. Collapsing
+        // them into a bare rejection erases the only evidence an operator has
+        // about which package identity actually disagreed.
+        rejected => SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "packaged native qualification rejected: {rejected}"
+        )),
     }
 }
 
@@ -658,8 +650,13 @@ fn prepare_semantic_activation_publication(
     evidence: &SemanticActivationPublicationEvidenceV1,
 ) -> Result<PreparedSemanticActivationPublicationV1, SemanticActivationCoordinationErrorV1> {
     let (report, evaluated_material) = evidence.report_and_material();
-    if !candidate_matches_evaluated_material(candidate, &evaluated_material) {
-        return Err(SemanticActivationCoordinationErrorV1::Rejected);
+    if let Err(mismatch) = candidate_matches_evaluated_material(candidate, &evaluated_material) {
+        return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+            format!(
+                "semantic evaluation candidate material does not match what the evaluator ran: \
+             {mismatch}"
+            ),
+        ));
     }
     let mut compatibility = candidate.compatibility.clone();
     if let Some(semantic) = compatibility.semantic.as_mut() {
@@ -669,7 +666,12 @@ fn prepare_semantic_activation_publication(
     let accepted_runtime = runtime_with_accepted_resources(&snapshot.runtime, &compatibility)?;
     let passing_evaluation =
         PassingRetrievalEvaluationV1::from_report(&report, &candidate.evaluated_profile_id)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|error| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                    "semantic evaluation report cannot certify profile {}: {error}",
+                    candidate.evaluated_profile_id
+                ))
+            })?;
     let evaluation_anchor = passing_evaluation.evaluation_anchor().clone();
     let evaluated_profile = evaluated_material.profile;
     let profile = FusionProfile {
@@ -712,10 +714,27 @@ fn prepare_semantic_activation_publication(
         compatibility,
         passing_evaluation,
     )
-    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    .map_err(|error| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "semantic evaluation profile {} cannot be accepted: {error}",
+            candidate.evaluated_profile_id
+        ))
+    })?;
     accepted_profile
         .executable_under(&accepted_runtime)
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|error| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "semantic evaluation profile {} is not executable under the verified runtime: \
+                 {error}; measured resources {:?}; runtime ceiling {:?}",
+                candidate.evaluated_profile_id,
+                accepted_profile
+                    .compatibility()
+                    .semantic
+                    .as_ref()
+                    .map(|pins| pins.resources),
+                accepted_runtime.semantic_ceiling,
+            ))
+        })?;
     Ok(PreparedSemanticActivationPublicationV1 {
         report,
         accepted_profile,
@@ -729,7 +748,12 @@ fn semantic_resource_requirement_from_report(
 ) -> Result<SemanticResourceRequirementV1, SemanticActivationCoordinationErrorV1> {
     let measured = report
         .semantic_activation_resource_pins(evaluated_profile_id)
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|error| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "semantic evaluation report carries no usable resource measurement for profile \
+                 {evaluated_profile_id}: {error}"
+            ))
+        })?;
     Ok(SemanticResourceRequirementV1 {
         model_bytes: measured.model_bytes,
         tokenizer_bytes: measured.tokenizer_bytes,
@@ -750,55 +774,245 @@ fn runtime_with_accepted_resources(
     match (runtime.semantic.as_mut(), accepted.semantic.as_ref()) {
         (Some(observed), Some(accepted)) => {
             observed.resources = accepted.resources;
-            if observed != accepted {
-                return Err(SemanticActivationCoordinationErrorV1::Rejected);
+            if let Some(mismatch) = semantic_pin_mismatch(observed, accepted) {
+                return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    format!("semantic runtime pins do not match the accepted profile: {mismatch}"),
+                ));
             }
             // Keep the runtime-observed configured ceiling. The accepted
             // profile's canonical `executable_under` validation below proves
             // measured report resources fit within this actual ceiling.
         }
         (None, None) => {}
-        _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+        (Some(_), None) => {
+            return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "the verified runtime carries semantic pins but the accepted profile does not"
+                    .to_owned(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "the accepted profile carries semantic pins but the verified runtime does not"
+                    .to_owned(),
+            ));
+        }
     }
     runtime.semantic = accepted.semantic.clone();
     Ok(runtime)
 }
 
+/// Name the first semantic pin that differs, with both observed values.
+///
+/// The pins are an exact-equality contract, so a bare inequality is useless to
+/// an operator: every field is an opaque digest or revision and only the
+/// differing one identifies which side drifted.
+fn semantic_pin_mismatch(
+    observed: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+    accepted: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+) -> Option<String> {
+    fn differing<T: PartialEq + std::fmt::Debug>(
+        field: &str,
+        observed: &T,
+        accepted: &T,
+    ) -> Option<String> {
+        (observed != accepted)
+            .then(|| format!("{field} observed {observed:?}, accepted {accepted:?}"))
+    }
+
+    differing(
+        "implementation_revision",
+        &observed.implementation_revision,
+        &accepted.implementation_revision,
+    )
+    .or_else(|| {
+        differing(
+            "fusion_revision",
+            &observed.fusion_revision,
+            &accepted.fusion_revision,
+        )
+    })
+    .or_else(|| {
+        differing(
+            "artifact_manifest_digest",
+            &observed.artifact_manifest_digest,
+            &accepted.artifact_manifest_digest,
+        )
+    })
+    .or_else(|| {
+        differing(
+            "runtime_compatibility_digest",
+            &observed.runtime_compatibility_digest,
+            &accepted.runtime_compatibility_digest,
+        )
+    })
+    .or_else(|| differing("projection", &observed.projection, &accepted.projection))
+    .or_else(|| {
+        differing(
+            "search_index_key",
+            &observed.search_index_key,
+            &accepted.search_index_key,
+        )
+    })
+    .or_else(|| {
+        differing(
+            "vector_generation_id",
+            &observed.vector_generation_id,
+            &accepted.vector_generation_id,
+        )
+    })
+    .or_else(|| differing("calibration", &observed.calibration, &accepted.calibration))
+    .or_else(|| differing("resources", &observed.resources, &accepted.resources))
+}
+
+/// Name the first candidate field that differs from what the evaluator ran,
+/// with both values.
+///
+/// This is an exact-equality binding between the profile material the daemon
+/// proposed and the material the evaluator actually executed. A boolean answer
+/// tells an operator only that *something* drifted, which is precisely the
+/// signal that invites tuning a checked-in fixture value until the comparison
+/// happens to agree. Naming the field and printing both sides identifies the
+/// drifting authority instead.
 fn candidate_matches_evaluated_material(
     candidate: &SemanticEvaluationProfileCandidateV1,
     evaluated: &DirectEvaluatedProfileMaterialV1,
-) -> bool {
-    candidate.profile.profile_id == evaluated.profile.profile_id
-        && candidate.profile.calibrations == evaluated.profile.calibrations
-        && candidate.profile.score_domain_calibrations
-            == evaluated.profile.score_domain_calibrations
-        && candidate.profile.minimum_calibrated_feature_micros
-            == evaluated.profile.minimum_calibrated_feature_micros
-        && candidate.profile.weights_micros == evaluated.profile.weights_micros
-        && candidate.profile.diversity_policy_id == evaluated.profile.diversity_policy_id
-        && candidate.profile.rerank_policy_id == evaluated.profile.rerank_policy_id
-        && candidate.profile.retrieval_budget == evaluated.profile.retrieval_budget
-        && candidate.diversity.policy_id == evaluated.diversity.policy_id
-        && candidate.diversity.per_source_namespace == evaluated.diversity.per_source_namespace
-        && candidate.diversity.per_source_instance == evaluated.diversity.per_source_instance
-        && candidate.diversity.per_repository == evaluated.diversity.per_repository
-        && candidate.diversity.per_file == evaluated.diversity.per_file
-        && candidate.diversity.per_session_or_thread == evaluated.diversity.per_session_or_thread
-        && candidate.diversity.per_copy_cluster == evaluated.diversity.per_copy_cluster
-        && candidate.diversity.per_evidence_role == evaluated.diversity.per_evidence_role
-        && match (&candidate.rerank, &evaluated.rerank) {
-            (None, None) => true,
-            (Some(candidate), Some(evaluated)) => {
-                candidate.policy_id == evaluated.policy_id
-                    && candidate.max_candidates == evaluated.max_candidates
-                    && candidate.max_input_bytes == evaluated.max_input_bytes
-                    && candidate.max_input_tokens == evaluated.max_input_tokens
-                    && candidate.max_work_units == evaluated.max_work_units
-                    && candidate.max_model_invocations == evaluated.max_model_invocations
-                    && candidate.deadline_micros == evaluated.deadline_micros
-            }
-            _ => false,
+) -> Result<(), String> {
+    fn same<T: PartialEq + std::fmt::Debug>(
+        field: &str,
+        candidate: &T,
+        evaluated: &T,
+    ) -> Result<(), String> {
+        if candidate == evaluated {
+            Ok(())
+        } else {
+            Err(format!(
+                "{field} candidate {candidate:?}, evaluator {evaluated:?}"
+            ))
         }
+    }
+
+    same(
+        "profile.profile_id",
+        &candidate.profile.profile_id,
+        &evaluated.profile.profile_id,
+    )?;
+    same(
+        "profile.calibrations",
+        &candidate.profile.calibrations,
+        &evaluated.profile.calibrations,
+    )?;
+    same(
+        "profile.score_domain_calibrations",
+        &candidate.profile.score_domain_calibrations,
+        &evaluated.profile.score_domain_calibrations,
+    )?;
+    same(
+        "profile.minimum_calibrated_feature_micros",
+        &candidate.profile.minimum_calibrated_feature_micros,
+        &evaluated.profile.minimum_calibrated_feature_micros,
+    )?;
+    same(
+        "profile.weights_micros",
+        &candidate.profile.weights_micros,
+        &evaluated.profile.weights_micros,
+    )?;
+    same(
+        "profile.diversity_policy_id",
+        &candidate.profile.diversity_policy_id,
+        &evaluated.profile.diversity_policy_id,
+    )?;
+    same(
+        "profile.rerank_policy_id",
+        &candidate.profile.rerank_policy_id,
+        &evaluated.profile.rerank_policy_id,
+    )?;
+    same(
+        "profile.retrieval_budget",
+        &candidate.profile.retrieval_budget,
+        &evaluated.profile.retrieval_budget,
+    )?;
+    same(
+        "diversity.policy_id",
+        &candidate.diversity.policy_id,
+        &evaluated.diversity.policy_id,
+    )?;
+    same(
+        "diversity.per_source_namespace",
+        &candidate.diversity.per_source_namespace,
+        &evaluated.diversity.per_source_namespace,
+    )?;
+    same(
+        "diversity.per_source_instance",
+        &candidate.diversity.per_source_instance,
+        &evaluated.diversity.per_source_instance,
+    )?;
+    same(
+        "diversity.per_repository",
+        &candidate.diversity.per_repository,
+        &evaluated.diversity.per_repository,
+    )?;
+    same(
+        "diversity.per_file",
+        &candidate.diversity.per_file,
+        &evaluated.diversity.per_file,
+    )?;
+    same(
+        "diversity.per_session_or_thread",
+        &candidate.diversity.per_session_or_thread,
+        &evaluated.diversity.per_session_or_thread,
+    )?;
+    same(
+        "diversity.per_copy_cluster",
+        &candidate.diversity.per_copy_cluster,
+        &evaluated.diversity.per_copy_cluster,
+    )?;
+    same(
+        "diversity.per_evidence_role",
+        &candidate.diversity.per_evidence_role,
+        &evaluated.diversity.per_evidence_role,
+    )?;
+    match (&candidate.rerank, &evaluated.rerank) {
+        (None, None) => Ok(()),
+        (Some(candidate), Some(evaluated)) => {
+            same(
+                "rerank.policy_id",
+                &candidate.policy_id,
+                &evaluated.policy_id,
+            )?;
+            same(
+                "rerank.max_candidates",
+                &candidate.max_candidates,
+                &evaluated.max_candidates,
+            )?;
+            same(
+                "rerank.max_input_bytes",
+                &candidate.max_input_bytes,
+                &evaluated.max_input_bytes,
+            )?;
+            same(
+                "rerank.max_input_tokens",
+                &candidate.max_input_tokens,
+                &evaluated.max_input_tokens,
+            )?;
+            same(
+                "rerank.max_work_units",
+                &candidate.max_work_units,
+                &evaluated.max_work_units,
+            )?;
+            same(
+                "rerank.max_model_invocations",
+                &candidate.max_model_invocations,
+                &evaluated.max_model_invocations,
+            )?;
+            same(
+                "rerank.deadline_micros",
+                &candidate.deadline_micros,
+                &evaluated.deadline_micros,
+            )
+        }
+        (Some(_), None) => Err("rerank candidate declares a policy, evaluator ran none".to_owned()),
+        (None, Some(_)) => Err("rerank candidate declares no policy, evaluator ran one".to_owned()),
+    }
 }
 
 fn validate_evaluation_snapshot(
@@ -1261,6 +1475,44 @@ mod tests {
         );
     }
 
+    /// Thirteen distinct package-identity failures used to collapse into one
+    /// bare rejection, so "the model does not match" and "the corpus is stale"
+    /// were indistinguishable from the caller's side.
+    #[test]
+    fn every_packaged_qualification_failure_keeps_its_own_reason() {
+        let mut reasons = std::collections::BTreeSet::new();
+        for error in [
+            PackagedNativeQualificationErrorV1::CorruptBytes,
+            PackagedNativeQualificationErrorV1::UnsupportedSchema,
+            PackagedNativeQualificationErrorV1::InvalidQualificationKey,
+            PackagedNativeQualificationErrorV1::StaleWorkload,
+            PackagedNativeQualificationErrorV1::StaleCorpus,
+            PackagedNativeQualificationErrorV1::StaleExecutionRevision,
+            PackagedNativeQualificationErrorV1::ModelMismatch,
+            PackagedNativeQualificationErrorV1::BuildMismatch,
+            PackagedNativeQualificationErrorV1::SearchIndexMismatch,
+            PackagedNativeQualificationErrorV1::RuntimeMismatch,
+            PackagedNativeQualificationErrorV1::PlatformMismatch,
+            PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence,
+            PackagedNativeQualificationErrorV1::IncompleteNativeEvidence,
+            PackagedNativeQualificationErrorV1::FailedQualification,
+        ] {
+            let expected = error.to_string();
+            match map_packaged_qualification_error(error) {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(detail) => {
+                    assert!(detail.contains(&expected), "{detail} omits {expected}");
+                    reasons.insert(detail);
+                }
+                other => panic!("expected a detailed rejection, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            reasons.len(),
+            14,
+            "package failures must stay distinguishable"
+        );
+    }
+
     #[test]
     fn ordinary_packaged_publication_denies_missing_genuine_package_without_evaluator() {
         let mut candidate = query_candidate();
@@ -1381,10 +1633,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
-        ));
+        assert_rejection_names_its_invariant(&result, "profile selection");
         assert_eq!(authority.calls(), (1, 0, 0));
     }
 
@@ -1405,10 +1654,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
-        ));
+        assert_rejection_names_its_invariant(&result, "vector, lifecycle, or runtime pins");
         assert_eq!(authority.calls(), (1, 0, 0));
     }
 
@@ -1422,10 +1668,7 @@ mod tests {
             .evaluate_and_publish_profile(&authority, workspace_root(), candidate)
             .await;
 
-        assert!(matches!(
-            result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
-        ));
+        assert_rejection_names_its_invariant(&result, "candidate runtime does not match");
         assert_eq!(authority.calls(), (1, 0, 0));
         assert_eq!(authority.published_snapshot(), None);
     }
@@ -1441,12 +1684,28 @@ mod tests {
             .evaluate_and_publish_profile(&authority, workspace_root(), candidate)
             .await;
 
-        assert!(matches!(
-            result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
-        ));
+        assert_rejection_names_its_invariant(&result, "candidate runtime does not match");
         assert_eq!(authority.calls(), (1, 0, 0));
         assert_eq!(authority.published_snapshot(), None);
+    }
+
+    /// Every rejection reachable from qualification or publication must name
+    /// the invariant it failed. A bare `Rejected` renders as "semantic
+    /// activation input was rejected", which tells an operator nothing about
+    /// which of a dozen exact-equality bindings actually drifted.
+    #[track_caller]
+    fn assert_rejection_names_its_invariant<T>(
+        result: &Result<T, SemanticActivationCoordinationErrorV1>,
+        expected_invariant: &str,
+    ) {
+        match result {
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail)) => assert!(
+                detail.contains(expected_invariant),
+                "rejection detail {detail:?} does not name {expected_invariant:?}"
+            ),
+            Err(other) => panic!("expected a detailed rejection, got {other:?}"),
+            Ok(_) => panic!("expected a detailed rejection, got a success"),
+        }
     }
 
     #[test]
@@ -1491,13 +1750,24 @@ mod tests {
             compatibility: RetrievalCompatibilityPinsV1::default(),
         };
 
-        assert!(candidate_matches_evaluated_material(&candidate, &material));
+        assert_eq!(
+            candidate_matches_evaluated_material(&candidate, &material),
+            Ok(())
+        );
         *candidate
             .profile
             .weights_micros
             .get_mut(&RetrieverKind::Lexical)
             .expect("lexical weight") += 1;
-        assert!(!candidate_matches_evaluated_material(&candidate, &material));
+        // The drift report must name the field and print both sides: a bare
+        // boolean is what makes an operator reach for a fixture knob.
+        let mismatch = candidate_matches_evaluated_material(&candidate, &material)
+            .expect_err("a drifted weight must be reported");
+        assert!(
+            mismatch.starts_with("profile.weights_micros candidate ")
+                && mismatch.contains("evaluator "),
+            "unhelpful weight mismatch: {mismatch}"
+        );
         *candidate
             .profile
             .weights_micros
@@ -1507,7 +1777,12 @@ mod tests {
             .profile
             .minimum_calibrated_feature_micros
             .insert(RetrieverKind::Lexical, 1);
-        assert!(!candidate_matches_evaluated_material(&candidate, &material));
+        let mismatch = candidate_matches_evaluated_material(&candidate, &material)
+            .expect_err("a drifted acceptance cut must be reported");
+        assert!(
+            mismatch.starts_with("profile.minimum_calibrated_feature_micros candidate "),
+            "unhelpful acceptance-cut mismatch: {mismatch}"
+        );
         let serialized = serde_json::to_string(&candidate).expect("serialize candidate");
         assert!(!serialized.contains("evaluation_result_anchor"));
     }
