@@ -544,7 +544,10 @@ impl GraphDb {
                 .write()
                 .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
             let database = database_guard.take().ok_or(GraphDbError::Closed)?;
-            if let Err(error) = database.close() {
+            if let Err(error) = hotpath::measure_block!(
+                "graph_db.generation.reopen.close",
+                database.close()
+            ) {
                 self.inner.poisoned.store(true, Ordering::Release);
                 return Err(GraphDbError::DurabilityUncertain {
                     message: format!(
