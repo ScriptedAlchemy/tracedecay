@@ -64,6 +64,27 @@ const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
+const SEALED_STORE_FORM_COMPACT: &str = "compact";
+const SEALED_STORE_FORM_REPLAY: &str = "replay";
+
+/// Whether the pinned grafeo revision round-trips `Value::Bytes` through the
+/// columnar `CompactStore` codecs.
+///
+/// At rev `019d353b14` it does not: a Bytes column falls back to the
+/// dictionary codec (`compact/builder.rs`, `infer_type_from_values`), and
+/// `Column::value()` restores every dictionary entry as `Value::String`
+/// (`compact/column.rs`). TraceDecay serializes a Bytes payload onto nearly
+/// every code-graph entity, so compacting such a generation would fail its
+/// post-reopen recovered-digest proof. Until the fork fix (Bytes-preserving
+/// dictionary entries, branch stacked on `tracedecay/0.5.42-close-and-overlay`)
+/// is picked up by the workspace pin, a generation whose rows carry any Bytes
+/// property is sealed in **replay form**: still its own isolated
+/// single-generation store — generation-scoped open, retirement by directory
+/// delete, read routing — just without the columnar base. Flip this with the
+/// pin move; the post-reopen digest proof will refuse any store the flip
+/// mis-declares.
+const COMPACT_ROUND_TRIPS_BYTES: bool = false;
+
 /// Receipt binding a sealed store directory to the exact generation and
 /// recovered digest it was built from. Written after the compacted database
 /// is durably closed; an open that finds a receipt for a different digest
@@ -71,6 +92,10 @@ const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 #[derive(Debug, Deserialize, Serialize)]
 struct SealedStoreReceiptV1 {
     version: u32,
+    /// `"compact"` when the store serves from a columnar `CompactStore`
+    /// base, `"replay"` when it stayed in LPG replay form (see
+    /// [`COMPACT_ROUND_TRIPS_BYTES`]).
+    form: String,
     namespace: String,
     projection: String,
     generation: String,
@@ -245,9 +270,17 @@ impl SealedCopyPager {
         )?;
         let endpoint_namespaces = std::mem::take(&mut self.endpoint_namespaces);
         self.live_bytes = 0;
-        sealed.apply_sealed_copy_batch(batch, &endpoint_namespaces, check)?;
+        sealed.apply_sealed_copy_batch(batch, &endpoint_namespaces, None, check)?;
         Ok(())
     }
+}
+
+fn properties_carry_bytes(
+    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
+) -> bool {
+    properties
+        .values()
+        .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
 }
 
 fn entity_copy_live_bytes(entity: &GraphEntity) -> usize {
@@ -459,6 +492,9 @@ impl GraphDb {
         &self,
         mut batch: GraphWriteBatch,
         endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        dependency_digest: Option<
+            tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+        >,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
         let digest = batch.validate_and_digest()?;
@@ -470,7 +506,11 @@ impl GraphDb {
             database,
             &mut state,
             batch,
-            mutation::CommitMetadata::for_digest(digest),
+            mutation::CommitMetadata {
+                digest,
+                generation_dependency_digest: dependency_digest,
+                publication_record: None,
+            },
             endpoint_namespaces,
             &self.inner.poisoned,
             check,
@@ -517,9 +557,10 @@ fn build_or_open_sealed_store(
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
     let built = copy_compact_and_close(source, identity, expected, &staging, check)
         .inspect_err(|_| remove_sealed_directory(&staging));
-    let (entities, relations) = built?;
+    let (entities, relations, form) = built?;
     let receipt = SealedStoreReceiptV1 {
         version: SEALED_STORE_RECEIPT_VERSION,
+        form: form.to_owned(),
         namespace: identity.projection.namespace.as_str().to_owned(),
         projection: identity.projection.projection.as_str().to_owned(),
         generation: identity.generation.as_str().to_owned(),
@@ -549,15 +590,16 @@ fn build_or_open_sealed_store(
 }
 
 /// Streams the generation's verified rows into a fresh database under
-/// `staging`, proves the recovered digest reproduces, compacts, and closes.
-/// Returns the copied `(entities, relations)` row counts.
+/// `staging`, proves the recovered digest reproduces, compacts when the
+/// pinned engine can round-trip every value in the row set, and closes.
+/// Returns the copied `(entities, relations)` counts and the sealed form.
 fn copy_compact_and_close(
     source: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(usize, usize), GraphDbError> {
+) -> Result<(usize, usize, &'static str), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
     let sealed = GraphDb::open_with_store_state(
         sealed_database_options(staging.join(SEALED_STORE_DATABASE_FILE)),
@@ -647,6 +689,9 @@ fn copy_compact_and_close(
     };
     let entity_count = entity_nodes.len();
     let relation_count = relation_rows.len();
+    let mut saw_bytes_property = relation_rows
+        .iter()
+        .any(|relation| properties_carry_bytes(&relation.properties));
 
     // 1. Dependency endpoint copies, so cross-generation edges resolve.
     for (projection, copies) in dependency_endpoints {
@@ -659,6 +704,7 @@ fn copy_compact_and_close(
         let mut pager = SealedCopyPager::new(namespace, projection.projection.clone(), identity);
         for (_, entity) in copies {
             check()?;
+            saw_bytes_property |= properties_carry_bytes(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -684,6 +730,7 @@ fn copy_compact_and_close(
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
             load_entity_by_node(database, node)?.entity
         };
+        saw_bytes_property |= properties_carry_bytes(&entity.properties);
         let live_bytes = entity_copy_live_bytes(&entity);
         pager.push(
             &sealed,
@@ -736,19 +783,24 @@ fn copy_compact_and_close(
     }
     pager.flush(&sealed, check)?;
 
-    if entity_count == 0 && relation_count == 0 {
-        // An empty generation still needs its projection-state row for the
-        // recovered-digest proof to find a commit.
-        let batch = GraphWriteBatch::new_canonical_checked(
-            physical_namespace.clone(),
-            identity.projection.projection.clone(),
-            identity.source_generation.clone(),
-            identity.watermark.clone(),
-            Vec::new(),
-            check,
-        )?;
-        sealed.apply_sealed_copy_batch(batch, &mutation::RelationEndpointNamespaces::new(), check)?;
-    }
+    // Finalization: exactly like native staging, an empty batch binds the
+    // dependency-closure digest to the projection commit — the recovered
+    // proof requires it, and it is what marks these rows as a *sealed*
+    // generation rather than an unfinished stage.
+    let finalization = GraphWriteBatch::new_canonical_checked(
+        physical_namespace.clone(),
+        identity.projection.projection.clone(),
+        identity.source_generation.clone(),
+        identity.watermark.clone(),
+        Vec::new(),
+        check,
+    )?;
+    sealed.apply_sealed_copy_batch(
+        finalization,
+        &mutation::RelationEndpointNamespaces::new(),
+        Some(identity.dependency_closure_digest(check)?),
+        check,
+    )?;
 
     // Prove the copy: the sealed rows must reproduce the recovered digest
     // before anything is compacted or served.
@@ -759,13 +811,23 @@ fn copy_compact_and_close(
             .map_err(|error| sealed_store_failure("pre-compact verification failed", error))?;
     }
 
-    sealed
-        .compact_for_seal()
-        .map_err(|error| sealed_store_failure("compact failed", error))?;
+    // Compact only when the pinned engine round-trips every scalar the rows
+    // carry; otherwise the artifact stays in replay form, still isolated per
+    // generation. The post-reopen digest proof re-checks whichever form was
+    // written, so a wrong choice here surfaces as a typed refusal, never as
+    // silently wrong reads.
+    let form = if saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES {
+        SEALED_STORE_FORM_REPLAY
+    } else {
+        sealed
+            .compact_for_seal()
+            .map_err(|error| sealed_store_failure("compact failed", error))?;
+        SEALED_STORE_FORM_COMPACT
+    };
     sealed
         .close()
         .map_err(|error| sealed_store_failure("durable close failed", error))?;
-    Ok((entity_count, relation_count))
+    Ok((entity_count, relation_count, form))
 }
 
 /// Opens the artifact under `directory` and proves it against `expected`.
