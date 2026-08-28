@@ -645,6 +645,29 @@ pub fn qualified_default_activation_candidate(
     activation_candidate_from_qualification(qualification, expectations)
 }
 
+/// Revalidate a retained portable report against the evaluator corpus embedded
+/// in this build. This is the durable-authority counterpart to package loading:
+/// it never treats the mounted project as the evaluator fixture and never
+/// accepts project-local vector generation identifiers in portable evidence.
+pub fn validate_packaged_native_activation_report(
+    report: &DirectEvaluationReportV1,
+) -> Result<(), PackagedNativeQualificationErrorV1> {
+    let workload = crate::load_authoritative_default_workload_metadata()
+        .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
+    let corpus_digest = crate::packaged_assets::current_corpus_digest(&workload)
+        .map_err(|_| PackagedNativeQualificationErrorV1::StaleCorpus)?;
+    report
+        .validate_portable_qualification_against_authoritative_corpus(&workload, &corpus_digest)
+        .map_err(|error| match error {
+            crate::report::PortableNativeQualificationValidationErrorV1::Report => {
+                PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence
+            }
+            crate::report::PortableNativeQualificationValidationErrorV1::NativeEvidence => {
+                PackagedNativeQualificationErrorV1::IncompleteNativeEvidence
+            }
+        })
+}
+
 fn load_embedded_qualification()
 -> Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1> {
     let canonical = embedded_qualification_bytes()?;

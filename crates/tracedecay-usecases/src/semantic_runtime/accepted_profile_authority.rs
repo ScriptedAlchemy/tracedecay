@@ -17,6 +17,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1;
 use tracedecay_search_eval::{
     CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material,
+    validate_packaged_native_activation_report,
 };
 
 const ACTIVATION_WORKLOAD_JSON: &str = include_str!(
@@ -271,9 +272,7 @@ fn validate_publication_authority(
 ) -> Result<ValidatedActivationEvidenceV1, SemanticAcceptedProfileAuthorityErrorV1> {
     let workload: CandidateWorkloadV1 = serde_json::from_str(ACTIVATION_WORKLOAD_JSON)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-    report
-        .validate_for_activation(evaluation_repository_root, &workload)
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    let evidence_kind = validate_report_authority(evaluation_repository_root, report, &workload)?;
     let evaluated_profile_id = accepted_profile.evaluation().evaluated_profile_id();
     let evaluation = PassingRetrievalEvaluationV1::from_report(report, evaluated_profile_id)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -296,7 +295,12 @@ fn validate_publication_authority(
     {
         return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
     }
-    validate_runtime_evidence(report, accepted_profile, evaluated_profile_id)?;
+    validate_runtime_evidence(
+        report,
+        accepted_profile,
+        evaluated_profile_id,
+        evidence_kind,
+    )?;
     accepted_profile
         .executable_under(runtime)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -316,6 +320,26 @@ fn validate_publication_authority(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvaluationEvidenceKindV1 {
+    Genuine,
+    PackagedPortable,
+}
+
+fn validate_report_authority(
+    evaluation_repository_root: &Path,
+    report: &DirectEvaluationReportV1,
+    workload: &CandidateWorkloadV1,
+) -> Result<EvaluationEvidenceKindV1, SemanticAcceptedProfileAuthorityErrorV1> {
+    if validate_packaged_native_activation_report(report).is_ok() {
+        return Ok(EvaluationEvidenceKindV1::PackagedPortable);
+    }
+    report
+        .validate_for_activation(evaluation_repository_root, workload)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    Ok(EvaluationEvidenceKindV1::Genuine)
+}
+
 fn validate_retained_authority(
     report: &DirectEvaluationReportV1,
     accepted_profile: &AcceptedRetrievalProfileV1,
@@ -332,10 +356,16 @@ fn validate_retained_authority(
     if &evaluation != accepted_profile.evaluation() {
         return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
     }
+    let evidence_kind = if validate_packaged_native_activation_report(report).is_ok() {
+        EvaluationEvidenceKindV1::PackagedPortable
+    } else {
+        EvaluationEvidenceKindV1::Genuine
+    };
     validate_runtime_evidence(
         report,
         accepted_profile,
         accepted_profile.evaluation().evaluated_profile_id(),
+        evidence_kind,
     )?;
     accepted_profile
         .executable_under(runtime)
@@ -589,6 +619,7 @@ fn validate_runtime_evidence(
     report: &DirectEvaluationReportV1,
     accepted_profile: &AcceptedRetrievalProfileV1,
     evaluated_profile_id: &str,
+    evidence_kind: EvaluationEvidenceKindV1,
 ) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
     let outputs = report
         .raw_outputs
@@ -622,8 +653,16 @@ fn validate_runtime_evidence(
                 let SemanticNativeStageResultV1::Complete(sample) = sample else {
                     return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
                 };
-                if sample.provenance.vector_generation_id.as_deref()
-                    != Some(semantic.vector_generation_id.as_digest().as_str())
+                let vector_generation_matches = match evidence_kind {
+                    EvaluationEvidenceKindV1::Genuine => {
+                        sample.provenance.vector_generation_id.as_deref()
+                            == Some(semantic.vector_generation_id.as_digest().as_str())
+                    }
+                    EvaluationEvidenceKindV1::PackagedPortable => {
+                        sample.provenance.vector_generation_id.is_none()
+                    }
+                };
+                if !vector_generation_matches
                     || sample.provenance.artifact_digest.as_deref()
                         != Some(semantic.artifact_manifest_digest.as_str())
                 {
@@ -656,9 +695,31 @@ fn validate_runtime_evidence(
 mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_search_eval::{
+        PackagedNativeQualificationV1, packaged_native_qualification_bytes,
+    };
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn reviewed_portable_report_uses_packaged_corpus_not_target_project() {
+        let qualification: PackagedNativeQualificationV1 =
+            serde_json::from_slice(packaged_native_qualification_bytes())
+                .expect("reviewed packaged qualification");
+        let target = tempfile::tempdir().expect("target project");
+        let workload: CandidateWorkloadV1 =
+            serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
+
+        assert_eq!(
+            validate_report_authority(
+                target.path(),
+                &qualification.portable_evidence.report,
+                &workload,
+            ),
+            Ok(EvaluationEvidenceKindV1::PackagedPortable)
+        );
     }
 
     fn retained_bindings() -> AcceptedProfileValidationBindingsV1 {

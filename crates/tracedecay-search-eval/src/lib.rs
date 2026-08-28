@@ -17,7 +17,6 @@ mod controlled_workloads;
 mod native_qualification;
 mod packaged_assets;
 mod report;
-pub mod semantic_cut;
 pub mod semantic_native;
 
 #[cfg(test)]
@@ -59,7 +58,8 @@ pub use native_qualification::{
     PortableNativeQualificationEvidenceV1, encode_daemon_native_qualification_blob,
     encode_packaged_native_qualification, load_packaged_native_qualification_from_bytes,
     packaged_native_qualification_bytes, qualified_default_activation_candidate,
-    write_daemon_native_qualification, write_packaged_native_qualification,
+    validate_packaged_native_activation_report, write_daemon_native_qualification,
+    write_packaged_native_qualification,
 };
 
 /// Returns the nearest-rank percentile from an ascending sample.
@@ -204,7 +204,7 @@ fn validate_activation_profile_matrix(
         || rerank.rerank_weight_ppm == 0
         || rerank.lexical_weight_ppm != semantic.lexical_weight_ppm
         || rerank.graph_weight_ppm != semantic.graph_weight_ppm
-        || rerank.semantic_cut != semantic.semantic_cut
+        || rerank.calibration_threshold_ppm != semantic.calibration_threshold_ppm
     {
         return Err(SearchEvalError::Contract(
             "rerank comparison must differ from the semantic profile only by rerank material"
@@ -906,7 +906,7 @@ fn candidate_matches_anchor(
             .any(|candidate_anchor| candidate_anchor == anchor)
 }
 
-pub(crate) fn candidate_matches_any_anchor(
+fn candidate_matches_any_anchor(
     candidate: &candidate_output::RankedCandidateRowV1,
     anchors: &[String],
 ) -> bool {
@@ -960,10 +960,7 @@ fn ndcg_at_10_ppm(
     }
 }
 
-pub(crate) fn label_strings(
-    label: &serde_json::Value,
-    field: &str,
-) -> Result<Vec<String>, SearchEvalError> {
+fn label_strings(label: &serde_json::Value, field: &str) -> Result<Vec<String>, SearchEvalError> {
     let Some(value) = label.get(field) else {
         return Ok(Vec::new());
     };
@@ -1355,7 +1352,6 @@ mod tests {
             ranked,
             historical: HistoricalQueryExecutionV1::NotRequested,
             native: None,
-            semantic_scores: Vec::new(),
         }
     }
 

@@ -3617,7 +3617,11 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
             status, 200,
             "production dashboard settings patch failed: {patched_envelope}"
         );
-        let patched = &patched_envelope["payload"];
+        assert!(
+            patched_envelope["application_outcome"].is_object(),
+            "a changed settings patch must expose its application settlement: {patched_envelope}"
+        );
+        let patched = &patched_envelope["current"]["payload"];
         let patched_revision = patched["project"]["configuration_revision_id"]
             .as_str()
             .expect("patched configuration revision")
