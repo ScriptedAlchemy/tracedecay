@@ -48,7 +48,7 @@ fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
 ///
 /// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
 /// so operators can raise or lower the authority without rebuilding. Otherwise
-/// TraceDecay retains one quarter of physical RAM outside its modeled
+/// `TraceDecay` retains one quarter of physical RAM outside its modeled
 /// concurrent allocations for the OS, agent hosts, and allocations that do
 /// not yet participate in this authority. The remaining authority throttles
 /// simultaneous scratch ownership; it never limits repository bytes on disk.

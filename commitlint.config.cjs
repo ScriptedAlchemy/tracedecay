@@ -14,7 +14,12 @@ const allowedTypes = [
 
 module.exports = {
   defaultIgnores: false,
-  ignores: [(message) => /^Merge[ \t]/.test(message)],
+  ignores: [
+    (message) => /^Merge[ \t]/.test(message),
+    // Git's default `Revert "..."` subject is already on published history
+    // and is not `revert:` conventional form. Do not rewrite those commits.
+    (message) => /^Revert[ \t]"/.test(message),
+  ],
   parserPreset: {
     name: "tracedecay",
     parserOpts: {
