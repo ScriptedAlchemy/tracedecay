@@ -6437,6 +6437,7 @@ dependencies = [
 name = "tracedecay-search-eval"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gix",
  "hex",
  "hotpath",

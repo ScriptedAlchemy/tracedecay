@@ -295,6 +295,14 @@ impl DaemonInvocationService {
                                     error.to_string(),
                                 )
                             })?;
+                            let qualification_bytes = crate::search_eval::encode_daemon_native_qualification_blob(
+                                &qualification_bytes,
+                            )
+                            .map_err(|error| {
+                                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    error.to_string(),
+                                )
+                            })?;
                             let qualification =
                                 crate::daemon_contract::CanonicalQualificationBlob::new(
                                     qualification_bytes,

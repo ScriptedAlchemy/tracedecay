@@ -6,9 +6,11 @@
 //! authorities. Loading never creates an evaluator root or model runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -28,6 +30,8 @@ use crate::{
 };
 
 const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
+const DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC: &[u8] = b"tracedecay.native-qualification.zlib.v1\0";
+const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 // Qualification bytes remain unavailable until a genuine native run has
 // produced a reviewed report. An empty slice is an unavailable artifact, never
@@ -508,7 +512,9 @@ pub fn write_daemon_native_qualification(
     output: &Path,
     bytes: &[u8],
 ) -> Result<(), SearchEvalError> {
-    let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(bytes)
+    let decoded = decode_daemon_native_qualification_blob(bytes)
+        .map_err(|error| SearchEvalError::Contract(error.to_string()))?;
+    let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(&decoded)
         .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)
         .and_then(|qualification| {
             validate_document_bindings(&qualification)?;
@@ -518,7 +524,7 @@ pub fn write_daemon_native_qualification(
     let canonical = serde_json::to_vec(&qualification).map_err(|error| {
         SearchEvalError::Contract(format!("serialize native qualification: {error}"))
     })?;
-    if canonical != bytes {
+    if canonical != decoded {
         return Err(SearchEvalError::Contract(
             "native qualification bytes are not canonical".to_owned(),
         ));
@@ -535,6 +541,69 @@ pub fn write_daemon_native_qualification(
             output.display()
         ))
     })
+}
+
+/// Compress canonical qualification evidence for the bounded daemon response
+/// frame. The durable artifact written by the caller remains canonical JSON;
+/// compression is only the wire representation.
+pub fn encode_daemon_native_qualification_blob(
+    canonical: &[u8],
+) -> Result<Vec<u8>, PackagedNativeQualificationErrorV1> {
+    if canonical.is_empty() || canonical.len() > MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES
+    {
+        return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
+    let uncompressed_len = u64::try_from(canonical.len())
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(canonical)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    let compressed = encoder
+        .finish()
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    let mut encoded = Vec::with_capacity(
+        DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC.len() + size_of::<u64>() + compressed.len(),
+    );
+    encoded.extend_from_slice(DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC);
+    encoded.extend_from_slice(&uncompressed_len.to_be_bytes());
+    encoded.extend_from_slice(&compressed);
+    Ok(encoded)
+}
+
+fn decode_daemon_native_qualification_blob(
+    encoded: &[u8],
+) -> Result<Vec<u8>, PackagedNativeQualificationErrorV1> {
+    let header_len = DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC.len() + size_of::<u64>();
+    if encoded.len() <= header_len || !encoded.starts_with(DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC) {
+        return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
+    let length_offset = DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC.len();
+    let expected_len = u64::from_be_bytes(
+        encoded[length_offset..header_len]
+            .try_into()
+            .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?,
+    );
+    let expected_len = usize::try_from(expected_len)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    if expected_len == 0 || expected_len > MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES {
+        return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
+    let expected_len_u64 = u64::try_from(expected_len)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    let mut decoder = ZlibDecoder::new(&encoded[header_len..]);
+    let mut decoded = Vec::with_capacity(expected_len);
+    decoder
+        .by_ref()
+        .take(expected_len_u64.saturating_add(1))
+        .read_to_end(&mut decoded)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    if decoded.len() != expected_len
+        || encode_daemon_native_qualification_blob(&decoded)?.as_slice() != encoded
+    {
+        return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
+    Ok(decoded)
 }
 
 /// Validate arbitrary package bytes without materializing evaluator assets.
@@ -906,6 +975,31 @@ fn canonical_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_qualification_blob_compresses_and_round_trips_canonical_evidence() {
+        let canonical = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "evidence": "repeated-native-evidence".repeat(32_768),
+        }))
+        .expect("canonical fixture");
+
+        let encoded = encode_daemon_native_qualification_blob(&canonical)
+            .expect("encode daemon qualification blob");
+        assert!(encoded.len() < canonical.len());
+        assert_eq!(
+            decode_daemon_native_qualification_blob(&encoded)
+                .expect("decode daemon qualification blob"),
+            canonical
+        );
+
+        let mut corrupt = encoded;
+        corrupt[0] ^= 0xff;
+        assert_eq!(
+            decode_daemon_native_qualification_blob(&corrupt),
+            Err(PackagedNativeQualificationErrorV1::CorruptBytes)
+        );
+    }
 
     #[test]
     fn workload_profile_alias_matches_its_canonical_evaluated_material() {
