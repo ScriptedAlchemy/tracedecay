@@ -1125,6 +1125,9 @@ fn cold_full_file_scan_does_not_hash_the_whole_file() {
 #[cfg(unix)]
 #[test]
 fn unchanged_settled_repoll_reads_zero_file_bytes() {
+    // The warm entry this test proves must survive between its two polls, and
+    // the isolation reset is process-global.
+    let _hold = super::jsonl::HoldUnchangedGenerationCache::enter();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("warm.jsonl");
     let record = b"{\"v\":0}\n";

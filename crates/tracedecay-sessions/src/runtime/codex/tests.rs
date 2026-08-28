@@ -2072,6 +2072,13 @@ mod recent_first_discovery_tests {
     /// A single historical bucket larger than the whole per-pass budget must
     /// converge file-by-file through the retained directory iterator instead
     /// of starving its tail or pinning forever.
+    ///
+    /// The intra-sweep cursor is the retained `CodexDiscoveryState`, not the
+    /// durable frontier: the frontier stays pinned at the incoming epoch for
+    /// every unfinished pass and only advances once one sweep has observed the
+    /// whole corpus. So progress is asserted on the retained cursor's own
+    /// output — each unfinished pass must emit files it has not emitted before,
+    /// and must not claim completion while it is still reporting truncation.
     #[test]
     fn codex_oversized_bucket_converges_through_retained_traversal() {
         let temp = TempDir::new().unwrap();
@@ -2089,25 +2096,45 @@ mod recent_first_discovery_tests {
         let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
         let source = CodexSource::with_home(home);
 
+        let mut state = CodexDiscoveryState::default();
         let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut completed = false;
         for _pass in 0..64 {
-            let pass = source
-                .discover_transcript_paths_with_frontier(bounds, frontier)
-                .unwrap();
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            let before = covered.len();
             covered.extend(pass.report.paths.iter().cloned());
-            if covered.len() == all.len() {
+            if pass.next_frontier.is_complete() {
+                assert!(
+                    !pass.report.is_truncated(),
+                    "a sweep may not claim completion while it still reports truncation"
+                );
+                completed = true;
+                frontier = pass.next_frontier;
                 break;
             }
             assert!(
-                pass.next_frontier != frontier,
-                "an unfinished oversized bucket must still advance its cursor"
+                pass.report.is_truncated(),
+                "an unfinished sweep must keep catch-up scheduled"
+            );
+            assert!(
+                covered.len() > before,
+                "an unfinished oversized bucket must still advance its retained cursor"
             );
             frontier = pass.next_frontier;
         }
+        assert!(
+            completed,
+            "the retained sweep must reach a durable completion claim"
+        );
         assert_eq!(
             covered, all,
             "an oversized bucket's tail must be reached across passes"
+        );
+        assert_eq!(
+            frontier.epoch.files,
+            u64::try_from(all.len()).unwrap(),
+            "the completed frontier's epoch must count the whole corpus"
         );
     }
 
@@ -2138,10 +2165,19 @@ mod recent_first_discovery_tests {
 
         let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        // Reaching the watermark is a long-lived scheduler's job, so this
+        // setup drives the retained traversal the scheduler uses. The
+        // standalone helper documents that it does not converge past one pass:
+        // its cursor lives in `CodexDiscoveryState`, not in the durable
+        // frontier. The restart the test is actually about is still a fresh
+        // `CodexSource` with fresh state below, reading only the persisted
+        // admission offsets.
+        let mut state = CodexDiscoveryState::default();
         for _pass in 0..64 {
             let pass = source
-                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .discover_transcript_paths_with_state(bounds, frontier, &mut state)
                 .unwrap();
+            state.acknowledge();
             covered.extend(pass.report.paths.iter().cloned());
             persist_codex_history_frontier(&admission, &scope, frontier, pass.next_frontier)
                 .await
