@@ -782,7 +782,7 @@ pub(crate) fn canonical_buffer_allocation_growths() -> usize {
     CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(std::cell::Cell::get)
 }
 
-fn physical_namespace_projection_map(
+pub(crate) fn physical_namespace_projection_map(
     identity: &GraphGenerationManifestIdentity,
 ) -> Result<BTreeMap<GraphNamespace, GraphProjectionIdentity>, GraphDbError> {
     let mut map = BTreeMap::from([(identity.physical_namespace()?, identity.projection.clone())]);
@@ -799,7 +799,7 @@ fn physical_namespace_projection_map(
     Ok(map)
 }
 
-fn recovered_entity_ref(
+pub(crate) fn recovered_entity_ref(
     store: &dyn grafeo_core::graph::GraphStore,
     node: grafeo_common::types::NodeId,
     namespace_projection: &BTreeMap<GraphNamespace, GraphProjectionIdentity>,

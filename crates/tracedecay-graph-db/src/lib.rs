@@ -17,6 +17,7 @@ mod recovery;
 mod registry;
 mod runtime;
 mod schema;
+mod sealed_store;
 pub mod semantic_vector_native;
 mod state;
 mod traversal;

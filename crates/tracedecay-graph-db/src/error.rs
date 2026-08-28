@@ -79,6 +79,12 @@ pub enum GraphDbError {
     ResetRequired { message: String },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
+    /// A write reached a generation that is sealed into an immutable
+    /// compacted store. Sealed rows accept exact idempotent replays only;
+    /// anything else is refused with this typed error rather than a generic
+    /// conflict, because no retry can ever make the write admissible.
+    #[error("sealed graph generation store is immutable: {message}")]
+    SealedStoreImmutable { message: String },
     #[error("graph database unavailable: {message}")]
     Unavailable { message: String },
     #[error("graph database durability is uncertain: {message}")]
