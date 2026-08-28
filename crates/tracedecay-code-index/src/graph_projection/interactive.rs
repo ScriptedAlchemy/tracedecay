@@ -25,8 +25,8 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphRelationId,
-    GraphRelationKind, GraphRelationRef, MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphRelation,
+    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
 };
 
 use super::{
@@ -931,13 +931,13 @@ impl CodeGraphInteractiveReader {
         let starts = entity_ids(seeds)?;
         let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
         let per_seed_relations = match direction {
-            AdjacencyDirection::Outgoing => self.snapshot.outgoing_relation_ids(
+            AdjacencyDirection::Outgoing => self.snapshot.outgoing_relations(
                 &starts,
                 &source_relation_kinds()?,
                 max_relations,
                 Arc::clone(&cancellation),
             )?,
-            AdjacencyDirection::Incoming => self.snapshot.incoming_relation_ids(
+            AdjacencyDirection::Incoming => self.snapshot.incoming_relations(
                 &starts,
                 &target_relation_kinds()?,
                 max_relations,
@@ -1003,28 +1003,23 @@ impl CodeGraphInteractiveReader {
     fn hydrate_edge_record(
         &self,
         seed: &SymbolOccurrenceId,
-        relation: &GraphRelationId,
+        relation: &GraphRelation,
         direction: AdjacencyDirection,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
-        let relation = self
-            .snapshot
-            .relation(
-                &GraphRelationRef::new(self.projection.clone(), relation.clone()),
-                Arc::clone(&cancellation),
-            )?
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph adjacency listed a missing relation".to_owned(),
-                )
-            })?;
         let edge_reference = match direction {
             AdjacencyDirection::Outgoing => &relation.to,
             AdjacencyDirection::Incoming => &relation.from,
         };
         let entity = self
             .snapshot
-            .entity(edge_reference, cancellation)?
+            .entity(
+                &tracedecay_graph_db::GraphEntityRef::new(
+                    self.projection.clone(),
+                    edge_reference.clone(),
+                ),
+                cancellation,
+            )?
             .ok_or_else(|| {
                 CodeGraphProjectionError::Corrupt(
                     "code graph adjacency referenced a missing edge entity".to_owned(),

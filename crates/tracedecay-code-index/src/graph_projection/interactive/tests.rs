@@ -433,6 +433,43 @@ fn adjacency_reads_are_kind_filtered_and_endpoint_checked() {
     assert_eq!(callees[0][0].edge.to_occurrence.as_str(), "sym.beta.run");
 }
 
+#[test]
+fn verified_adjacency_returns_relation_rows_in_seed_shape() {
+    let reader = reader(&store_for(production_manifest()));
+    let seeds = [
+        id::<SymbolOccurrenceId>("sym.gamma.main"),
+        id::<SymbolOccurrenceId>("sym.alpha.run"),
+    ];
+    let starts = super::entity_ids(&seeds).expect("seed entity identities");
+
+    let outgoing = reader
+        .snapshot
+        .outgoing_relations(
+            &starts,
+            &super::source_relation_kinds().expect("source relation kinds"),
+            16,
+            request(),
+        )
+        .expect("verified outgoing relation rows");
+    assert_eq!(outgoing.len(), seeds.len());
+    assert_eq!(outgoing[0].len(), 1);
+    assert_eq!(outgoing[1].len(), 1);
+    assert_ne!(outgoing[0][0].identity, outgoing[1][0].identity);
+
+    let incoming = reader
+        .snapshot
+        .incoming_relations(
+            &starts,
+            &super::target_relation_kinds().expect("target relation kinds"),
+            16,
+            request(),
+        )
+        .expect("verified incoming relation rows");
+    assert_eq!(incoming.len(), seeds.len());
+    assert!(incoming[0].is_empty());
+    assert_eq!(incoming[1].len(), 1);
+}
+
 /// Edge kinds outside the admitted set must stop hydration at the edge
 /// payload: their far endpoints are never read. Both queries examine the same
 /// two adjacency rows of `sym.beta.run`; the filtered one hydrates one

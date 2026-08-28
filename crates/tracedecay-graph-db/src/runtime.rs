@@ -550,6 +550,40 @@ impl GraphDb {
         Ok(batches)
     }
 
+    /// Bulk kind-filtered incoming fan-out with the same shape, cancellation,
+    /// and aggregate relation budget as [`Self::outgoing_relations`].
+    #[hotpath::measure(label = "graph_db.traversal.incoming", impl_type = "GraphDb")]
+    pub fn incoming_relations(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::incoming_relations(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "graph_db.traversal.reachable", impl_type = "GraphDb")]
     pub fn reachable_entities(

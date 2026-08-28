@@ -22,8 +22,8 @@ use crate::{
     GraphGenerationDependency, GraphGenerationId, GraphGenerationManifestIdentity,
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
-    GraphProjectionTelemetryRequest, GraphRelationId, GraphRelationRef, TraversalRequest,
-    VectorSearchRequest, VectorSearchResult,
+    GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
+    TraversalRequest, VectorSearchRequest, VectorSearchResult,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -417,6 +417,55 @@ impl VerifiedGraphSnapshot {
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         self.with_operation(|| {
             self.database.incoming_relation_ids(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
+        })
+    }
+
+    /// Bulk outgoing relation rows over this verified generation. This keeps
+    /// the traversal's already-decoded rows in hand for callers that need the
+    /// relation payload, instead of reducing them to identities and issuing a
+    /// point read for every edge.
+    #[hotpath::measure(
+        label = "graph_db.lease.outgoing_relations",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn outgoing_relations(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.outgoing_relations(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
+        })
+    }
+
+    /// Bulk incoming relation rows over this verified generation.
+    #[hotpath::measure(
+        label = "graph_db.lease.incoming_relations",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn incoming_relations(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.incoming_relations(
                 &self.head.locator.physical_namespace()?,
                 starts,
                 relation_kinds,
