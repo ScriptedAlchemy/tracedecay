@@ -10,10 +10,10 @@ use grafeo_core::graph::{
 use grafeo_engine::GrafeoDB;
 
 use crate::schema::{
-    ENTITY_ID_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
+    ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
     RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY,
-    decode_graph_properties, entity_key_label, entity_projection_label, relation_kind_from_type,
-    relation_type_for_kind,
+    decode_graph_properties, entity_key_value, entity_projection_label, label_keys,
+    relation_kind_from_type, relation_type_for_kind,
 };
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace,
@@ -379,7 +379,7 @@ fn relation_projection(
     store: Arc<dyn GraphStoreSearch>,
     relation_kinds: &BTreeSet<GraphRelationKind>,
 ) -> GraphProjection {
-    let mut spec = ProjectionSpec::new().with_node_labels([ENTITY_LABEL]);
+    let mut spec = ProjectionSpec::new().with_node_labels(label_keys(store.as_ref(), ENTITY_LABEL));
     if !relation_kinds.is_empty() {
         spec = spec.with_edge_types(relation_kinds.iter().map(relation_type_for_kind));
     }
@@ -392,8 +392,10 @@ fn projection_relation_projection(
     projection: &GraphProjectionId,
     relation_kinds: &BTreeSet<GraphRelationKind>,
 ) -> GraphProjection {
-    let mut spec =
-        ProjectionSpec::new().with_node_labels([entity_projection_label(namespace, projection)]);
+    let mut spec = ProjectionSpec::new().with_node_labels(label_keys(
+        store.as_ref(),
+        &entity_projection_label(namespace, projection),
+    ));
     if !relation_kinds.is_empty() {
         spec = spec.with_edge_types(relation_kinds.iter().map(relation_type_for_kind));
     }
@@ -807,7 +809,12 @@ fn optional_node_for_entity(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<NodeId>, GraphDbError> {
-    let mut matches = store.nodes_by_label(&entity_key_label(namespace, identity));
+    let mut matches = crate::state::indexed_nodes(
+        store,
+        ENTITY_KEY_PROPERTY,
+        &entity_key_value(namespace, identity),
+        ENTITY_LABEL,
+    );
     match matches.len() {
         0 => Ok(None),
         1 => {

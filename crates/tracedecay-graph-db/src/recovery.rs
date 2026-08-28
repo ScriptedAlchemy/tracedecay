@@ -9,13 +9,13 @@ use crate::error::rollback_failure;
 use crate::location::ValidatedOpen;
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, NAMESPACE_PROPERTY,
-    PROJECTION_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY, required_string,
+    PROJECTION_PROPERTY, QUARANTINE_KEY_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY,
+    nodes_with_label, required_string,
 };
 use crate::state::FormatState;
 use crate::{GraphCommit, GraphDbError, GraphDurability, GraphNamespace, GraphProjectionId};
 
 const QUARANTINE_LABEL: &str = "__tracedecay_graph_db_recovery_quarantine";
-const QUARANTINE_KEY_LABEL_PREFIX: &str = "__tracedecay_graph_db_recovery_quarantine_key_";
 
 /// A freshly reopened graph database together with its loaded format state
 /// and the set of quarantined projections read from the store.
@@ -83,7 +83,7 @@ pub(crate) fn validate_or_initialize_format(
     validated: &ValidatedOpen,
 ) -> Result<(), GraphDbError> {
     let store = database.graph_store();
-    let markers = store.nodes_by_label(FORMAT_LABEL);
+    let markers = nodes_with_label(store.as_ref(), FORMAT_LABEL);
     if markers.is_empty() {
         if store.node_count() != 0 || validated.preexisting_store {
             return Err(GraphDbError::ResetRequired {
@@ -224,7 +224,7 @@ pub(crate) fn load_quarantined_projections(
 ) -> Result<BTreeSet<(GraphNamespace, GraphProjectionId)>, GraphDbError> {
     let store = database.graph_store();
     let mut quarantined = BTreeSet::new();
-    for node_id in store.nodes_by_label(QUARANTINE_LABEL) {
+    for node_id in nodes_with_label(store.as_ref(), QUARANTINE_LABEL) {
         let record = store
             .get_node(node_id)
             .ok_or_else(|| GraphDbError::Corrupt {
@@ -244,8 +244,9 @@ pub(crate) fn load_quarantined_projections(
         .map_err(|error| GraphDbError::Corrupt {
             message: format!("invalid projection quarantine identity: {error}"),
         })?;
-        let key_label = quarantine_key_label(&namespace, &projection);
-        if !record.has_label(&key_label) {
+        if record.get_property(QUARANTINE_KEY_PROPERTY)
+            != Some(&quarantine_key_value(&namespace, &projection))
+        {
             return Err(GraphDbError::Corrupt {
                 message: "projection quarantine marker has no exact native key".to_owned(),
             });
@@ -265,13 +266,16 @@ pub(crate) fn set_projection_quarantine(
     projection: &GraphProjectionId,
     quarantined: bool,
 ) -> Result<(), GraphDbError> {
-    let key_label = quarantine_key_label(namespace, projection);
+    let key_value = quarantine_key_value(namespace, projection);
     let store = database.graph_store();
-    let mut markers = store.nodes_by_label(&key_label).into_iter().filter(|node| {
-        store
-            .get_node(*node)
-            .is_some_and(|record| record.has_label(QUARANTINE_LABEL))
-    });
+    let mut markers = store
+        .find_nodes_by_property(QUARANTINE_KEY_PROPERTY, &key_value)
+        .into_iter()
+        .filter(|node| {
+            store
+                .get_node(*node)
+                .is_some_and(|record| record.has_label(QUARANTINE_LABEL))
+        });
     let existing = markers.next();
     if markers.next().is_some() {
         return Err(GraphDbError::Corrupt {
@@ -289,10 +293,11 @@ pub(crate) fn set_projection_quarantine(
     let mutation = if quarantined {
         session
             .create_node_with_props(
-                &[QUARANTINE_LABEL, &key_label],
+                &[QUARANTINE_LABEL],
                 [
                     (NAMESPACE_PROPERTY, Value::from(namespace.as_str())),
                     (PROJECTION_PROPERTY, Value::from(projection.as_str())),
+                    (QUARANTINE_KEY_PROPERTY, key_value.clone()),
                 ],
             )
             .map(|_| ())
@@ -329,12 +334,16 @@ pub(crate) fn set_projection_quarantine(
         })
 }
 
-fn quarantine_key_label(namespace: &GraphNamespace, projection: &GraphProjectionId) -> String {
-    format!(
-        "{QUARANTINE_KEY_LABEL_PREFIX}{}_{}",
+/// The indexed unique-key value for one projection quarantine marker.
+///
+/// A property rather than a label for the same reason entity identity is: one
+/// native label per record becomes one columnar node table per record.
+fn quarantine_key_value(namespace: &GraphNamespace, projection: &GraphProjectionId) -> Value {
+    Value::from(format!(
+        "{}_{}",
         hex::encode(namespace.as_str().as_bytes()),
         hex::encode(projection.as_str().as_bytes())
-    )
+    ))
 }
 
 pub(crate) fn quarantine_transition_failure(context: &str, error: GraphDbError) -> GraphDbError {
