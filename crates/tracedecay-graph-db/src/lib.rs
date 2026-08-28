@@ -108,7 +108,9 @@ pub struct GraphDbHydrationCounters {
 pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
     hotpath_observe::take_hydration_counters()
 }
-pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
+pub use traversal::{
+    GraphRelationTarget, GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit,
+};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use vector::{GraphVectorIndexRequest, GraphVectorIndexStatus};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]

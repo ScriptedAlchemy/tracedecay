@@ -517,8 +517,8 @@ fn read_scope(
         return Ok(None);
     };
     let relation_kinds = BTreeSet::from([relation_kind(CONTAINS_KIND)?, relation_kind(BASE_KIND)?]);
-    let relation_pages = snapshot
-        .outgoing_relations(
+    let target_pages = snapshot
+        .outgoing_relation_targets(
             &namespace,
             std::slice::from_ref(&owner),
             &relation_kinds,
@@ -526,19 +526,17 @@ fn read_scope(
             Arc::clone(&cancellation),
         )
         .map_err(map_graph_error)?;
-    let relation_rows = relation_pages.into_iter().next().unwrap_or_default();
+    let targets = target_pages.into_iter().next().unwrap_or_default();
     let mut entities = BTreeMap::from([(owner.clone(), owner_row)]);
     let mut relations = BTreeMap::new();
     let mut visited_targets = BTreeSet::from([owner.clone()]);
-    for relation in relation_rows {
+    for target in targets {
+        let relation = target.relation;
         if relation.from != owner || !visited_targets.insert(relation.to.clone()) {
             continue;
         }
         if relation.kind.as_str() == CONTAINS_KIND {
-            let child = snapshot
-                .entity(&namespace, &relation.to, Arc::clone(&cancellation))
-                .map_err(map_graph_error)?
-                .ok_or_else(|| corrupt("semantic vector scope child is missing"))?;
+            let child = target.target;
             entities.insert(child.identity.clone(), child);
         }
         relations.insert(relation.identity.clone(), relation);

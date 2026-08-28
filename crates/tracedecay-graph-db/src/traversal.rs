@@ -12,11 +12,11 @@ use grafeo_engine::GrafeoDB;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
     RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY,
-    decode_graph_properties, entity_key_value, entity_projection_label, label_keys,
+    decode_entity, decode_graph_properties, entity_key_value, entity_projection_label, label_keys,
     relation_kind_from_type, relation_type_for_kind,
 };
 use crate::{
-    GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
     GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot,
     VectorSearchRequest, VectorSearchResult,
 };
@@ -71,6 +71,12 @@ pub struct TraversalVisit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraversalResult {
     pub visits: Vec<TraversalVisit>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphRelationTarget {
+    pub relation: GraphRelation,
+    pub target: GraphEntity,
 }
 
 impl GraphSnapshot {
@@ -224,6 +230,70 @@ pub(crate) fn outgoing_relations(
         cancellation,
         ensure_projection_readable,
     )
+}
+
+pub(crate) fn outgoing_relation_targets(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
+    check_batch_request(starts, cancellation)?;
+    let store = database.graph_store();
+    let projected = relation_projection(Arc::clone(&store), relation_kinds);
+    let mut admitted = 0_usize;
+    let mut results = Vec::with_capacity(starts.len());
+    let mut entity_ids = HashMap::new();
+    for start in starts {
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
+            results.push(Vec::new());
+            continue;
+        };
+        let mut targets = Vec::new();
+        for (neighbor, edge) in projected.edges_from(node, Direction::Outgoing) {
+            if cancellation.is_cancelled() {
+                return Err(GraphDbError::Cancelled);
+            }
+            let relation = relation_for_edge(
+                &projected,
+                edge,
+                namespace,
+                ensure_projection_readable,
+                &mut entity_ids,
+            )?;
+            let target = store
+                .get_node(neighbor)
+                .ok_or_else(|| GraphDbError::Corrupt {
+                    message: "outgoing relation target is missing".to_owned(),
+                })?;
+            let target = decode_entity(&target)?;
+            if target.identity != relation.to {
+                return Err(GraphDbError::Corrupt {
+                    message: "outgoing relation target disagrees with native adjacency".to_owned(),
+                });
+            }
+            targets.push(GraphRelationTarget { relation, target });
+        }
+        targets.sort_by(|left, right| left.relation.identity.cmp(&right.relation.identity));
+        targets.dedup_by(|left, right| left.relation.identity == right.relation.identity);
+        admitted = admitted
+            .checked_add(targets.len())
+            .ok_or_else(|| read_budget(max_relations))?;
+        if admitted > max_relations {
+            return Err(read_budget(max_relations));
+        }
+        results.push(targets);
+    }
+    Ok(results)
 }
 
 /// Bulk kind-filtered incoming fan-out. See [`incoming_relation_ids`].

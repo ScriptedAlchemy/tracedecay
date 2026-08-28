@@ -642,6 +642,13 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
             .collect::<Vec<_>>(),
         vec![vec!["ab"], Vec::<&str>::new(), Vec::<&str>::new()]
     );
+    let targets = db
+        .outgoing_relation_targets(&namespace(), &starts, &kinds, 1, live())
+        .unwrap();
+    assert_eq!(targets[0][0].relation.identity.as_str(), "ab");
+    assert_eq!(targets[0][0].target.identity.as_str(), "b");
+    assert!(targets[1].is_empty());
+    assert!(targets[2].is_empty());
     assert_eq!(
         db.outgoing_relation_ids(&namespace(), &starts, &kinds, 0, live())
             .unwrap_err(),
