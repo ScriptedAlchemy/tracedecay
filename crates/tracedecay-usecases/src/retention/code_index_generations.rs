@@ -12,8 +12,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -34,12 +32,14 @@ use tracedecay_code_index::production::sealed_generation_format_revision_is_comp
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 #[cfg(test)]
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
 mod graph_replay_release;
+mod journal;
 mod locking;
+mod receipt_store;
 mod scope_quarantine;
 mod generation_transactions;
 mod scope_roots;
@@ -66,13 +66,14 @@ pub use text_artifacts::{
 };
 
 use generation_transactions::{
-    acquire_graph_replay_pool_lock, cleanup_committed_transaction,
+    GENERATION_RECEIPT_STORE, acquire_graph_replay_pool_lock, cleanup_committed_transaction,
     cleanup_committed_transaction_under_graph_replay_pool_lock, clear_transaction,
     expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
     open_file_sha256_hex_cancellable, path_still_names_open_file, persist_transaction,
     receipt_is_durable, regular_file_exists, remove_empty_stage_root,
-    rollback_staged_transaction, stage_collectable_generations, transaction_path,
+    rollback_staged_transaction, stage_collectable_generations, transaction_path, write_receipt,
 };
+use receipt_store::receipt_digest_file_component;
 #[cfg(test)]
 use generation_transactions::{
     transaction_stage_root, verify_existing_graph_replay_pool_entry,
@@ -859,14 +860,7 @@ fn generation_file_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("generation-")?
         .strip_suffix(".json")
-        .filter(|digest| is_lowercase_sha256(digest))
-}
-
-fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
 
@@ -1001,6 +995,10 @@ pub fn execute_code_generation_retention_cancellable(
                     pool_lock,
                 )?;
             }
+            // Release events must be durable before the deletion receipt so
+            // the replay reconciler never observes a receipt whose pool
+            // survival events are missing.
+            graph_replay_release::write_events(store_root, &receipt)?;
             write_receipt(store_root, &receipt)?;
             cleanup_committed_transaction_under_graph_replay_pool_lock(
                 store_root,
@@ -1177,21 +1175,18 @@ fn run_code_generation_retention_cancellable(
 pub fn observe_code_generation_retention(
     store_root: &Path,
 ) -> Result<CodeGenerationRetentionObservationV1, CodeGenerationRetentionErrorV1> {
+    // A store without a publication pointer has nothing to observe; that is a
+    // typed empty observation, not an error. Every present pointer goes
+    // through the one canonical reader so corruption reporting cannot drift.
     let active_path = store_root.join(ACTIVE_POINTER_FILE);
-    let active_pointer = match std::fs::read(&active_path) {
-        Ok(bytes) => {
-            serde_json::from_slice::<DurablePublicationPointerV1>(&bytes).map_err(|error| {
-                CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "active pointer '{}' is corrupt: {error}",
-                    active_path.display()
-                ))
-            })?
-        }
+    match std::fs::symlink_metadata(&active_path) {
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(CodeGenerationRetentionObservationV1::default());
         }
         Err(error) => return Err(storage(error)),
-    };
+    }
+    let active_pointer = read_active_pointer(store_root)?;
     validate_generation_file(&active_pointer.generation_file)?;
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let entries = match std::fs::read_dir(&generations_root) {
@@ -1387,11 +1382,7 @@ fn sha256_file_component<'a>(
             "{resource} digest is not SHA-256"
         )));
     };
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !is_lowercase_hex(value, 64) {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "{resource} digest is not lowercase SHA-256"
         )));
@@ -1440,11 +1431,7 @@ fn build_receipt(
     };
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    let receipt_digest = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_owned();
+    let receipt_digest = receipt_digest_file_component(&GENERATION_RECEIPT_STORE, digest.as_str())?;
     Ok(CodeGenerationRetentionReceiptV1 {
         schema: RECEIPT_SCHEMA.to_owned(),
         receipt_digest,
@@ -1457,47 +1444,6 @@ fn build_receipt(
     })
 }
 
-
-fn write_receipt(
-    store_root: &Path,
-    receipt: &CodeGenerationRetentionReceiptV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    graph_replay_release::write_events(store_root, receipt)?;
-    let receipts_root = store_root.join(RECEIPTS_DIRECTORY);
-    std::fs::create_dir_all(&receipts_root).map_err(storage)?;
-    let final_path = receipts_root.join(format!("receipt-{}.json", receipt.receipt_digest));
-    let bytes = serde_json::to_vec(receipt).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention receipt serialization failed: {error}"
-        ))
-    })?;
-    if final_path.exists() {
-        let existing = std::fs::read(&final_path).map_err(storage)?;
-        if existing == bytes {
-            return Ok(());
-        }
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "retention receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    let temporary = receipts_root.join(format!(
-        ".receipt-{}.{}.tmp",
-        receipt.receipt_digest,
-        std::process::id()
-    ));
-    if temporary.exists() {
-        std::fs::remove_file(&temporary).map_err(storage)?;
-    }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(storage)?;
-    file.write_all(&bytes).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
-    std::fs::rename(&temporary, &final_path).map_err(storage)?;
-    sync_directory(&receipts_root)
-}
 
 
 fn sync_directory(path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {

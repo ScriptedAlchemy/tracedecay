@@ -12,10 +12,14 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex};
-use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use super::graph_replay_release;
+use super::journal::{
+    BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
+};
 use super::locking::{CodeGenerationStoreLockV1, acquire_code_generation_store_lock};
+use super::receipt_store;
+use super::receipt_store::ReceiptStoreSpec;
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
@@ -24,8 +28,22 @@ use super::{
     sync_directory, total_bytes, validate_generation_file,
 };
 
+const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<CodeGenerationRetentionTransactionV1> =
+    BoundedJournalSpec {
+        file_name: TRANSACTION_FILE,
+        max_bytes: MAX_TRANSACTION_BYTES,
+        label: "retention transaction",
+        write_context: "code-generation-retention-transaction",
+        validate: validate_transaction,
+    };
+
+pub(super) const GENERATION_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+    directory: RECEIPTS_DIRECTORY,
+    label: "retention receipt",
+};
+
 pub(super) fn transaction_path(store_root: &Path) -> PathBuf {
-    store_root.join(TRANSACTION_FILE)
+    journal_path(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn transaction_stage_root(
@@ -41,44 +59,13 @@ pub(super) fn persist_transaction(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    validate_transaction(transaction)?;
-    let bytes = serde_json::to_vec(transaction).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention transaction serialization failed: {error}"
-        ))
-    })?;
-    atomic_write(
-        &transaction_path(store_root),
-        "code-generation-retention-transaction",
-        &bytes,
-        DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(storage)
+    persist_journal(store_root, &GENERATION_TRANSACTION_JOURNAL, transaction)
 }
 
 pub(super) fn load_transaction(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    let path = transaction_path(store_root);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(error)),
-    };
-    if bytes.len() as u64 > MAX_TRANSACTION_BYTES {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention transaction '{}' exceeds the bounded journal size",
-            path.display()
-        )));
-    }
-    let transaction = serde_json::from_slice(&bytes).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention transaction '{}' is unreadable: {error}",
-            path.display()
-        ))
-    })?;
-    validate_transaction(&transaction)?;
-    Ok(Some(transaction))
+    load_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn validate_transaction(
@@ -89,13 +76,9 @@ pub(super) fn validate_transaction(
             "retention transaction has an incompatible schema".to_owned(),
         ));
     }
-    if transaction.receipt.receipt_digest.len() != 64
-        || !transaction
-            .receipt
-            .receipt_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    // Every writer emits lowercase digests, so mixed case is forgery or
+    // corruption, never a legitimate journal.
+    if !is_lowercase_hex(&transaction.receipt.receipt_digest, 64) {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "retention transaction receipt digest is not a SHA-256 file component".to_owned(),
         ));
@@ -142,37 +125,28 @@ pub(super) fn validate_transaction(
     Ok(())
 }
 
-pub(super) fn receipt_path(store_root: &Path, receipt: &CodeGenerationRetentionReceiptV1) -> PathBuf {
-    store_root
-        .join(RECEIPTS_DIRECTORY)
-        .join(format!("receipt-{}.json", receipt.receipt_digest))
-}
-
-pub(super) fn receipt_bytes(
-    receipt: &CodeGenerationRetentionReceiptV1,
-) -> Result<Vec<u8>, CodeGenerationRetentionErrorV1> {
-    serde_json::to_vec(receipt).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention receipt serialization failed: {error}"
-        ))
-    })
-}
-
 pub(super) fn receipt_is_durable(
     store_root: &Path,
     receipt: &CodeGenerationRetentionReceiptV1,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let path = receipt_path(store_root, receipt);
-    if !regular_file_exists(&path)? {
-        return Ok(false);
-    }
-    let existing = std::fs::read(&path).map_err(storage)?;
-    if existing != receipt_bytes(receipt)? {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "retention receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    Ok(true)
+    receipt_store::receipt_is_durable(
+        store_root,
+        &GENERATION_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
+}
+
+pub(super) fn write_receipt(
+    store_root: &Path,
+    receipt: &CodeGenerationRetentionReceiptV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    receipt_store::write_receipt(
+        store_root,
+        &GENERATION_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
 }
 
 #[hotpath::measure(label = "usecases.retention.stage")]
@@ -192,7 +166,10 @@ pub(super) fn stage_collectable_generations(
         let staged = stage_root.join(&generation.generation_file);
         match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
             (true, false) => {
-                let metadata = std::fs::metadata(&source).map_err(storage)?;
+                // No-follow: `regular_file_exists` already proved the path is
+                // a regular file, and sizing through a racing symlink would
+                // measure foreign bytes.
+                let metadata = std::fs::symlink_metadata(&source).map_err(storage)?;
                 if metadata.len() != generation.size_bytes {
                     return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                         "collectable generation '{}' changed after the mark phase",
@@ -786,12 +763,7 @@ pub(super) fn ensure_transaction_liveness(
 }
 
 pub(super) fn clear_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let path = transaction_path(store_root);
-    match std::fs::remove_file(&path) {
-        Ok(()) => sync_directory(store_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage(error)),
-    }
+    clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn remove_empty_stage_root(stage_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {

@@ -13,19 +13,21 @@
 //! of collection is an entire directory tree rather than one superseded file.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
-use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 #[cfg(test)]
 use super::SCOPE_RETENTION_QUARANTINE_DIRECTORY;
+use super::journal::{
+    BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
+};
 use super::locking::{acquire_code_generation_store_lock, acquire_scope_retention_lock};
+use super::receipt_store;
+use super::receipt_store::{ReceiptStoreSpec, receipt_digest_file_component};
 use super::scope_quarantine::{ScopeDirectoryIdentityV1, ScopeQuarantineAuthority};
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
@@ -34,7 +36,30 @@ use super::{
     SCOPE_RETENTION_RECEIPT_SCHEMA,
     SCOPE_RETENTION_RECEIPTS_DIRECTORY, SCOPE_RETENTION_TRANSACTION_FILE,
     SCOPE_RETENTION_TRANSACTION_SCHEMA, SCOPE_ROOT_LIVENESS_PROOF_SCHEMA, STORE_LOCK_FILE,
-    TRANSACTION_FILE, code_index_scope_hash, regular_file_exists, storage, sync_directory,
+    TRANSACTION_FILE, code_index_scope_hash, storage,
+};
+
+const SCOPE_TRANSACTION_JOURNAL: BoundedJournalSpec<ScopeRootRetentionTransactionV1> =
+    BoundedJournalSpec {
+        file_name: SCOPE_RETENTION_TRANSACTION_FILE,
+        max_bytes: MAX_SCOPE_TRANSACTION_BYTES,
+        label: "scope reconciliation transaction",
+        write_context: "code-index-scope-retention-transaction",
+        validate: validate_scope_transaction,
+    };
+
+const SCOPE_BINDING_CLEANUP_INTENT_JOURNAL: BoundedJournalSpec<ScopeRootBindingCleanupIntentV1> =
+    BoundedJournalSpec {
+        file_name: SCOPE_BINDING_CLEANUP_INTENT_FILE,
+        max_bytes: MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES,
+        label: "scope binding cleanup intent",
+        write_context: "code-index-scope-binding-cleanup-intent",
+        validate: validate_scope_binding_cleanup_intent,
+    };
+
+const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+    directory: SCOPE_RETENTION_RECEIPTS_DIRECTORY,
+    label: "scope reconciliation receipt",
 };
 
 /// One `code-index-v1/` scope directory whose scope hash matches no live
@@ -716,11 +741,7 @@ pub(super) fn recover_pending_scope_transaction_unlocked(
 }
 
 pub(super) fn scope_transaction_path(store_root: &Path) -> PathBuf {
-    store_root.join(SCOPE_RETENTION_TRANSACTION_FILE)
-}
-
-pub(super) fn scope_binding_cleanup_intent_path(store_root: &Path) -> PathBuf {
-    store_root.join(SCOPE_BINDING_CLEANUP_INTENT_FILE)
+    journal_path(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
 #[cfg(test)]
@@ -730,10 +751,9 @@ pub(super) fn scope_stage_root(store_root: &Path, receipt: &ScopeRootRetentionRe
         .join(&receipt.receipt_digest)
 }
 
+#[cfg(test)]
 pub(super) fn scope_receipt_path(store_root: &Path, receipt: &ScopeRootRetentionReceiptV1) -> PathBuf {
-    store_root
-        .join(SCOPE_RETENTION_RECEIPTS_DIRECTORY)
-        .join(format!("receipt-{}.json", receipt.receipt_digest))
+    receipt_store::receipt_path(store_root, &SCOPE_RECEIPT_STORE, &receipt.receipt_digest)
 }
 
 /// Join a scope hash onto the store root, refusing anything that is not a bare
@@ -867,12 +887,7 @@ pub(super) fn scope_receipt_digest(
     };
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    let Some(receipt_digest) = digest.as_str().strip_prefix("sha256:") else {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation receipt digest lacks its SHA-256 prefix".to_owned(),
-        ));
-    };
-    Ok(receipt_digest.to_owned())
+    receipt_digest_file_component(&SCOPE_RECEIPT_STORE, digest.as_str())
 }
 
 pub(super) fn binding_cleanup_receipt(
@@ -906,12 +921,9 @@ pub(super) fn validate_scope_receipt(
             "scope reconciliation receipt has an incompatible schema".to_owned(),
         ));
     }
-    if receipt.receipt_digest.len() != 64
-        || !receipt
-            .receipt_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    // Every writer emits lowercase digests, so mixed case is forgery or
+    // corruption, never a legitimate receipt.
+    if !is_lowercase_hex(&receipt.receipt_digest, 64) {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "scope reconciliation receipt digest is not a SHA-256 file component".to_owned(),
         ));
@@ -1090,167 +1102,60 @@ pub(super) fn persist_scope_transaction(
     store_root: &Path,
     transaction: &ScopeRootRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    validate_scope_transaction(transaction)?;
-    let bytes = serde_json::to_vec(transaction).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope reconciliation transaction serialization failed: {error}"
-        ))
-    })?;
-    atomic_write(
-        &scope_transaction_path(store_root),
-        "code-index-scope-retention-transaction",
-        &bytes,
-        DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(storage)
+    persist_journal(store_root, &SCOPE_TRANSACTION_JOURNAL, transaction)
 }
 
 pub(super) fn load_scope_transaction(
     store_root: &Path,
 ) -> Result<Option<ScopeRootRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    let path = scope_transaction_path(store_root);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(error)),
-    };
-    if bytes.len() as u64 > MAX_SCOPE_TRANSACTION_BYTES {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope reconciliation transaction '{}' exceeds the bounded journal size",
-            path.display()
-        )));
-    }
-    let transaction = serde_json::from_slice(&bytes).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope reconciliation transaction '{}' is unreadable: {error}",
-            path.display()
-        ))
-    })?;
-    validate_scope_transaction(&transaction)?;
-    Ok(Some(transaction))
+    load_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn clear_scope_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    match std::fs::remove_file(scope_transaction_path(store_root)) {
-        Ok(()) => sync_directory(store_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage(error)),
-    }
+    clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn persist_scope_binding_cleanup_intent(
     store_root: &Path,
     intent: &ScopeRootBindingCleanupIntentV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    validate_scope_binding_cleanup_intent(intent)?;
-    let bytes = serde_json::to_vec(intent).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope binding cleanup intent serialization failed: {error}"
-        ))
-    })?;
-    atomic_write(
-        &scope_binding_cleanup_intent_path(store_root),
-        "code-index-scope-binding-cleanup-intent",
-        &bytes,
-        DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(storage)
+    persist_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL, intent)
 }
 
 pub(super) fn load_scope_binding_cleanup_intent(
     store_root: &Path,
 ) -> Result<Option<ScopeRootBindingCleanupIntentV1>, CodeGenerationRetentionErrorV1> {
-    let path = scope_binding_cleanup_intent_path(store_root);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(error)),
-    };
-    if bytes.len() as u64 > MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope binding cleanup intent '{}' exceeds the bounded journal size",
-            path.display()
-        )));
-    }
-    let intent = serde_json::from_slice(&bytes).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope binding cleanup intent '{}' is unreadable: {error}",
-            path.display()
-        ))
-    })?;
-    validate_scope_binding_cleanup_intent(&intent)?;
-    Ok(Some(intent))
+    load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)
 }
 
 pub(super) fn clear_scope_binding_cleanup_intent(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    match std::fs::remove_file(scope_binding_cleanup_intent_path(store_root)) {
-        Ok(()) => sync_directory(store_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage(error)),
-    }
-}
-
-pub(super) fn scope_receipt_bytes(
-    receipt: &ScopeRootRetentionReceiptV1,
-) -> Result<Vec<u8>, CodeGenerationRetentionErrorV1> {
-    serde_json::to_vec(receipt).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope reconciliation receipt serialization failed: {error}"
-        ))
-    })
+    clear_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)
 }
 
 pub(super) fn scope_receipt_is_durable(
     store_root: &Path,
     receipt: &ScopeRootRetentionReceiptV1,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let path = scope_receipt_path(store_root, receipt);
-    if !regular_file_exists(&path)? {
-        return Ok(false);
-    }
-    if std::fs::read(&path).map_err(storage)? != scope_receipt_bytes(receipt)? {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    Ok(true)
+    receipt_store::receipt_is_durable(
+        store_root,
+        &SCOPE_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
 }
 
 pub(super) fn write_scope_receipt(
     store_root: &Path,
     receipt: &ScopeRootRetentionReceiptV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let receipts_root = store_root.join(SCOPE_RETENTION_RECEIPTS_DIRECTORY);
-    std::fs::create_dir_all(&receipts_root).map_err(storage)?;
-    let final_path = receipts_root.join(format!("receipt-{}.json", receipt.receipt_digest));
-    let bytes = scope_receipt_bytes(receipt)?;
-    if final_path.exists() {
-        if std::fs::read(&final_path).map_err(storage)? == bytes {
-            return Ok(());
-        }
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    let temporary = receipts_root.join(format!(
-        ".receipt-{}.{}.tmp",
-        receipt.receipt_digest,
-        std::process::id()
-    ));
-    if temporary.exists() {
-        std::fs::remove_file(&temporary).map_err(storage)?;
-    }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(storage)?;
-    file.write_all(&bytes).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
-    std::fs::rename(&temporary, &final_path).map_err(storage)?;
-    sync_directory(&receipts_root)
+    receipt_store::write_receipt(
+        store_root,
+        &SCOPE_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
 }
 
 pub(super) fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
