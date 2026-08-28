@@ -5,8 +5,8 @@
 //! existing application operations and transactional store.
 
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_application::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
@@ -813,13 +813,7 @@ struct SystemConfigurationClock;
 
 impl ConfigurationClock for SystemConfigurationClock {
     fn now(&self) -> UtcMicros {
-        UtcMicros(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| {
-                    duration.as_micros().min(i64::MAX as u128) as i64
-                }),
-        )
+        now_micros()
     }
 }
 

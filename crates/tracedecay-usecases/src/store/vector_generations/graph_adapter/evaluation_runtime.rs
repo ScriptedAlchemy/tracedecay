@@ -5,8 +5,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use tracedecay_application::{ClockError, try_now_micros};
 use tracedecay_code_index::{
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, code_graph_generation_id, code_graph_idempotency_key,
@@ -15,7 +16,7 @@ use tracedecay_code_index::{
     production::CodeIndexPublishedGenerationV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ProjectId, RepositoryId, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    CodeGenerationId, ProjectId, RepositoryId, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_graph_db::{
@@ -587,14 +588,10 @@ impl IsolatedSemanticEvaluationGraphV1 {
             ))
             .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
-        let requested_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))
-            .and_then(|duration| {
-                i64::try_from(duration.as_micros())
-                    .map(UtcMicros)
-                    .map_err(|error| GraphDbError::invalid(error.to_string()))
-            })?;
+        let requested_at = try_now_micros().map_err(|error| match error {
+            ClockError::BeforeUnixEpoch => GraphDbError::unavailable(error.to_string()),
+            ClockError::OverflowsI64Micros => GraphDbError::invalid(error.to_string()),
+        })?;
         let control = RuntimeRequestControlV1 {
             requested_at,
             deadline: deadline_identity.clone(),

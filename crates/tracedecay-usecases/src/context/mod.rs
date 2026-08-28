@@ -8,8 +8,8 @@ mod registered_scope;
 pub mod source_read;
 
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_application::now_micros;
 use tracedecay_domain::{AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId};
 
 pub use registered_scope::RegisteredScopeResolver;
@@ -352,15 +352,6 @@ pub enum RequestInterruption {
     DeadlineExceeded,
 }
 
-fn wall_clock_micros() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_micros()),
-    )
-    .unwrap_or(i64::MAX)
-}
-
 /// Composes immutable session admission authority into one application grant
 /// digest. Unlike the compatibility composition, this binds request budgets
 /// and the live cancellation token identity so a supplemental session binding
@@ -391,7 +382,7 @@ pub fn session_application_grant_digest(
 
 /// Returns the current wall-clock observation used by application deadlines.
 pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
-    tracedecay_domain::UtcMicros(wall_clock_micros())
+    now_micros()
 }
 
 /// Rechecks immutable application admission together with the live transport

@@ -10,7 +10,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,7 @@ use tracedecay_application::{
     LegalAction, OpaqueCursor, OperationReceipt, OperationTermination, PageRequest,
     ProblemOwningLayer, RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken,
     RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
-    StreamTermination,
+    StreamTermination, now_micros,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
@@ -57,13 +56,7 @@ static OPERATION_EVENT_PROBLEM_CONTRACT: LazyLock<ResultContractRef> = LazyLock:
 });
 
 fn current_micros_for_cancellation() -> UtcMicros {
-    UtcMicros(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-            .unwrap_or(i64::MAX),
-    )
+    now_micros()
 }
 
 /// Stable operation identity. The originating authorized request owns the
