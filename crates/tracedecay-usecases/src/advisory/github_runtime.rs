@@ -9,6 +9,7 @@ mod ci_cache;
 mod decoder;
 mod discovery;
 mod dto;
+mod gh_cli;
 mod network;
 mod owner;
 mod rate_gate;

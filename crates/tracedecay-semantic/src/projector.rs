@@ -604,6 +604,39 @@ fn take_full_encoder_groups<'a>(
 /// This keeps copied multi-chunk file tensors invariant when unrelated chunk
 /// IDs interleave in the changed-set's durable chunk-ID order without
 /// sacrificing the admitted production batch shape for singleton files.
+///
+/// # Why the resulting under-fill is not recovered by batching at the model
+///
+/// Flushing per file makes real corpora under-fill: every multi-chunk file
+/// contributes one partial group, so the achieved mean fill sits far below the
+/// admitted batch width and the forward-pass count tracks the multi-chunk file
+/// count rather than the corpus size.
+///
+/// The obvious recovery — keep membership, but hand several groups to the
+/// model in one call — is unavailable, and not because of this function.
+/// `TextEmbedding::transform` splits its input with `texts.chunks(batch_size)`
+/// and runs one `ort::Session::run` per chunk, while the tokenizer pads with
+/// `PaddingStrategy::BatchLongest`. So a chunk's ONNX input shape is
+/// `[chunk_len, longest_encoding_in_that_chunk]`, and the two reachable
+/// merges are both dead ends:
+///
+/// - Equal-sized groups concatenated under `Some(k)` are split straight back
+///   apart by `chunks(k)`. Byte-identical, and exactly as many forward passes
+///   as before — the win is zero.
+/// - Differently-sized groups can only merge under `Some(total)`, which
+///   re-pads the shorter group's rows to the longer group's length. Whether
+///   that perturbs the emitted floats is a property of the specific ONNX
+///   graph: measured byte-identical on the cataloged
+///   `jinaai/jina-embeddings-v2-base-code`, but every lane of every row moves
+///   by up to 2.4e-2 on `Xenova/all-MiniLM-L6-v2`. Since vector bytes feed
+///   `vector_output_digest` and thence the generation manifest digest, a
+///   merge that is safe only for today's single catalog entry would turn any
+///   future catalog addition into an unannounced full re-embed.
+///
+/// `tests/inference_batch_identity.rs` is the executable form of both
+/// findings. Recovering this under-fill needs a batching seam below FastEmbed
+/// (pre-tokenized inputs with an explicit padded length), not a regrouping
+/// here.
 fn canonical_encoder_groups<'a, Missing>(
     changes: &'a [ChangedCodeChunkV1],
     chunks: &BTreeMap<CodeSearchChunkId, &'a CodeSearchChunkV1>,

@@ -122,6 +122,19 @@ const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
 const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
+/// Anti-livelock ceiling on the advances one activation will drive.
+///
+/// A single `TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1` advance never
+/// finalizes even a one-file generation, so an activation that stopped after
+/// one advance could never seat the owners and always reported typed warming
+/// to its caller. Each advance is guaranteed to make progress -- it either
+/// finalizes or consumes its full page/finalization budget -- so this is a
+/// bound against a source that never reports completion, not a work budget or
+/// a tunable. At 64 operations per advance it covers far more pages than any
+/// real repository's sealed generation contains; exceeding it still yields the
+/// same retryable warming error the caller already handles.
+#[cfg(test)]
+const TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
@@ -2761,12 +2774,23 @@ impl LatestCodeTextGenerationV1 {
             .artifact_occurrence_by_chunk(chunk)
     }
 
+    /// Drive the resumable text-artifact build to completion for activation.
+    ///
+    /// One bounded advance cannot finalize even a one-file generation, so
+    /// activation must keep advancing until the build reports completion.
+    /// Every advance stays bounded and cancellation-checkpointed, so a
+    /// shutdown or epoch bump still surfaces immediately through `?` rather
+    /// than being absorbed by this loop.
     #[cfg(test)]
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
-            return Err(RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving owners are warming".to_owned(),
-            ));
+        let mut advances = 0_usize;
+        while !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
