@@ -341,7 +341,9 @@ pub async fn publish(
             detail,
         },
     };
-    let _ = live_bus().send(record);
+    let bus = live_bus();
+    let _ = bus.send(record);
+    crate::hotpath_observe::event_lane_publish(bus.len(), bus.receiver_count());
 }
 
 pub async fn replay_after(

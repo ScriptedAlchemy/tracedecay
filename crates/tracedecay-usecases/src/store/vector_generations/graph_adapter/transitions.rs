@@ -373,6 +373,7 @@ impl GraphVectorGenerationStoreV1 {
                 }
             };
             if let Some(publication) = published {
+                crate::hotpath_observe::vector_publication_replayed();
                 return Ok(VectorGenerationBeginOutcomeV1::AlreadyPublished {
                     build_id: result,
                     publication,
@@ -461,6 +462,7 @@ impl GraphVectorGenerationStoreV1 {
                         )
                     })?
                     .remove(build_id);
+                crate::hotpath_observe::vector_build_cancelled();
                 Ok(true)
             }
             SemanticVectorStageCancelOutcome::MissingStage => {
@@ -571,6 +573,10 @@ impl GraphVectorGenerationStoreV1 {
         pending.state = after;
         pending.revision = next_revision;
         pending.publication = publication;
+        crate::hotpath_observe::vector_batch_committed(
+            prepared.receipt.receipts.len(),
+            checkpoint.completed_batches,
+        );
         Ok(checkpoint)
     }
 

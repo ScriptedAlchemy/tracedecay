@@ -53,6 +53,52 @@ pub(crate) fn retention_recovery_idle() {
     hotpath::gauge!("usecases.retention.cancellation_state").set(0.0);
 }
 
+/// Count one failed semantic activation/coordination outcome by its typed
+/// class. Success is visible through the surrounding phase spans; failures
+/// would otherwise vanish into mapped error returns.
+#[inline]
+pub(crate) fn semantic_coordination_error(
+    error: &crate::semantic_runtime::SemanticActivationCoordinationErrorV1,
+) {
+    use crate::semantic_runtime::SemanticActivationCoordinationErrorV1;
+    match error {
+        SemanticActivationCoordinationErrorV1::Unavailable => {
+            hotpath::gauge!("usecases.semantic.coordination.unavailable").inc(1.0);
+        }
+        SemanticActivationCoordinationErrorV1::Rejected
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => {
+            hotpath::gauge!("usecases.semantic.coordination.rejected").inc(1.0);
+        }
+        SemanticActivationCoordinationErrorV1::Conflict => {
+            hotpath::gauge!("usecases.semantic.coordination.conflict").inc(1.0);
+        }
+        SemanticActivationCoordinationErrorV1::Runtime(_) => {
+            hotpath::gauge!("usecases.semantic.coordination.runtime_failure").inc(1.0);
+        }
+    }
+}
+
+/// One completed redundancy generation read: vectors visited on the active
+/// generation versus vectors admitted (symbol-grain, integrity-checked).
+#[inline]
+pub(crate) fn semantic_redundancy_scan(scanned: usize, admitted: usize) {
+    hotpath::gauge!("usecases.semantic.redundancy.vectors_scanned").set(scanned as f64);
+    hotpath::gauge!("usecases.semantic.redundancy.vectors_admitted").set(admitted as f64);
+}
+
+/// Outcome of one redundancy generation read. A skipped read (no committed
+/// authority, disabled semantics, or a pin/integrity mismatch) is normal
+/// bounded behavior, but its rate distinguishes "semantics off" from "reads
+/// repeatedly failing verification".
+#[inline]
+pub(crate) fn semantic_redundancy_read(complete: bool) {
+    if complete {
+        hotpath::gauge!("usecases.semantic.redundancy.reads_complete").inc(1.0);
+    } else {
+        hotpath::gauge!("usecases.semantic.redundancy.reads_skipped").inc(1.0);
+    }
+}
+
 #[inline]
 pub(crate) fn semantic_queue(
     queued_batches: usize,
@@ -106,6 +152,88 @@ pub(crate) fn vector_resident_reservation(retained_bytes: u64, hydration_peak_by
 #[inline]
 pub(crate) fn vector_cancelled() {
     hotpath::gauge!("usecases.vector.cancellation_checkpoints").inc(1.0);
+}
+
+/// One committed projector batch: chunk receipts carried by this batch and
+/// the build's completed-batch progression after the commit.
+#[inline]
+pub(crate) fn vector_batch_committed(batch_chunks: usize, completed_batches: u64) {
+    hotpath::gauge!("usecases.vector.batch_chunks").set(batch_chunks as f64);
+    hotpath::gauge!("usecases.vector.completed_batches").set(completed_batches as f64);
+}
+
+/// A begin/rebuild request resolved to an already-published generation, so
+/// projection work was skipped and the durable publication was replayed.
+#[inline]
+pub(crate) fn vector_publication_replayed() {
+    hotpath::gauge!("usecases.vector.publication_replays").inc(1.0);
+}
+
+/// One staged vector build durably cancelled before publication.
+#[inline]
+pub(crate) fn vector_build_cancelled() {
+    hotpath::gauge!("usecases.vector.builds_cancelled").inc(1.0);
+}
+
+/// Size of one hydrated published vector generation (catalog-verified rows
+/// and vector payload bytes), recorded on every full generation-record read.
+#[inline]
+pub(crate) fn vector_generation_hydrated(rows: u64, vector_bytes: u64) {
+    hotpath::gauge!("usecases.vector.hydrated_rows").set(rows as f64);
+    hotpath::gauge!("usecases.vector.hydrated_bytes").set(vector_bytes as f64);
+}
+
+/// Depth of the published base-generation lineage walked during recovery.
+/// Growth here means incremental generations are chaining instead of being
+/// compacted onto a fresh base.
+#[inline]
+pub(crate) fn vector_lineage_depth(depth: usize) {
+    hotpath::gauge!("usecases.vector.lineage_depth").set(depth as f64);
+}
+
+/// Durable graph-replay release events written for retired generations.
+#[inline]
+pub(crate) fn retention_replay_releases_queued(count: usize) {
+    hotpath::gauge!("usecases.retention.replay_releases_queued").inc(count as f64);
+}
+
+/// Release events still awaiting graph-reconciler consumption after one
+/// bounded queue page scan.
+#[inline]
+pub(crate) fn retention_replay_releases_pending(count: usize) {
+    hotpath::gauge!("usecases.retention.replay_releases_pending").set(count as f64);
+}
+
+/// One release event consumed by the graph reconciler.
+#[inline]
+pub(crate) fn retention_replay_release_completed() {
+    hotpath::gauge!("usecases.retention.replay_releases_completed").inc(1.0);
+}
+
+/// Stranded scope roots moved into the retention quarantine stage.
+#[inline]
+pub(crate) fn retention_scopes_quarantined(count: usize) {
+    hotpath::gauge!("usecases.retention.scopes_quarantined").inc(count as f64);
+}
+
+/// Quarantined scope roots restored by a reconciliation rollback.
+#[inline]
+pub(crate) fn retention_scopes_restored(count: usize) {
+    hotpath::gauge!("usecases.retention.scopes_restored").inc(count as f64);
+}
+
+/// Quarantined scope roots unlinked after a durable deletion receipt.
+#[inline]
+pub(crate) fn retention_scopes_deleted(count: usize) {
+    hotpath::gauge!("usecases.retention.scopes_deleted").inc(count as f64);
+}
+
+/// Live activity bus state after one publish: queued records not yet seen by
+/// the slowest subscriber, and the current subscriber count.
+#[inline]
+pub(crate) fn event_lane_publish(queue_depth: usize, subscribers: usize) {
+    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
+    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
 }
 
 #[inline]
