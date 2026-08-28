@@ -617,3 +617,47 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
     }));
     SessionSyncServicePort::shutdown(&service).await;
 }
+
+/// `TRACEDECAY_SESSION_INGEST_DISABLED` must stop transcript ingest without
+/// unmounting anything else.
+///
+/// The live failure it covers: with the switch on, the startup import returned
+/// `Unavailable { session_ingest_disabled_by_env }`, `schedule_startup_import`
+/// reported that as a failed admission, the project's session context was
+/// retired, and the whole project full-upgrade failed
+/// (`full_upgrade_degraded ... session sync startup import was not admitted`).
+/// That same block admits the code-index scheduler, so every later background
+/// refresh answered `code_index_scheduler_unavailable` and the daemon could
+/// neither seal nor seat a code generation.
+#[test]
+fn configured_off_transcript_ingest_does_not_fail_the_project_mount() {
+    assert!(
+        DaemonSessionSyncService::classify_startup_import_outcome(
+            SessionSyncOutcomeV1::Unavailable {
+                reason_code: crate::daemon::SESSION_INGEST_DISABLED_REASON_V1,
+            },
+        )
+        .is_ok(),
+        "a configured-off ingest lane is a deliberate no-op and must never roll back the mount"
+    );
+}
+
+/// The skip above is exactly one reason code wide: every other unadmitted
+/// outcome is still a genuine failure that must roll the session context back.
+#[test]
+fn other_unadmitted_startup_import_outcomes_still_fail_the_project_mount() {
+    for outcome in [
+        SessionSyncOutcomeV1::Unavailable {
+            reason_code: "session_sync_coalesced_journal_read_failed",
+        },
+        SessionSyncOutcomeV1::Cancelled,
+        SessionSyncOutcomeV1::DeadlineExceeded,
+        SessionSyncOutcomeV1::WrongScope,
+    ] {
+        let refused = DaemonSessionSyncService::classify_startup_import_outcome(outcome.clone());
+        assert!(
+            refused.is_err(),
+            "startup import outcome {outcome:?} must still fail the project mount"
+        );
+    }
+}
