@@ -5,9 +5,7 @@ use tracedecay_store::runtime::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphVerifiedHeadV1, StoreShardIdV1,
 };
 
-use super::{
-    DIGEST_CHECK_INTERVAL_BYTES, GraphDbError, GraphGenerationManifest, GraphIdempotencyKey,
-};
+use super::{GraphDbError, GraphGenerationManifest, GraphIdempotencyKey};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -125,17 +123,22 @@ pub(crate) fn metadata_manifest_from_replay(
         GraphGenerationReplaySource::InlineManifest(_)
         | GraphGenerationReplaySource::SealedCodeGeneration(_) => return Ok(None),
     };
+    // The decoded metadata is kept for the binding comparison below instead
+    // of decoding the canonical payload a second time; `new_checked` may
+    // normalize (sort) dependencies, so the comparison still refuses a
+    // journaled payload that was not already canonical.
     let manifest = GraphGenerationManifest::new_checked(
-        metadata.projection,
-        metadata.generation,
-        metadata.source_generation,
-        metadata.watermark,
-        metadata.dependencies,
+        metadata.projection.clone(),
+        metadata.generation.clone(),
+        metadata.source_generation.clone(),
+        metadata.watermark.clone(),
+        metadata.dependencies.clone(),
         Vec::new(),
         Vec::new(),
         check,
     )?;
-    validate_metadata_binding(publication, &manifest, false, check)?;
+    validate_metadata_publication(publication)?;
+    validate_decoded_metadata_binding(publication, &manifest, &metadata, false, check)?;
     Ok(Some(manifest))
 }
 
@@ -145,11 +148,7 @@ pub(crate) fn validate_metadata_binding(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    publication
-        .validate()
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("metadata-only graph replay is invalid: {error}"),
-        })?;
+    validate_metadata_publication(publication)?;
     manifest.validate_checked(check)?;
     let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
     let metadata = match source {
@@ -160,6 +159,34 @@ pub(crate) fn validate_metadata_binding(
             return Err(GraphDbError::Conflict);
         }
     };
+    validate_decoded_metadata_binding(
+        publication,
+        manifest,
+        &metadata,
+        validate_expected_digest,
+        check,
+    )
+}
+
+fn validate_metadata_publication(
+    publication: &GraphPublicationReplayV1,
+) -> Result<(), GraphDbError> {
+    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
+        publication
+            .validate()
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("metadata-only graph replay is invalid: {error}"),
+            })
+    })
+}
+
+fn validate_decoded_metadata_binding(
+    publication: &GraphPublicationReplayV1,
+    manifest: &GraphGenerationManifest,
+    metadata: &GraphGenerationReplayMetadata,
+    validate_expected_digest: bool,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
     if metadata.projection != manifest.projection
         || metadata.generation != manifest.generation
         || metadata.source_generation != manifest.source_generation
@@ -177,11 +204,13 @@ pub(crate) fn validate_supplied_manifest_binding(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    publication
-        .validate()
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("graph publication replay is invalid: {error}"),
-        })?;
+    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
+        publication
+            .validate()
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("graph publication replay is invalid: {error}"),
+            })
+    })?;
     manifest.validate_checked(check)?;
     match checked_decode_replay_source(&publication.canonical_replay_source, check)? {
         GraphGenerationReplaySource::InlineManifest(replayed) if replayed == *manifest => {
@@ -192,9 +221,23 @@ pub(crate) fn validate_supplied_manifest_binding(
                 check,
             )
         }
-        GraphGenerationReplaySource::MetadataOnlyManifest(_)
-        | GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
-            validate_metadata_binding(publication, manifest, validate_expected_digest, check)
+        GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => {
+            validate_decoded_metadata_binding(
+                publication,
+                manifest,
+                &metadata,
+                validate_expected_digest,
+                check,
+            )
+        }
+        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => {
+            validate_decoded_metadata_binding(
+                publication,
+                manifest,
+                &vector.metadata,
+                validate_expected_digest,
+                check,
+            )
         }
         // A sealed code generation journals only its replay source, so the
         // supplied manifest cannot be compared field-by-field against a
@@ -223,21 +266,24 @@ fn validate_publication_manifest_identity(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let direct_dependencies =
-        manifest.relational_dependency_generations(&publication.key.projection.shard_id)?;
-    if publication.key.projection.namespace.as_str() != manifest.projection.namespace.as_str()
-        || publication.key.projection.projection.as_str() != manifest.projection.projection.as_str()
-        || publication.key.generation.as_str() != manifest.generation.as_str()
-        || publication.direct_dependency_generations != direct_dependencies
-        || publication.dependency_generation_closure_digest
-            != manifest.dependency_closure_digest(check)?
-        || (validate_expected_digest
-            && publication.expected_recovered_digest
-                != manifest.expected_recovered_digest(check)?)
-    {
-        return Err(GraphDbError::Conflict);
-    }
-    Ok(())
+    hotpath::measure_block!("graph_db.generation.replay.binding.identity", {
+        let direct_dependencies =
+            manifest.relational_dependency_generations(&publication.key.projection.shard_id)?;
+        if publication.key.projection.namespace.as_str() != manifest.projection.namespace.as_str()
+            || publication.key.projection.projection.as_str()
+                != manifest.projection.projection.as_str()
+            || publication.key.generation.as_str() != manifest.generation.as_str()
+            || publication.direct_dependency_generations != direct_dependencies
+            || publication.dependency_generation_closure_digest
+                != manifest.dependency_closure_digest(check)?
+            || (validate_expected_digest
+                && publication.expected_recovered_digest
+                    != manifest.expected_recovered_digest(check)?)
+        {
+            return Err(GraphDbError::Conflict);
+        }
+        Ok(())
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -345,17 +391,19 @@ pub(crate) fn checked_decode_replay_source(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphGenerationReplaySource, GraphDbError> {
     check()?;
-    let mut reader = CheckedSliceReader::new(payload, check);
-    let decoded = {
-        let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
-        match GraphGenerationReplaySource::deserialize(&mut deserializer) {
-            Ok(source) => deserializer.end().map(|()| source),
-            Err(error) => Err(error),
-        }
-    };
-    if let Some(error) = reader.take_failure() {
-        return Err(error);
-    }
+    // Parse straight from the in-memory slice. Reader-mode serde_json pulls
+    // exactly one byte per `Read::read` call through `io::Bytes` (measured:
+    // 2.9M one-byte reads and ~21x the slice-mode wall time for a 2.9MB
+    // payload), and `io::Bytes` retries `ErrorKind::Interrupted`, so the old
+    // checked reader's per-interval cancellation never aborted the parse —
+    // its failure only surfaced after the full slow parse finished. Checks at
+    // the decode boundaries bound the work between two cancellation checks by
+    // one slice parse of a payload capped at
+    // `MAX_GRAPH_REPLAY_SOURCE_BYTES_V1`, a tighter worst-case cancellation
+    // latency than the reader ever delivered.
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let decoded = GraphGenerationReplaySource::deserialize(&mut deserializer)
+        .and_then(|source| deserializer.end().map(|()| source));
     check()?;
     let source = decoded.map_err(|error| {
         GraphDbError::invalid(format!(
@@ -450,5 +498,88 @@ impl Read for CheckedSliceReader<'_> {
         output[..length].copy_from_slice(&remaining[..length]);
         self.offset += length;
         Ok(length)
+    }
+}
+
+// Temporary decomposition probe for the hydrate decode path; removed before
+// commit.
+#[cfg(test)]
+mod probe_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use super::*;
+    use crate::{
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphGenerationManifest, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
+        GraphWatermark, SourceGeneration,
+    };
+
+    fn corpus_manifest() -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("probe").unwrap(),
+            GraphProjectionId::new("decode").unwrap(),
+        );
+        let entities = (0..4_000)
+            .map(|index| {
+                GraphEntity::new(
+                    GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                    BTreeSet::new(),
+                    BTreeMap::from([(
+                        GraphPropertyName::new("marker").unwrap(),
+                        GraphProperty::String("x".repeat(700)),
+                    )]),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("probe-generation").unwrap(),
+            SourceGeneration::new("probe-source").unwrap(),
+            GraphWatermark::new("probe-watermark").unwrap(),
+            vec![],
+            entities,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn probe_current_decode_passes_and_cancellation() {
+        let manifest = corpus_manifest();
+        let payload = manifest.canonical_replay_source(&|| Ok(())).unwrap();
+        eprintln!("payload bytes: {}", payload.len());
+
+        let start = Instant::now();
+        let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
+        eprintln!("checked from_reader decode: {:?}", start.elapsed());
+
+        let start = Instant::now();
+        let slice: GraphGenerationReplaySource = serde_json::from_slice(&payload).unwrap();
+        eprintln!("plain from_slice decode: {:?}", start.elapsed());
+        assert_eq!(decoded, slice);
+
+        // Fail every check from the second invocation onward: the entry check
+        // passes, the first interval check fails. If a failed interval check
+        // aborted the parse, total polls would be ~2; if `io::Bytes` retries
+        // the Interrupted error and the parse runs to completion, polls will
+        // be ~payload_len / 64KiB.
+        let polls = AtomicUsize::new(0);
+        let start = Instant::now();
+        let result = checked_decode_replay_source(&payload, &|| {
+            if polls.fetch_add(1, Ordering::SeqCst) >= 1 {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        eprintln!(
+            "cancelled decode: polls={} elapsed={:?}",
+            polls.load(Ordering::SeqCst),
+            start.elapsed()
+        );
+        assert_eq!(result, Err(GraphDbError::Cancelled));
     }
 }
