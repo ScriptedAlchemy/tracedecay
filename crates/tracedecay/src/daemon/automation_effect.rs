@@ -598,6 +598,26 @@ pub(crate) enum AutomationEffectAdmission {
     PreAdmissionProblem(ApplicationProblemEnvelope),
 }
 
+/// Bounded admission-decision census: every prepared automation effect
+/// settles into exactly one of these outcomes, so a run that never executed
+/// is diagnosable from counters instead of log archaeology.
+fn observe_admission_decision(admission: &AutomationEffectAdmission) {
+    match admission {
+        AutomationEffectAdmission::Execute(_) => {
+            hotpath::gauge!("daemon.effect_admission.admitted_total").inc(1_u64);
+        }
+        AutomationEffectAdmission::Replay(_) => {
+            hotpath::gauge!("daemon.effect_admission.replayed_total").inc(1_u64);
+        }
+        AutomationEffectAdmission::Conflict => {
+            hotpath::gauge!("daemon.effect_admission.refused.conflict_total").inc(1_u64);
+        }
+        AutomationEffectAdmission::PreAdmissionProblem(_) => {
+            hotpath::gauge!("daemon.effect_admission.refused.pre_admission_total").inc(1_u64);
+        }
+    }
+}
+
 pub(crate) use input::{
     memory_curator_run_request, session_reflector_run_request, skill_writer_run_request,
     user_job_run_request,
@@ -1211,7 +1231,9 @@ impl AutomationEffectAuthority {
                     problem,
                 )
                 .map_err(contract_error)?;
-                return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
+                let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
+                observe_admission_decision(&admission);
+                return Ok(admission);
             }
             Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
         };
@@ -1333,7 +1355,7 @@ impl AutomationEffectAuthority {
         .map_err(|error| {
             contract_error(format!("automation reservation writer failed: {error}"))
         })??;
-        match reservation {
+        let admission = match reservation {
             ReservationResult::Replay {
                 terminal,
                 publication,
@@ -1456,7 +1478,9 @@ impl AutomationEffectAuthority {
                         None,
                     )
                     .await?;
-                    return Ok(AutomationEffectAdmission::Replay(Box::new(terminal)));
+                    let admission = AutomationEffectAdmission::Replay(Box::new(terminal));
+                    observe_admission_decision(&admission);
+                    return Ok(admission);
                 }
                 let recovery_cancellation = cancellation.clone();
                 let read_control =
@@ -1545,7 +1569,9 @@ impl AutomationEffectAuthority {
             ReservationResult::Conflict { terminal } => {
                 reservation_conflict_admission(dashboard_root, &journal_path, terminal).await
             }
-        }
+        }?;
+        observe_admission_decision(&admission);
+        Ok(admission)
     }
 
     fn terminal_for_run(
