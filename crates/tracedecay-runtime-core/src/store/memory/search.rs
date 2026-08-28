@@ -491,6 +491,7 @@ async fn project_memory_rank_snapshot(
     finish_read_snapshot(transaction, result).await
 }
 
+#[hotpath::measure(label = "runtime_core.memory.search")]
 pub(super) async fn search_project_memory_facts(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -508,6 +509,7 @@ pub(super) async fn search_project_memory_facts(
     Ok(page)
 }
 
+#[hotpath::measure(label = "runtime_core.memory.related")]
 pub(super) async fn related_project_memory_facts(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,

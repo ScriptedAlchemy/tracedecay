@@ -102,6 +102,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
     }
 
+    #[hotpath::measure(label = "daemon.code_index.branch_generations.revisions")]
     fn revisions(
         &self,
         base_reference: &RefId,
@@ -279,6 +280,10 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    #[hotpath::measure(
+        label = "daemon.code_index.branch_generations.generations",
+        future = true
+    )]
     async fn generations_for_revisions_with_bounds(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -354,18 +359,20 @@ impl CodeIndexSchedulerRegistryV1 {
                             return Err(CodeIndexSearchUnavailableReasonV1::Internal);
                         }
                     };
-                    if missing.base {
-                        scheduler.publish_exact_git_tree_generation(
-                            &exact_source(&base_reference, &base_revision, &base_tree)?,
-                            &control,
-                        )?;
-                    }
-                    if missing.head && !same_revision {
-                        scheduler.publish_exact_git_tree_generation(
-                            &exact_source(&head_reference, &head_revision, &head_tree)?,
-                            &control,
-                        )?;
-                    }
+                    hotpath::measure_block!("daemon.code_index.branch_generations.mint", {
+                        if missing.base {
+                            scheduler.publish_exact_git_tree_generation(
+                                &exact_source(&base_reference, &base_revision, &base_tree)?,
+                                &control,
+                            )?;
+                        }
+                        if missing.head && !same_revision {
+                            scheduler.publish_exact_git_tree_generation(
+                                &exact_source(&head_reference, &head_revision, &head_tree)?,
+                                &control,
+                            )?;
+                        }
+                    });
                     drop(scheduler);
                     match historical_generation_owner.publication.revisions(
                         &base_reference,

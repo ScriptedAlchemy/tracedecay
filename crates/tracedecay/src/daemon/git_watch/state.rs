@@ -2,13 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant as StdInstant;
 
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::DirtySet;
@@ -133,16 +132,16 @@ impl RetirementRaceProbe {
 /// OS watchers without collapsing their freshness requests.
 pub(super) struct WatchState {
     pub(super) common_dir: PathBuf,
-    ownership: StdMutex<WatchStateOwnership>,
-    pub(super) dirty: AsyncMutex<DirtySet>,
+    ownership: super::ProfiledStdMutex<WatchStateOwnership>,
+    pub(super) dirty: super::ProfiledTokioMutex<DirtySet>,
     pub(super) reconciliation_pending: AtomicBool,
     pub(super) wake: Notify,
     pub(super) reconfigure: Notify,
-    retry_not_before: std::sync::Mutex<Option<Instant>>,
+    retry_not_before: super::ProfiledStdMutex<Option<Instant>>,
     retry_backoff_ms: AtomicU64,
     pub(super) maintenance: MaintenanceCoordinator,
     pub(super) health: ProjectHealth,
-    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    task: super::ProfiledStdMutex<Option<tokio::task::JoinHandle<()>>>,
     retirement: CancellationToken,
     #[cfg(test)]
     pub(super) entered_debounce: Notify,
@@ -182,22 +181,31 @@ impl WatchState {
     ) -> Self {
         Self {
             common_dir,
-            ownership: StdMutex::new(WatchStateOwnership {
-                worktrees: BTreeMap::from([(
-                    project_root,
-                    WorktreeWatchRegistration { git_dir, config },
-                )]),
-                retired: false,
-            }),
-            dirty: AsyncMutex::new(DirtySet::default()),
+            ownership: hotpath::mutex!(
+                std::sync::Mutex::new(WatchStateOwnership {
+                    worktrees: BTreeMap::from([(
+                        project_root,
+                        WorktreeWatchRegistration { git_dir, config },
+                    )]),
+                    retired: false,
+                }),
+                label = "daemon.git.watch.ownership"
+            ),
+            dirty: hotpath::mutex!(
+                tokio::sync::Mutex::new(DirtySet::default()),
+                label = "daemon.git.watch.dirty"
+            ),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             reconfigure: Notify::new(),
-            retry_not_before: std::sync::Mutex::new(None),
+            retry_not_before: hotpath::mutex!(
+                std::sync::Mutex::new(None),
+                label = "daemon.git.watch.retry"
+            ),
             retry_backoff_ms: AtomicU64::new(250),
             maintenance,
             health: ProjectHealth::default(),
-            task: StdMutex::new(None),
+            task: hotpath::mutex!(std::sync::Mutex::new(None), label = "daemon.git.watch.task"),
             retirement: CancellationToken::new(),
             #[cfg(test)]
             entered_debounce: Notify::new(),

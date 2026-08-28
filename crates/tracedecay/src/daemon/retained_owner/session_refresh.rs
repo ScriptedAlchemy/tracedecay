@@ -36,6 +36,7 @@ const REQUEST_MAX_WORK_UNITS: u64 = 10_000;
 const SESSION_REFRESH_LIFECYCLE_CAPABILITY: &[u8] =
     b"application.retained.session-refresh-lifecycle.v1";
 
+#[hotpath::measure(label = "daemon.retained.session.refresh_admit")]
 pub(crate) fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,

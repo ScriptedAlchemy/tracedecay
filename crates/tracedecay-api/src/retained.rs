@@ -108,7 +108,11 @@ where
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::measure_block!("api.http.handler", owner.invoke_retained(request).await)
+    hotpath::future!(
+        async move { owner.invoke_retained(request).await },
+        label = "api.http.handler"
+    )
+    .await
 }
 
 pub fn retained_invalid_request_response(request_id: RequestId) -> Response {

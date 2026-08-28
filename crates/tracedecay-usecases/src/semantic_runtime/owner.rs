@@ -64,6 +64,7 @@ where
         status
     }
 
+    #[hotpath::measure(label = "usecases.semantic.owner.activate", future = true)]
     pub async fn activate(
         &self,
         request: SemanticActivationRequestV1,
@@ -85,6 +86,7 @@ where
         Ok(receipt)
     }
 
+    #[hotpath::measure(label = "usecases.semantic.owner.rollback", future = true)]
     pub async fn rollback(
         &self,
         request: SemanticRollbackRequestV1,

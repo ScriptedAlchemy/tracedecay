@@ -12,6 +12,7 @@ use super::DaemonEngine;
 use super::portable_database_owner_reconciler;
 use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 
+#[hotpath::measure(label = "daemon.project.compose.bind_graph", future = true)]
 pub(super) async fn bind_verified_project_graph_runtime(
     database: Arc<crate::db::Database>,
     sessions: &RegisteredGlobalDb,

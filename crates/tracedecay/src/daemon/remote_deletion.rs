@@ -25,6 +25,7 @@ pub(super) enum RemoteDeletionBootMode {
     DeletionOnly(RemoteDeletionReceipt),
 }
 
+#[hotpath::measure(label = "daemon.remote.deletion_boot", future = true)]
 pub(super) async fn resume_remote_account_deletion_for_boot(
     owners: &RemoteDeletionRuntimeOwners,
 ) -> crate::errors::Result<RemoteDeletionBootMode> {
@@ -189,6 +190,7 @@ impl RemoteDeletionReceipt {
     }
 }
 
+#[hotpath::measure(label = "daemon.remote.deletion_dispatch", future = true)]
 pub(super) async fn dispatch_remote_deletion(
     State(registry): State<DaemonHttpApplicationRegistry>,
     request: Request<Body>,
@@ -254,6 +256,7 @@ impl RemoteDeletionExecutionError {
     }
 }
 
+#[hotpath::measure(label = "daemon.remote.deletion_execute", future = true)]
 async fn execute_remote_deletion(
     owners: &RemoteDeletionRuntimeOwners,
     request: RemoteDeletionHttpRequest,
@@ -292,9 +295,12 @@ async fn parse_remote_deletion_request(
     if !has_json_content_type(request.headers()) {
         return Err(RemoteDeletionReceipt::invalid_request());
     }
-    let body = to_bytes(request.into_body(), MAX_REMOTE_DELETION_BODY_BYTES)
-        .await
-        .map_err(|_| RemoteDeletionReceipt::invalid_request())?;
+    let body = hotpath::future!(
+        to_bytes(request.into_body(), MAX_REMOTE_DELETION_BODY_BYTES),
+        label = "daemon.remote.deletion_parse"
+    )
+    .await
+    .map_err(|_| RemoteDeletionReceipt::invalid_request())?;
     serde_json::from_slice(&body).map_err(|_| RemoteDeletionReceipt::invalid_request())
 }
 

@@ -19,6 +19,7 @@ hotpath = [
     "tracedecay-lsp/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
@@ -30,6 +31,7 @@ hotpath-alloc = [
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
@@ -41,6 +43,7 @@ hotpath-cpu = [
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
 ]
 default = []
 # Forwarded from the root package. Gates daemonless fixture runtimes and the

@@ -75,6 +75,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
     /// Re-observe the exact latest durable transition after a verified model
     /// lifecycle recovery. The registrar remains the sole live-route publisher;
     /// this method neither changes configuration nor publishes graph state.
+    #[hotpath::measure(label = "usecases.semantic.reobserve", future = true)]
     pub async fn reobserve_current_activation(
         &self,
     ) -> Result<
@@ -116,6 +117,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
         Ok(Some(identity))
     }
 
+    #[hotpath::measure(label = "usecases.semantic.bootstrap", future = true)]
     pub async fn bootstrap_query_profile(
         &self,
         configuration: ConfigurationCurrentStateV1,
@@ -164,6 +166,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.semantic.activate", future = true)]
     pub async fn stage_and_activate(
         &self,
         base_configuration: SemanticConfigurationPinV1,
@@ -217,6 +220,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.semantic.rollback", future = true)]
     pub async fn stage_and_rollback(
         &self,
         base_configuration: SemanticConfigurationPinV1,

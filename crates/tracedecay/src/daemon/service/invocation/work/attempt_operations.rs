@@ -23,6 +23,7 @@ use super::{
 };
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.start_attempt")]
 pub(super) fn start_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -93,6 +94,7 @@ pub(super) fn start_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.synthesize")]
 pub(super) fn synthesize(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -165,6 +167,7 @@ pub(super) fn synthesize(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.attempt_status")]
 pub(super) fn attempt_status(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -194,6 +197,7 @@ pub(super) fn attempt_status(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.cancel_attempt")]
 pub(super) fn cancel_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -228,6 +232,7 @@ pub(super) fn cancel_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.retry_attempt")]
 pub(super) fn retry_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -319,6 +324,7 @@ pub(super) fn retry_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.resume_attempts")]
 pub(super) fn resume_attempts(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,

@@ -27,6 +27,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Reads the next immutable page after an exact observation/usage ordinal.
+    #[hotpath::measure(future = true, label = "global_db.registered.provider_usage.query")]
     pub async fn provider_usage_observations_after(
         &self,
         scope: &ObservationScopeV1,

@@ -19,6 +19,7 @@ pub struct RunListParams {
 /// The newest automation runs from the ledger, projected to the fields the
 /// run-history surface reads. Heavy per-run payloads (proposed/applied ops,
 /// validation reports) stay behind the per-run artifact routes.
+#[hotpath::measure(label = "dashboard_api.runs.list", future = true)]
 pub async fn run_list(
     State(state): State<DashboardState>,
     axum::extract::Query(params): axum::extract::Query<RunListParams>,
@@ -80,6 +81,7 @@ fn run_history_row(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
+#[hotpath::measure(label = "dashboard_api.runs.artifacts", future = true)]
 pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
@@ -115,6 +117,7 @@ pub async fn artifact_list(
     }
 }
 
+#[hotpath::measure(label = "dashboard_api.runs.artifact", future = true)]
 pub async fn artifact_payload(
     State(state): State<DashboardState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,

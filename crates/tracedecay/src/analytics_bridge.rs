@@ -29,6 +29,7 @@ pub use tracedecay_usecases::analytics_bridge::{
 // Takes the source list by value: a borrowed slice iterator held across the
 // per-source awaits trips rustc's higher-ranked Send leak check when this
 // future runs inside the spawned startup catch-up task.
+#[hotpath::measure(label = "analytics.import")]
 pub(crate) async fn import_hook_analytics(
     gdb: &RegisteredGlobalDb,
     sources: Vec<HookImportSource>,
@@ -54,6 +55,7 @@ fn cli_project_root() -> Option<PathBuf> {
         .and_then(|cwd| crate::config::discover_project_root(&cwd))
 }
 
+#[hotpath::measure(label = "analytics.messages")]
 async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
@@ -74,7 +76,7 @@ async fn registered_diagnostics_message_count(
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
-#[hotpath::measure]
+#[hotpath::measure(label = "analytics.sync_cli")]
 pub async fn run_analytics_sync() -> crate::errors::Result<()> {
     let project_root = cli_project_root();
     let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
@@ -87,7 +89,7 @@ pub async fn run_analytics_sync() -> crate::errors::Result<()> {
 
 /// `tracedecay analytics diagnostics`: the CLI wrapper around the dashboard
 /// diagnostics summary — durable `analytics_events` plus merged hook JSONL.
-#[hotpath::measure]
+#[hotpath::measure(label = "analytics.diagnostics_cli")]
 pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,
@@ -109,6 +111,7 @@ pub async fn run_analytics_diagnostics(
     Ok(())
 }
 
+#[hotpath::measure(label = "analytics.admin")]
 async fn call_admin_cli(
     project_root: Option<PathBuf>,
     arguments: Value,
@@ -120,6 +123,7 @@ async fn call_admin_cli(
     crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
+#[hotpath::measure(label = "analytics.sync")]
 pub(crate) async fn analytics_sync_with_db(
     gdb: &RegisteredGlobalDb,
     project_root: Option<&Path>,
@@ -128,6 +132,7 @@ pub(crate) async fn analytics_sync_with_db(
     import_hook_analytics(gdb, sources).await.as_json()
 }
 
+#[hotpath::measure(label = "analytics.diagnostics")]
 pub(crate) async fn analytics_diagnostics_with_db(
     gdb: &RegisteredGlobalDb,
     project_sessions: Option<&RegisteredGlobalDb>,
@@ -149,8 +154,9 @@ pub(crate) async fn analytics_diagnostics_with_db(
     } else {
         project_root.map(RegisteredGlobalDb::canonical_project_key)
     };
-    let events = gdb
-        .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+    let events = hotpath::measure_block!(
+        "analytics.events",
+        gdb.query_analytics_events(&crate::global_db::AnalyticsEventQuery {
             provider: None,
             project_id: project_filter.clone(),
             session_id: None,
@@ -161,15 +167,18 @@ pub(crate) async fn analytics_diagnostics_with_db(
             limit: EVENT_SAMPLE_LIMIT,
         })
         .await
-        .map_err(cli_error)?;
-    let observatory = tracedecay_usecases::observability::observatory_read_model(
-        gdb,
-        project_filter.as_deref(),
-        0,
-    )
-    .await;
-    let observatory = tracedecay_usecases::observability::observatory_cli_value(&observatory)
-        .map_err(cli_error)?;
+        .map_err(cli_error)?
+    );
+    let observatory = hotpath::measure_block!("analytics.observatory", {
+        let observatory = tracedecay_usecases::observability::observatory_read_model(
+            gdb,
+            project_filter.as_deref(),
+            0,
+        )
+        .await;
+        tracedecay_usecases::observability::observatory_cli_value(&observatory)
+            .map_err(cli_error)?
+    });
     let provider_scope = if all_projects {
         None
     } else {
@@ -183,15 +192,17 @@ pub(crate) async fn analytics_diagnostics_with_db(
         })
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = tracedecay_usecases::observability::costs_read_model(
-        gdb,
-        provider_usage_db,
-        provider_scope.as_ref(),
-        project_filter.as_deref(),
-        0,
-    )
-    .await;
-    let costs = tracedecay_usecases::observability::costs_cli_value(&costs).map_err(cli_error)?;
+    let costs = hotpath::measure_block!("analytics.costs", {
+        let costs = tracedecay_usecases::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            project_filter.as_deref(),
+            0,
+        )
+        .await;
+        tracedecay_usecases::observability::costs_cli_value(&costs).map_err(cli_error)?
+    });
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
@@ -203,9 +214,12 @@ pub(crate) async fn analytics_diagnostics_with_db(
             .map(|layout| layout.data_root)
     });
     let hook_filter_root = if all_projects { None } else { project_root };
-    let hook_analytics = crate::dashboard::analytics_api::read_hook_analytics_rows_at(
-        store_root.as_deref(),
-        hook_filter_root,
+    let hook_analytics = hotpath::measure_block!(
+        "analytics.hooks",
+        crate::dashboard::analytics_api::read_hook_analytics_rows_at(
+            store_root.as_deref(),
+            hook_filter_root,
+        )
     );
 
     let message_count =
@@ -216,10 +230,13 @@ pub(crate) async fn analytics_diagnostics_with_db(
     } else {
         Some(event_rows.as_slice())
     };
-    let mut summary = crate::dashboard::analytics_api::diagnostics_summary_from_parts(
-        message_count,
-        &hook_analytics,
-        durable,
+    let mut summary = hotpath::measure_block!(
+        "analytics.assemble",
+        crate::dashboard::analytics_api::diagnostics_summary_from_parts(
+            message_count,
+            &hook_analytics,
+            durable,
+        )
     );
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(

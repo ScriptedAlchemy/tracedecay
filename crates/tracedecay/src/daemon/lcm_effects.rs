@@ -110,8 +110,11 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                self.db
-                    .lcm_protect_session_raw_messages(&request.provider, &request.session_id),
+                hotpath::future!(
+                    self.db
+                        .lcm_protect_session_raw_messages(&request.provider, &request.session_id),
+                    label = "daemon.lcm.hydrate"
+                ),
             )
             .await?;
         if matches!(

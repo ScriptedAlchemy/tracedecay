@@ -426,6 +426,7 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Self { port }
     }
 
+    #[hotpath::measure(label = "application.git.native_integration.preflight")]
     pub fn preflight(
         &self,
         request: NativeIntegrationPreflightRequestV1,
@@ -439,6 +440,7 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(outcome)
     }
 
+    #[hotpath::measure(label = "application.git.native_integration.apply")]
     pub fn apply(
         &self,
         request: NativeIntegrationApplyRequestV1,
@@ -450,6 +452,7 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(receipt)
     }
 
+    #[hotpath::measure(label = "application.git.native_integration.status")]
     pub fn status(
         &self,
         request: NativeIntegrationStatusRequestV1,
@@ -462,6 +465,7 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(status)
     }
 
+    #[hotpath::measure(label = "application.git.native_integration.cancel")]
     pub fn cancel(
         &self,
         request: NativeIntegrationCancelRequestV1,

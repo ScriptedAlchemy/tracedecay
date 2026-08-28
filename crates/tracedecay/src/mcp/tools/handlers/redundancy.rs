@@ -17,6 +17,7 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::decode_primitive_request;
 
+#[hotpath::measure(label = "mcp.health.redundancy.total")]
 pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -26,7 +27,11 @@ pub(crate) async fn handle_redundancy(
     let request: RedundancySurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_redundancy")?;
     let options = redundancy_options(&request, scope_prefix);
-    let scan = redundancy_scan(cg, graph, &options).await?;
+    let scan = hotpath::future!(
+        redundancy_scan(cg, graph, &options),
+        label = "mcp.health.redundancy.scan"
+    )
+    .await?;
     let result = serde_json::from_value::<RedundancyResultV1>(scan.output.clone())?;
     let output = serde_json::to_value(result)?;
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {

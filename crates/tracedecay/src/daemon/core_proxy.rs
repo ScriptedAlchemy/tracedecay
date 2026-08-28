@@ -66,6 +66,7 @@ pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -76,6 +77,7 @@ pub async fn proxy_stdio_to_daemon(
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -141,6 +143,7 @@ pub async fn proxy_transport_to_daemon(
 /// `drain_bound` overrides the per-request bound derived by
 /// [`disconnect_drain_bound`]; production passes `None` and always derives it.
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.proxy.transport", future = true)]
 pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -229,6 +232,7 @@ fn request_tool_name(line: &str) -> Option<String> {
 /// how a disconnected session turns into a long-lived orphan holding its fds
 /// and daemon connection.
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.proxy.drain", future = true)]
 async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
@@ -247,6 +251,7 @@ async fn drain_daemon_request_after_disconnect(
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.proxy.host_input", future = true)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -384,6 +389,7 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
     *handshake = base_handshake.clone();
 }
 
+#[hotpath::measure(label = "daemon.engine.proxy.initialize_route", future = true)]
 pub(crate) async fn resolve_daemon_initialize_route(
     params: Option<&serde_json::Value>,
     registry: Option<&crate::global_db::RegisteredGlobalDb>,
@@ -474,6 +480,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
     Ok(None)
 }
 
+#[hotpath::measure(label = "daemon.engine.proxy.repository_identity", future = true)]
 pub(super) async fn bounded_repository_identity(
     path: &Path,
 ) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
@@ -575,6 +582,7 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
+#[hotpath::measure(label = "daemon.engine.proxy.request_retry", future = true)]
 async fn send_daemon_request_line_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -595,6 +603,7 @@ async fn send_daemon_request_line_with_project_open_retry(
     Ok(responses)
 }
 
+#[hotpath::measure(label = "daemon.engine.proxy.request", future = true)]
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -773,6 +782,7 @@ fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<Json
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure(label = "daemon.engine.proxy.one_request", future = true)]
 async fn proxy_one_request(
     socket_path: &Path,
     handshake: &DaemonHandshake,

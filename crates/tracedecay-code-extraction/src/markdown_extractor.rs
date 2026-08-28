@@ -147,9 +147,7 @@ impl MarkdownExtractor {
         Self::add_file_node(&mut state, file_path, source);
 
         if let Ok(tree) = Self::parse(source) {
-            crate::hotpath_observe::measure_query(|| {
-                Self::visit(&mut state, tree.root_node());
-            });
+            crate::hotpath_observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
         }
 
         Self::build_result(state, start)
@@ -277,25 +275,8 @@ impl MarkdownExtractor {
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = crate::hotpath_observe::measure_language(|| {
-            let mut parser = Parser::new();
-            parser
-                .set_language(&tracedecay_large_treesitters::markdown::LANGUAGE.into())
-                .map_err(|e| format!("failed to load markdown grammar: {e}"))?;
-            Ok::<_, String>(parser)
-        })?;
-        crate::hotpath_observe::measure_parse_file(
-            "Markdown",
-            source.len(),
-            || {
-                parser
-                    .parse(source, None)
-                    .ok_or_else(|| "tree-sitter parse returned None".to_string())
-            },
-            |result| match result {
-                Ok(tree) => tree.root_node().named_child_count(),
-                Err(_) => 0,
-            },
+        crate::ts_provider::parse_extractor_source_with_labeled_lookup(
+            "markdown", "markdown", source,
         )
     }
 

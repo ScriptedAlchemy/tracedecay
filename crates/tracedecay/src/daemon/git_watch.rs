@@ -42,7 +42,6 @@ use std::time::{Duration, Instant as StdInstant};
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use notify::EventKind;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
@@ -51,6 +50,16 @@ use tracedecay_runtime_core::git_discovery::{
 };
 
 use crate::config::SyncConfig;
+
+#[cfg(feature = "hotpath")]
+pub(super) type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+pub(super) type ProfiledStdMutex<T> = std::sync::Mutex<T>;
+
+#[cfg(feature = "hotpath")]
+pub(super) type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+pub(super) type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 #[cfg(test)]
 use super::maintenance::retention_maintenance_enabled;
@@ -162,21 +171,22 @@ pub(super) struct GitWatcherInner {
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
-    admission: std::sync::Mutex<()>,
+    admission: ProfiledStdMutex<()>,
     /// Canonical git common directory → repository-scoped watch state.
-    projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
+    projects: ProfiledTokioMutex<HashMap<PathBuf, Arc<WatchState>>>,
     /// Single-flight retry owners for roots whose identity discovery timed
     /// out: a bounded git timeout is uncertainty, not absence, so admission
     /// arms a backoff retry instead of leaving the repository unwatched until
     /// the next handshake. Keyed by requested project root.
-    identity_retries: std::sync::Mutex<HashMap<PathBuf, JoinHandle<()>>>,
+    identity_retries: ProfiledStdMutex<HashMap<PathBuf, JoinHandle<()>>>,
     /// Bounded roster of capacity-refused repositories kept on the backstop's
     /// scheduler-ingress freshness floor until a watch slot frees.
-    overflow: std::sync::Mutex<overflow::OverflowRoster>,
+    overflow: ProfiledStdMutex<overflow::OverflowRoster>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
-    backstop_task: Mutex<Option<JoinHandle<()>>>,
+    backstop_task: ProfiledTokioMutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
-    shutdown_completion: Mutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
+    shutdown_completion:
+        ProfiledTokioMutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
     #[cfg(test)]
     repository_publication_probe: ownership::PublicationRaceProbe,
     #[cfg(test)]
@@ -219,13 +229,31 @@ impl GitWatcher {
                 code_index_schedulers,
                 cancellation: tracedecay_usecases::context::CancellationToken::new(),
                 enabled,
-                admission: std::sync::Mutex::new(()),
-                projects: Mutex::new(HashMap::new()),
-                identity_retries: std::sync::Mutex::new(HashMap::new()),
-                overflow: std::sync::Mutex::new(overflow::OverflowRoster::default()),
-                backstop_task: Mutex::new(None),
+                admission: hotpath::mutex!(
+                    std::sync::Mutex::new(()),
+                    label = "daemon.git.watch.admission"
+                ),
+                projects: hotpath::mutex!(
+                    tokio::sync::Mutex::new(HashMap::new()),
+                    label = "daemon.git.watch.projects"
+                ),
+                identity_retries: hotpath::mutex!(
+                    std::sync::Mutex::new(HashMap::new()),
+                    label = "daemon.git.watch.identity_retries"
+                ),
+                overflow: hotpath::mutex!(
+                    std::sync::Mutex::new(overflow::OverflowRoster::default()),
+                    label = "daemon.git.watch.overflow_roster"
+                ),
+                backstop_task: hotpath::mutex!(
+                    tokio::sync::Mutex::new(None),
+                    label = "daemon.git.watch.backstop_task"
+                ),
                 shutting_down: AtomicBool::new(false),
-                shutdown_completion: Mutex::new(None),
+                shutdown_completion: hotpath::mutex!(
+                    tokio::sync::Mutex::new(None),
+                    label = "daemon.git.watch.shutdown_completion"
+                ),
                 #[cfg(test)]
                 repository_publication_probe: ownership::PublicationRaceProbe::default(),
                 #[cfg(test)]
@@ -302,6 +330,7 @@ impl GitWatcher {
     ///
     /// Called once from `run_foreground_unix` after the engine is built. Safe to
     /// call on a disabled watcher (no-op).
+    #[hotpath::measure(label = "daemon.git.watch.spawn", future = true)]
     pub(super) async fn spawn(&self) -> GitWatcherStart {
         if !self.inner.enabled {
             return GitWatcherStart::Disabled;
@@ -329,7 +358,7 @@ impl GitWatcher {
             async move {
                 backstop::run(watcher).await;
             },
-            label = "daemon.git_watch.backstop"
+            label = "daemon.git.watch.backstop"
         ));
         *retained = Some(handle);
         #[cfg(test)]
@@ -338,6 +367,7 @@ impl GitWatcher {
     }
 
     /// Stops every watcher-owned task and joins it before database shutdown.
+    #[hotpath::measure(label = "daemon.git.watch.shutdown", future = true)]
     pub async fn shutdown(&self) -> GitWatcherShutdownOutcome {
         if !self.inner.enabled {
             return GitWatcherShutdownOutcome::default();
@@ -479,6 +509,7 @@ fn watch_status_reason(
 /// Supervises one repository's watch task: on panic, restart with capped
 /// exponential backoff so a transient watcher failure never permanently drops a
 /// project (the backstop still covers it in the meantime).
+#[hotpath::measure(label = "daemon.git.watch.supervise", future = true)]
 async fn supervise_repository(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let mut backoff = Duration::from_millis(500);
     let cancellation = state.cancellation(&inner.cancellation);
@@ -511,6 +542,7 @@ async fn supervise_repository(inner: Arc<GitWatcherInner>, state: Arc<WatchState
 /// One repository event loop. The watcher is rebuilt when another linked
 /// worktree registers so its per-worktree operation-marker directory joins the
 /// same small metadata watch set.
+#[hotpath::measure(label = "daemon.git.watch.repository", future = true)]
 async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let cancellation = state.cancellation(&inner.cancellation);
     loop {
@@ -810,6 +842,7 @@ fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: StdInst
     cancellation.is_cancelled() || StdInstant::now() >= deadline
 }
 
+#[hotpath::measure(label = "daemon.git.watch.operation_scan")]
 fn operation_state_blocking(
     state: &WatchState,
     max_worktrees: usize,
@@ -869,6 +902,7 @@ fn operation_state(state: &WatchState, max_worktrees: usize) -> OperationState {
     }
 }
 
+#[hotpath::measure(label = "daemon.git.watch.operation", future = true)]
 async fn observe_operation_state(
     state: Arc<WatchState>,
     cancellation: WatchCancellation,
@@ -910,6 +944,7 @@ async fn observe_operation_state(
 /// scheduler owns exact source revision resolution, gix status,
 /// changed-candidate evidence, generation assembly, and its short CAS
 /// publication; this watcher owns none of those authorities.
+#[hotpath::measure(label = "daemon.git.watch.freshness", future = true)]
 async fn request_freshness_for_repository(
     inner: &GitWatcherInner,
     state: &Arc<WatchState>,
@@ -1075,6 +1110,7 @@ fn retain_freshness_retry(state: &WatchState, affected_roots: Option<BTreeSet<Pa
 /// (e.g. ENOSPC). A fixed cadence is deliberate: filesystem mtimes cannot
 /// faithfully summarize loose-ref content changes, while the scheduler's gix
 /// reconciliation can.
+#[hotpath::measure(label = "daemon.git.watch.degraded", future = true)]
 async fn degraded_poll_loop(
     inner: &Arc<GitWatcherInner>,
     state: &Arc<WatchState>,

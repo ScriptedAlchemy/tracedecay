@@ -212,7 +212,7 @@ impl Display for WorkflowFanOutRuntimeError {
 
 impl std::error::Error for WorkflowFanOutRuntimeError {}
 
-#[hotpath::measure]
+#[hotpath::measure(label = "application.workflow.fan_out.prepare")]
 pub fn prepare_workflow_fan_out(
     request: &WorkflowFanOutRequest,
 ) -> Result<WorkflowFanOutPlan, WorkflowFanOutRuntimeError> {
@@ -357,7 +357,7 @@ pub fn prepare_workflow_fan_out(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "application.workflow.fan_out.plan")]
 pub fn durable_workflow_fan_out_plan(
     plan: &WorkflowFanOutPlan,
     provider: &WorkflowProviderAdmission,

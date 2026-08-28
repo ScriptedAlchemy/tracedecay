@@ -565,6 +565,7 @@ impl GitRootReadPort for GitReadAuthorityV1 {
     }
 }
 
+#[hotpath::measure(label = "usecases.git.execute_read")]
 pub fn execute_git_read(
     authority: Option<&GitReadAuthorityV1>,
     selected_scope: &ResolvedScope,
@@ -579,6 +580,7 @@ pub fn execute_git_read(
     }
 }
 
+#[hotpath::measure(label = "usecases.git.execute_historical_read")]
 pub fn execute_historical_git_read(
     authority: Option<&GitReadAuthorityV1>,
     selected_scope: &ResolvedScope,

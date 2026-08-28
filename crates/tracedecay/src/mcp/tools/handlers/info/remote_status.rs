@@ -15,6 +15,7 @@ use super::super::support::tool_json;
 ///
 /// Absence of the provider is the typed unmounted-authority outcome
 /// [`RemoteOperationalStatusReadV1::Unavailable`], never an empty success.
+#[hotpath::measure(label = "mcp.info.remote_status.total")]
 pub(crate) fn handle_remote_status(
     project_root: &Path,
     args: &Value,

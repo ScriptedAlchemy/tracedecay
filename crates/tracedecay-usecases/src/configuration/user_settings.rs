@@ -185,6 +185,7 @@ fn validate_profile_provenance(
     Ok(())
 }
 
+#[hotpath::measure(label = "usecases.configuration.plan_user_settings")]
 pub fn plan_user_settings_mutation(
     _current: &UserSettingsSnapshotV1,
     profile_id: UserProfileId,

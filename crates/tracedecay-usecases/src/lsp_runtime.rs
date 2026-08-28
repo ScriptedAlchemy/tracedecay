@@ -449,6 +449,7 @@ impl RegisteredProjectLspAuthority {
         Ok((document.absolute, relative_path))
     }
 
+    #[hotpath::measure(label = "usecases.lsp.document.read", future = true)]
     async fn read_disk_document(&self, relative: &Path) -> Result<String, LspRuntimeFailure> {
         let (_canonical, file) = open_project_file(&self.project_dir, relative)?;
         let mut file = tokio::fs::File::from_std(file.into_std());
@@ -459,6 +460,7 @@ impl RegisteredProjectLspAuthority {
         Ok(text)
     }
 
+    #[hotpath::measure(label = "usecases.lsp.scope.current", future = true)]
     async fn current_scope(
         &self,
         document_relative_path: Option<String>,
@@ -484,14 +486,17 @@ impl LspFeedbackProjectionScopePort for RegisteredProjectLspAuthority {
         document_uri: Option<String>,
     ) -> LspRuntimeFuture<Result<LspFeedbackProjectionScope, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(async move {
-            authority.validate_root(&root)?;
-            let document_relative_path = document_uri
-                .as_deref()
-                .map(|uri| authority.document_path(uri).map(|(_, relative)| relative))
-                .transpose()?;
-            authority.current_scope(document_relative_path).await
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                authority.validate_root(&root)?;
+                let document_relative_path = document_uri
+                    .as_deref()
+                    .map(|uri| authority.document_path(uri).map(|(_, relative)| relative))
+                    .transpose()?;
+                authority.current_scope(document_relative_path).await
+            },
+            label = "usecases.lsp.scope.resolve"
+        ))
     }
 }
 
@@ -501,49 +506,52 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<LspDocument, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(async move {
-            authority.validate_root(&request.root)?;
-            let (path, relative_path) = authority.document_path(&request.document_uri)?;
-            let relative = Path::new(&relative_path);
-            let (language, language_id, text) = match request.overlay {
-                Some(overlay) => {
-                    let overlay = admit_overlay(overlay, &request.document_uri)?;
-                    let adapter = builtin_adapters()
-                        .into_iter()
-                        .find(|adapter| adapter.language_id == overlay.language_id)
-                        .ok_or_else(|| {
+        Box::pin(hotpath::future!(
+            async move {
+                authority.validate_root(&request.root)?;
+                let (path, relative_path) = authority.document_path(&request.document_uri)?;
+                let relative = Path::new(&relative_path);
+                let (language, language_id, text) = match request.overlay {
+                    Some(overlay) => {
+                        let overlay = admit_overlay(overlay, &request.document_uri)?;
+                        let adapter = builtin_adapters()
+                            .into_iter()
+                            .find(|adapter| adapter.language_id == overlay.language_id)
+                            .ok_or_else(|| {
+                                LspRuntimeFailure::new("document-language-not-registered")
+                            })?;
+                        (
+                            adapter.language,
+                            adapter.language_id,
+                            overlay.text.to_string(),
+                        )
+                    }
+                    None => {
+                        let adapter = adapter_for_path(&path).ok_or_else(|| {
                             LspRuntimeFailure::new("document-language-not-registered")
                         })?;
-                    (
-                        adapter.language,
-                        adapter.language_id,
-                        overlay.text.to_string(),
-                    )
+                        let text = authority.read_disk_document(relative).await?;
+                        (adapter.language, adapter.language_id, text)
+                    }
+                };
+                let document = LspDocument {
+                    language,
+                    language_id,
+                    relative_path,
+                    text,
+                };
+                let observed_content_digest = ContentDigest::of_bytes(document.text.as_bytes());
+                if request
+                    .expected_content_digest
+                    .as_ref()
+                    .is_some_and(|expected| expected != &observed_content_digest)
+                {
+                    return Err(LspRuntimeFailure::new("document-content-stale"));
                 }
-                None => {
-                    let adapter = adapter_for_path(&path).ok_or_else(|| {
-                        LspRuntimeFailure::new("document-language-not-registered")
-                    })?;
-                    let text = authority.read_disk_document(relative).await?;
-                    (adapter.language, adapter.language_id, text)
-                }
-            };
-            let document = LspDocument {
-                language,
-                language_id,
-                relative_path,
-                text,
-            };
-            let observed_content_digest = ContentDigest::of_bytes(document.text.as_bytes());
-            if request
-                .expected_content_digest
-                .as_ref()
-                .is_some_and(|expected| expected != &observed_content_digest)
-            {
-                return Err(LspRuntimeFailure::new("document-content-stale"));
-            }
-            Ok(document)
-        })
+                Ok(document)
+            },
+            label = "usecases.lsp.document.load"
+        ))
     }
 }
 
@@ -573,14 +581,17 @@ impl LspFeedbackDocumentSnapshotPort for RegisteredProjectLspAuthority {
         document_uri: String,
     ) -> LspRuntimeFuture<Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(async move {
-            authority.validate_root(&root)?;
-            let (_, relative_path) = authority.document_path(&document_uri)?;
-            let text = authority
-                .read_disk_document(Path::new(&relative_path))
-                .await?;
-            Ok(LspFeedbackDocumentSnapshot { text })
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                authority.validate_root(&root)?;
+                let (_, relative_path) = authority.document_path(&document_uri)?;
+                let text = authority
+                    .read_disk_document(Path::new(&relative_path))
+                    .await?;
+                Ok(LspFeedbackDocumentSnapshot { text })
+            },
+            label = "usecases.lsp.document.snapshot"
+        ))
     }
 }
 
@@ -784,123 +795,133 @@ where
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>> {
         let records = Arc::clone(&self.records);
         let documents = Arc::clone(&self.documents);
-        Box::pin(async move {
-            let document = documents.snapshot(root, document_uri.clone()).await?;
-            let Some(document_content_digest) = scope.document_content_digest.as_ref() else {
-                return Err(LspRuntimeFailure::new(
-                    "diagnostic-document-identity-unavailable",
-                ));
-            };
-            if tracedecay_code_index::intake::content_digest(document.text.as_bytes())
-                != *document_content_digest
-            {
-                return Err(LspRuntimeFailure::new("diagnostic-document-content-stale"));
-            }
-            let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
-            let mut diagnostics = Vec::new();
-            let impact_target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
-            for finding in &cycle.findings {
-                let finding_id = finding.finding_id.as_str();
-                if !finding_matches_document(finding, &scope, impact_target_file) {
-                    skipped(
-                        finding_id,
-                        FeedbackDiagnosticProjectionSkipV1::DocumentFileMismatch,
-                    );
-                    continue;
-                }
-                if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
-                    skipped(
-                        finding_id,
-                        FeedbackDiagnosticProjectionSkipV1::LifecycleNotActive,
-                    );
-                    continue;
-                }
-                let Some(anchor) = finding.retrieval_anchor_id.as_ref() else {
-                    skipped(
-                        finding_id,
-                        FeedbackDiagnosticProjectionSkipV1::NoRetrievalAnchor,
-                    );
-                    continue;
+        Box::pin(hotpath::future!(
+            async move {
+                let document = documents.snapshot(root, document_uri.clone()).await?;
+                let Some(document_content_digest) = scope.document_content_digest.as_ref() else {
+                    return Err(LspRuntimeFailure::new(
+                        "diagnostic-document-identity-unavailable",
+                    ));
                 };
-                if let Some(projection) = finding.diagnostic_projection.as_ref() {
-                    let Some(target_file) = impact_target_file else {
+                if tracedecay_code_index::intake::content_digest(document.text.as_bytes())
+                    != *document_content_digest
+                {
+                    return Err(LspRuntimeFailure::new("diagnostic-document-content-stale"));
+                }
+                let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
+                let mut diagnostics = Vec::new();
+                let impact_target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
+                for finding in &cycle.findings {
+                    let finding_id = finding.finding_id.as_str();
+                    if !finding_matches_document(finding, &scope, impact_target_file) {
                         skipped(
                             finding_id,
-                            FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent,
-                        );
-                        continue;
-                    };
-                    if projection.file != *target_file {
-                        skipped(
-                            finding_id,
-                            FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch,
+                            FeedbackDiagnosticProjectionSkipV1::DocumentFileMismatch,
                         );
                         continue;
                     }
-                    let start = usize::try_from(projection.span.start_byte)
+                    if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
+                        skipped(
+                            finding_id,
+                            FeedbackDiagnosticProjectionSkipV1::LifecycleNotActive,
+                        );
+                        continue;
+                    }
+                    let Some(anchor) = finding.retrieval_anchor_id.as_ref() else {
+                        skipped(
+                            finding_id,
+                            FeedbackDiagnosticProjectionSkipV1::NoRetrievalAnchor,
+                        );
+                        continue;
+                    };
+                    if let Some(projection) = finding.diagnostic_projection.as_ref() {
+                        let Some(target_file) = impact_target_file else {
+                            skipped(
+                                finding_id,
+                                FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent,
+                            );
+                            continue;
+                        };
+                        if projection.file != *target_file {
+                            skipped(
+                                finding_id,
+                                FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch,
+                            );
+                            continue;
+                        }
+                        let start = usize::try_from(projection.span.start_byte)
+                            .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                        let end = usize::try_from(projection.span.end_byte)
+                            .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                        let (start, end) = byte_offsets_to_utf16_range(&document.text, start, end)?;
+                        diagnostics.push(GatewayDiagnostic {
+                            uri: document_uri.clone(),
+                            range: LspRange { start, end },
+                            severity: Some(gateway_severity(projection.severity)),
+                            code: Some(projection.code.clone()),
+                            code_description_uri: projection.code_description_uri.clone(),
+                            message: projection.safe_bounded_message.clone(),
+                            source: advisory_diagnostic_source(projection.producer),
+                            related_information: Vec::new(),
+                            data: gateway_diagnostic_data(
+                                finding,
+                                anchor,
+                                &scope,
+                                coverage,
+                                &expansion_handles,
+                            ),
+                        });
+                        continue;
+                    }
+                    let Some(record) = records.diagnostic_by_anchor(anchor.clone()).await? else {
+                        skipped(
+                            finding_id,
+                            FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
+                        );
+                        continue;
+                    };
+                    if let Err(skip) = classify_feedback_diagnostic_admission(
+                        &record,
+                        impact_target_file,
+                        &scope.code_generation_id,
+                        document_content_digest,
+                        &cycle.scope.head_commit_id,
+                    ) {
+                        skipped(finding_id, skip);
+                        continue;
+                    }
+                    let start = usize::try_from(record.span.start_byte)
                         .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                    let end = usize::try_from(projection.span.end_byte)
+                    let end = usize::try_from(record.span.end_byte)
                         .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                     let (start, end) = byte_offsets_to_utf16_range(&document.text, start, end)?;
+                    let data = gateway_diagnostic_data(
+                        finding,
+                        anchor,
+                        &scope,
+                        coverage,
+                        &expansion_handles,
+                    );
                     diagnostics.push(GatewayDiagnostic {
                         uri: document_uri.clone(),
                         range: LspRange { start, end },
-                        severity: Some(gateway_severity(projection.severity)),
-                        code: Some(projection.code.clone()),
-                        code_description_uri: projection.code_description_uri.clone(),
-                        message: projection.safe_bounded_message.clone(),
-                        source: advisory_diagnostic_source(projection.producer),
-                        related_information: Vec::new(),
-                        data: gateway_diagnostic_data(
-                            finding,
-                            anchor,
-                            &scope,
-                            coverage,
-                            &expansion_handles,
+                        severity: Some(gateway_severity(record.severity)),
+                        code: Some(record.code),
+                        code_description_uri: None,
+                        message: record.message,
+                        // Name the real producer instead of an anonymous
+                        // `tracedecay` lane (Plan 35).
+                        source: DiagnosticSource::from_producer(
+                            record.provenance.producer.as_str(),
                         ),
+                        related_information: Vec::new(),
+                        data,
                     });
-                    continue;
                 }
-                let Some(record) = records.diagnostic_by_anchor(anchor.clone()).await? else {
-                    skipped(
-                        finding_id,
-                        FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
-                    );
-                    continue;
-                };
-                if let Err(skip) = classify_feedback_diagnostic_admission(
-                    &record,
-                    impact_target_file,
-                    &scope.code_generation_id,
-                    document_content_digest,
-                    &cycle.scope.head_commit_id,
-                ) {
-                    skipped(finding_id, skip);
-                    continue;
-                }
-                let start = usize::try_from(record.span.start_byte)
-                    .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                let end = usize::try_from(record.span.end_byte)
-                    .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
-                let (start, end) = byte_offsets_to_utf16_range(&document.text, start, end)?;
-                let data =
-                    gateway_diagnostic_data(finding, anchor, &scope, coverage, &expansion_handles);
-                diagnostics.push(GatewayDiagnostic {
-                    uri: document_uri.clone(),
-                    range: LspRange { start, end },
-                    severity: Some(gateway_severity(record.severity)),
-                    code: Some(record.code),
-                    code_description_uri: None,
-                    message: record.message,
-                    // Name the real producer instead of an anonymous
-                    // `tracedecay` lane (Plan 35).
-                    source: DiagnosticSource::from_producer(record.provenance.producer.as_str()),
-                    related_information: Vec::new(),
-                    data,
-                });
-            }
-            Ok(diagnostics)
-        })
+                Ok(diagnostics)
+            },
+            label = "usecases.lsp.diagnostics.project"
+        ))
     }
 }
 
@@ -973,6 +994,7 @@ impl OperationEventTestRunProjection {
         }
     }
 
+    #[hotpath::measure(label = "usecases.lsp.test_run.store_expansion")]
     fn store_expansion(
         &self,
         root: &AdmittedRoot,
@@ -1051,169 +1073,173 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         document_content_digest: Option<ContentDigest>,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         let projection = self.clone();
-        Box::pin(async move {
-            let mut scope = match projection
-                .project
-                .resolve(root.clone(), document_uri.clone())
-                .await
-            {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return ContextProjectionOutcome::Deferred {
-                        reason: error.class().to_owned(),
-                    };
-                }
-            };
-            if let Err(reason) = bind_test_run_document_content(&mut scope, document_content_digest)
-            {
-                return ContextProjectionOutcome::Deferred {
-                    reason: reason.to_owned(),
+        Box::pin(hotpath::future!(
+            async move {
+                let mut scope = match projection
+                    .project
+                    .resolve(root.clone(), document_uri.clone())
+                    .await
+                {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        return ContextProjectionOutcome::Deferred {
+                            reason: error.class().to_owned(),
+                        };
+                    }
                 };
-            }
-            let current = ManagedTestRunCurrentScope {
-                root_uri: root.uri().to_owned(),
-                head_commit_id: Some(scope.head_commit_id.clone()),
-                code_generation_id: Some(scope.code_generation_id.clone()),
-                document_uri: document_uri.clone(),
-                document_content_digest: scope.document_content_digest.clone(),
-            };
-            projection
-                .current_scopes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    current_scope_key(&current),
-                    CachedTestRunScope {
-                        current: current.clone(),
-                        projection: scope.clone(),
-                    },
-                );
-            let page = match PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32) {
-                Ok(page) => page,
-                Err(_) => {
+                if let Err(reason) =
+                    bind_test_run_document_content(&mut scope, document_content_digest)
+                {
                     return ContextProjectionOutcome::Deferred {
-                        reason: "managed-test-run-page-invalid".to_owned(),
+                        reason: reason.to_owned(),
                     };
                 }
-            };
-            match projection.reader.latest_current_page(&current, &page).await {
-                ManagedTestRunReadOutcome::Current(snapshot) => {
-                    projection
-                        .observed_revisions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(
-                            current_scope_key(&current),
-                            test_run_source_revision(&snapshot),
-                        );
-                    let expansion_context = LspTestRunExpansionContext {
-                        operation_id: snapshot.operation_id.to_string(),
-                        operation_generation: snapshot.generation,
-                        operation_completed: snapshot.completed,
-                        operation_total: snapshot.total,
-                        operation_termination: snapshot.termination,
-                        available_results: snapshot.available_results,
-                        result_offset: snapshot.result_offset,
-                        page_size: 1,
-                    };
-                    let has_bounded_results = snapshot.next_cursor.is_some();
-                    let mut outcome = test_run_projection(
-                        root.clone(),
-                        document_uri.clone(),
-                        scope.clone(),
-                        snapshot,
+                let current = ManagedTestRunCurrentScope {
+                    root_uri: root.uri().to_owned(),
+                    head_commit_id: Some(scope.head_commit_id.clone()),
+                    code_generation_id: Some(scope.code_generation_id.clone()),
+                    document_uri: document_uri.clone(),
+                    document_content_digest: scope.document_content_digest.clone(),
+                };
+                projection
+                    .current_scopes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        current_scope_key(&current),
+                        CachedTestRunScope {
+                            current: current.clone(),
+                            projection: scope.clone(),
+                        },
                     );
-                    if let ContextProjectionOutcome::Ready(envelope) = &mut outcome {
-                        for (index, item) in envelope.items.iter_mut().enumerate() {
-                            item.retrieval_handle = match projection.store_expansion(
-                                &root,
-                                document_uri.as_deref(),
-                                &scope,
-                                item.stable_id.clone(),
-                                LspTestRunExpansionContext {
-                                    result_offset: expansion_context
-                                        .result_offset
-                                        .saturating_add(index),
-                                    ..expansion_context.clone()
-                                },
-                            ) {
-                                Ok(handle) => Some(handle),
-                                Err(error) => {
-                                    return ContextProjectionOutcome::Deferred {
-                                        reason: error.class().to_owned(),
-                                    };
-                                }
-                            };
+                let page = match PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32) {
+                    Ok(page) => page,
+                    Err(_) => {
+                        return ContextProjectionOutcome::Deferred {
+                            reason: "managed-test-run-page-invalid".to_owned(),
+                        };
+                    }
+                };
+                match projection.reader.latest_current_page(&current, &page).await {
+                    ManagedTestRunReadOutcome::Current(snapshot) => {
+                        projection
+                            .observed_revisions
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(
+                                current_scope_key(&current),
+                                test_run_source_revision(&snapshot),
+                            );
+                        let expansion_context = LspTestRunExpansionContext {
+                            operation_id: snapshot.operation_id.to_string(),
+                            operation_generation: snapshot.generation,
+                            operation_completed: snapshot.completed,
+                            operation_total: snapshot.total,
+                            operation_termination: snapshot.termination,
+                            available_results: snapshot.available_results,
+                            result_offset: snapshot.result_offset,
+                            page_size: 1,
+                        };
+                        let has_bounded_results = snapshot.next_cursor.is_some();
+                        let mut outcome = test_run_projection(
+                            root.clone(),
+                            document_uri.clone(),
+                            scope.clone(),
+                            snapshot,
+                        );
+                        if let ContextProjectionOutcome::Ready(envelope) = &mut outcome {
+                            for (index, item) in envelope.items.iter_mut().enumerate() {
+                                item.retrieval_handle = match projection.store_expansion(
+                                    &root,
+                                    document_uri.as_deref(),
+                                    &scope,
+                                    item.stable_id.clone(),
+                                    LspTestRunExpansionContext {
+                                        result_offset: expansion_context
+                                            .result_offset
+                                            .saturating_add(index),
+                                        ..expansion_context.clone()
+                                    },
+                                ) {
+                                    Ok(handle) => Some(handle),
+                                    Err(error) => {
+                                        return ContextProjectionOutcome::Deferred {
+                                            reason: error.class().to_owned(),
+                                        };
+                                    }
+                                };
+                            }
+                            if has_bounded_results && !envelope.items.is_empty() {
+                                envelope.retrieval_handle = match projection.store_expansion(
+                                    &root,
+                                    document_uri.as_deref(),
+                                    &scope,
+                                    format!("{}.__remaining__", expansion_context.operation_id),
+                                    LspTestRunExpansionContext {
+                                        result_offset: expansion_context
+                                            .result_offset
+                                            .saturating_add(envelope.items.len()),
+                                        page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                                        ..expansion_context
+                                    },
+                                ) {
+                                    Ok(handle) => Some(handle),
+                                    Err(error) => {
+                                        return ContextProjectionOutcome::Deferred {
+                                            reason: error.class().to_owned(),
+                                        };
+                                    }
+                                };
+                            }
                         }
-                        if has_bounded_results && !envelope.items.is_empty() {
-                            envelope.retrieval_handle = match projection.store_expansion(
-                                &root,
-                                document_uri.as_deref(),
-                                &scope,
-                                format!("{}.__remaining__", expansion_context.operation_id),
-                                LspTestRunExpansionContext {
-                                    result_offset: expansion_context
-                                        .result_offset
-                                        .saturating_add(envelope.items.len()),
-                                    page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
-                                    ..expansion_context
-                                },
-                            ) {
-                                Ok(handle) => Some(handle),
-                                Err(error) => {
-                                    return ContextProjectionOutcome::Deferred {
-                                        reason: error.class().to_owned(),
-                                    };
-                                }
-                            };
+                        outcome
+                    }
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::FrontierExpired,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-frontier-expired".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::RetainedHeadUnbound,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-head-unbound".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-code-generation-unbound".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::CurrentDocumentUnbound
+                        | ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-document-content-unbound".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::CurrentHeadUnbound
+                        | ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-current-identity-unbound".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity) => {
+                        ContextProjectionOutcome::Deferred {
+                            reason: "managed-test-run-source-identity-stale".to_owned(),
                         }
                     }
-                    outcome
-                }
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::FrontierExpired,
-                ) => ContextProjectionOutcome::Deferred {
-                    reason: "managed-test-run-frontier-expired".to_owned(),
-                },
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::RetainedHeadUnbound,
-                ) => ContextProjectionOutcome::Deferred {
-                    reason: "managed-test-run-head-unbound".to_owned(),
-                },
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
-                ) => ContextProjectionOutcome::Deferred {
-                    reason: "managed-test-run-code-generation-unbound".to_owned(),
-                },
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::CurrentDocumentUnbound
-                    | ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
-                ) => ContextProjectionOutcome::Deferred {
-                    reason: "managed-test-run-document-content-unbound".to_owned(),
-                },
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::CurrentHeadUnbound
-                    | ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
-                ) => ContextProjectionOutcome::Deferred {
-                    reason: "managed-test-run-current-identity-unbound".to_owned(),
-                },
-                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity) => {
-                    ContextProjectionOutcome::Deferred {
-                        reason: "managed-test-run-source-identity-stale".to_owned(),
-                    }
-                }
-                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent) => {
-                    ContextProjectionOutcome::Deferred {
+                    ManagedTestRunReadOutcome::Stale(
+                        ManagedTestRunStaleReason::DocumentContent,
+                    ) => ContextProjectionOutcome::Deferred {
                         reason: "managed-test-run-document-content-stale".to_owned(),
-                    }
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::AuthorityFailure,
+                    ) => ContextProjectionOutcome::Failed {
+                        reason: "managed-test-run-projection-failed".to_owned(),
+                    },
                 }
-                ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::AuthorityFailure,
-                ) => ContextProjectionOutcome::Failed {
-                    reason: "managed-test-run-projection-failed".to_owned(),
-                },
-            }
-        })
+            },
+            label = "usecases.lsp.test_run.snapshot"
+        ))
     }
 
     fn expand(
@@ -1224,6 +1250,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         self.expand_stored(root, stored_record)
     }
 
+    #[hotpath::measure(label = "usecases.lsp.test_run.poll_changes")]
     fn poll_changes(
         &self,
         root: &AdmittedRoot,
@@ -1330,133 +1357,142 @@ impl OperationEventTestRunProjection {
         stored_record: String,
     ) -> LspRuntimeFuture<ContextExpansionOutcome> {
         let projection = self.clone();
-        Box::pin(async move {
-            let Ok(record) = serde_json::from_str::<StoredLspTestRunExpansionV1>(&stored_record)
-            else {
-                return ContextExpansionOutcome::Denied;
-            };
-            let observed_at = now_micros();
-            if record.schema_version != LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION
-                || record.revision != TRACEDECAY_CONTEXT_REVISION
-                || record.root_uri != root.uri()
-                || record.issued_at >= record.expires_at
-                || observed_at < record.issued_at
-                || observed_at >= record.expires_at
-                || record.page_size == 0
-                || record.page_size > MAX_CONTEXT_PROJECTION_ITEMS as u32
-            {
-                return ContextExpansionOutcome::Denied;
-            }
-            let scope = match projection
-                .project
-                .resolve(root.clone(), record.document_uri.clone())
-                .await
-            {
-                Ok(scope) => scope,
-                Err(_) => return ContextExpansionOutcome::Denied,
-            };
-            if projection.project.feedback.scope().scope_digest.as_str() != record.scope_digest {
-                return ContextExpansionOutcome::Denied;
-            }
-            if scope.generation != record.generation
-                || scope.projection_identity() != record.identity
-            {
-                return ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
-                    record,
-                    ContextCoverage::Partial,
-                    None,
-                    Some("stale-generation".to_owned()),
-                    None,
-                ));
-            }
-            let current = ManagedTestRunCurrentScope {
-                root_uri: root.uri().to_owned(),
-                head_commit_id: Some(scope.head_commit_id.clone()),
-                code_generation_id: Some(scope.code_generation_id.clone()),
-                document_uri: record.document_uri.clone(),
-                document_content_digest: scope.document_content_digest.clone(),
-            };
-            let ManagedTestRunReadOutcome::Current(snapshot) =
-                projection.reader.latest_current(&current).await
-            else {
-                return ContextExpansionOutcome::Denied;
-            };
-            if snapshot.operation_id.to_string() != record.operation_id
-                || snapshot.generation != record.operation_generation
-                || snapshot.completed != record.operation_completed
-                || snapshot.total != record.operation_total
-                || snapshot.termination != record.operation_termination
-                || snapshot.results.len() != record.available_results
-            {
-                return ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
-                    record,
-                    ContextCoverage::Partial,
-                    None,
-                    Some("stale-generation".to_owned()),
-                    None,
-                ));
-            }
-            let end = record
-                .result_offset
-                .saturating_add(record.page_size as usize)
-                .min(snapshot.results.len());
-            if record.result_offset >= snapshot.results.len() {
-                return ContextExpansionOutcome::Denied;
-            }
-            let results = snapshot.results[record.result_offset..end]
-                .iter()
-                .map(|result| {
-                    serde_json::json!({
-                        "test": result.test,
-                        "passed": result.passed,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let result_offset = record.result_offset;
-            let next_retrieval_handle = if end < snapshot.results.len() {
-                match projection.store_expansion(
-                    &root,
-                    record.document_uri.as_deref(),
-                    &scope,
-                    record.stable_id.clone(),
-                    LspTestRunExpansionContext {
-                        operation_id: record.operation_id.clone(),
-                        operation_generation: record.operation_generation,
-                        operation_completed: record.operation_completed,
-                        operation_total: record.operation_total,
-                        operation_termination: record.operation_termination,
-                        available_results: record.available_results,
-                        result_offset: end,
-                        page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
-                    },
-                ) {
-                    Ok(handle) => Some(handle),
-                    Err(_) => return ContextExpansionOutcome::Denied,
+        Box::pin(hotpath::future!(
+            async move {
+                let Ok(record) =
+                    serde_json::from_str::<StoredLspTestRunExpansionV1>(&stored_record)
+                else {
+                    return ContextExpansionOutcome::Denied;
+                };
+                let observed_at = now_micros();
+                if record.schema_version != LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION
+                    || record.revision != TRACEDECAY_CONTEXT_REVISION
+                    || record.root_uri != root.uri()
+                    || record.issued_at >= record.expires_at
+                    || observed_at < record.issued_at
+                    || observed_at >= record.expires_at
+                    || record.page_size == 0
+                    || record.page_size > MAX_CONTEXT_PROJECTION_ITEMS as u32
+                {
+                    return ContextExpansionOutcome::Denied;
                 }
-            } else {
-                None
-            };
-            let coverage = if next_retrieval_handle.is_some() {
-                ContextCoverage::Partial
-            } else {
-                ContextCoverage::Complete
-            };
-            let omission_reason = next_retrieval_handle
-                .as_ref()
-                .map(|_| "bounded-projection-items".to_owned());
-            ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
-                record,
-                coverage,
-                Some(serde_json::json!({
-                    "results": results,
-                    "result_offset": result_offset,
-                    "available_results": snapshot.results.len(),
-                    "next_retrieval_handle": next_retrieval_handle,
-                })),
-                omission_reason,
-                next_retrieval_handle,
-            ))
-        })
+                let scope = match projection
+                    .project
+                    .resolve(root.clone(), record.document_uri.clone())
+                    .await
+                {
+                    Ok(scope) => scope,
+                    Err(_) => return ContextExpansionOutcome::Denied,
+                };
+                if projection.project.feedback.scope().scope_digest.as_str() != record.scope_digest
+                {
+                    return ContextExpansionOutcome::Denied;
+                }
+                if scope.generation != record.generation
+                    || scope.projection_identity() != record.identity
+                {
+                    return ContextExpansionOutcome::Ready(
+                        context_expansion_envelope_for_test_run(
+                            record,
+                            ContextCoverage::Partial,
+                            None,
+                            Some("stale-generation".to_owned()),
+                            None,
+                        ),
+                    );
+                }
+                let current = ManagedTestRunCurrentScope {
+                    root_uri: root.uri().to_owned(),
+                    head_commit_id: Some(scope.head_commit_id.clone()),
+                    code_generation_id: Some(scope.code_generation_id.clone()),
+                    document_uri: record.document_uri.clone(),
+                    document_content_digest: scope.document_content_digest.clone(),
+                };
+                let ManagedTestRunReadOutcome::Current(snapshot) =
+                    projection.reader.latest_current(&current).await
+                else {
+                    return ContextExpansionOutcome::Denied;
+                };
+                if snapshot.operation_id.to_string() != record.operation_id
+                    || snapshot.generation != record.operation_generation
+                    || snapshot.completed != record.operation_completed
+                    || snapshot.total != record.operation_total
+                    || snapshot.termination != record.operation_termination
+                    || snapshot.results.len() != record.available_results
+                {
+                    return ContextExpansionOutcome::Ready(
+                        context_expansion_envelope_for_test_run(
+                            record,
+                            ContextCoverage::Partial,
+                            None,
+                            Some("stale-generation".to_owned()),
+                            None,
+                        ),
+                    );
+                }
+                let end = record
+                    .result_offset
+                    .saturating_add(record.page_size as usize)
+                    .min(snapshot.results.len());
+                if record.result_offset >= snapshot.results.len() {
+                    return ContextExpansionOutcome::Denied;
+                }
+                let results = snapshot.results[record.result_offset..end]
+                    .iter()
+                    .map(|result| {
+                        serde_json::json!({
+                            "test": result.test,
+                            "passed": result.passed,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let result_offset = record.result_offset;
+                let next_retrieval_handle = if end < snapshot.results.len() {
+                    match projection.store_expansion(
+                        &root,
+                        record.document_uri.as_deref(),
+                        &scope,
+                        record.stable_id.clone(),
+                        LspTestRunExpansionContext {
+                            operation_id: record.operation_id.clone(),
+                            operation_generation: record.operation_generation,
+                            operation_completed: record.operation_completed,
+                            operation_total: record.operation_total,
+                            operation_termination: record.operation_termination,
+                            available_results: record.available_results,
+                            result_offset: end,
+                            page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                        },
+                    ) {
+                        Ok(handle) => Some(handle),
+                        Err(_) => return ContextExpansionOutcome::Denied,
+                    }
+                } else {
+                    None
+                };
+                let coverage = if next_retrieval_handle.is_some() {
+                    ContextCoverage::Partial
+                } else {
+                    ContextCoverage::Complete
+                };
+                let omission_reason = next_retrieval_handle
+                    .as_ref()
+                    .map(|_| "bounded-projection-items".to_owned());
+                ContextExpansionOutcome::Ready(context_expansion_envelope_for_test_run(
+                    record,
+                    coverage,
+                    Some(serde_json::json!({
+                        "results": results,
+                        "result_offset": result_offset,
+                        "available_results": snapshot.results.len(),
+                        "next_retrieval_handle": next_retrieval_handle,
+                    })),
+                    omission_reason,
+                    next_retrieval_handle,
+                ))
+            },
+            label = "usecases.lsp.test_run.expand"
+        ))
     }
 }
 
@@ -1507,6 +1543,7 @@ impl ConcreteFeedbackLspSource {
         self.publications.clone()
     }
 
+    #[hotpath::measure(label = "usecases.lsp.changes.queue", future = true)]
     async fn queue_feedback_changes(
         &self,
         request: &FeedbackCycleRequest,
@@ -1598,6 +1635,7 @@ impl ConcreteFeedbackLspSource {
         Ok(current)
     }
 
+    #[hotpath::measure(label = "usecases.lsp.cycle.current", future = true)]
     async fn current_cycle(
         &self,
         root: AdmittedRoot,
@@ -1666,6 +1704,7 @@ impl ConcreteFeedbackLspSource {
         })
     }
 
+    #[hotpath::measure(label = "usecases.lsp.context.findings")]
     fn current_finding_items<'a>(
         &self,
         target: FindingContextTarget<'_>,
@@ -1744,6 +1783,7 @@ impl ConcreteFeedbackLspSource {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.lsp.context.store_handle")]
     fn attach_context_handle(
         &self,
         root: &AdmittedRoot,
@@ -1898,13 +1938,16 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
         request: FeedbackCycleRequest,
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
         let source = self.clone();
-        Box::pin(async move {
-            source.cycle.execute(request.clone()).await?;
-            // Queueing is best-effort: the cycle above already succeeded, and
-            // that is what `execute` reports.
-            let _ = source.queue_feedback_changes(&request).await;
-            Ok(())
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                source.cycle.execute(request.clone()).await?;
+                // Queueing is best-effort: the cycle above already succeeded, and
+                // that is what `execute` reports.
+                let _ = source.queue_feedback_changes(&request).await;
+                Ok(())
+            },
+            label = "usecases.lsp.cycle.execute"
+        ))
     }
 }
 
@@ -1914,53 +1957,58 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
         let source = self.clone();
-        Box::pin(async move {
-            let cycle_request = FeedbackCycleRequest {
-                root_uri: request.root.uri().to_owned(),
-                document_uri: request.document_uri.clone(),
-                trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
-            };
-            source.cycle.execute(cycle_request.clone()).await?;
-            let current = source.queue_feedback_changes(&cycle_request).await?;
-            let scope = current.scope;
-            crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
-            let Some(result) = current.result else {
-                return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
-            };
-            let cycle = result.cycle;
-            let expansion_handles = source
-                .current_finding_items(
-                    FindingContextTarget {
-                        root: &request.root,
-                        document_uri: Some(&request.document_uri),
-                    },
-                    &scope,
-                    cycle.impact.as_ref().map(|impact| &impact.target.file),
-                    ContextProjectionKind::diagnostics(),
-                    cycle.findings.iter(),
-                    MAX_CONTEXT_PROJECTION_ITEMS,
-                )?
-                .into_iter()
-                .filter_map(|item| item.retrieval_handle.map(|handle| (item.stable_id, handle)))
-                .collect();
-            let diagnostics = source
-                .diagnostic_projection
-                .project(
-                    request.root,
-                    request.document_uri,
-                    scope.clone(),
-                    cycle,
-                    expansion_handles,
-                )
-                .await?;
-            Ok(ManagedDiagnosticSnapshot {
-                generation: scope.generation,
-                code_generation_id: scope.code_generation_id.clone(),
-                snapshot_digest: scope.snapshot_digest.clone(),
-                authority_digest: crate::lsp_support::managed_diagnostic_authority_digest(&scope)?,
-                diagnostics,
-            })
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                let cycle_request = FeedbackCycleRequest {
+                    root_uri: request.root.uri().to_owned(),
+                    document_uri: request.document_uri.clone(),
+                    trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+                };
+                source.cycle.execute(cycle_request.clone()).await?;
+                let current = source.queue_feedback_changes(&cycle_request).await?;
+                let scope = current.scope;
+                crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
+                let Some(result) = current.result else {
+                    return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
+                };
+                let cycle = result.cycle;
+                let expansion_handles = source
+                    .current_finding_items(
+                        FindingContextTarget {
+                            root: &request.root,
+                            document_uri: Some(&request.document_uri),
+                        },
+                        &scope,
+                        cycle.impact.as_ref().map(|impact| &impact.target.file),
+                        ContextProjectionKind::diagnostics(),
+                        cycle.findings.iter(),
+                        MAX_CONTEXT_PROJECTION_ITEMS,
+                    )?
+                    .into_iter()
+                    .filter_map(|item| item.retrieval_handle.map(|handle| (item.stable_id, handle)))
+                    .collect();
+                let diagnostics = source
+                    .diagnostic_projection
+                    .project(
+                        request.root,
+                        request.document_uri,
+                        scope.clone(),
+                        cycle,
+                        expansion_handles,
+                    )
+                    .await?;
+                Ok(ManagedDiagnosticSnapshot {
+                    generation: scope.generation,
+                    code_generation_id: scope.code_generation_id.clone(),
+                    snapshot_digest: scope.snapshot_digest.clone(),
+                    authority_digest: crate::lsp_support::managed_diagnostic_authority_digest(
+                        &scope,
+                    )?,
+                    diagnostics,
+                })
+            },
+            label = "usecases.lsp.diagnostics.snapshot"
+        ))
     }
 }
 
@@ -1996,59 +2044,61 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 .snapshot(root, request.document_uri, document_content_digest);
         }
         let source = self.clone();
-        Box::pin(async move {
-            let current = match source
-                .current_cycle(
-                    root.clone(),
-                    request.document_uri.clone(),
-                    request.document_content_digest().cloned(),
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    return ContextProjectionOutcome::Deferred {
-                        reason: error.class().to_owned(),
-                    };
-                }
-            };
-            let CurrentFeedbackCycle {
-                scope,
-                result,
-                termination,
-                canonical_handle,
-                observed_at,
-                expires_at,
-            } = current;
-            let Some(result) = result else {
-                if request.kind != ContextProjectionKind::diagnostics()
-                    && request.kind != ContextProjectionKind::post_edit_impact()
-                    && request.kind != ContextProjectionKind::affected_tests()
-                    && advisory_projection_producer(&request.kind).is_none()
+        Box::pin(hotpath::future!(
+            async move {
+                let current = match source
+                    .current_cycle(
+                        root.clone(),
+                        request.document_uri.clone(),
+                        request.document_content_digest().cloned(),
+                    )
+                    .await
                 {
-                    return ContextProjectionOutcome::Unsupported;
-                }
-                let (coverage, producer_state) = incomplete_read_projection(termination);
-                return ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
-                    root_uri: root.uri().to_owned(),
-                    document_uri: request.document_uri,
-                    kind: request.kind,
-                    generation: scope.generation,
-                    identity: scope.projection_identity(),
-                    freshness: ContextFreshness::Current,
-                    producer_state,
-                    coverage,
-                    revision: TRACEDECAY_CONTEXT_REVISION,
-                    items: Vec::new(),
-                    omitted_count: 0,
-                    omission_reasons: projection_omission_reasons(coverage, 0, producer_state),
-                    retrieval_handle: None,
-                });
-            };
-            let cycle = result.cycle;
-            let kind = request.kind.clone();
-            let (coverage, mut items, omitted_count) =
-                if request.kind == ContextProjectionKind::diagnostics() {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return ContextProjectionOutcome::Deferred {
+                            reason: error.class().to_owned(),
+                        };
+                    }
+                };
+                let CurrentFeedbackCycle {
+                    scope,
+                    result,
+                    termination,
+                    canonical_handle,
+                    observed_at,
+                    expires_at,
+                } = current;
+                let Some(result) = result else {
+                    if request.kind != ContextProjectionKind::diagnostics()
+                        && request.kind != ContextProjectionKind::post_edit_impact()
+                        && request.kind != ContextProjectionKind::affected_tests()
+                        && advisory_projection_producer(&request.kind).is_none()
+                    {
+                        return ContextProjectionOutcome::Unsupported;
+                    }
+                    let (coverage, producer_state) = incomplete_read_projection(termination);
+                    return ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                        root_uri: root.uri().to_owned(),
+                        document_uri: request.document_uri,
+                        kind: request.kind,
+                        generation: scope.generation,
+                        identity: scope.projection_identity(),
+                        freshness: ContextFreshness::Current,
+                        producer_state,
+                        coverage,
+                        revision: TRACEDECAY_CONTEXT_REVISION,
+                        items: Vec::new(),
+                        omitted_count: 0,
+                        omission_reasons: projection_omission_reasons(coverage, 0, producer_state),
+                        retrieval_handle: None,
+                    });
+                };
+                let cycle = result.cycle;
+                let kind = request.kind.clone();
+                let (coverage, mut items, omitted_count) = if request.kind
+                    == ContextProjectionKind::diagnostics()
+                {
                     let items = match source.current_finding_items(
                         FindingContextTarget {
                             root: &root,
@@ -2144,90 +2194,92 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 } else {
                     return ContextProjectionOutcome::Unsupported;
                 };
-            // Advisory finding items already carry per-finding canonical
-            // expand/get handles from `current_finding_items`; replacing them
-            // with a cycle-level diagnostics handle would discard the exact
-            // authority that expansion must reauthorize.
-            if kind != ContextProjectionKind::diagnostics()
-                && advisory_projection_producer(&kind).is_none()
-            {
-                items = match items
-                    .into_iter()
-                    .map(|item| {
-                        source.attach_context_handle(
-                            &root,
-                            request.document_uri.as_deref(),
-                            kind.clone(),
-                            &scope,
-                            observed_at,
-                            expires_at,
-                            FeedbackReadOperationV1::Diagnostics,
-                            &canonical_handle,
-                            item,
-                        )
-                    })
-                    .collect()
+                // Advisory finding items already carry per-finding canonical
+                // expand/get handles from `current_finding_items`; replacing them
+                // with a cycle-level diagnostics handle would discard the exact
+                // authority that expansion must reauthorize.
+                if kind != ContextProjectionKind::diagnostics()
+                    && advisory_projection_producer(&kind).is_none()
                 {
-                    Ok(items) => items,
+                    items = match items
+                        .into_iter()
+                        .map(|item| {
+                            source.attach_context_handle(
+                                &root,
+                                request.document_uri.as_deref(),
+                                kind.clone(),
+                                &scope,
+                                observed_at,
+                                expires_at,
+                                FeedbackReadOperationV1::Diagnostics,
+                                &canonical_handle,
+                                item,
+                            )
+                        })
+                        .collect()
+                    {
+                        Ok(items) => items,
+                        Err(error) => {
+                            return ContextProjectionOutcome::Deferred {
+                                reason: error.class().to_owned(),
+                            };
+                        }
+                    };
+                }
+                let retrieval_handle = match source.attach_context_handle(
+                    &root,
+                    request.document_uri.as_deref(),
+                    kind.clone(),
+                    &scope,
+                    observed_at,
+                    expires_at,
+                    FeedbackReadOperationV1::Diagnostics,
+                    &canonical_handle,
+                    ContextProjectionItem {
+                        stable_id: "__projection__".to_owned(),
+                        summary: String::new(),
+                        retrieval_handle: None,
+                    },
+                ) {
+                    Ok(item) => item.retrieval_handle,
                     Err(error) => {
                         return ContextProjectionOutcome::Deferred {
                             reason: error.class().to_owned(),
                         };
                     }
                 };
-            }
-            let retrieval_handle = match source.attach_context_handle(
-                &root,
-                request.document_uri.as_deref(),
-                kind.clone(),
-                &scope,
-                observed_at,
-                expires_at,
-                FeedbackReadOperationV1::Diagnostics,
-                &canonical_handle,
-                ContextProjectionItem {
-                    stable_id: "__projection__".to_owned(),
-                    summary: String::new(),
-                    retrieval_handle: None,
-                },
-            ) {
-                Ok(item) => item.retrieval_handle,
-                Err(error) => {
-                    return ContextProjectionOutcome::Deferred {
-                        reason: error.class().to_owned(),
-                    };
+                let mut producer_state = advisory_projection_producer(&kind)
+                    .map(|producer| advisory_projection_status(&cycle, producer).1)
+                    .unwrap_or_else(|| producer_state_for_cycle(&cycle));
+                if coverage == ContextCoverage::Partial
+                    && producer_state == ContextProducerState::Complete
+                {
+                    producer_state = ContextProducerState::Partial;
                 }
-            };
-            let mut producer_state = advisory_projection_producer(&kind)
-                .map(|producer| advisory_projection_status(&cycle, producer).1)
-                .unwrap_or_else(|| producer_state_for_cycle(&cycle));
-            if coverage == ContextCoverage::Partial
-                && producer_state == ContextProducerState::Complete
-            {
-                producer_state = ContextProducerState::Partial;
-            }
-            let mut omission_reasons =
-                projection_omission_reasons(coverage, omitted_count, producer_state);
-            if advisory_projection_producer(&kind).is_some() && cycle.omitted_findings > 0 {
-                omission_reasons.retain(|reason| reason != "producer-partial");
-                omission_reasons.push("cycle-omissions-unattributed".to_owned());
-            }
-            ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
-                root_uri: root.uri().to_owned(),
-                document_uri: request.document_uri,
-                kind,
-                generation: scope.generation,
-                identity: scope.projection_identity(),
-                freshness: ContextFreshness::Current,
-                producer_state,
-                coverage,
-                revision: TRACEDECAY_CONTEXT_REVISION,
-                items,
-                omitted_count,
-                omission_reasons,
-                retrieval_handle,
-            })
-        })
+                let mut omission_reasons =
+                    projection_omission_reasons(coverage, omitted_count, producer_state);
+                if advisory_projection_producer(&kind).is_some() && cycle.omitted_findings > 0 {
+                    omission_reasons.retain(|reason| reason != "producer-partial");
+                    omission_reasons.push("cycle-omissions-unattributed".to_owned());
+                }
+                ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: request.document_uri,
+                    kind,
+                    generation: scope.generation,
+                    identity: scope.projection_identity(),
+                    freshness: ContextFreshness::Current,
+                    producer_state,
+                    coverage,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    items,
+                    omitted_count,
+                    omission_reasons,
+                    retrieval_handle,
+                })
+            },
+            label = "usecases.lsp.context.snapshot"
+        ))
     }
 
     fn expand(
@@ -2237,7 +2289,10 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
         request: ContextExpansionRequest,
     ) -> LspRuntimeFuture<ContextExpansionOutcome> {
         let source = self.clone();
-        Box::pin(async move { source.expand_context(root, request).await })
+        Box::pin(hotpath::future!(
+            async move { source.expand_context(root, request).await },
+            label = "usecases.lsp.context.expand"
+        ))
     }
 
     fn poll_changes(
@@ -2940,6 +2995,7 @@ struct ValidatedDocumentPath {
     relative: PathBuf,
 }
 
+#[hotpath::measure(label = "usecases.lsp.document.validate_path")]
 fn validated_document_path(
     project_root: &Path,
     root_uri: &Url,
@@ -2985,6 +3041,7 @@ fn validate_relative_path(path: &Path) -> Result<(), LspRuntimeFailure> {
     Ok(())
 }
 
+#[hotpath::measure(label = "usecases.lsp.document.normalize")]
 fn normalize_overlay_relative(
     project_dir: &Dir,
     relative: &Path,
@@ -3025,6 +3082,7 @@ fn normalize_overlay_relative(
     Ok(canonical)
 }
 
+#[hotpath::measure(label = "usecases.lsp.document.open")]
 fn open_project_file(
     project_dir: &Dir,
     relative: &Path,

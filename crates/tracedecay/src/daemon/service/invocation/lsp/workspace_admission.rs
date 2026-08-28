@@ -19,6 +19,7 @@ pub(super) enum CurrentLspWorkspaceAuthorityV1 {
 }
 
 impl DaemonInvocationService {
+    #[hotpath::measure(label = "daemon.service.lsp.workspace_authority", future = true)]
     pub(super) async fn current_lsp_workspace_authority(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -88,6 +89,7 @@ impl DaemonInvocationService {
         Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.authorize_workspace", future = true)]
     pub(crate) async fn authorize_lsp_workspace(
         &self,
         mut roots: Vec<(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)>,

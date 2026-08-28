@@ -21,14 +21,20 @@ static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
 
 pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::Result<()> {
     match action {
-        LspAction::Servers { json } => print_lsp_servers(json)?,
+        LspAction::Servers { json } => {
+            hotpath::measure_block!("cli.lsp.servers", print_lsp_servers(json))?
+        }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
                 return Err(tracedecay::errors::TraceDecayError::Config {
                     message: "lsp bridge requires --stdio".to_owned(),
                 });
             }
-            run_stdio_bridge(project.map(PathBuf::from)).await?;
+            hotpath::future!(
+                run_stdio_bridge(project.map(PathBuf::from)),
+                label = "cli.lsp.bridge"
+            )
+            .await?;
         }
     }
     Ok(())
@@ -41,6 +47,7 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::
 /// `initialize` frame to bind canonical local workspace roots; it never
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
+#[hotpath::measure(label = "cli.lsp.stdio_bridge", future = true)]
 async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::Result<()> {
     let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {

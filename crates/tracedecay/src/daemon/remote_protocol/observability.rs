@@ -96,6 +96,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
     }
 }
 
+#[hotpath::measure(label = "daemon.remote.query_observation")]
 pub(super) fn record_remote_query_response(
     producer: Option<&BoundedObservabilityProducerV1>,
     expected_shards: usize,

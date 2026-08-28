@@ -120,6 +120,7 @@ pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> boo
 /// export for one host must not block the others (or the lifecycle action
 /// that triggered the refresh). Agents with no export destinations are
 /// omitted from the result.
+#[hotpath::measure(label = "hosts.agents.export_managed_skills")]
 pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
@@ -152,6 +153,7 @@ pub fn export_managed_skills_to_agents(
 /// Re-runs managed-skill exports for global installs under `home` plus
 /// project-local installs under `project_root`. Reports are merged per agent
 /// so dashboard callers can present one lifecycle refresh result per host.
+#[hotpath::measure(label = "hosts.agents.export_managed_skills_hosts")]
 pub fn export_managed_skills_to_agent_hosts(
     home: &Path,
     project_root: &Path,

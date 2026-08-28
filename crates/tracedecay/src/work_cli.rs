@@ -352,6 +352,7 @@ pub async fn invoke_work_cli(
 
 /// Invokes Work while retaining the daemon connection until the presentation
 /// layer explicitly acknowledges the terminal output boundary.
+#[hotpath::measure(label = "work_cli.invoke", future = true)]
 pub async fn invoke_work_cli_with_delivery(
     project_root: PathBuf,
     operation: WorkOperation,

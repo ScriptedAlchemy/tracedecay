@@ -209,6 +209,7 @@ fn profile_retained_connection_authority_from_persisted_identity(
 
 /// Execute one profile-scoped retained request through canonical admission and
 /// render the typed application result only after execution has completed.
+#[hotpath::measure(label = "daemon.retained.profile.execute", future = true)]
 pub(crate) async fn execute_profile_retained_application(
     authorities: ProfileRetainedAuthoritiesV1<'_>,
     connection: &ProfileRetainedConnectionAuthorityV1,

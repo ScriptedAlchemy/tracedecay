@@ -133,6 +133,7 @@ impl DaemonNativeIntegrationStore {
         Self::open_actor(ActorDatabase::Registered(database))
     }
 
+    #[hotpath::measure(label = "daemon.native_integration.store_open")]
     fn open_actor(database: ActorDatabase) -> NativeIntegrationStoreResult<Self> {
         let (commands, receiver) = sync_channel(NATIVE_INTEGRATION_STORE_ACTOR_CAPACITY);
         let (ready, started) = sync_channel::<NativeIntegrationStoreResult<()>>(1);

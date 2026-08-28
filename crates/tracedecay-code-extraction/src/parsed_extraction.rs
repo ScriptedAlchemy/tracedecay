@@ -65,20 +65,16 @@ impl ParsedExtractionArtifactV1 {
         scope: ParsedExtractionScope<'_>,
         metrics: ParsedTraversalMetrics,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| {
-            let disposition = match scope {
-                ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
-                ParsedExtractionScope::ChangedRegions(_) => {
-                    ParsedExtractionDisposition::ChangedRegions
-                }
-            };
-            artifact.canonicalize_order();
-            Self {
-                artifact,
-                disposition,
-                metrics,
-            }
-        })
+        let disposition = match scope {
+            ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
+            ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
+        };
+        crate::hotpath_observe::measure_emit(|| artifact.canonicalize_order());
+        Self {
+            artifact,
+            disposition,
+            metrics,
+        }
     }
 
     pub(crate) fn reset(
@@ -86,17 +82,15 @@ impl ParsedExtractionArtifactV1 {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| {
-            artifact.canonicalize_order();
-            Self {
-                artifact,
-                disposition: ParsedExtractionDisposition::Reset { reason },
-                metrics: ParsedTraversalMetrics {
-                    visited_top_level_nodes: 0,
-                    visited_bytes: source_bytes,
-                },
-            }
-        })
+        crate::hotpath_observe::measure_emit(|| artifact.canonicalize_order());
+        Self {
+            artifact,
+            disposition: ParsedExtractionDisposition::Reset { reason },
+            metrics: ParsedTraversalMetrics {
+                visited_top_level_nodes: 0,
+                visited_bytes: source_bytes,
+            },
+        }
     }
 
     pub(crate) fn from_parsed(parsed: ParsedExtraction) -> Self {
@@ -122,20 +116,16 @@ impl ParsedExtraction {
         scope: ParsedExtractionScope<'_>,
         metrics: ParsedTraversalMetrics,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| {
-            let disposition = match scope {
-                ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
-                ParsedExtractionScope::ChangedRegions(_) => {
-                    ParsedExtractionDisposition::ChangedRegions
-                }
-            };
-            result.canonicalize_order();
-            Self {
-                result,
-                disposition,
-                metrics,
-            }
-        })
+        let disposition = match scope {
+            ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
+            ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
+        };
+        crate::hotpath_observe::measure_emit(|| result.canonicalize_order());
+        Self {
+            result,
+            disposition,
+            metrics,
+        }
     }
 
     pub fn reset(
@@ -143,17 +133,15 @@ impl ParsedExtraction {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| {
-            result.canonicalize_order();
-            Self {
-                result,
-                disposition: ParsedExtractionDisposition::Reset { reason },
-                metrics: ParsedTraversalMetrics {
-                    visited_top_level_nodes: 0,
-                    visited_bytes: source_bytes,
-                },
-            }
-        })
+        crate::hotpath_observe::measure_emit(|| result.canonicalize_order());
+        Self {
+            result,
+            disposition: ParsedExtractionDisposition::Reset { reason },
+            metrics: ParsedTraversalMetrics {
+                visited_top_level_nodes: 0,
+                visited_bytes: source_bytes,
+            },
+        }
     }
 }
 

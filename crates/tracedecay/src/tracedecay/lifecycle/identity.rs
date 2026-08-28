@@ -28,6 +28,7 @@ impl TraceDecay {
         })
     }
 
+    #[hotpath::measure(label = "lifecycle.resolve_registered_layout", future = true)]
     pub(crate) async fn resolve_registered_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -70,6 +71,7 @@ impl TraceDecay {
     /// store evidence still names the previous registry root — only under an
     /// explicit operator adoption decision; ambient first-touch passes
     /// [`MovedStoreAdoption::Never`] and always mints fresh.
+    #[hotpath::measure(label = "lifecycle.resolve_first_touch_layout", future = true)]
     pub(crate) async fn resolve_first_touch_configuration_layout_with_adoption(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -141,6 +143,7 @@ impl TraceDecay {
         Ok(roots)
     }
 
+    #[hotpath::measure(label = "lifecycle.enrollment_roots", future = true)]
     pub(crate) async fn registered_enrollment_roots(
         project_root: &Path,
         store_layout: &StoreLayout,
@@ -189,6 +192,7 @@ impl TraceDecay {
         Ok(roots)
     }
 
+    #[hotpath::measure(label = "lifecycle.resolve_store_layout", future = true)]
     async fn resolve_store_layout_for_authority(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -332,6 +336,7 @@ impl TraceDecay {
     /// Resolves an initialized store without discarding identity conflicts or
     /// other storage errors. User-facing diagnostics must use this variant so
     /// a preserved split store is never mislabeled as uninitialized.
+    #[hotpath::measure(label = "lifecycle.try_initialized_layout", future = true)]
     pub async fn try_initialized_store_layout_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,

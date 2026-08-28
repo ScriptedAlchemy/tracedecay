@@ -68,10 +68,14 @@ async fn app_index(
     State(source): State<Arc<dyn DashboardAssetSource>>,
     headers: HeaderMap,
 ) -> Response {
-    match source.asset_by_path("index.html") {
-        Some(asset) => app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    hotpath::measure_block!("api.http.assets", {
+        match source.asset_by_path("index.html") {
+            Some(asset) => {
+                app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate)
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    })
 }
 
 async fn app_static(
@@ -79,16 +83,18 @@ async fn app_static(
     headers: HeaderMap,
     Path(tail): Path<String>,
 ) -> Response {
-    let asset_path = format!("static/{tail}");
-    let cache_policy = if fingerprinted_static_asset_path(&asset_path) {
-        CachePolicy::Immutable
-    } else {
-        CachePolicy::Revalidate
-    };
-    match source.asset_by_path(&asset_path) {
-        Some(asset) => app_response(&headers, asset, source.cache_tag(), cache_policy),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    hotpath::measure_block!("api.http.static", {
+        let asset_path = format!("static/{tail}");
+        let cache_policy = if fingerprinted_static_asset_path(&asset_path) {
+            CachePolicy::Immutable
+        } else {
+            CachePolicy::Revalidate
+        };
+        match source.asset_by_path(&asset_path) {
+            Some(asset) => app_response(&headers, asset, source.cache_tag(), cache_policy),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    })
 }
 
 async fn app_spa_fallback(
@@ -96,13 +102,17 @@ async fn app_spa_fallback(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if uri.path() == "/api" || uri.path().starts_with("/api/") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match source.asset_by_path("index.html") {
-        Some(asset) => app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    hotpath::measure_block!("api.http.spa", {
+        if uri.path() == "/api" || uri.path().starts_with("/api/") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        match source.asset_by_path("index.html") {
+            Some(asset) => {
+                app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate)
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    })
 }
 
 #[derive(Clone, Copy)]

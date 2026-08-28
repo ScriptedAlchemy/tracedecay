@@ -166,6 +166,7 @@ tokio::task_local! {
 ///
 /// Outside a connection scope (tests, background tasks, reserved-control
 /// clients) this is a transparent passthrough.
+#[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
 pub(crate) async fn park_admission<F>(future: F) -> F::Output
 where
     F: std::future::Future,
@@ -546,6 +547,7 @@ pub(crate) async fn reject_reserved_bulk_request(
     .await
 }
 
+#[hotpath::measure(label = "daemon.engine.admission.reject_request", future = true)]
 pub(crate) async fn reject_admitted_request(
     transport: &mut impl tracedecay_jsonrpc::McpTransport,
     request_line: &str,
@@ -597,6 +599,7 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
     read_line_handling_wire_oversized(transport).await
 }
 
+#[hotpath::measure(label = "daemon.engine.admission.reject_saturated", future = true)]
 pub(crate) async fn reject_saturated_daemon_client(
     stream: BrokerStream,
     response: DaemonClientSaturationResponse,

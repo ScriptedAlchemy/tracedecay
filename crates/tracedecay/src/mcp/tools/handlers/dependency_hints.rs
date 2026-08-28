@@ -22,6 +22,7 @@ pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
+#[hotpath::measure(future = true, label = "mcp.search.import_hint.total")]
 pub(super) async fn external_import_hint(
     graph: &VerifiedGraphQuery,
     query: &str,
@@ -30,8 +31,9 @@ pub(super) async fn external_import_hint(
     deadline: Option<&tracedecay_application::Deadline>,
     cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Option<Value>> {
-    let candidates =
-        ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?;
+    let candidates = hotpath::measure_block!("mcp.search.import_hint.scan", {
+        ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?
+    });
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -74,6 +76,7 @@ pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
     json!(unavailable_evidence(error))
 }
 
+#[hotpath::measure(label = "mcp.search.import_admit.total")]
 pub(super) async fn admit_verified_ignored_dependency(
     admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
     graph: &VerifiedGraphQuery,
@@ -95,13 +98,15 @@ pub(super) async fn admit_verified_ignored_dependency(
         ));
     };
     let source_generation = graph.generation();
-    match admission
-        .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
+    match hotpath::future!(
+        admission.admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
             graph.request_context(),
             source_generation,
             std::slice::from_ref(import),
-        ))
-        .await
+        )),
+        label = "mcp.search.import_admit.execute"
+    )
+    .await
     {
         Ok(active_generation) if &active_generation != source_generation => {
             Err(generation_advanced())

@@ -39,74 +39,77 @@ impl Driver for CargoDriver {
         project_root: &'a Path,
         scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(async move {
-            let target_dir = target_dir_for(project_root);
+        Box::pin(hotpath::future!(
+            async move {
+                let target_dir = target_dir_for(project_root);
 
-            let mut cmd = tokio::process::Command::new("cargo");
-            cmd.arg("check")
-                .arg("--message-format=json")
-                .arg("--target-dir")
-                .arg(&target_dir)
-                .current_dir(project_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
+                let mut cmd = tokio::process::Command::new("cargo");
+                cmd.arg("check")
+                    .arg("--message-format=json")
+                    .arg("--target-dir")
+                    .arg(&target_dir)
+                    .current_dir(project_root)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
 
-            if let Scope::Package { name } = scope {
-                cmd.arg("-p").arg(name);
-            }
-
-            let output = cmd.output().await.map_err(|e| TraceDecayError::Config {
-                message: format!("failed to spawn cargo: {e}"),
-            })?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut diagnostics = Vec::new();
-            for line in stdout.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                let parsed: CargoLine = match serde_json::from_str(line) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if parsed.reason != "compiler-message" {
-                    continue;
-                }
-                let Some(msg) = parsed.message else { continue };
-                if !is_diagnostic_level(&msg.level) {
-                    continue;
-                }
-                if msg.spans.is_empty() {
-                    continue;
+                if let Scope::Package { name } = scope {
+                    cmd.arg("-p").arg(name);
                 }
 
-                let code = msg
-                    .code
-                    .as_ref()
-                    .map(|c| c.code.clone())
-                    .unwrap_or_default();
+                let output = cmd.output().await.map_err(|e| TraceDecayError::Config {
+                    message: format!("failed to spawn cargo: {e}"),
+                })?;
 
-                for span in &msg.spans {
-                    if !span.is_primary {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut diagnostics = Vec::new();
+                for line in stdout.lines() {
+                    if line.is_empty() {
                         continue;
                     }
-                    let rel_file = canonicalise_file(&span.file_name, project_root);
-                    diagnostics.push(Diagnostic {
-                        file: rel_file,
-                        line_start: span.line_start,
-                        line_end: span.line_end,
-                        level: msg.level.clone(),
-                        code: code.clone(),
-                        message: msg.message.clone(),
-                        driver: "rust",
-                    });
-                }
-            }
+                    let parsed: CargoLine = match serde_json::from_str(line) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    if parsed.reason != "compiler-message" {
+                        continue;
+                    }
+                    let Some(msg) = parsed.message else { continue };
+                    if !is_diagnostic_level(&msg.level) {
+                        continue;
+                    }
+                    if msg.spans.is_empty() {
+                        continue;
+                    }
 
-            Ok(diagnostics)
-        })
+                    let code = msg
+                        .code
+                        .as_ref()
+                        .map(|c| c.code.clone())
+                        .unwrap_or_default();
+
+                    for span in &msg.spans {
+                        if !span.is_primary {
+                            continue;
+                        }
+                        let rel_file = canonicalise_file(&span.file_name, project_root);
+                        diagnostics.push(Diagnostic {
+                            file: rel_file,
+                            line_start: span.line_start,
+                            line_end: span.line_end,
+                            level: msg.level.clone(),
+                            code: code.clone(),
+                            message: msg.message.clone(),
+                            driver: "rust",
+                        });
+                    }
+                }
+
+                Ok(diagnostics)
+            },
+            label = "diagnostics.rust.cargo_check"
+        ))
     }
 }
 

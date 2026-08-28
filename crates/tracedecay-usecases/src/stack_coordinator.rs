@@ -372,6 +372,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         transition::restore_open_drift_interval(&self.drift_intervals, scope, observation)
     }
 
+    #[hotpath::measure(label = "usecases.stack.enqueue")]
     pub fn enqueue_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
         store: &S,
@@ -424,6 +425,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(())
     }
 
+    #[hotpath::measure(label = "usecases.stack.drain")]
     pub fn drain_due<
         S: StackCoordinatorStore,
         A: StackDeliveryAuthorizationPort,
@@ -510,6 +512,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(delivered)
     }
 
+    #[hotpath::measure(label = "usecases.stack.expand")]
     pub fn expand_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
         store: &S,

@@ -39,6 +39,7 @@ impl DashboardAssetSource for EmbeddedDashboardAssetSource {
 
 /// The root build owns the manifest; `tracedecay-api` owns this router's
 /// complete HTTP behavior.
+#[hotpath::measure(label = "dashboard.spa")]
 pub(crate) fn spa_router() -> Router {
     static_dashboard_router(Arc::new(EmbeddedDashboardAssetSource))
 }

@@ -924,6 +924,7 @@ fn hash16(value: &[u8]) -> [u8; 16] {
     value
 }
 
+#[hotpath::measure(label = "daemon.project.owners.advisory", future = true)]
 pub(super) async fn register_production_feedback_and_advisory(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -944,6 +945,7 @@ pub(super) async fn register_production_feedback_and_advisory(
 }
 
 /// Registers owners whose exact authority depends on a mounted code index.
+#[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,

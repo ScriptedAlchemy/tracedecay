@@ -90,6 +90,7 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
         Self { registry, identity }
     }
 
+    #[hotpath::measure(label = "daemon.retained.message_search", future = true)]
     async fn execute_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -134,6 +135,7 @@ impl DirectRetainedSessionPortV1 {
         Self { authorities }
     }
 
+    #[hotpath::measure(label = "daemon.retained.message_search", future = true)]
     async fn execute_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -151,6 +153,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.session_refresh", future = true)]
     async fn execute_session_refresh(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -204,6 +207,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.sessions_for", future = true)]
     async fn execute_sessions_for(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -228,6 +232,7 @@ impl DirectRetainedSessionPortV1 {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.workflows", future = true)]
     async fn execute_workflows(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -273,22 +278,25 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1 {
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedSessionRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedSessionRequestV1::SessionRefresh(request) => {
-                    self.execute_session_refresh(&context, request).await
+        Box::pin(hotpath::future!(
+            async move {
+                match request {
+                    RetainedSessionRequestV1::SessionRefresh(request) => {
+                        self.execute_session_refresh(&context, request).await
+                    }
+                    RetainedSessionRequestV1::MessageSearch(request) => {
+                        self.execute_message_search(&context, request).await
+                    }
+                    RetainedSessionRequestV1::SessionsFor(request) => {
+                        self.execute_sessions_for(&context, request).await
+                    }
+                    RetainedSessionRequestV1::Workflows(request) => {
+                        self.execute_workflows(&context, request).await
+                    }
                 }
-                RetainedSessionRequestV1::MessageSearch(request) => {
-                    self.execute_message_search(&context, request).await
-                }
-                RetainedSessionRequestV1::SessionsFor(request) => {
-                    self.execute_sessions_for(&context, request).await
-                }
-                RetainedSessionRequestV1::Workflows(request) => {
-                    self.execute_workflows(&context, request).await
-                }
-            }
-        })
+            },
+            label = "daemon.retained.session"
+        ))
     }
 }
 
@@ -298,18 +306,21 @@ impl RetainedSessionExecutionPortV1 for DirectProfileRetainedSessionPortV1<'_> {
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedSessionRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedSessionRequestV1::MessageSearch(request) => {
-                    self.execute_message_search(&context, request).await
+        Box::pin(hotpath::future!(
+            async move {
+                match request {
+                    RetainedSessionRequestV1::MessageSearch(request) => {
+                        self.execute_message_search(&context, request).await
+                    }
+                    RetainedSessionRequestV1::SessionRefresh(_)
+                    | RetainedSessionRequestV1::SessionsFor(_)
+                    | RetainedSessionRequestV1::Workflows(_) => {
+                        Err(RetainedSurfaceExecutionErrorV1::Unsupported)
+                    }
                 }
-                RetainedSessionRequestV1::SessionRefresh(_)
-                | RetainedSessionRequestV1::SessionsFor(_)
-                | RetainedSessionRequestV1::Workflows(_) => {
-                    Err(RetainedSurfaceExecutionErrorV1::Unsupported)
-                }
-            }
-        })
+            },
+            label = "daemon.retained.session"
+        ))
     }
 }
 

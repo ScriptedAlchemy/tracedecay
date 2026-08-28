@@ -34,7 +34,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.preview")]
     pub async fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
@@ -61,6 +61,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// approval under the same identity or digest is a conflict, never an
     /// overwrite. Consumption is not recorded here: an approval is consumed
     /// exactly when a transaction row binds its unique `approval_id`.
+    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.approval")]
     pub async fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
@@ -81,7 +82,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     }
 
     /// Atomically consumes the approval and inserts the `Prepared` record.
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.begin")]
     pub async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
@@ -183,7 +184,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.cas")]
     pub async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -222,7 +223,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// Publishes the terminal status transition and its receipt in one
     /// immediate database transaction, so restart recovery never observes a
     /// terminal phase without its immutable receipt or quarantine fence.
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.terminal")]
     pub async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -331,6 +332,10 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         approval_consumed_in_transaction(&snapshot, approval_id).await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.native_integration.persist.quarantine"
+    )]
     pub async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,

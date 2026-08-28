@@ -449,7 +449,7 @@ impl RemoteExactObservationQueryServiceV1 {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.remote.query")]
     pub fn query(
         &self,
         request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,

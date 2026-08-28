@@ -27,6 +27,7 @@ impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
     }
 }
 
+#[hotpath::measure(label = "query.lane.graph.read")]
 fn read_graph_evidence(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
@@ -146,6 +147,8 @@ fn read_graph_evidence(
         continuation: None,
     };
     check_request_control(request, control.as_ref())?;
+    hotpath::gauge!("query.graph.project.candidates").set(batch.candidates.len());
+    hotpath::gauge!("query.graph.project.examined").set(batch.coverage.examined);
     Ok(RetrieverOutcome::Complete(batch))
 }
 

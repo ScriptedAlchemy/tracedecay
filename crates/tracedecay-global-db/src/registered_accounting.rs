@@ -17,11 +17,13 @@ impl RegisteredGlobalDb {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.accounting.upsert")]
     pub async fn try_upsert_project_tokens(
         &self,
         project_path: &Path,
         tokens_saved: u64,
     ) -> tracedecay_runtime_core::errors::Result<()> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let path = super::project_path_alias_key(project_path);
         let transaction = self.begin_write_transaction().await?;
         transaction
@@ -107,6 +109,7 @@ impl RegisteredGlobalDb {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.accounting.record")]
     pub async fn try_record_savings(
         &self,
         project_path: &str,
@@ -115,6 +118,7 @@ impl RegisteredGlobalDb {
         after_tokens: u64,
         timestamp: i64,
     ) -> tracedecay_runtime_core::errors::Result<()> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
         let transaction = self.begin_write_transaction().await?;
         transaction
@@ -185,6 +189,7 @@ impl RegisteredGlobalDb {
             .map(|(totals, _)| totals)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.accounting.totals")]
     pub async fn savings_totals_with_watermark(
         &self,
         project_id: Option<&str>,

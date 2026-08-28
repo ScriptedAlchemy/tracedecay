@@ -3,7 +3,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,7 +32,7 @@ mod traversal;
 
 pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
-use self::interactive::InteractiveCatalog;
+use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
@@ -187,11 +189,10 @@ pub struct CodeGraphProjectionStore {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection: GraphProjectionIdentity,
     generation: CodeGenerationId,
-    /// Generation-pinned name/kind catalog, built lazily on first interactive
-    /// read and shared by every reader cloned from this store. The catalog is
-    /// derived from the verified snapshot and dies with it, so it is a cache
-    /// of the projection authority rather than a parallel authority.
-    interactive_catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
+    /// Generation-pinned name/kind catalog state and its single build gate.
+    /// The state lock is never held across the projection scan, so
+    /// occurrence-seeded reads remain independent while catalog warming runs.
+    interactive_catalog: Arc<InteractiveCatalogCache>,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -219,7 +220,7 @@ impl CodeGraphProjectionStore {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
-            interactive_catalog: Arc::new(RwLock::new(None)),
+            interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
         })
     }
 

@@ -59,6 +59,7 @@ impl tracedecay_api::HandoffApplicationOwner for HandoffExecutorOwner {
     }
 }
 
+#[hotpath::measure(label = "application_surface.handoff.invoke", future = true)]
 async fn invoke_operation(
     executor: Arc<dyn DaemonInvocationExecutor>,
     request: tracedecay_api::HandoffHttpRequest,

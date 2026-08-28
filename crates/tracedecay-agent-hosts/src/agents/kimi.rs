@@ -166,6 +166,7 @@ impl AgentIntegration for KimiIntegration {
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let code_home = kimi_code_home(&ctx.home);
         if !installed_json_has_tracedecay(&code_home) {
@@ -174,6 +175,7 @@ impl AgentIntegration for KimiIntegration {
         stage_kimi_install_action(ctx).map(UpdatePluginOutcome::DeferredUserAction)
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKimi CLI integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home, &kimi_code_home(&ctx.home));
@@ -248,6 +250,7 @@ impl AgentIntegration for KimiIntegration {
         Some(kimi_installed_json_path(&kimi_code_home(home)))
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.install")]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
         if kimi_plugin_is_natively_active(&ctx.home, &code_home)? {
@@ -259,6 +262,7 @@ impl AgentIntegration for KimiIntegration {
         }
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.uninstall")]
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
         if installed_json_has_tracedecay(&code_home) {
@@ -274,6 +278,7 @@ impl AgentIntegration for KimiIntegration {
         installed_json_has_tracedecay(&kimi_code_home(home))
     }
 
+    #[hotpath::measure(label = "hosts.agent.kimi.export")]
     fn export_managed_skills_local(
         &self,
         project_root: &Path,

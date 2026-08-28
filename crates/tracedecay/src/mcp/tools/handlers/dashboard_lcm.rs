@@ -58,6 +58,7 @@ impl DashboardLcmReadAdapter {
         })
     }
 
+    #[hotpath::measure(future = true, label = "mcp.lcm.total")]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -354,6 +355,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
+    #[hotpath::measure(future = true, label = "mcp.lcm.overview")]
     async fn execute_overview_with_matches(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -424,6 +426,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
+    #[hotpath::measure(future = true, label = "mcp.lcm.hydrate")]
     async fn hydrate_summary(
         &self,
         context: &RequestContext,

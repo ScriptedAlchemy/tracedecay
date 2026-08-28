@@ -517,7 +517,6 @@ where
     }
 }
 
-#[hotpath::measure(label = "daemon.engine.transport.await_owner", future = true)]
 pub(super) async fn await_project_owner_or_disconnect<T>(
     transport: &mut impl McpTransport,
     open: impl std::future::Future<Output = Result<T>>,
@@ -568,7 +567,6 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
@@ -1188,7 +1186,6 @@ pub(super) async fn serve_windows_broker_client_with_class(
 #[cfg(any(not(unix), test))]
 // The foreground portable broker supplies one daemon-generation invocation state.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
 pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     stream: BrokerStream,
     auth_token: &str,

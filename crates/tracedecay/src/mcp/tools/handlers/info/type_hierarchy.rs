@@ -3,6 +3,7 @@
 use super::*;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
+#[hotpath::measure(label = "mcp.info.type_hierarchy.total")]
 pub(crate) async fn handle_type_hierarchy(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -40,15 +41,18 @@ pub(crate) async fn handle_type_hierarchy(
     );
     let mut all_files = vec![root_file.to_owned()];
     let mut seen = HashSet::from([occurrence.clone()]);
-    build_type_tree(
-        graph,
-        &occurrence,
-        max_depth,
-        0,
-        &mut tree,
-        &mut all_files,
-        &mut seen,
-    )?;
+    hotpath::measure_block!(
+        "mcp.info.type_hierarchy.walk",
+        build_type_tree(
+            graph,
+            &occurrence,
+            max_depth,
+            0,
+            &mut tree,
+            &mut all_files,
+            &mut seen,
+        )?
+    );
 
     let touched_files = unique_file_paths(all_files.iter().map(String::as_str));
     let payload = json!({

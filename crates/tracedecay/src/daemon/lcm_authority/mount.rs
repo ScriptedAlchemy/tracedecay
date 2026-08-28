@@ -199,10 +199,13 @@ fn lcm_binding_digest(
 
 impl MountedLcmAuthorityPort for MountedLcmAuthority {
     fn execute(&self, request: LcmAuthorityRequest) -> MountedLcmFuture<'_> {
-        Box::pin(async move {
-            let invocation = self.invocation(request)?;
-            Some(self.authority.execute(invocation).await)
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                let invocation = self.invocation(request)?;
+                Some(self.authority.execute(invocation).await)
+            },
+            label = "daemon.lcm.mount.execute"
+        ))
     }
 
     fn execute_admitted<'a>(

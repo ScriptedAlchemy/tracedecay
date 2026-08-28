@@ -116,6 +116,7 @@ impl AgentIntegration for OpenCodeIntegration {
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let plugin_path = opencode_plugin_path(&ctx.home);
         if !plugin_path.exists() {
@@ -125,6 +126,7 @@ impl AgentIntegration for OpenCodeIntegration {
         Ok(UpdatePluginOutcome::Refreshed(vec![plugin_path]))
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mOpenCode integration\x1b[0m");
         doctor_check_config(dc, &ctx.home);
@@ -242,6 +244,7 @@ impl AgentIntegration for OpenCodeIntegration {
         install_mcp_server(&opencode_config_path(&ctx.home), &ctx.tracedecay_bin)
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -271,6 +274,7 @@ impl AgentIntegration for OpenCodeIntegration {
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.uninstall")]
     fn deactivate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -309,6 +313,7 @@ impl AgentIntegration for OpenCodeIntegration {
         config_path.exists().then_some(config_path)
     }
 
+    #[hotpath::measure(label = "hosts.agent.opencode.export")]
     fn export_managed_skills(
         &self,
         home: &Path,

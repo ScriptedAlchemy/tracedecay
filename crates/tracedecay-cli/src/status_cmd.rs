@@ -110,7 +110,7 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.status.dispatch", future = true)]
 pub(crate) async fn handle_status_command(
     path: Option<String>,
     project_id: Option<String>,
@@ -145,6 +145,7 @@ pub(crate) async fn handle_status_command(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "cli.status.within", future = true)]
 async fn handle_status_command_within(
     deadline: Instant,
     path: Option<String>,

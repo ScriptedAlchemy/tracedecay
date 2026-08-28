@@ -19,7 +19,7 @@ fn operation_authority(
 }
 
 impl GraphVectorGenerationStoreV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.reserve_generation")]
     pub fn reserve_one_generation(
         &self,
         after: Option<SemanticVectorStageCensusCursor>,
@@ -32,7 +32,7 @@ impl GraphVectorGenerationStoreV1 {
             .map_err(map_graph_error)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.finalize_generation")]
     pub fn finalize_reserved_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
@@ -46,7 +46,7 @@ impl GraphVectorGenerationStoreV1 {
             .map_err(map_graph_error)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.store.release_generation")]
     pub fn release_reserved_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,

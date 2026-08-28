@@ -293,6 +293,7 @@ where
     P: SessionTemporalExecutionPort,
     E: VersionedTokenEstimator + Sync,
 {
+    #[hotpath::measure(label = "usecases.session.retrieve", future = true)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,

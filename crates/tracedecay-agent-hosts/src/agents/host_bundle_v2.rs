@@ -185,7 +185,7 @@ pub fn plan_verified_lifecycle_mutation(
 
 /// Verify first, then produce the full immutable lifecycle plan, including
 /// receipt-derived orphan removals for update, repair, and uninstall.
-#[hotpath::measure(label = "host_bundle_plan_complete")]
+#[hotpath::measure(label = "hosts.agent.host_bundle.plan_complete")]
 pub fn plan_verified_complete_lifecycle_mutation(
     manifest: &HostBundleManifestV1,
     request: &HostBundleLifecycleRequestV1,
@@ -1371,7 +1371,7 @@ pub fn dry_run_host_bundle_lifecycle_at(
     )
 }
 
-#[hotpath::measure(label = "host_bundle_dry_run")]
+#[hotpath::measure(label = "hosts.agent.host_bundle.dry_run")]
 pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
@@ -1480,7 +1480,7 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
 /// Read-only component-set preview for the official CLI. The registration
 /// adapter contributes the exact native-config revision, while every artifact
 /// plan is derived through the same ownership-aware planner used by apply.
-#[hotpath::measure(label = "host_bundle_component_set_dry_run")]
+#[hotpath::measure(label = "hosts.agent.host_bundle.component_set_dry_run")]
 pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     V: HostBundleVerificationAdapterV1,
     R: HostComponentSetRegistrationV1,
@@ -1604,7 +1604,7 @@ fn discovered_competing_extension_claims<R: HostComponentSetRegistrationV1>(
     Ok(claims)
 }
 
-#[hotpath::measure(label = "host_bundle_inspect_installed")]
+#[hotpath::measure(label = "hosts.agent.host_bundle.inspect_installed")]
 pub fn inspect_installed_host_bundle_components_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
@@ -2574,7 +2574,7 @@ impl HostBundleWriterV1 {
 
     /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
     /// mutations, then execute them atomically with a recoverable journal.
-    #[hotpath::measure(label = "host_bundle_execute")]
+    #[hotpath::measure(label = "hosts.agent.host_bundle.execute")]
     pub fn execute(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -2809,7 +2809,7 @@ impl HostBundleWriterV1 {
         )
     }
 
-    #[hotpath::measure(label = "host_bundle_component_set_execute")]
+    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_execute")]
     fn execute_component_set_with_preview<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
@@ -3584,6 +3584,7 @@ impl HostBundleWriterV1 {
         Ok(receipt)
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.receipt_persist")]
     fn write_receipt(&self, receipt: &HostBundleInstallReceiptV1) -> Result<(), HostBundleError> {
         validate_receipt(receipt)?;
         let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
@@ -3618,6 +3619,7 @@ impl HostBundleWriterV1 {
         Ok(receipt)
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_receipt_persist")]
     fn write_component_set_receipt(
         &self,
         receipt: &HostComponentSetReceiptV1,
@@ -3714,12 +3716,14 @@ impl HostBundleWriterV1 {
         Ok(Some(journal.operation))
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.journal_persist")]
     fn write_journal(&self, journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
         validate_journal(journal)?;
         let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
         atomic_write_nofollow(&self.control, HOST_BUNDLE_JOURNAL_FILE, &bytes, true)
     }
 
+    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_journal_persist")]
     fn write_component_set_journal(
         &self,
         journal: &HostComponentSetJournalV1,

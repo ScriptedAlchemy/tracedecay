@@ -27,7 +27,7 @@ pub fn stable_record_id(
     provider_observation_id(&candidate).ok_or(ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.claude.normalize")]
 pub fn normalize(
     native: &Value,
     session_id: &str,

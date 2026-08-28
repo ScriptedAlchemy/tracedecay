@@ -31,6 +31,7 @@ pub(super) async fn write_daemon_invocation_response(
 
 /// Read one newline-delimited frame. Oversized input gets a typed non-durable
 /// rejection and returns `Ok(None)` without retaining payload bytes.
+#[hotpath::measure(label = "daemon.wire.read_line", future = true)]
 pub(super) async fn read_line_handling_wire_oversized(
     transport: &mut impl McpTransport,
 ) -> Result<Option<String>> {

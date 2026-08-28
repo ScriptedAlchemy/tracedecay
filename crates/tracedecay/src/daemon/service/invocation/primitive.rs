@@ -9,6 +9,7 @@ pub(crate) use context_scout_registry::{
 };
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.primitive.execute", future = true)]
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
@@ -131,6 +132,7 @@ pub(super) async fn execute_primitive(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.callable_code.execute", future = true)]
 pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
@@ -453,6 +455,7 @@ fn callable_code_response<T: Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.context_scout.execute", future = true)]
 pub(super) async fn execute_context_scout(
     service: &DaemonInvocationService,
     wire_request_id: String,
@@ -721,6 +724,7 @@ pub(super) async fn execute_context_scout(
     }
 }
 
+#[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
@@ -863,6 +867,7 @@ impl ContextScoutActivationReconciliationError {
     }
 }
 
+#[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
 async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
     owner: &Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,

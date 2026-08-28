@@ -465,6 +465,7 @@ impl ToolHintDedupe {
     /// ([`decide_hint_delivery`]) and applies the resulting per-session budget
     /// and per-category escalation state mutations. The policy decision is
     /// returned unchanged; rendering happens only from it.
+    #[hotpath::measure(label = "hosts.hooks.tool_hints.dedupe")]
     pub fn decide(
         &mut self,
         session_id: impl Into<String>,
@@ -521,6 +522,7 @@ impl ToolHintDedupe {
         self.categories.len()
     }
 
+    #[hotpath::measure(label = "hosts.hooks.tool_hints.load")]
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         // v2: {"version":2, "sessions":[...], "categories":[...]}. v1: a bare
@@ -586,6 +588,7 @@ impl ToolHintDedupe {
         }
     }
 
+    #[hotpath::measure(label = "hosts.hooks.tool_hints.save")]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -665,6 +668,7 @@ struct PersistedHintEntry {
     category: String,
 }
 
+#[hotpath::measure(label = "hosts.hooks.tool_hints.decide")]
 pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if !input.hints_enabled {
         return None;
@@ -673,6 +677,7 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     classify_hint(input).map(hint_for_category)
 }
 
+#[hotpath::measure(label = "hosts.hooks.tool_hints.classify")]
 fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
     let facts = HintRequestFacts::new(input);
     CLASSIFICATION_RULES

@@ -112,17 +112,19 @@ pub fn build_observation_resolution_authorization_v1(
     observation: &DurableObservationV1,
     authority_namespace: &str,
 ) -> ObservationStoreResult<ResolutionAuthorizationV1> {
-    let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
-        "domain": "tracedecay.observation-anchor.request.v1",
-        "authority": authority_namespace,
-        "owner": observation.scope(),
-        "observation_id": observation.observation_id(),
-    }))
-    .map_err(ObservationStoreError::Contract)?
-    .digest()
-    .as_str()
-    .to_owned();
-    build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+    hotpath::measure_block!("store.observation.build_observation_authorization", {
+        let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+            "domain": "tracedecay.observation-anchor.request.v1",
+            "authority": authority_namespace,
+            "owner": observation.scope(),
+            "observation_id": observation.observation_id(),
+        }))
+        .map_err(ObservationStoreError::Contract)?
+        .digest()
+        .as_str()
+        .to_owned();
+        build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+    })
 }
 
 /// Derives a caller-bound authorization snapshot for resolutions that have no
@@ -134,17 +136,19 @@ pub fn build_scope_resolution_authorization_v1(
     anchor_id: &RetrievalAnchorId,
     authority_namespace: &str,
 ) -> ObservationStoreResult<ResolutionAuthorizationV1> {
-    let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
-        "domain": "tracedecay.observation-anchor.request.v1",
-        "authority": authority_namespace,
-        "owner": scope,
-        "anchor_id": anchor_id,
-    }))
-    .map_err(ObservationStoreError::Contract)?
-    .digest()
-    .as_str()
-    .to_owned();
-    build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+    hotpath::measure_block!("store.observation.build_scope_authorization", {
+        let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+            "domain": "tracedecay.observation-anchor.request.v1",
+            "authority": authority_namespace,
+            "owner": scope,
+            "anchor_id": anchor_id,
+        }))
+        .map_err(ObservationStoreError::Contract)?
+        .digest()
+        .as_str()
+        .to_owned();
+        build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+    })
 }
 
 /// Upper bound on memoized access-policy digests.
@@ -161,29 +165,39 @@ const MAX_MEMOIZED_ACCESS_POLICY_DIGESTS: usize = 64;
 /// namespace. Deriving it per resolution put a canonical-JSON encode plus a
 /// SHA-256 compression on the anchor-resolution serving path for a value that
 /// was born the first time the namespace was used.
-static ACCESS_POLICY_DIGESTS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+///
+/// The lock type follows `hotpath::rw_lock!`: instrumented wrapper when the
+/// `hotpath` feature is on, `std::sync::RwLock` when it is off.
+static ACCESS_POLICY_DIGESTS: LazyLock<hotpath::rw_locks::RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| {
+        hotpath::rw_lock!(
+            RwLock::new(HashMap::new()),
+            label = "store.observation.access_policy_digests"
+        )
+    });
 
 fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult<String> {
-    if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
-        && let Some(digest) = memo.get(authority_namespace)
-    {
-        return Ok(digest.clone());
-    }
-    let digest = PayloadReferenceV1::for_payload(&serde_json::json!({
-        "domain": "tracedecay.observation-anchor.authorization.v1",
-        "authority": authority_namespace,
-    }))
-    .map_err(ObservationStoreError::Contract)?
-    .digest()
-    .as_str()
-    .to_owned();
-    if let Ok(mut memo) = ACCESS_POLICY_DIGESTS.write()
-        && memo.len() < MAX_MEMOIZED_ACCESS_POLICY_DIGESTS
-    {
-        memo.insert(authority_namespace.to_owned(), digest.clone());
-    }
-    Ok(digest)
+    hotpath::measure_block!("store.observation.access_policy_digest", {
+        if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
+            && let Some(digest) = memo.get(authority_namespace)
+        {
+            return Ok(digest.clone());
+        }
+        let digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+            "domain": "tracedecay.observation-anchor.authorization.v1",
+            "authority": authority_namespace,
+        }))
+        .map_err(ObservationStoreError::Contract)?
+        .digest()
+        .as_str()
+        .to_owned();
+        if let Ok(mut memo) = ACCESS_POLICY_DIGESTS.write()
+            && memo.len() < MAX_MEMOIZED_ACCESS_POLICY_DIGESTS
+        {
+            memo.insert(authority_namespace.to_owned(), digest.clone());
+        }
+        Ok(digest)
+    })
 }
 
 /// Returns the exact access-policy digest retained by production observation
@@ -220,50 +234,52 @@ pub fn build_observation_retrieval_anchor_v2(
     ingested_at: UtcMicros,
     authorization: ResolutionAuthorizationV1,
 ) -> ObservationStoreResult<RetrievalAnchorRecordV2> {
-    let aliases = observation
-        .identity()
-        .native_record_id()
-        .map(|native_record_id| {
-            let locator = serde_json::json!({
-                "owner": observation.scope(),
-                "provider": observation.source().provider(),
-                "session_id": observation.source().session_id(),
-                "native_record_id": native_record_id,
-            });
-            let digest = PayloadReferenceV1::for_payload(&locator)
-                .map_err(ObservationStoreError::Contract)?
-                .digest()
-                .as_str()
-                .to_owned();
-            let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
-                .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-            NativeAliasV2::new(NativeAliasKindV2::ProviderRecord, locator_digest)
-                .map_err(ObservationStoreError::RetrievalAnchorContract)
+    hotpath::measure_block!("store.observation.build_retrieval_anchor", {
+        let aliases = observation
+            .identity()
+            .native_record_id()
+            .map(|native_record_id| {
+                let locator = serde_json::json!({
+                    "owner": observation.scope(),
+                    "provider": observation.source().provider(),
+                    "session_id": observation.source().session_id(),
+                    "native_record_id": native_record_id,
+                });
+                let digest = PayloadReferenceV1::for_payload(&locator)
+                    .map_err(ObservationStoreError::Contract)?
+                    .digest()
+                    .as_str()
+                    .to_owned();
+                let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
+                    .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+                NativeAliasV2::new(NativeAliasKindV2::ProviderRecord, locator_digest)
+                    .map_err(ObservationStoreError::RetrievalAnchorContract)
+            })
+            .transpose()?
+            .into_iter()
+            .collect();
+        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+            target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+            owner: observation.scope().clone(),
+            aliases,
+            occurred_at: None,
+            ingested_at,
+            evidence_class: EvidenceClass::Observed,
+            source_generation: AnchorSourceGenerationV2::Observation(
+                observation.identity().generation(),
+            ),
+            projection_generation,
+            projection_watermark: VectorWatermark::default(),
+            coverage: CoverageReportV1::default(),
+            source_observations: vec![observation.observation_id().clone()],
+            source_anchors: vec![],
+            authorization,
+            payload_access: PayloadAccessState::Eligible,
+            retention_class: observation.retention_class().clone(),
+            durability: AnchorDurabilityClass::DurableEvidence,
         })
-        .transpose()?
-        .into_iter()
-        .collect();
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
-        owner: observation.scope().clone(),
-        aliases,
-        occurred_at: None,
-        ingested_at,
-        evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Observation(
-            observation.identity().generation(),
-        ),
-        projection_generation,
-        projection_watermark: VectorWatermark::default(),
-        coverage: CoverageReportV1::default(),
-        source_observations: vec![observation.observation_id().clone()],
-        source_anchors: vec![],
-        authorization,
-        payload_access: PayloadAccessState::Eligible,
-        retention_class: observation.retention_class().clone(),
-        durability: AnchorDurabilityClass::DurableEvidence,
+        .map_err(ObservationStoreError::RetrievalAnchorContract)
     })
-    .map_err(ObservationStoreError::RetrievalAnchorContract)
 }
 
 /// Store-side observation of an evidence-anchor binding at resolution time.

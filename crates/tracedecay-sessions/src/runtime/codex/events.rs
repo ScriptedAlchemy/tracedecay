@@ -167,6 +167,7 @@ impl CodexStructuredState {
     /// * `Some(rows)` — the line was recognized. `rows` may be empty (an
     ///   `exec_command` call is buffered until its output arrives; a recognized
     ///   but unusable line is consumed so it is not re-processed).
+    #[hotpath::measure(label = "sessions.codex_events.event_from_line")]
     pub(super) fn event_from_line(
         &mut self,
         record: &Value,
@@ -367,6 +368,7 @@ impl CodexStructuredState {
     /// arrived in this pass (still running, or truncated at a chunk boundary),
     /// so the call is never silently dropped. Rows are returned in call order;
     /// the caller annotates and appends them.
+    #[hotpath::measure(label = "sessions.codex_events.flush_pending")]
     pub(super) fn flush_pending(
         &mut self,
         meta: &CodexMeta,
@@ -448,6 +450,7 @@ const EXEC_MARKER: &str = "tools.exec_command(";
 /// the caller then leaves the line on the generic `tool_event` path. When a call
 /// is present but no `cmd` string can be recovered, the returned `cmd` is `None`
 /// (the field falls back to null; nothing is guessed).
+#[hotpath::measure(label = "sessions.codex_events.extract_exec_args")]
 fn extract_exec_command_args(input: &str) -> Option<ExecInvocation> {
     if !input.contains(EXEC_MARKER) {
         return None;
@@ -884,6 +887,7 @@ struct CommitCandidates {
     observed: Vec<String>,
 }
 
+#[hotpath::measure(label = "sessions.codex_events.commit_candidates")]
 fn commit_candidates(command: &str, wrapped_output: &str) -> CommitCandidates {
     let creates_commit = command
         .split([';', '\n', '&', '|'])

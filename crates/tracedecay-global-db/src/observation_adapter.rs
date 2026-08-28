@@ -645,7 +645,7 @@ impl ObservationBatchState {
     }
 }
 
-#[hotpath::measure(future = true)]
+#[hotpath::measure(future = true, label = "global_db.observation.query.preflight")]
 async fn load_observation_preflight(
     database: &Database,
     writes: &[AnchoredObservationWrite],
@@ -1115,7 +1115,7 @@ impl ObservationStore for GlobalDbObservationStore {
             })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.observation.persist.batch")]
     async fn persist_observations(
         &self,
         writes: Vec<AnchoredObservationWrite>,

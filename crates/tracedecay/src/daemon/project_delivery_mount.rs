@@ -5,6 +5,7 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
+#[hotpath::measure(label = "daemon.project.mount", future = true)]
 pub(super) async fn ensure_project_delivery_settlement(
     invocation: &DaemonInvocationState,
     project_root: &Path,

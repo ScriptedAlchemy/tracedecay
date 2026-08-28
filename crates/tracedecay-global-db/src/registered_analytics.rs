@@ -47,6 +47,7 @@ pub struct ObservabilityRetentionReceiptV1 {
 
 impl RegisteredGlobalDb {
     /// Read an existing exact owner claim without allocating a new delivery.
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.claim")]
     pub async fn observability_emission_claim(
         &self,
         project_id: &str,
@@ -106,10 +107,12 @@ impl RegisteredGlobalDb {
         }))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append")]
     pub async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -127,10 +130,15 @@ impl RegisteredGlobalDb {
     /// The registered writer serializes the lookup and insert; the partial
     /// unique index remains the cross-process backstop. Reusing a key with
     /// changed canonical input is an explicit conflict.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.registered.analytics.append_observability"
+    )]
     pub async fn append_observability_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -144,6 +152,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Claim one stable owner fact without replacing a prior delivery.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim")]
     pub async fn claim_observability_emission(
         &self,
         project_id: &str,
@@ -206,6 +215,7 @@ impl RegisteredGlobalDb {
     }
 
     /// CAS a pending delivery to its delayed-coverage representation.
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.persist.delay")]
     pub async fn delay_observability_emission(
         &self,
         project_id: &str,
@@ -276,6 +286,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Append the exact delivery and settle its outbox row in one transaction.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.settle")]
     pub async fn settle_observability_emission(
         &self,
         project_id: &str,
@@ -341,6 +352,7 @@ impl RegisteredGlobalDb {
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
     /// carriers. This table is not a generic delivery outbox: recovery decodes
     /// every pending row through that exact envelope before settlement.
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.pending")]
     pub async fn pending_observability_emissions(
         &self,
         project_id: &str,
@@ -393,6 +405,7 @@ impl RegisteredGlobalDb {
 
     /// Expires only optional observability detail and rollup rows through the
     /// registered writer. Product receipts retain their owning lifecycle.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.prune")]
     pub async fn prune_observability_events(
         &self,
         now_seconds: i64,
@@ -434,6 +447,7 @@ impl RegisteredGlobalDb {
         })
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_batch")]
     pub async fn append_analytics_events(
         &self,
         events: &[AnalyticsEventInsert],
@@ -441,6 +455,9 @@ impl RegisteredGlobalDb {
         if events.is_empty() {
             return Ok(Vec::new());
         }
+        crate::hotpath_observe::record_transaction_rows(
+            u64::try_from(events.len()).unwrap_or(u64::MAX),
+        );
         let transaction = self
             .begin_write_transaction()
             .await
@@ -463,6 +480,7 @@ impl RegisteredGlobalDb {
     /// is the durable cursor the caller read before parsing: the append is
     /// refused when another importer has already advanced it, so two concurrent
     /// importers can never both claim the same byte range.
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_cursor")]
     pub async fn append_analytics_events_with_cursor(
         &self,
         events: &[AnalyticsEventInsert],
@@ -491,6 +509,7 @@ impl RegisteredGlobalDb {
         Ok(ids)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.analytics.query")]
     pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
@@ -566,6 +585,7 @@ impl RegisteredGlobalDb {
         Ok(events)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.count")]
     pub async fn count_analytics_events(
         &self,
         project_id: Option<&str>,
@@ -596,6 +616,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode analytics event count: {error}"))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.tools")]
     pub async fn query_analytics_tool_counts(
         &self,
         project_id: Option<&str>,
@@ -644,6 +665,7 @@ impl RegisteredGlobalDb {
         Ok(counts)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.hints")]
     pub async fn query_analytics_hint_counts(
         &self,
         project_id: Option<&str>,

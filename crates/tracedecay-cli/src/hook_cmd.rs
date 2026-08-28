@@ -1,5 +1,6 @@
 use crate::cli::Commands;
 
+#[hotpath::measure(label = "cli.hook.dispatch", future = true)]
 pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors::Result<i32> {
     // Claude PostCompact is a daemon-owned pressure probe, not a native
     // capture source: Claude exposes no machine-verifiable compacted payload,

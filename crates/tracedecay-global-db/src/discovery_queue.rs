@@ -113,6 +113,7 @@ fn decode_entry(
 }
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.discovery_queue.persist.enqueue")]
     pub async fn enqueue_host_discovery_paths(
         &self,
         provider: &str,
@@ -196,6 +197,7 @@ impl RegisteredGlobalDb {
         Ok(Some(entry))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.discovery_queue.query")]
     pub async fn host_discovery_paths_after(
         &self,
         provider: &str,

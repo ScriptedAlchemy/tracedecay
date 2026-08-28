@@ -792,6 +792,7 @@ impl GraphDbRegistry {
     /// This is deliberately the only entry-creation path. Ordinary
     /// [`GraphDbRegistration`] values can resolve an already mounted entry,
     /// but cannot turn an operation lease into map ownership.
+    #[hotpath::measure(label = "graph_db.registry.attach", impl_type = "GraphDbRegistry")]
     pub fn resolve_owner_attachment(
         &self,
         registration: GraphDbOwnerRegistrationV1,
@@ -1108,6 +1109,7 @@ impl GraphDbRegistry {
         self.reopen(registration)
     }
 
+    #[hotpath::measure(label = "graph_db.registry.close", impl_type = "GraphDbRegistry")]
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
@@ -1155,6 +1157,10 @@ impl GraphDbRegistry {
         self.close_retained_inner(binding, verified_locator, true)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.registry.close_retained",
+        impl_type = "GraphDbRegistry"
+    )]
     fn close_retained_inner(
         &self,
         binding: &StoreRuntimeBindingV1,
@@ -1170,6 +1176,7 @@ impl GraphDbRegistry {
         Ok(true)
     }
 
+    #[hotpath::measure(label = "graph_db.registry.evict", impl_type = "GraphDbRegistry")]
     pub fn evict_idle(
         &self,
         minimum_idle: Duration,
@@ -1322,6 +1329,10 @@ impl GraphDbRegistry {
     /// Identity and client-lease checks complete under one registry-state lock,
     /// so failure leaves every target ready and success denies new resolution
     /// for the entire selected set until commit or drop.
+    #[hotpath::measure(
+        label = "graph_db.registry.retire.reserve",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<GraphDbRetirementTarget>,

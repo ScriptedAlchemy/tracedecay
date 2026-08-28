@@ -83,7 +83,7 @@ impl DoctorTestRuntime {
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
-#[hotpath::measure]
+#[hotpath::measure(label = "doctor.run", future = true)]
 pub async fn run_doctor() -> crate::errors::Result<()> {
     let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
         Ok(lease) => lease,
@@ -321,6 +321,7 @@ fn doctor_result(
     }
 }
 
+#[hotpath::measure(label = "doctor.daemon_status", future = true)]
 async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
     let handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path.to_path_buf()),
@@ -509,6 +510,7 @@ fn check_binary(dc: &mut DoctorCounters) {
 /// reports whether an explicitly enabled project watcher is active or using
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
 /// a failure — activation comes from each project's pinned configuration.
+#[hotpath::measure(label = "doctor.check.watcher")]
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
 
@@ -588,6 +590,7 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
+#[hotpath::measure(label = "doctor.config.upload", future = true)]
 async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result<bool> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
@@ -680,6 +683,7 @@ fn check_user_config(
 }
 
 /// Check optional external tools that gate optional MCP capabilities.
+#[hotpath::measure(label = "doctor.check.external_tools")]
 fn check_external_tools(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mExternal tools\x1b[0m");
     let diagnostics = crate::mcp::tools::ast_grep_diagnostics_json();
@@ -725,6 +729,7 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 }
 
 /// Check network connectivity.
+#[hotpath::measure(label = "doctor.check.network")]
 fn check_network(
     dc: &mut DoctorCounters,
     upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,

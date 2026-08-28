@@ -34,6 +34,7 @@ pub struct SourceReadOutput {
     pub context: Option<Value>,
 }
 
+#[hotpath::measure(label = "usecases.context.read_source", future = true)]
 pub async fn read_source(
     project_root: &Path,
     database: &Database,
@@ -170,6 +171,7 @@ pub async fn read_source(
     })
 }
 
+#[hotpath::measure(label = "usecases.context.resolve_indexed_source")]
 pub fn resolve_indexed_source_file(
     project_root: &Path,
     reader: &CodeGraphInteractiveReader,

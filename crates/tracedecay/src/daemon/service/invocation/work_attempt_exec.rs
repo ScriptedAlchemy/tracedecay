@@ -354,6 +354,7 @@ impl WorkAttemptProcessRegistryV1 {
             .accepting = false;
     }
 
+    #[hotpath::measure(label = "daemon.service.work_attempt.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> bool {
         let processes = {
             let mut state = self
@@ -454,6 +455,7 @@ pub(super) fn spawn_attempt_execution(
     });
 }
 
+#[hotpath::measure(label = "daemon.service.work_attempt.run", future = true)]
 async fn run_attempt(
     registered: RegisteredWorkRuntime,
     project_root: PathBuf,
@@ -774,6 +776,7 @@ fn admitted_provider_environment(
         .collect()
 }
 
+#[hotpath::measure(label = "daemon.service.work_attempt.provider", future = true)]
 async fn execute_provider_with_environment<S>(
     attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
@@ -989,6 +992,7 @@ struct AppServerSessionOutput {
 /// The session client is blocking, so it runs on a blocking worker while the
 /// deadline and cancellation arms stay on the runtime — the same three-armed
 /// shape the stdio path uses.
+#[hotpath::measure(label = "daemon.service.work_attempt.app_server", future = true)]
 async fn execute_app_server<S>(
     attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
@@ -1234,6 +1238,7 @@ fn offer_no_progress_observation(
 
 /// Runs the graceful-interrupt / forced-kill cancellation ladder after the
 /// durable cancellation request has been observed.
+#[hotpath::measure(label = "daemon.service.work_attempt.cancel_ladder", future = true)]
 async fn cancel_ladder<S>(
     attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,

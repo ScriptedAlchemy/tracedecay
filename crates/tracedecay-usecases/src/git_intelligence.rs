@@ -272,6 +272,7 @@ impl NativeGitIntelligence {
     /// repositories `gix` can open — including linked worktrees, where the
     /// snapshot resolves the checkout-specific HEAD rather than the common
     /// directory's.
+    #[hotpath::measure(label = "usecases.git_intelligence.head")]
     pub fn head(&self) -> Result<GitHeadStateV1, GitIntelligenceError> {
         Ok(self.repository_snapshot()?.head)
     }
@@ -283,6 +284,7 @@ impl NativeGitIntelligence {
     /// crates mount the same production read. It opens no subprocess and
     /// exposes no revision expression, traversal, ref mutation, or object
     /// write surface.
+    #[hotpath::measure(label = "usecases.git_intelligence.historical_blob")]
     pub fn historical_blob(
         &self,
         request: &GitHistoricalBlobRequestV1,
@@ -299,6 +301,7 @@ impl NativeGitIntelligence {
     ///
     /// The first argument must be an admitted read subcommand; ambient
     /// `GIT_*` environment is scrubbed and `GIT_OPTIONAL_LOCKS=0` is pinned.
+    #[hotpath::measure(label = "usecases.git_intelligence.run_git")]
     fn run_git(
         &self,
         operation: &'static str,
@@ -396,6 +399,7 @@ impl NativeGitIntelligence {
     /// Exact porcelain remains the authority for mutable status/diff/blame
     /// payloads, but HEAD, object format, operation state, configuration, and
     /// index conflict state do not require subprocesses.
+    #[hotpath::measure(label = "usecases.git_intelligence.snapshot")]
     fn repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
         let Ok(repo) = gix::open(&self.repo_root) else {
             return self.cli_repository_snapshot();
@@ -461,6 +465,7 @@ impl NativeGitIntelligence {
     /// Bounded compatibility read for object formats or repository layouts
     /// that this build of gix cannot open. This path is uncommon and keeps
     /// SHA-256 repositories truthful without claiming native support.
+    #[hotpath::measure(label = "usecases.git_intelligence.snapshot.cli")]
     fn cli_repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
         let git_dir = PathBuf::from(
             self.stdout("rev-parse", &["rev-parse", "--absolute-git-dir"])?
@@ -597,6 +602,7 @@ impl NativeGitIntelligence {
     /// Typed repository status with staged, unstaged, untracked, ignored,
     /// renamed, conflicted, submodule, sparse, split-index, and file-mode
     /// state plus explicit coverage.
+    #[hotpath::measure(label = "usecases.git_intelligence.status")]
     pub fn status(&self) -> Result<GitStatusV1, GitIntelligenceError> {
         let authority = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
             &self.repo_root,
@@ -617,6 +623,7 @@ impl NativeGitIntelligence {
     }
 
     /// Typed diff for one scope with file and hunk structure.
+    #[hotpath::measure(label = "usecases.git_intelligence.diff")]
     pub fn diff(&self, scope: &GitDiffScopeV1) -> Result<GitDiffV1, GitIntelligenceError> {
         let snapshot = self.repository_snapshot()?;
         let joined = self.diff_internal(scope, &snapshot)?;
@@ -714,6 +721,7 @@ impl NativeGitIntelligence {
     /// ordinary `GitHunkV1` values. Normal entries pair 1:1 with normal
     /// patch sections; a divergence means the repository changed mid-read
     /// and is reported rather than silently misjoined.
+    #[hotpath::measure(label = "usecases.git_intelligence.diff.internal")]
     fn diff_internal(
         &self,
         scope: &GitDiffScopeV1,
@@ -811,6 +819,7 @@ impl NativeGitIntelligence {
     }
 
     /// Bounded commit history in native traversal order.
+    #[hotpath::measure(label = "usecases.git_intelligence.history")]
     pub fn history(
         &self,
         request: &GitHistoryRequest,
@@ -844,6 +853,7 @@ impl NativeGitIntelligence {
 
     /// Blame/line provenance for one path with boundary, rename-following,
     /// and typed unavailable states.
+    #[hotpath::measure(label = "usecases.git_intelligence.blame")]
     pub fn blame(&self, request: &GitBlameRequest) -> Result<GitBlameV1, GitIntelligenceError> {
         let snapshot = self.repository_snapshot()?;
         let mut degradations = snapshot.degradations;
@@ -940,6 +950,7 @@ impl NativeGitIntelligence {
     /// attribute-driven, and unmerged entries remain explicit read-only
     /// capability evidence in [`GitDiffV1`] and are omitted here without
     /// suppressing safe text refs from the same diff.
+    #[hotpath::measure(label = "usecases.git_intelligence.hunk_refs")]
     pub fn hunk_refs(
         &self,
         scope: &GitDiffScopeV1,
@@ -1104,6 +1115,7 @@ impl NativeGitIntelligence {
         Ok(references)
     }
 
+    #[hotpath::measure(label = "usecases.git_intelligence.index_entries")]
     fn index_entries_for_paths(
         &self,
         paths: &BTreeSet<&str>,
@@ -1140,6 +1152,7 @@ impl NativeGitIntelligence {
         Ok(by_path)
     }
 
+    #[hotpath::measure(label = "usecases.git_intelligence.head_blobs")]
     fn head_blobs_for_paths(
         &self,
         paths: &BTreeSet<&str>,
@@ -1188,6 +1201,7 @@ impl NativeGitIntelligence {
     /// Native content identity or explicit absence of worktree files.
     /// Present content is hashed by `git hash-object` WITHOUT `-w` — hashing
     /// only, no object write.
+    #[hotpath::measure(label = "usecases.git_intelligence.worktree_blobs")]
     fn worktree_blobs_for_paths(
         &self,
         paths: &BTreeSet<&str>,
@@ -1236,6 +1250,7 @@ impl NativeGitIntelligence {
 
     /// Capture exact attribute identity and classify paths whose clean/smudge
     /// or end-of-line behavior lacks a proven native round trip.
+    #[hotpath::measure(label = "usecases.git_intelligence.attributes")]
     fn attributes_for_paths(
         &self,
         paths: &BTreeSet<&str>,

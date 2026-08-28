@@ -576,6 +576,7 @@ fn summary_node(value: LcmSummaryNode) -> LcmSummaryNodeV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.retained.lcm.assemble_query")]
 pub(super) fn assemble_query(
     prompt: &str,
     query: Option<&str>,

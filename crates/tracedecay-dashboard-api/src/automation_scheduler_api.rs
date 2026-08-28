@@ -53,15 +53,18 @@ pub(super) struct AutomationTaskStatusV1 {
     pub last_scheduler_run: Option<Value>,
 }
 
+#[hotpath::measure(label = "dashboard_api.scheduler.status", future = true)]
 pub async fn status(State(state): State<DashboardState>) -> ApiResult {
     scheduler_status_payload(&state).await
 }
 
+#[hotpath::measure(label = "dashboard_api.scheduler.pause", future = true)]
 pub async fn pause(State(state): State<DashboardState>) -> ApiResult {
     set_scheduler_paused(&state, true).await?;
     scheduler_status_payload(&state).await
 }
 
+#[hotpath::measure(label = "dashboard_api.scheduler.resume", future = true)]
 pub async fn resume(State(state): State<DashboardState>) -> ApiResult {
     set_scheduler_paused(&state, false).await?;
     scheduler_status_payload(&state).await

@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
     receipt: &tracedecay_usecases::configuration::ConfigurationMutationReceipt,
@@ -52,6 +53,7 @@ pub(super) async fn reconcile_configuration_runtime(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.configuration.effect")]
 pub(super) fn configuration_effect(
     payload: serde_json::Value,
     mut authority: AuthorityReceipt,

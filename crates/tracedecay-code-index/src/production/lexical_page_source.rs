@@ -2390,6 +2390,7 @@ fn read_verified_text_metadata<R: Read + Seek>(
     layout: &SealedLexicalLayoutV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
+    #[hotpath::measure(label = "code_index.lexical_source.decode_range")]
     fn decode_range<T: serde::de::DeserializeOwned, R: Read + Seek>(
         reader: &mut R,
         range: (u64, u64),

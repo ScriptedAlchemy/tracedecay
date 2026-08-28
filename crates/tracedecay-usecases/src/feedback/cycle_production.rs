@@ -335,6 +335,7 @@ pub fn production_proximity_feedback_cycle_input(
 /// the project diagnostics broker. An empty provider set remains a valid
 /// cycle: provider-backed diagnostics are typed unavailable while the retained
 /// project feedback/LSP owner continues to serve its other projections.
+#[hotpath::measure(label = "usecases.feedback.resolve_cycle_parts", future = true)]
 pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {

@@ -34,6 +34,7 @@ impl tracedecay_application::ObservatoryReadPortV1 for RegisteredObservatoryRead
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.observatory.read", future = true)]
 pub(super) async fn execute_observatory_read(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,

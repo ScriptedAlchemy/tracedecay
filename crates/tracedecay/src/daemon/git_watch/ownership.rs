@@ -183,6 +183,7 @@ async fn join_before(
     }
 }
 
+#[hotpath::measure(label = "daemon.git.watch.join", future = true)]
 pub(super) async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdownOutcome {
     let mut outcome = GitWatcherShutdownOutcome::default();
     let deadline = tokio::time::Instant::now() + GIT_OBSERVATION_BUDGET;
@@ -232,6 +233,7 @@ pub(super) async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatche
     outcome
 }
 
+#[hotpath::measure(label = "daemon.git.watch.retire", future = true)]
 pub(super) async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
     let mut projects = inner.projects.lock().await;
     let candidates = projects.keys().cloned().collect::<Vec<_>>();

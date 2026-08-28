@@ -351,6 +351,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// complete generation for one exact scope, then pass their typed outcomes
     /// unchanged into the authenticated query composition authority.
     #[cfg(test)]
+    #[hotpath::measure(label = "daemon.code_index.query_search", future = true)]
     pub(in crate::daemon) async fn execute_query_search(
         &self,
         scope: &ResolvedScope,
@@ -370,7 +371,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.query.execute", future = true)]
     pub(in crate::daemon) async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
@@ -448,6 +449,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.code_index.query_search.generation", future = true)]
     pub(in crate::daemon) async fn execute_query_search_on_generation<C>(
         &self,
         scope: &ResolvedScope,
@@ -474,6 +476,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.code_index.query_search.latest", future = true)]
 async fn execute_query_search_on_latest<C>(
     schedulers: &CodeIndexSchedulerRegistryV1,
     scope: &ResolvedScope,
@@ -498,6 +501,7 @@ where
     .await
 }
 
+#[hotpath::measure(label = "daemon.code_index.query_search.text", future = true)]
 async fn execute_query_search_on_text<C>(
     schedulers: &CodeIndexSchedulerRegistryV1,
     scope: &ResolvedScope,

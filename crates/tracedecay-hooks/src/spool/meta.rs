@@ -47,7 +47,7 @@ fn decode_exact_meta(bytes: &[u8]) -> Result<HookSpoolMetaV1, HookSpoolError> {
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.write_meta")]
 pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
     let bytes = serde_json::to_vec(meta).map_err(|_| HookSpoolError::MetadataCorrupted)?;
     if bytes.len() > MAX_META_BYTES {

@@ -49,6 +49,7 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 ];
 
 /// Cursor `subagentStart` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.subagent_start")]
 pub async fn hook_cursor_subagent_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -86,6 +87,7 @@ pub async fn hook_cursor_subagent_start() -> i32 {
 /// search tool) and irrelevant tools fail open with no output. Each hint
 /// category is emitted at most once per session via
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
 pub async fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -119,6 +121,7 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
 /// miss). `sessionEnd` receives the common-schema `transcript_path`, so the
 /// regular capped catch-up ingest applies. The response is logged but unused,
 /// so an empty object is emitted. Fail-open.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_end")]
 pub async fn hook_cursor_session_end() -> i32 {
     hook_cursor_session_completion("sessionEnd").await
 }
@@ -204,6 +207,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
 /// ingest: a time-boxed incremental catch-up that picks up bounded transcript
 /// tails appended during the turn. The `stop` output is informational only, so
 /// we emit an empty object and never ask the agent to continue. Fail-open.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.stop")]
 pub async fn hook_cursor_stop() -> i32 {
     hook_cursor_session_completion("stop").await
 }
@@ -215,6 +219,7 @@ pub async fn hook_cursor_stop() -> i32 {
 /// without ingesting the transcript or publishing summary state. Native summary
 /// content remains typed unavailable because Cursor does not expose it.
 /// The hook is fail-open and emits Cursor's empty object shape.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.pre_compact")]
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -266,6 +271,7 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 ///    which needs the added text — can only run here. The hint rides Cursor's
 ///    documented `additional_context` output shape with the same per-session
 ///    dedupe and initialized-store gating as `postToolUse`.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_file_edit")]
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -319,6 +325,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     0
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_start")]
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let (root, output) = cursor_session_start_response(&event).await;
@@ -365,6 +372,7 @@ async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String)
 ///
 /// Notifies the daemon that Cursor completed a shell action. Command text is
 /// not forwarded and cannot become Git or synchronization authority.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_shell")]
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -383,6 +391,7 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// Cursor `workspaceOpen` hook handler.
 ///
 /// Notifies the daemon to run one-shot workspace catch-up. Fail-open.
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.workspace_open")]
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -539,6 +548,7 @@ pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<Pa
     }
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.cursor.resolve_root")]
 async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
     let mut resolved = None;
     for candidate in cursor_hook_root_candidates(parsed) {

@@ -22,6 +22,7 @@ use std::hash::{BuildHasher, Hash};
 /// SCCs are emitted in reverse-topological order over the condensation:
 /// if SCC `A` depends on SCC `B`, `B` appears in the result before `A`.
 /// This matches Tarjan's natural emission order.
+#[hotpath::measure(label = "usecases.graph.tarjan_scc")]
 pub fn tarjan_scc<N, S1, S2>(adj: &HashMap<N, HashSet<N, S2>, S1>) -> Vec<Vec<N>>
 where
     N: Eq + Hash + Clone,

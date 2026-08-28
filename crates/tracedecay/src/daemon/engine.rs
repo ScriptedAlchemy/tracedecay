@@ -73,6 +73,7 @@ pub(super) struct DaemonEngine {
 /// Read-only core tools and edit previews do not depend on this service. The
 /// service owns the store actor; constructing a second service for the same
 /// database is rejected by the registry.
+#[hotpath::measure(label = "daemon.engine.git_index_transactions", future = true)]
 pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
     store_administration: &StoreAdministration,
     session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
@@ -112,6 +113,7 @@ pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
         })
 }
 
+#[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
 pub(super) fn ensure_context_scout_owner_before_advertising(
     project: &crate::tracedecay::TraceDecay,
 ) -> Result<()> {
@@ -203,6 +205,7 @@ impl DaemonEngine {
 
     /// Runs destructive branch administration before any project server is
     /// opened for the request, under the daemon-wide store administration gate.
+    #[hotpath::measure(label = "daemon.engine.execute_branch_admin", future = true)]
     pub(super) async fn execute_branch_admin(
         &self,
         handshake: &DaemonHandshake,
@@ -331,6 +334,7 @@ impl DaemonEngine {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.engine.project_server_until_cancelled", future = true)]
     async fn project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
@@ -356,6 +360,7 @@ impl DaemonEngine {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.engine.cached_project_server", future = true)]
     async fn cached_project_server_for_requirement(
         &self,
         handshake: &DaemonHandshake,
@@ -396,7 +401,7 @@ impl DaemonEngine {
         ))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.engine.begin_project_open", future = true)]
     pub(super) async fn begin_project_open(
         &self,
         handshake: DaemonHandshake,
@@ -441,6 +446,7 @@ impl DaemonEngine {
         ensure_registered_project_route(&self.store_administration, project_path, allow_init).await
     }
 
+    #[hotpath::measure(label = "daemon.engine.schedule_warmup", future = true)]
     pub(super) async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
@@ -456,7 +462,6 @@ impl DaemonEngine {
         }
     }
 
-    #[hotpath::measure]
     pub(super) async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,
@@ -565,54 +570,77 @@ impl DaemonEngine {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.engine.open_project_server", future = true)]
     pub(super) async fn open_project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
         cancellation: &CancellationToken,
     ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)> {
-        let Some(project_path) = handshake.project_path.as_ref() else {
-            return Err(TraceDecayError::Config {
-                message: "project server requested without project_path".to_string(),
-            });
-        };
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
-        self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init)
+        self.open_project_server_until_cancelled_inner(handshake, cancellation)
+            .await
+    }
+
+    fn open_project_server_until_cancelled_inner<'a>(
+        &'a self,
+        handshake: &'a DaemonHandshake,
+        cancellation: &'a CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        // Erase the deeply nested project-open composition future before it
+        // reaches the measured wrapper so every profiling feature can compute
+        // its layout.
+        Box::pin(async move {
+            let Some(project_path) = handshake.project_path.as_ref() else {
+                return Err(TraceDecayError::Config {
+                    message: "project server requested without project_path".to_string(),
+                });
+            };
+            let canonical_project_path = project_path
+                .canonicalize()
+                .unwrap_or_else(|_| project_path.clone());
+            self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init)
+                .await?;
+            let composition = production_project_server(
+                &self.store_administration,
+                self.project_open_gates.as_ref(),
+                &self.invocation,
+                &self.http_application_registry,
+                &canonical_project_path,
+                handshake,
+                ProductionProjectCompositionRuntime::Unix(Box::new(self.clone())),
+                cancellation,
+                #[cfg(test)]
+                Some(&self.project_open_attempts),
+            )
             .await?;
-        let composition = production_project_server(
-            &self.store_administration,
-            self.project_open_gates.as_ref(),
-            &self.invocation,
-            &self.http_application_registry,
-            &canonical_project_path,
-            handshake,
-            ProductionProjectCompositionRuntime::Unix(Box::new(self.clone())),
-            cancellation,
-            #[cfg(test)]
-            Some(&self.project_open_attempts),
-        )
-        .await?;
-        if composition.inserted {
-            self.spawn_project_maintenance_activation(
-                composition.key.clone(),
-                composition.canonical_project_path.clone(),
-                handshake.clone(),
-                Arc::clone(&composition.server),
-            );
-        }
-        Ok((
-            composition.key,
-            composition.canonical_project_path,
-            composition.server,
-            composition.inserted,
-        ))
+            if composition.inserted {
+                self.spawn_project_maintenance_activation(
+                    composition.key.clone(),
+                    composition.canonical_project_path.clone(),
+                    handshake.clone(),
+                    Arc::clone(&composition.server),
+                );
+            }
+            Ok((
+                composition.key,
+                composition.canonical_project_path,
+                composition.server,
+                composition.inserted,
+            ))
+        })
     }
 
     pub(super) fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
         project_route_for_handshake(handshake)
     }
 
+    #[hotpath::measure(label = "daemon.engine.activate_project_server", future = true)]
     async fn activate_project_server(
         &self,
         project_path: PathBuf,
@@ -663,18 +691,36 @@ impl DaemonEngine {
     ) {
         let engine = self.clone();
         let recovery_server = Arc::clone(&server);
-        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
-            let cg = recovery_server.cg().await;
-            project_open_owners::reconcile_project_open_automation_effects(cg).await;
-        });
-        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
-            let cg = server.cg().await;
-            engine
-                .activate_automation_scheduler_for_open_project(key, project_path, handshake, cg)
-                .await;
-        });
+        spawn_lifecycle_automation_scheduler_activation(
+            self.lifecycle.clone(),
+            hotpath::future!(
+                async move {
+                    let cg = recovery_server.cg().await;
+                    project_open_owners::reconcile_project_open_automation_effects(cg).await;
+                },
+                label = "daemon.engine.reconcile_automation_effects"
+            ),
+        );
+        spawn_lifecycle_automation_scheduler_activation(
+            self.lifecycle.clone(),
+            hotpath::future!(
+                async move {
+                    let cg = server.cg().await;
+                    engine
+                        .activate_automation_scheduler_for_open_project(
+                            key,
+                            project_path,
+                            handshake,
+                            cg,
+                        )
+                        .await;
+                },
+                label = "daemon.engine.activate_automation_scheduler"
+            ),
+        );
     }
 
+    #[hotpath::measure(label = "daemon.engine.rekey_maintenance", future = true)]
     pub(super) async fn rekey_project_maintenance(
         &self,
         old_key: &ProjectServerKey,
@@ -733,14 +779,15 @@ impl DaemonEngine {
             let current_project_path = Arc::clone(&current_project_path);
             let route_registered = Arc::clone(&route_registered);
             let handshake = handshake.clone();
-            Box::pin(async move {
-                let scope = crate::daemon::branch_admin::graph_writer_scope(
-                    &fresh,
-                    crate::daemon::branch_admin::StoreWriterClass::Owner,
-                );
-                let transition = engine
-                    .store_administration
-                    .with_writer_in(scope, || async {
+            Box::pin(hotpath::future!(
+                async move {
+                    let scope = crate::daemon::branch_admin::graph_writer_scope(
+                        &fresh,
+                        crate::daemon::branch_admin::StoreWriterClass::Owner,
+                    );
+                    let transition = engine
+                        .store_administration
+                        .with_writer_in(scope, || async {
                         if !route_registered.load(Ordering::Acquire) {
                             return None;
                         }
@@ -789,42 +836,44 @@ impl DaemonEngine {
                             fresh.project_root().to_path_buf(),
                             rekeyed,
                         ))
-                    })
-                    .await;
-                if let Some((old_key, new_key, new_session_db, project_path, acquire_new)) =
-                    transition
-                {
-                    let old_owner = old_key.owner.clone();
-                    let new_owner = new_key.owner.clone();
-                    let outcome = engine
-                        .rekey_project_maintenance(
-                            &old_key,
-                            new_key,
-                            project_path,
-                            handshake,
-                            acquire_new,
-                        )
+                        })
                         .await;
-                    if outcome == MaintenanceRekeyOutcome::Completed {
-                        if acquire_new
-                            && engine.lifecycle.accepting()
-                            && let Some(new_session_db) = new_session_db
-                        {
-                            engine
-                                .store_administration
-                                .session_temporal_refresh_schedulers()
-                                .rekey_project(&old_owner, new_owner, new_session_db)
-                                .await;
-                        } else {
-                            engine
-                                .store_administration
-                                .session_temporal_refresh_schedulers()
-                                .retire_project(&old_owner)
-                                .await;
+                    if let Some((old_key, new_key, new_session_db, project_path, acquire_new)) =
+                        transition
+                    {
+                        let old_owner = old_key.owner.clone();
+                        let new_owner = new_key.owner.clone();
+                        let outcome = engine
+                            .rekey_project_maintenance(
+                                &old_key,
+                                new_key,
+                                project_path,
+                                handshake,
+                                acquire_new,
+                            )
+                            .await;
+                        if outcome == MaintenanceRekeyOutcome::Completed {
+                            if acquire_new
+                                && engine.lifecycle.accepting()
+                                && let Some(new_session_db) = new_session_db
+                            {
+                                engine
+                                    .store_administration
+                                    .session_temporal_refresh_schedulers()
+                                    .rekey_project(&old_owner, new_owner, new_session_db)
+                                    .await;
+                            } else {
+                                engine
+                                    .store_administration
+                                    .session_temporal_refresh_schedulers()
+                                    .retire_project(&old_owner)
+                                    .await;
+                            }
                         }
                     }
-                }
-            })
+                },
+                label = "daemon.engine.database_owner_reconcile"
+            ))
         })
     }
 }

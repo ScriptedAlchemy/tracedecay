@@ -8,6 +8,7 @@ use serde_json::Value;
 struct RootHookReadinessProjection;
 
 impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookReadinessProjection {
+    #[hotpath::measure(label = "hints.hook_aggregate")]
     fn aggregate_hook_completed_readiness(&self, rows: &[Value]) -> Value {
         let distribution = tracedecay_agent_hosts::hooks::aggregate_hook_completed_readiness(rows);
         match serde_json::to_value(distribution) {
@@ -33,6 +34,7 @@ impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookRe
     }
 }
 
+#[hotpath::measure(label = "hints.hook_install")]
 pub(crate) fn install_dashboard_hook_readiness_projection() -> crate::errors::Result<()> {
     static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
         std::sync::LazyLock::new(|| {

@@ -121,6 +121,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    #[hotpath::measure(label = "lsp.context.request")]
     pub(crate) fn handle_context_request(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request = serde_json::from_value::<ContextProjectionRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/context parameters"));
@@ -162,6 +163,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp.context.expand")]
     pub(crate) fn handle_context_expand_request(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request =
             serde_json::from_value::<ContextExpansionRequest>(params.clone()).map_err(|_| {
@@ -192,6 +194,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp.context.subscribe")]
     pub(crate) fn handle_context_subscribe(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request = serde_json::from_value::<ContextSubscribeRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/subscribe parameters"));

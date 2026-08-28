@@ -281,6 +281,7 @@ pub(crate) async fn connect_to_daemon_connection(
     connect_to_daemon_connection_within(connection, None).await
 }
 
+#[hotpath::measure(label = "daemon.engine.client.connect", future = true)]
 pub(crate) async fn connect_to_daemon_connection_within(
     connection: &DaemonConnection,
     client_deadline: Option<DaemonClientDeadline>,

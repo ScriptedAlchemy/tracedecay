@@ -64,6 +64,7 @@ where
     /// Reconcile exactly one durable record. This is shared by startup and an
     /// admitted transaction whose native boundary became ambiguous; neither
     /// caller is allowed to invoke native apply a second time.
+    #[hotpath::measure(label = "daemon.git.tx.recover_record")]
     pub(crate) fn recover_record(
         &self,
         record: &GitIndexTransactionRecordV1,

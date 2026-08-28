@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_usecases::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
 
+#[hotpath::measure(label = "cli.cost.read", future = true)]
 pub(crate) async fn handle_cost(
     range: String,
     by_model: bool,

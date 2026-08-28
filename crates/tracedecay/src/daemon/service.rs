@@ -220,6 +220,7 @@ pub fn with_quiesced_installed_service<T>(
 /// lifecycle lease owner token. On Windows the exclusive lease is released
 /// before `action` runs so the running executable can be replaced; other
 /// platforms retain it for the duration and restore the daemon afterward.
+#[hotpath::measure(label = "daemon.service.maintenance_window")]
 pub fn with_exclusive_maintenance_window<T>(
     operation: &str,
     action: impl FnOnce(&str) -> Result<T>,
@@ -659,6 +660,7 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
 /// quiesced daemon lifecycle lease. The public [`install_service`] wrapper
 /// acquires that lease itself and would deadlock if called from a
 /// lease-holding context.
+#[hotpath::measure(label = "daemon.service.install")]
 pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     #[cfg(windows)]
@@ -686,6 +688,7 @@ pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Res
     operation_result
 }
 
+#[hotpath::measure(label = "daemon.service.refresh")]
 fn refresh_service_with_runner(
     runner: &ServiceRunner,
     spec: &DaemonServiceSpec,
@@ -779,6 +782,7 @@ fn refresh_installed_service_with_state(
 /// The daemon owns a shared lifecycle lease for its lifetime, so the order is
 /// intentionally stop-then-lock.
 #[doc(hidden)]
+#[hotpath::measure(label = "daemon.service.quiesce")]
 pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(DaemonServiceState::Missing);
@@ -820,6 +824,7 @@ pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
 /// Verifies that pre-lease quiescence still holds. This never stops or starts
 /// a service while the caller owns the exclusive lifecycle lease.
 #[doc(hidden)]
+#[hotpath::measure(label = "daemon.service.verify_quiesced")]
 pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(DaemonServiceState::Missing);
@@ -857,6 +862,7 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
 /// Restores the exact running/disabled state captured before maintenance.
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
+#[hotpath::measure(label = "daemon.service.restore")]
 pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
     if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos", windows))
     {
@@ -915,6 +921,7 @@ fn installed_service_state() -> Result<DaemonServiceState> {
     ServiceRunner::current()?.service_state(&socket_path)
 }
 
+#[hotpath::measure(label = "daemon.service.start")]
 pub fn start_service() -> Result<()> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
@@ -927,6 +934,7 @@ pub fn start_service() -> Result<()> {
     ServiceRunner::current()?.start(&service_path, &socket_path)
 }
 
+#[hotpath::measure(label = "daemon.service.stop")]
 pub fn stop_service() -> Result<()> {
     if matches!(installed_service_state()?, DaemonServiceState::Missing) {
         return Err(TraceDecayError::Config {
@@ -941,6 +949,7 @@ pub fn stop_service() -> Result<()> {
 /// `TraceDecay` protocol request from the socket configured in their installed
 /// unit and identify as the current installed version; stopped or missing
 /// services must remain quiescent.
+#[hotpath::measure(label = "daemon.service.wait_state")]
 pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<()> {
     // A freshly restored daemon may legitimately spend a while on startup
     // recovery (schema migrations, projection rebuilds, transcript catch-up)
@@ -1053,6 +1062,7 @@ fn combine_operation_and_restore<T>(
     }
 }
 
+#[hotpath::measure(label = "daemon.service.uninstall")]
 fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     let service_path = service_unit_path()?;
@@ -1062,6 +1072,7 @@ fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
     Ok(service_path)
 }
 
+#[hotpath::measure(label = "daemon.service.status")]
 pub fn service_status(socket_path: &Path) -> String {
     let transport_path = if cfg!(unix) {
         socket_path.to_path_buf()

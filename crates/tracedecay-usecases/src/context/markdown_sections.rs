@@ -81,6 +81,7 @@ impl<'a> SectionEnrichment<'a> {
     /// This is an *enrichment*: a symbol the source cannot explain (no span, a
     /// span past the end of the file, a non-section kind) is left untouched
     /// rather than failing the surface that carries it.
+    #[hotpath::measure(label = "usecases.context.markdown.enrich")]
     pub fn enrich_symbol_array(&mut self, symbols: &mut [Value], source: &str) {
         for symbol in symbols {
             if let Some(section) = self.section_for_symbol(symbol, source) {

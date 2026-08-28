@@ -49,6 +49,7 @@ fn adoption_family(capability_id: &str) -> Option<&'static str> {
 
 /// Enumerates the complete composed catalog into per-family eligibility
 /// observations. Only families with a non-zero eligible population appear.
+#[hotpath::measure(label = "daemon.adoption.census")]
 pub(in crate::daemon) fn adoption_eligibility_census()
 -> Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError> {
     let contributions = application_catalog_contributions()?;
@@ -83,6 +84,7 @@ pub(in crate::daemon) fn adoption_eligibility_census()
 /// Records the project-open adoption-eligibility census through the
 /// project-bound observation authority. Telemetry only: every failure is
 /// logged and discarded so project open never blocks or fails on it.
+#[hotpath::measure(label = "daemon.adoption.record", future = true)]
 pub(in crate::daemon) async fn record_project_open_adoption_census(
     db: &RegisteredGlobalDb,
     project_root: &Path,

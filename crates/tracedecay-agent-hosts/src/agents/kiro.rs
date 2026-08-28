@@ -347,6 +347,7 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.kiro.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         // The managed agent file is the only generated artifact (it bakes the
         // tracedecay binary path into its hook commands). The shared MCP
@@ -367,6 +368,7 @@ impl AgentIntegration for KiroIntegration {
         Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
     }
 
+    #[hotpath::measure(label = "hosts.agent.kiro.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
         let host_home = kiro_home(&ctx.home);
@@ -453,6 +455,7 @@ impl AgentIntegration for KiroIntegration {
         }
     }
 
+    #[hotpath::measure(label = "hosts.agent.kiro.install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -465,6 +468,7 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
+    #[hotpath::measure(label = "hosts.agent.kiro.uninstall")]
     fn deactivate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -481,6 +485,7 @@ impl AgentIntegration for KiroIntegration {
         mcp_registry_has_tracedecay(&mcp_config_path(home))
     }
 
+    #[hotpath::measure(label = "hosts.agent.kiro.export")]
     fn export_managed_skills(
         &self,
         home: &Path,

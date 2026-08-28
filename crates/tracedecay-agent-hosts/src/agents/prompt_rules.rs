@@ -141,6 +141,7 @@ enum PromptRulesEditOutcome {
 /// The callback runs while the stable per-path lock is held, so no host branch
 /// can compute replacement bytes from an observation made outside the write
 /// authority.
+#[hotpath::measure(label = "hosts.agents.prompt_rules.reconcile")]
 pub(crate) fn reconcile_prompt_rules_with(
     path: &Path,
     reconcile: impl FnOnce(&str) -> Result<PromptRulesEdit>,
@@ -186,6 +187,7 @@ pub(crate) fn reconcile_prompt_rules_with(
 
 /// Read, reconcile, and conditionally remove host-specific prompt rules while
 /// holding the same path lock used by installation.
+#[hotpath::measure(label = "hosts.agents.prompt_rules.remove")]
 pub(crate) fn remove_prompt_rules_with(
     path: &Path,
     reconcile: impl FnOnce(&str) -> Result<PromptRulesRemoval>,

@@ -23,10 +23,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
-    #[hotpath::measure(
-        label = "lsp_session_with_request",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.protocol.with_request")]
     pub(crate) fn with_request(
         &mut self,
         id: Value,
@@ -97,10 +94,7 @@ where
         }
     }
 
-    #[hotpath::measure(
-        label = "lsp_session_semantic_request",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.protocol.semantic_request")]
     pub(crate) fn start_semantic_request(
         &mut self,
         response_id: Value,

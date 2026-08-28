@@ -60,7 +60,7 @@ pub struct GitNativeApplyOutcome {
 impl GitRepositoryAuthority {
     /// Preflight one exact pair without changing refs, index, worktree, or the
     /// real object database.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.git.native_preflight")]
     pub fn preflight_native_integration(
         &self,
         source_ref: &str,
@@ -154,7 +154,7 @@ impl GitRepositoryAuthority {
     /// Recreate and commit an exact eligible preflight with one destination
     /// ref CAS. Checked-out destination materialization remains ineligible at
     /// the adapter boundary until a native checkout transaction is supplied.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.git.native_apply")]
     pub fn apply_native_integration(
         &self,
         source_ref: &str,
@@ -276,7 +276,7 @@ impl GitRepositoryAuthority {
     }
 
     /// Roll back only the exact candidate ref tip written by this transaction.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.git.native_rollback")]
     pub fn rollback_native_integration(
         &self,
         destination_ref: &str,

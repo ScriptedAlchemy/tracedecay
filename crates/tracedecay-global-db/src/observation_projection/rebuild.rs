@@ -102,7 +102,10 @@ fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&s
 /// Projects one queued observation through the guarded registered database
 /// client. The transaction remains bound to that client for its whole life;
 /// no physical engine handle escapes the runtime boundary.
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.persist.project"
+)]
 pub async fn project_observation(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
@@ -392,7 +395,10 @@ async fn persist_projection_rejection_with_engine(
         .map_err(|error| storage("commit projection rejection transaction", error))
 }
 
-#[hotpath::measure]
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.persist.rebuild"
+)]
 pub async fn rebuild_projection(
     database: &Database,
     frontier_sequence: u64,
@@ -406,6 +412,10 @@ pub async fn rebuild_projection(
 /// transaction. Once a generation exists, later calls resume its frozen
 /// frontier instead of replacing it with a moving committed frontier. Each
 /// invocation performs only the ordinary bounded rebuild step budget.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.persist.converge"
+)]
 pub async fn converge_projection_predecessor(
     database: &Database,
 ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {

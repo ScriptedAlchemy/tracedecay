@@ -577,7 +577,7 @@ fn prepare_fence_request(
     .map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.remote.replay.execute")]
 fn execute_replay(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,

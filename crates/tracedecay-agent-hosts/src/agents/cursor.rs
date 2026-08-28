@@ -55,6 +55,7 @@ impl AgentIntegration for CursorIntegration {
         true
     }
 
+    #[hotpath::measure(label = "hosts.agent.cursor.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         // The whole plugin directory is a tracedecay-generated bundle (its
         // mcp.json / hooks.json are rendered artifacts, not user config), so
@@ -71,6 +72,7 @@ impl AgentIntegration for CursorIntegration {
         ]))
     }
 
+    #[hotpath::measure(label = "hosts.agent.cursor.export")]
     fn export_managed_skills(
         &self,
         home: &Path,
@@ -88,6 +90,7 @@ impl AgentIntegration for CursorIntegration {
         ])
     }
 
+    #[hotpath::measure(label = "hosts.agent.cursor.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
         let project_cursor = ctx.project_path.join(".cursor");
@@ -345,7 +348,7 @@ fn remove_retired_global_cursor_memory_rule(home: &Path) -> Result<bool> {
     Ok(true)
 }
 
-#[hotpath::measure(label = "cursor_plugin_install")]
+#[hotpath::measure(label = "hosts.agent.cursor.install")]
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     remove_retired_global_cursor_memory_rule(home)?;
     let install_dir = cursor_plugin_install_dir(home);

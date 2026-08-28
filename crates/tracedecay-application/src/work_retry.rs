@@ -339,6 +339,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "application.work.retry")]
     pub fn retry(
         &self,
         context: &RequestContext,

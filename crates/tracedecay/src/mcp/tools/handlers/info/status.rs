@@ -5,6 +5,7 @@ use super::*;
 /// Daemon-only sync entry point used by the first-party CLI. It is deliberately
 /// not advertised in the MCP catalog: external agents should rely on the
 /// daemon watcher while the CLI can request an explicit serialized refresh.
+#[hotpath::measure(label = "mcp.info.admin_sync.total")]
 pub(crate) async fn handle_admin_sync(
     cg: &TraceDecay,
     args: Value,
@@ -18,7 +19,12 @@ pub(crate) async fn handle_admin_sync(
             "admin sync requires the daemon code-index scheduler",
         )
     })?;
-    if !reconcile_sink(cg.project_root().to_path_buf()).await {
+    if !hotpath::future!(
+        reconcile_sink(cg.project_root().to_path_buf()),
+        label = "mcp.info.admin_sync.reconcile"
+    )
+    .await
+    {
         return Err(TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
             true,
@@ -113,6 +119,7 @@ pub(crate) async fn graph_statistics_value(
     Ok(serde_json::to_value(&census)?)
 }
 
+#[hotpath::measure(label = "mcp.info.status.total")]
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
     args: Value,
@@ -150,7 +157,7 @@ pub(crate) async fn handle_status(
 
     let graph_statistics = hotpath::future!(
         graph_statistics_value(generation_census_reader),
-        label = "mcp.status.generation_census"
+        label = "mcp.info.status.generation_census"
     )
     .await?;
     let mut output = json!({
@@ -160,7 +167,7 @@ pub(crate) async fn handle_status(
     let code_index_freshness = match code_index_freshness_reader {
         Some(reader) => match hotpath::future!(
             reader(cg.project_root().to_path_buf()),
-            label = "mcp.status.code_index_freshness"
+            label = "mcp.info.status.code_index_freshness"
         )
         .await
         {
@@ -190,9 +197,14 @@ pub(crate) async fn handle_status(
     };
     output["code_index_freshness"] = code_index_freshness;
     if include_storage_health {
-        let mut storage_health =
-            serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)
-                .unwrap_or_else(|_| json!({}));
+        let mut storage_health = serde_json::to_value(
+            hotpath::future!(
+                crate::runtime_telemetry::collect_database(cg, false),
+                label = "mcp.info.status.storage_health"
+            )
+            .await?,
+        )
+        .unwrap_or_else(|_| json!({}));
         if server_stats.is_some() {
             storage_health["daemon_owner_pid"] = json!(std::process::id());
             storage_health["daemon_generation"] = json!(crate::runtime_identity::process_run_id());
@@ -224,7 +236,12 @@ pub(crate) async fn handle_status(
                         "message": "daemon project session authority is unavailable",
                     });
                 }
-                Some(db) => match db.cursor_session_ingest_health().await {
+                Some(db) => match hotpath::future!(
+                    db.cursor_session_ingest_health(),
+                    label = "mcp.info.status.session_ingest"
+                )
+                .await
+                {
                     Ok(ingest) => {
                         output["session_ingest"] =
                             serde_json::to_value(&ingest).unwrap_or_else(|error| {
@@ -238,7 +255,12 @@ pub(crate) async fn handle_status(
                         // doctor-owned signal. Historical catch-up is measured across
                         // providers and remains explicitly partial while the retained
                         // daemon authority drains its bounded backlog.
-                        if let Some(catch_up) = historical_session_catch_up(db).await {
+                        if let Some(catch_up) = hotpath::future!(
+                            historical_session_catch_up(db),
+                            label = "mcp.info.status.session_history"
+                        )
+                        .await
+                        {
                             output["session_history_catch_up"] = catch_up;
                         }
                     }
@@ -468,6 +490,7 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
     }
 }
 
+#[hotpath::measure(label = "mcp.info.active_project.total")]
 pub(crate) fn handle_active_project(
     cg: &TraceDecay,
     args: &Value,

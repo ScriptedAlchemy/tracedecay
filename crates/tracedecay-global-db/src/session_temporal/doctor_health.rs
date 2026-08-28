@@ -43,14 +43,30 @@ struct CachedSessionTemporalHealth {
     report: SessionTemporalHealthReport,
 }
 
-type SessionTemporalHealthCacheCell = Arc<tokio::sync::Mutex<Option<CachedSessionTemporalHealth>>>;
+#[cfg(feature = "hotpath")]
+type SessionDoctorCacheLock<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type SessionDoctorCacheLock<T> = Mutex<T>;
+
+#[cfg(feature = "hotpath")]
+type SessionDoctorLaneLock<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type SessionDoctorLaneLock<T> = tokio::sync::Mutex<T>;
+
+type SessionTemporalHealthCacheCell =
+    Arc<SessionDoctorLaneLock<Option<CachedSessionTemporalHealth>>>;
 
 static SESSION_TEMPORAL_HEALTH_CACHE: OnceLock<
-    Mutex<HashMap<PathBuf, SessionTemporalHealthCacheCell>>,
+    SessionDoctorCacheLock<HashMap<PathBuf, SessionTemporalHealthCacheCell>>,
 > = OnceLock::new();
 
 fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCacheCell {
-    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| {
+        hotpath::mutex!(
+            Mutex::new(HashMap::new()),
+            label = "global_db.session_temporal.doctor.cache"
+        )
+    });
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -63,11 +79,12 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     {
         cache.remove(&evict);
     }
-    Arc::clone(
-        cache
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
-    )
+    Arc::clone(cache.entry(path.to_path_buf()).or_insert_with(|| {
+        Arc::new(hotpath::mutex!(
+            tokio::sync::Mutex::new(None),
+            label = "global_db.session_temporal.doctor.lane"
+        ))
+    }))
 }
 
 fn store_file_fingerprint(
@@ -90,34 +107,38 @@ fn store_file_fingerprint(
 fn session_temporal_store_fingerprint(
     database_path: &Path,
 ) -> std::io::Result<SessionTemporalStoreFingerprint> {
-    let Some(database) = store_file_fingerprint(database_path)? else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "session temporal database is absent",
-        ));
-    };
-    let mut wal_path = database_path.as_os_str().to_os_string();
-    wal_path.push("-wal");
-    Ok(SessionTemporalStoreFingerprint {
-        database,
-        wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
+    hotpath::measure_block!("global_db.session_temporal.doctor.fingerprint", {
+        let Some(database) = store_file_fingerprint(database_path)? else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "session temporal database is absent",
+            ));
+        };
+        let mut wal_path = database_path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        Ok(SessionTemporalStoreFingerprint {
+            database,
+            wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
+        })
     })
 }
 
 fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
-    let database = std::fs::metadata(database_path)?.len();
-    let mut wal_path = database_path.as_os_str().to_os_string();
-    wal_path.push("-wal");
-    match std::fs::metadata(PathBuf::from(wal_path)) {
-        Ok(wal) => database.checked_add(wal.len()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "session temporal store size overflowed",
-            )
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(database),
-        Err(error) => Err(error),
-    }
+    hotpath::measure_block!("global_db.session_temporal.doctor.stat", {
+        let database = std::fs::metadata(database_path)?.len();
+        let mut wal_path = database_path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        match std::fs::metadata(PathBuf::from(wal_path)) {
+            Ok(wal) => database.checked_add(wal.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session temporal store size overflowed",
+                )
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(database),
+            Err(error) => Err(error),
+        }
+    })
 }
 
 fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
@@ -653,6 +674,7 @@ impl RegisteredGlobalDb {
     /// retained registered reader pool. Identical requests coalesce behind one
     /// per-store lane and reuse a very short-lived result only while the exact
     /// database/WAL fingerprint remains unchanged.
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.query")]
     pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
         if !permits_synchronous_session_temporal_health(database_path) {
@@ -668,10 +690,12 @@ impl RegisteredGlobalDb {
             && observed.fingerprint == fingerprint
             && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
         {
+            record_session_doctor_cache_hit();
             return self
                 .with_relation_graph_health(observed.report.clone())
                 .await;
         }
+        record_session_doctor_cache_miss();
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return unavailable_report(classify_database_error(&error)),
@@ -691,6 +715,7 @@ impl RegisteredGlobalDb {
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.diagnose")]
 async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
@@ -788,6 +813,7 @@ async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthRe
             status = SessionTemporalHealthStatus::Partial;
             continue;
         }
+        record_session_doctor_check();
         match snapshot_count(conn, check.sql).await {
             Ok(0) => {}
             Ok(value) => merge_finding(&mut findings, check.kind, value),
@@ -818,6 +844,10 @@ struct SchemaInventory {
     triggers: BTreeMap<String, String>,
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.doctor.query.inventory"
+)]
 async fn snapshot_schema_inventory(
     conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::db::engine::Result<SchemaInventory> {
@@ -855,6 +885,10 @@ async fn snapshot_schema_inventory(
     })
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.doctor.query.column_shape"
+)]
 async fn snapshot_column_shape_drift(
     conn: &impl QueryExecutor,
     inventory: &SchemaInventory,
@@ -887,6 +921,10 @@ fn normalize_sql(sql: &str) -> String {
         .collect()
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.doctor.query.schema_version"
+)]
 async fn snapshot_schema_version(
     conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
@@ -900,6 +938,7 @@ async fn snapshot_schema_version(
     rows.next().await?.map(|row| row.get(0)).transpose()
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.doctor.query.count")]
 async fn snapshot_count(
     conn: &impl QueryExecutor,
     sql: &str,
@@ -984,6 +1023,24 @@ fn unavailable_report_with_reason(
         findings: Vec::new(),
         reason: reason.map(str::to_string),
     }
+}
+
+#[inline(always)]
+fn record_session_doctor_cache_hit() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("global_db.session_temporal.doctor.cache_hits").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_session_doctor_cache_miss() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("global_db.session_temporal.doctor.cache_misses").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_session_doctor_check() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("global_db.session_temporal.doctor.checks").inc(1_u64);
 }
 
 #[cfg(test)]

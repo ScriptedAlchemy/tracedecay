@@ -152,6 +152,10 @@ async fn append_summary_relation(
     .map_err(|error| LcmError::Db(error.to_string()))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.persist.publish_summary"
+)]
 pub async fn publish_immutable_summary(
     conn: &impl Executor,
     publication: LcmImmutableSummaryPublication,

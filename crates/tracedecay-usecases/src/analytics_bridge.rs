@@ -93,6 +93,7 @@ pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource>
 
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
 /// cursor per source file so re-runs only ingest the appended tail.
+#[hotpath::measure(label = "usecases.analytics.import", future = true)]
 pub async fn import_hook_analytics(
     gdb: &RegisteredGlobalDb,
     sources: &[HookImportSource],

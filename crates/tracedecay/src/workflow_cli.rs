@@ -181,6 +181,7 @@ fn workflow_outcome_matches(
     )
 }
 
+#[hotpath::measure(label = "workflow_cli.invoke", future = true)]
 pub async fn invoke_workflow_cli(
     project_root: PathBuf,
     operation: WorkflowOperation,

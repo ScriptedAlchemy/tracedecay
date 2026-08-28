@@ -223,7 +223,7 @@ pub struct RemoteQueryCompositionV1<T> {
 }
 
 impl<T> RemoteQueryCompositionV1<T> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.remote.compose")]
     pub fn compose<P>(
         expected_shards: BTreeSet<ExpectedRemoteShardV1>,
         contributions: Vec<ShardQueryContributionV1<T>>,

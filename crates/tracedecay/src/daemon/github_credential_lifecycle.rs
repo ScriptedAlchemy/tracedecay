@@ -100,6 +100,7 @@ impl GitHubProviderPermissionVerifierV1 {
         }
     }
 
+    #[hotpath::measure(label = "daemon.github_credential.verify")]
     fn verify(
         &self,
         secret: &str,
@@ -284,6 +285,7 @@ impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
         );
     }
 
+    #[hotpath::measure(label = "daemon.github_credential.configure")]
     fn configure_profile_with(
         &self,
         identity: &super::profile_identity::LocalProfileIdentityAuthorityV1,

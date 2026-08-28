@@ -115,6 +115,7 @@ pub(in crate::tracedecay) fn edit_symbol_from_summary(
 }
 
 /// Resolves a symbol against the immutable generation admitted for this edit.
+#[hotpath::measure(label = "edits.resolve_symbol")]
 pub(in crate::tracedecay) fn resolve_symbol_for_edit(
     graph: &SourceEditGraphReadV1,
     symbol: &str,

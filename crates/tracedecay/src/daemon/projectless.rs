@@ -136,7 +136,6 @@ pub(super) async fn projectless_tools_call_response(
         .await
 }
 
-#[hotpath::measure(label = "mcp.tools_call.projectless")]
 async fn projectless_tools_call_response_with_connection(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
@@ -344,6 +343,7 @@ async fn projectless_tools_call_response_with_connection(
     )
 }
 
+#[hotpath::measure(label = "daemon.project.projectless_retained", future = true)]
 async fn projectless_profile_retained_response(
     id: serde_json::Value,
     tool_name: &str,

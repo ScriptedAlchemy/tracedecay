@@ -14,7 +14,7 @@ pub enum DirectorySyncPolicy {
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.sync_directory")]
 pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -93,7 +93,7 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
     set_owner_private_file_mode(path)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.read_bounded")]
 pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
     if !validate_regular_or_missing(path)? {
         return Ok(None);
@@ -172,7 +172,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
 
 /// Publish `destination` by staging into an owned temp file, syncing, then
 /// replacing through `publish`.
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.publish")]
 pub fn with_owned_temp_publish<T>(
     destination: &Path,
     kind: &str,
@@ -424,7 +424,7 @@ pub fn atomic_write(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.write_prepared")]
 pub fn atomic_write_prepared(
     destination: &Path,
     kind: &str,
@@ -460,7 +460,7 @@ pub fn atomic_write_prepared(
 /// destination is atomically replaced while retaining the displaced object;
 /// the caller verifies that object against its exact snapshot. A mismatch is
 /// rolled back before this function returns an error.
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.write_prepared_conditionally")]
 pub fn atomic_write_prepared_conditionally<
     Prepare,
     BeforePublish,
@@ -590,7 +590,7 @@ where
 
 /// Remove an existing destination only after atomically retaining and
 /// verifying the exact object that occupied the path at publication time.
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.remove_conditionally")]
 pub fn remove_conditionally(
     destination: &Path,
     before_publish: impl FnOnce(),
@@ -633,7 +633,7 @@ pub fn remove_conditionally(
     sync_parent_directory(destination, directory_policy)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.append")]
 pub fn append_durable(
     path: &Path,
     frame: &[u8],
@@ -656,7 +656,7 @@ pub fn append_durable(
     Ok(offset)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "private_fs.framed_log.truncate")]
 pub fn truncate_file(
     path: &Path,
     len: u64,

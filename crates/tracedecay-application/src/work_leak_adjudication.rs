@@ -259,6 +259,7 @@ where
         Self { storage, evidence }
     }
 
+    #[hotpath::measure(label = "application.work.leak.adjudicate")]
     pub fn adjudicate(
         &self,
         context: &RequestContext,

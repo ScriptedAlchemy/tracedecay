@@ -216,6 +216,7 @@ where
     C: GitEffectClassifier,
     A: GitIndexPolicyRecheckPort,
 {
+    #[hotpath::measure(label = "daemon.git.tx.preview")]
     fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
@@ -240,6 +241,7 @@ where
         self.apply_cancellable(request, || None)
     }
 
+    #[hotpath::measure(label = "daemon.git.tx.recover")]
     fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
@@ -274,6 +276,7 @@ where
     C: GitEffectClassifier,
     A: GitIndexPolicyRecheckPort,
 {
+    #[hotpath::measure(label = "daemon.git.tx.apply")]
     pub(crate) fn apply_cancellable(
         &self,
         request: &GitIndexApplyRequestV1,
@@ -560,6 +563,7 @@ where
 {
     /// Reconcile every unresolved durable record and active quarantine before
     /// the daemon admits any new transaction for an affected repository.
+    #[hotpath::measure(label = "daemon.git.tx.recover_startup")]
     pub(crate) fn recover_startup(
         &self,
         observed_at: tracedecay_domain::UtcMicros,

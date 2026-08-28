@@ -139,6 +139,7 @@ impl ProjectMemoryFactMutationTarget {
 
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Settles one already-canonical curation batch against its exact receipt.
+    #[hotpath::measure(label = "usecases.memory.curation", future = true)]
     pub async fn dashboard_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
@@ -219,6 +220,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         })
     }
 
+    #[hotpath::measure(label = "usecases.memory.curation.apply", future = true)]
     pub async fn apply_project_memory_curation(
         &self,
         operations: Vec<ProjectMemoryCurationOperation>,
@@ -230,19 +232,21 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         ProjectMemoryFactCurationReceiptV1,
         MemoryMutationError<ProjectMemoryFactCurationReceiptV1>,
     > {
-        let operations = operations
-            .into_iter()
-            .enumerate()
-            .map(|(index, operation)| {
-                self.curation_operation(
-                    operation,
-                    context.operation_id(),
-                    index,
-                    context.actor(),
-                    automation_run_id.as_ref(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let operations = hotpath::measure_block!("usecases.memory.curation.prepare", {
+            operations
+                .into_iter()
+                .enumerate()
+                .map(|(index, operation)| {
+                    self.curation_operation(
+                        operation,
+                        context.operation_id(),
+                        index,
+                        context.actor(),
+                        automation_run_id.as_ref(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        });
         let mut batch = ProjectMemoryFactCurationBatchV1::new(
             self.owner.clone(),
             context.operation_id().clone(),
@@ -580,6 +584,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         self.dashboard_merge_facts(command, write_control).await
     }
 
+    #[hotpath::measure(label = "usecases.memory.merge", future = true)]
     pub async fn dashboard_merge_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,

@@ -39,6 +39,7 @@ pub(super) fn identity_discovery_disposition(
     }
 }
 
+#[hotpath::measure(label = "daemon.git.watch.identity", future = true)]
 pub(super) async fn resolve_watch_identity(
     project_root: PathBuf,
     cancellation: tracedecay_usecases::context::CancellationToken,

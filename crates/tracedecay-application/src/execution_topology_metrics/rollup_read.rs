@@ -64,7 +64,7 @@ pub trait ExecutionTopologyRollupQueryPort: Send + Sync {
 /// Returns invalid-request and authority-admission problems with the same
 /// semantics as the live topology metrics operation. Observation and retained
 /// rollup availability are represented by a typed unavailable model.
-#[hotpath::measure]
+#[hotpath::measure(label = "application.topology.rollup.read", future = true)]
 pub async fn execution_topology_rollup_metrics<R, O>(
     rollups: &R,
     observations: &O,

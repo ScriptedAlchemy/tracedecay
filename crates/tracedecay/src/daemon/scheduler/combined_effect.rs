@@ -351,6 +351,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.scheduler.combined_effect", future = true)]
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
@@ -848,6 +849,7 @@ async fn run_execute_pair(
     }
 }
 
+#[hotpath::measure(label = "daemon.scheduler.combined_effect_prepare", future = true)]
 pub(super) async fn prepare_combined_effects(
     engine: &DaemonEngine,
     memory: &TraceDecay,

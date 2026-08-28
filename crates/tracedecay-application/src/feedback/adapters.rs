@@ -237,29 +237,32 @@ where
         request: &'a FeedbackDiagnosticsRequest,
     ) -> super::FeedbackPortFuture<'a, Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>>
     {
-        Box::pin(async move {
-            if request.validate().is_err() {
-                return Vec::new();
-            }
-            let interrupted_state = match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => None,
-                RequestAdmission::Cancelled => Some(DiagnosticProviderState::Cancelled),
-                RequestAdmission::TimedOut => Some(DiagnosticProviderState::TimedOut),
-            };
-            if let Some(state) = interrupted_state {
-                return request
-                    .providers
-                    .iter()
-                    .cloned()
-                    .map(|provider| provider_result(provider, state, None))
-                    .collect();
-            }
-            let mut results = Vec::with_capacity(request.providers.len());
-            for provider in &request.providers {
-                results.push(self.current_result(context, &request.input, provider).await);
-            }
-            results
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                if request.validate().is_err() {
+                    return Vec::new();
+                }
+                let interrupted_state = match context.admission_at(request.input.observed_at) {
+                    RequestAdmission::Admitted => None,
+                    RequestAdmission::Cancelled => Some(DiagnosticProviderState::Cancelled),
+                    RequestAdmission::TimedOut => Some(DiagnosticProviderState::TimedOut),
+                };
+                if let Some(state) = interrupted_state {
+                    return request
+                        .providers
+                        .iter()
+                        .cloned()
+                        .map(|provider| provider_result(provider, state, None))
+                        .collect();
+                }
+                let mut results = Vec::with_capacity(request.providers.len());
+                for provider in &request.providers {
+                    results.push(self.current_result(context, &request.input, provider).await);
+                }
+                results
+            },
+            label = "application.feedback.adapter.diagnostics"
+        ))
     }
 
     fn diagnostic_history<'a>(
@@ -268,25 +271,28 @@ where
         request: &'a FeedbackDiagnosticsRequest,
         runtime: &'a FeedbackRuntimeStateV1,
     ) -> super::FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>> {
-        Box::pin(async move {
-            if request.validate().is_err()
-                || request.input.request.durability() != FeedbackDurabilityV1::Durable
-                || runtime.authoritative.baseline_horizon.is_none()
-                || context.admission_at(request.input.observed_at) != RequestAdmission::Admitted
-            {
-                return Vec::new();
-            }
-            let mut baselines = Vec::with_capacity(request.providers.len());
-            for provider in &request.providers {
-                if let Some(result) = self
-                    .history_result(context, &request.input, runtime, provider)
-                    .await
+        Box::pin(hotpath::future!(
+            async move {
+                if request.validate().is_err()
+                    || request.input.request.durability() != FeedbackDurabilityV1::Durable
+                    || runtime.authoritative.baseline_horizon.is_none()
+                    || context.admission_at(request.input.observed_at) != RequestAdmission::Admitted
                 {
-                    baselines.push(result);
+                    return Vec::new();
                 }
-            }
-            baselines
-        })
+                let mut baselines = Vec::with_capacity(request.providers.len());
+                for provider in &request.providers {
+                    if let Some(result) = self
+                        .history_result(context, &request.input, runtime, provider)
+                        .await
+                    {
+                        baselines.push(result);
+                    }
+                }
+                baselines
+            },
+            label = "application.feedback.adapter.history"
+        ))
     }
 }
 

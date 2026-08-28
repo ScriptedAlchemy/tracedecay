@@ -398,6 +398,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.configuration.persist.init")]
     async fn initialize_canonical_with_registry(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -477,6 +478,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     /// the derived locator digest changes. The write is a compare-and-swap
     /// against the revision the caller read; concurrent mutation surfaces as
     /// a typed `RevisionConflict` and the caller re-reads.
+    #[hotpath::measure(future = true, label = "global_db.configuration.persist.rebind")]
     pub async fn rebind_daemon_project_source_binding(
         &self,
         expected_revision_id: &ConfigurationRevisionId,
@@ -561,6 +563,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     /// closed set of known additive keys is accepted. Registered typed defaults
     /// and default provenance are written into an immutable child revision,
     /// and the expected parent is checked under the store's write transaction.
+    #[hotpath::measure(future = true, label = "global_db.configuration.persist.converge")]
     pub async fn converge_registered_additive_defaults(
         &self,
         expected_revision_id: &ConfigurationRevisionId,
@@ -844,6 +847,7 @@ impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.configuration.query")]
     pub async fn current(
         &self,
     ) -> Result<ProfileCodeIndexWorkerConfigurationV1, ConfigurationError> {
@@ -874,6 +878,7 @@ impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
         })
     }
 
+    #[hotpath::measure(future = true, label = "global_db.configuration.persist.selection")]
     pub async fn commit_selection(
         &self,
         authority: &ConfigurationMutationAuthority,

@@ -91,6 +91,7 @@ pub(crate) fn read_required(profile_root: &Path) -> Result<(BrainId, UserProfile
     Ok((record.brain_id, record.profile_id))
 }
 
+#[hotpath::measure(label = "daemon.profile_identity.load_or_create")]
 pub(super) fn load_or_create_pinned(
     profile_root: &Path,
     expected: Option<(&BrainId, &UserProfileId)>,

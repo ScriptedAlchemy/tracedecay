@@ -41,6 +41,7 @@ pub(super) struct RunAffectedArgs {
 }
 
 impl RunAffectedArgs {
+    #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
     pub(super) fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
         let explicit_paths = match args.get("changed_paths") {
             Some(Value::Array(paths)) => {

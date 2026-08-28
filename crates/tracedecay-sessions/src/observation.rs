@@ -434,6 +434,7 @@ where
     }
 
     /// Advances a validated non-durable frame cursor without exposing the store.
+    #[hotpath::measure(label = "sessions.observation.advance_cursor", future = true)]
     pub async fn advance_non_durable_source_cursor(
         &self,
         request: AdvanceNonDurableSourceCursorRequest,
@@ -556,6 +557,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "sessions.observation.readback", future = true)]
     async fn persisted_outcome(
         &self,
         outcome: ObservationPersistOutcome,
@@ -625,26 +627,29 @@ where
                 + '_,
         >,
     > {
-        Box::pin(async move {
-            match self.prepare_capture(request)? {
-                PreparedObservationCapture::Durable {
-                    write,
-                    sanitized_record,
-                    findings,
-                    cancellation,
-                } => {
-                    let outcome = self.store.persist_admitted_observation(*write).await?;
-                    self.persisted_outcome(outcome, sanitized_record, findings, &cancellation)
-                        .await
+        Box::pin(hotpath::future!(
+            async move {
+                match self.prepare_capture(request)? {
+                    PreparedObservationCapture::Durable {
+                        write,
+                        sanitized_record,
+                        findings,
+                        cancellation,
+                    } => {
+                        let outcome = self.store.persist_admitted_observation(*write).await?;
+                        self.persisted_outcome(outcome, sanitized_record, findings, &cancellation)
+                            .await
+                    }
+                    PreparedObservationCapture::Rejected { receipt, findings } => {
+                        Ok(CaptureObservationOutcome::Rejected { receipt, findings })
+                    }
+                    PreparedObservationCapture::Quarantined { receipt, findings } => {
+                        Ok(CaptureObservationOutcome::Quarantined { receipt, findings })
+                    }
                 }
-                PreparedObservationCapture::Rejected { receipt, findings } => {
-                    Ok(CaptureObservationOutcome::Rejected { receipt, findings })
-                }
-                PreparedObservationCapture::Quarantined { receipt, findings } => {
-                    Ok(CaptureObservationOutcome::Quarantined { receipt, findings })
-                }
-            }
-        })
+            },
+            label = "sessions.observation.capture"
+        ))
     }
 
     pub async fn capture_claude_observation(
@@ -654,6 +659,7 @@ where
         self.capture_observation(request).await
     }
 
+    #[hotpath::measure(label = "sessions.observation.get", future = true)]
     pub async fn get_observation(
         &self,
         request: GetObservationRequest,
@@ -679,6 +685,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "sessions.observation.replay", future = true)]
     pub async fn replay_observations(
         &self,
         request: ReplayObservationsRequest,
@@ -743,7 +750,7 @@ impl<S> ObservationApplication<S>
 where
     S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
-    #[hotpath::measure(future = true)]
+    #[hotpath::measure(label = "sessions.observation.prepare_batch", future = true)]
     async fn prepare_batch_captures(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -813,7 +820,7 @@ where
     /// without touching persist authority. A sanitizer reject or quarantine
     /// in the batch refuses before persistence so the stream owner can retry
     /// one request at a time and advance typed coverage between records.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "sessions.observation.capture_batch", future = true)]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,

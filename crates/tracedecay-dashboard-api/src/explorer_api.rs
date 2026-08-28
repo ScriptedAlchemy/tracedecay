@@ -474,69 +474,78 @@ pub async fn create_query(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.query.create", {
-        if let Err(message) = validate_query(&mut request) {
-            return bad_request(message);
-        }
-        let Some(owner) = run_owner(&state) else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"detail": "exact registered project scope is unavailable"})),
-            )
-                .into_response();
-        };
-        let Some(Extension(control)) = control else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
-            )
-                .into_response();
-        };
-        let Some(run_id) = new_run_id() else {
-            return internal_error("could not allocate explorer query run identity");
-        };
-        let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
-        let cancellation = CancellationToken::new();
-        if let Err(message) = remember_run(
-            StoredExplorerRun {
-                owner,
-                cancellation: cancellation.clone(),
-                run: Arc::clone(&run),
-            },
-            run_id,
-        ) {
-            return internal_error(message);
-        }
-        let initial = run.read().await.clone();
-        let response = envelope_for_run(&state, initial);
-        tokio::spawn(execute_query(
-            state,
-            request,
-            Arc::clone(&run),
-            cancellation,
-            control,
-        ));
-        (StatusCode::ACCEPTED, Json(response)).into_response()
-    })
+    hotpath::future!(
+        async move {
+            if let Err(message) = validate_query(&mut request) {
+                return bad_request(message);
+            }
+            let Some(owner) = run_owner(&state) else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"detail": "exact registered project scope is unavailable"})),
+                )
+                    .into_response();
+            };
+            let Some(Extension(control)) = control else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
+                )
+                    .into_response();
+            };
+            let Some(run_id) = new_run_id() else {
+                return internal_error("could not allocate explorer query run identity");
+            };
+            let run = Arc::new(RwLock::new(initial_run(run_id.clone(), request.clone())));
+            let cancellation = CancellationToken::new();
+            if let Err(message) = remember_run(
+                StoredExplorerRun {
+                    owner,
+                    cancellation: cancellation.clone(),
+                    run: Arc::clone(&run),
+                },
+                run_id,
+            ) {
+                return internal_error(message);
+            }
+            let initial = run.read().await.clone();
+            let response = envelope_for_run(&state, initial);
+            tokio::spawn(execute_query(
+                state,
+                request,
+                Arc::clone(&run),
+                cancellation,
+                control,
+            ));
+            (StatusCode::ACCEPTED, Json(response)).into_response()
+        },
+        label = "dashboard_api.query.create"
+    )
+    .await
 }
 
 pub async fn query_status(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.query.status", {
-        let Some(stored) = find_run(&state, &run_id) else {
-            return not_found(&run_id);
-        };
-        let mut run = stored.run.read().await.clone();
-        run.elapsed_micros = run
-            .completed_at_micros
-            .unwrap_or_else(now_micros)
-            .saturating_sub(run.submitted_at_micros);
-        Json(envelope_for_run(&state, run)).into_response()
-    })
+    hotpath::future!(
+        async move {
+            let Some(stored) = find_run(&state, &run_id) else {
+                return not_found(&run_id);
+            };
+            let mut run = stored.run.read().await.clone();
+            run.elapsed_micros = run
+                .completed_at_micros
+                .unwrap_or_else(now_micros)
+                .saturating_sub(run.submitted_at_micros);
+            Json(envelope_for_run(&state, run)).into_response()
+        },
+        label = "dashboard_api.query.status"
+    )
+    .await
 }
 
+#[hotpath::measure(label = "dashboard_api.query.cancel", future = true)]
 pub async fn cancel_query(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
@@ -557,6 +566,7 @@ pub async fn cancel_query(
     Json(envelope_for_run(&state, run.clone())).into_response()
 }
 
+#[hotpath::measure(label = "dashboard_api.query.execute", future = true)]
 async fn execute_query(
     state: DashboardState,
     request: ExplorerQueryRequestV1,
@@ -1014,52 +1024,58 @@ pub async fn session_size(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     Path(session_id): Path<String>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.query.session_size", {
-        let Some(Extension(control)) = control else {
-            return explorer_session_not_ready::<ExplorerSessionSizeV1>(
-                &state,
-                DashboardLcmReadStateV1::Unavailable,
-                "dashboard_request_admission_unavailable".to_owned(),
-            );
-        };
-        let outcome = read_session_page(&state, control, &session_id, 500, None).await;
-        match outcome {
-            DashboardLcmReadOutcomeV1::Ready(page) => {
-                let payload = ExplorerSessionSizeV1 {
-                    session_id,
-                    storage_scope: "project".to_owned(),
-                    counts: explorer_session_counts(&page.stats),
-                };
-                Json(DashboardEnvelopeV1::ready(
-                    scope_from_state(&state),
-                    DashboardCoverageV1::unknown(),
-                    Some(payload),
-                ))
-                .into_response()
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return explorer_session_not_ready::<ExplorerSessionSizeV1>(
+                    &state,
+                    DashboardLcmReadStateV1::Unavailable,
+                    "dashboard_request_admission_unavailable".to_owned(),
+                );
+            };
+            let outcome = read_session_page(&state, control, &session_id, 500, None).await;
+            match outcome {
+                DashboardLcmReadOutcomeV1::Ready(page) => {
+                    let payload = ExplorerSessionSizeV1 {
+                        session_id,
+                        storage_scope: "project".to_owned(),
+                        counts: explorer_session_counts(&page.stats),
+                    };
+                    Json(DashboardEnvelopeV1::ready(
+                        scope_from_state(&state),
+                        DashboardCoverageV1::unknown(),
+                        Some(payload),
+                    ))
+                    .into_response()
+                }
+                DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
+                    let examined = u64::try_from(page.messages.len()).unwrap_or(u64::MAX);
+                    let payload = ExplorerSessionSizeV1 {
+                        session_id,
+                        storage_scope: "project".to_owned(),
+                        counts: explorer_session_counts(&page.stats),
+                    };
+                    Json(DashboardEnvelopeV1::partial(
+                        scope_from_state(&state),
+                        examined.saturating_add(omitted),
+                        examined,
+                        "canonical hydrated records",
+                        vec!["lcm_temporal_read_incomplete".to_owned()],
+                        Some(payload),
+                    ))
+                    .into_response()
+                }
+                DashboardLcmReadOutcomeV1::NotReady {
+                    state: read_state,
+                    reason,
+                } => {
+                    explorer_session_not_ready::<ExplorerSessionSizeV1>(&state, read_state, reason)
+                }
             }
-            DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
-                let examined = u64::try_from(page.messages.len()).unwrap_or(u64::MAX);
-                let payload = ExplorerSessionSizeV1 {
-                    session_id,
-                    storage_scope: "project".to_owned(),
-                    counts: explorer_session_counts(&page.stats),
-                };
-                Json(DashboardEnvelopeV1::partial(
-                    scope_from_state(&state),
-                    examined.saturating_add(omitted),
-                    examined,
-                    "canonical hydrated records",
-                    vec!["lcm_temporal_read_incomplete".to_owned()],
-                    Some(payload),
-                ))
-                .into_response()
-            }
-            DashboardLcmReadOutcomeV1::NotReady {
-                state: read_state,
-                reason,
-            } => explorer_session_not_ready::<ExplorerSessionSizeV1>(&state, read_state, reason),
-        }
-    })
+        },
+        label = "dashboard_api.query.session_size"
+    )
+    .await
 }
 
 pub async fn read_context(
@@ -1068,114 +1084,119 @@ pub async fn read_context(
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.query.read_context", {
-        let limit = params.limit.unwrap_or(100).clamp(1, 500);
-        let Some(Extension(control)) = control else {
-            return explorer_session_not_ready::<ExplorerReadContextV1>(
-                &state,
-                DashboardLcmReadStateV1::Unavailable,
-                "dashboard_request_admission_unavailable".to_owned(),
-            );
-        };
-        let offset = params.offset.unwrap_or(0).max(0);
-        let order = if params.order.as_deref() == Some("desc") {
-            "desc"
-        } else {
-            "asc"
-        };
-        if offset != 0 || order == "desc" {
-            return Json(DashboardEnvelopeV1::unavailable(
-                scope_from_state(&state),
-                None::<ExplorerReadContextV1>,
-                "lcm_cursor_required",
-            ))
-            .into_response();
-        }
-        // The kernel serves one ranked stream in which summary nodes ride beside
-        // messages, so a windowed read fills its MESSAGE quota by consuming
-        // continuation pages: summaries accumulate alongside without starving the
-        // caller's limit, and the fill stays bounded so a read never becomes
-        // unbounded background work.
-        const READ_CONTEXT_FILL_PAGES: usize = 8;
-        let mut messages: Vec<DashboardLcmCanonicalMessageV1> = Vec::new();
-        let mut summary_nodes = Vec::new();
-        let mut stats = None;
-        let mut window_partial = false;
-        let mut omitted_total = 0_u64;
-        let mut cursor: Option<String> = None;
-        for _ in 0..READ_CONTEXT_FILL_PAGES {
-            let outcome =
-                read_session_page(&state, control.clone(), &session_id, limit, cursor.take()).await;
-            let (mut page, page_partial, page_omitted) = match outcome {
-                DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
-                DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
-                DashboardLcmReadOutcomeV1::NotReady {
-                    state: read_state,
-                    reason,
-                } => {
-                    return explorer_session_not_ready::<ExplorerReadContextV1>(
-                        &state, read_state, reason,
-                    );
-                }
+    hotpath::future!(
+        async move {
+            let limit = params.limit.unwrap_or(100).clamp(1, 500);
+            let Some(Extension(control)) = control else {
+                return explorer_session_not_ready::<ExplorerReadContextV1>(
+                    &state,
+                    DashboardLcmReadStateV1::Unavailable,
+                    "dashboard_request_admission_unavailable".to_owned(),
+                );
             };
-            window_partial |= page_partial;
-            omitted_total = omitted_total.saturating_add(page_omitted);
-            summary_nodes.append(&mut page.summary_nodes);
-            let deficit = usize::try_from(limit).unwrap_or(usize::MAX) - messages.len();
-            let overflow = page.messages.len() > deficit;
-            messages.extend(page.messages.drain(..).take(deficit));
-            stats = Some(page.stats);
-            cursor = page.next_cursor;
-            if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
-                break;
+            let offset = params.offset.unwrap_or(0).max(0);
+            let order = if params.order.as_deref() == Some("desc") {
+                "desc"
+            } else {
+                "asc"
+            };
+            if offset != 0 || order == "desc" {
+                return Json(DashboardEnvelopeV1::unavailable(
+                    scope_from_state(&state),
+                    None::<ExplorerReadContextV1>,
+                    "lcm_cursor_required",
+                ))
+                .into_response();
             }
-            if cursor.is_none() {
-                break;
+            // The kernel serves one ranked stream in which summary nodes ride beside
+            // messages, so a windowed read fills its MESSAGE quota by consuming
+            // continuation pages: summaries accumulate alongside without starving the
+            // caller's limit, and the fill stays bounded so a read never becomes
+            // unbounded background work.
+            const READ_CONTEXT_FILL_PAGES: usize = 8;
+            let mut messages: Vec<DashboardLcmCanonicalMessageV1> = Vec::new();
+            let mut summary_nodes = Vec::new();
+            let mut stats = None;
+            let mut window_partial = false;
+            let mut omitted_total = 0_u64;
+            let mut cursor: Option<String> = None;
+            for _ in 0..READ_CONTEXT_FILL_PAGES {
+                let outcome =
+                    read_session_page(&state, control.clone(), &session_id, limit, cursor.take())
+                        .await;
+                let (mut page, page_partial, page_omitted) = match outcome {
+                    DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
+                    DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
+                    DashboardLcmReadOutcomeV1::NotReady {
+                        state: read_state,
+                        reason,
+                    } => {
+                        return explorer_session_not_ready::<ExplorerReadContextV1>(
+                            &state, read_state, reason,
+                        );
+                    }
+                };
+                window_partial |= page_partial;
+                omitted_total = omitted_total.saturating_add(page_omitted);
+                summary_nodes.append(&mut page.summary_nodes);
+                let deficit = usize::try_from(limit).unwrap_or(usize::MAX) - messages.len();
+                let overflow = page.messages.len() > deficit;
+                messages.extend(page.messages.drain(..).take(deficit));
+                stats = Some(page.stats);
+                cursor = page.next_cursor;
+                if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                    break;
+                }
+                if cursor.is_none() {
+                    break;
+                }
             }
-        }
-        let stats = stats.unwrap_or_default();
-        let counts = explorer_session_counts(&stats);
-        let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
-        let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
-        let has_more_messages = stats.message_count > returned_messages;
-        let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
-        let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
-        let has_more = has_more_messages || has_more_summary_nodes;
-        let payload = ExplorerReadContextV1 {
-            session_id,
-            storage_scope: "project".to_owned(),
-            limit,
-            offset,
-            order: order.to_owned(),
-            counts,
-            messages: messages.into_iter().map(explorer_lcm_message).collect(),
-            summary_nodes: summary_nodes
-                .into_iter()
-                .map(explorer_lcm_summary)
-                .collect(),
-            has_more,
-            has_more_messages,
-            has_more_summary_nodes,
-        };
-        if window_partial || has_more {
-            Json(DashboardEnvelopeV1::partial(
-                scope_from_state(&state),
-                examined.saturating_add(omitted_total),
-                examined,
-                "canonical hydrated records",
-                vec!["lcm_temporal_read_incomplete".to_owned()],
-                Some(payload),
-            ))
-            .into_response()
-        } else {
-            Json(DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
-                DashboardCoverageV1::unknown(),
-                Some(payload),
-            ))
-            .into_response()
-        }
-    })
+            let stats = stats.unwrap_or_default();
+            let counts = explorer_session_counts(&stats);
+            let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
+            let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
+            let has_more_messages = stats.message_count > returned_messages;
+            let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
+            let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
+            let has_more = has_more_messages || has_more_summary_nodes;
+            let payload = ExplorerReadContextV1 {
+                session_id,
+                storage_scope: "project".to_owned(),
+                limit,
+                offset,
+                order: order.to_owned(),
+                counts,
+                messages: messages.into_iter().map(explorer_lcm_message).collect(),
+                summary_nodes: summary_nodes
+                    .into_iter()
+                    .map(explorer_lcm_summary)
+                    .collect(),
+                has_more,
+                has_more_messages,
+                has_more_summary_nodes,
+            };
+            if window_partial || has_more {
+                Json(DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    examined.saturating_add(omitted_total),
+                    examined,
+                    "canonical hydrated records",
+                    vec!["lcm_temporal_read_incomplete".to_owned()],
+                    Some(payload),
+                ))
+                .into_response()
+            } else {
+                Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::unknown(),
+                    Some(payload),
+                ))
+                .into_response()
+            }
+        },
+        label = "dashboard_api.query.read_context"
+    )
+    .await
 }
 
 async fn read_session_page(

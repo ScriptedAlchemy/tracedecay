@@ -615,17 +615,19 @@ impl ProjectOpenTasks {
         let task_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
-        let task = tokio::spawn(async move {
-            let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
-            let state = match open(task_cancellation).await {
-                Ok(()) => ProjectOpenTaskState::Ready,
-                Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::recorded_for_route(
-                    &error,
-                    &failure_route,
-                )),
-            };
-            updates.send_replace(state);
-        });
+        let task = tokio::spawn(hotpath::future!(
+            async move {
+                let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
+                let state = match open(task_cancellation).await {
+                    Ok(()) => ProjectOpenTaskState::Ready,
+                    Err(error) => ProjectOpenTaskState::Failed(
+                        ProjectOpenFailure::recorded_for_route(&error, &failure_route),
+                    ),
+                };
+                updates.send_replace(state);
+            },
+            label = "daemon.project.admit.task"
+        ));
         registry.routes.insert(
             route,
             ProjectOpenTaskEntry {
@@ -669,6 +671,7 @@ impl ProjectOpenTasks {
     /// full owner set. This is deliberately a route-local operation: callers
     /// must re-read the canonical route after it returns rather than carrying
     /// a core publication's stale project identity into LSP admission.
+    #[hotpath::measure(label = "daemon.project.admit.lsp_upgrade", future = true)]
     pub(super) async fn wait_for_lsp_upgrade(
         &self,
         route: &ProjectRouteKey,
@@ -762,6 +765,7 @@ impl ProjectOpenTasks {
         .await
     }
 
+    #[hotpath::measure(label = "daemon.project.admit.quiesce", future = true)]
     pub(super) async fn quiesce_project_identity(
         &self,
         profile_root: &Path,
@@ -793,6 +797,7 @@ impl ProjectOpenTasks {
         })
     }
 
+    #[hotpath::measure(label = "daemon.project.admit.shutdown_identity", future = true)]
     pub(super) async fn shutdown_project_identity_with_deadline(
         &self,
         profile_root: &Path,
@@ -814,6 +819,7 @@ impl ProjectOpenTasks {
         self.drain_retiring_routes(routes, timeout).await
     }
 
+    #[hotpath::measure(label = "daemon.project.admit.shutdown_profile", future = true)]
     pub(super) async fn shutdown_profile_with_deadline(
         &self,
         profile_root: &Path,
@@ -844,6 +850,7 @@ impl ProjectOpenTasks {
         self.drain_retiring_routes(routes, timeout).await
     }
 
+    #[hotpath::measure(label = "daemon.project.admit.shutdown", future = true)]
     pub(super) async fn shutdown_with_deadline(
         &self,
         cooperative_deadline: Duration,

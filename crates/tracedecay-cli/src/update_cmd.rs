@@ -322,6 +322,7 @@ pub(crate) enum RefreshPolicy {
 /// binary path, when known — so the plugin refresh, daemon refresh, and
 /// health pass run on the new version. `policy` decides whether the refresh
 /// runs on a no-op upgrade and whether a refresh failure is fatal.
+#[hotpath::measure(label = "cli.update.install_then_refresh")]
 pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
@@ -368,16 +369,17 @@ where
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.update.run")]
 pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
     run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.upgrade.run")]
 pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
+#[hotpath::measure(label = "cli.update.flow")]
 fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
@@ -409,7 +411,7 @@ fn combine_operation_and_restore<T>(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.update.post", future = true)]
 pub(crate) async fn run_post_update_command(
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
@@ -463,6 +465,7 @@ fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> 
         .or_else(|| current_tracedecay_exe_from(current))
 }
 
+#[hotpath::measure(label = "cli.update.post_subcommand")]
 fn run_post_update_subcommand(
     no_reinstall: bool,
     installed: Option<&Path>,
@@ -600,6 +603,7 @@ async fn reinstall_tracked_agents_under_lease(
     partition_reinstall_results(results)
 }
 
+#[hotpath::measure(label = "cli.update.post_tasks", future = true)]
 pub(crate) async fn run_post_update_tasks(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
@@ -614,6 +618,7 @@ pub(crate) async fn run_post_update_tasks(
     combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
 
+#[hotpath::measure(label = "cli.update.post_mutations", future = true)]
 async fn run_post_update_mutations(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,

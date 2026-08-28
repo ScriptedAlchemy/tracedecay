@@ -15,14 +15,19 @@ include = ["/src/**", "/tests/**", "/README.md"]
 [features]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
-hotpath = ["hotpath/hotpath"]
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-store/hotpath",
+]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
 ]
 
 [dependencies]

@@ -51,6 +51,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
     Ok(normalized)
 }
 
+#[hotpath::measure(label = "usecases.edit.state_digest")]
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
@@ -145,6 +146,7 @@ pub(super) fn reconciliation_attempt_effect_id(
     )
 }
 
+#[hotpath::measure(label = "usecases.edit.persist_record")]
 pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(|error| config_error(error.to_string()))?;
     if bytes.len() > MAX_DURABLE_RECORD_BYTES {
@@ -171,6 +173,7 @@ pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -
     .map_err(|error| io_error("persist source edit durable record", error))
 }
 
+#[hotpath::measure(label = "usecases.edit.load_record")]
 pub(super) fn load_record<T>(path: &Path, kind: &'static str) -> Result<Option<T>>
 where
     T: for<'de> Deserialize<'de>,

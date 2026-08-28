@@ -50,9 +50,11 @@ pub(super) async fn track_explicit_search(
             .map_err(memory_mapping::map_store_error)?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(memory
-            .record_project_memory_fact_retrieval(command, &write_control)
-            .await)
+        Ok(hotpath::future!(
+            memory.record_project_memory_fact_retrieval(command, &write_control),
+            label = "daemon.retained.memory.track.commit"
+        )
+        .await)
     })
     .await?;
     let (outcome, authority_result_invalid) = match memory_mutation_settlement(outcome)? {

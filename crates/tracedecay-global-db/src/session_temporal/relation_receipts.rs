@@ -102,6 +102,7 @@ async fn record_pending_effect_journal(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.session_temporal.txn.apply_relation")]
 pub(crate) async fn apply_relation_projection(
     database: &RegisteredGlobalDb,
     projection: &SessionRelationProjection,
@@ -146,10 +147,12 @@ pub(crate) async fn apply_relation_projection(
             "native graph acknowledged a different relation watermark",
         ));
     }
-    let transaction = database
-        .begin_write_transaction()
-        .await
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+        database
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?
+    });
     let changed = transaction
         .execute(
             "UPDATE session_relation_receipts
@@ -191,10 +194,12 @@ pub(crate) async fn apply_relation_projection(
             "relation effect journal changed during native graph acknowledgement",
         ));
     }
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?
+    });
     Ok(applied)
 }
 

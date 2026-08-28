@@ -154,6 +154,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp.diagnostics.dynamic_response")]
     pub(super) fn handle_dynamic_diagnostic_response(
         &mut self,
         id: &LspRequestId,

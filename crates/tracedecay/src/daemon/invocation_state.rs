@@ -110,6 +110,7 @@ impl DaemonInvocationState {
         })
     }
 
+    #[hotpath::measure(label = "daemon.invocation.retire_owners", future = true)]
     pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -121,6 +122,7 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
+    #[hotpath::measure(label = "daemon.invocation.quiesce_owners", future = true)]
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -137,6 +139,7 @@ impl DaemonInvocationState {
             })
     }
 
+    #[hotpath::measure(label = "daemon.invocation.drain_owners", future = true)]
     async fn drain_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -504,6 +507,7 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.invocation.multi_root_project", future = true)]
     pub(super) async fn execute_multi_root_for_project(
         &self,
         store_administration: &StoreAdministration,
@@ -848,6 +852,7 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.invocation.multi_root_op", future = true)]
     pub(super) async fn execute_one_multi_root_operation(
         &self,
         store_administration: &StoreAdministration,
@@ -935,6 +940,7 @@ impl DaemonInvocationState {
         }
     }
 
+    #[hotpath::measure(label = "daemon.invocation.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();

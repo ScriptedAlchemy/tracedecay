@@ -165,6 +165,7 @@ fn health_delta_digest_from_cursor(cursor: &str) -> Result<&str> {
     Ok(digest)
 }
 
+#[hotpath::measure(label = "usecases.graph.health_delta.persist", future = true)]
 async fn persist_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -242,6 +243,7 @@ async fn persist_health_delta_point(
     Ok(cursor)
 }
 
+#[hotpath::measure(label = "usecases.graph.health_delta.load", future = true)]
 async fn load_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -351,6 +353,7 @@ fn health_dimension_deltas(
         .collect()
 }
 
+#[hotpath::measure(label = "usecases.graph.health_delta", future = true)]
 pub async fn compute_verified_health_delta(
     project_id: Option<String>,
     graph: &GraphQueryManager<'_>,

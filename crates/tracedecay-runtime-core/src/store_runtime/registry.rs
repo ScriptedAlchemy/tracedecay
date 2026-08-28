@@ -198,7 +198,8 @@ struct StoreRuntimeLeaseSource {
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
-    database_attachments: Mutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
+    database_attachments:
+        ProfiledMutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
     next_database_attachment_id: AtomicU64,
     next_database_owner_id: AtomicU64,
     next_database_attachment_reservation_id: AtomicU64,

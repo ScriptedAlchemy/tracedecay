@@ -61,6 +61,7 @@ where
         Some(read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await)
     }
 
+    #[hotpath::measure(label = "store.workflow.upsert_run", future = true)]
     pub(crate) async fn upsert_workflow_run(
         &self,
         run: &WorkflowRun,
@@ -102,6 +103,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "store.workflow.index_snapshot", future = true)]
     pub(crate) async fn open_workflow_index_snapshot(
         &self,
     ) -> Result<RegisteredWorkflowIndexSnapshot, WorkflowIndexError> {
@@ -135,6 +137,7 @@ where
     }
 
     /// Unfinished-run evidence listing, read at one pinned generation.
+    #[hotpath::measure(label = "store.workflow.list_unfinished", future = true)]
     pub(crate) async fn list_unfinished_workflows(
         &self,
         limit: usize,

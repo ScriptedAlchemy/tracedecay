@@ -147,6 +147,7 @@ where
 
     /// Admits one bridge-owned frame without ambiguous post-dispatch
     /// backpressure. A consumed frame is never reported as retryable.
+    #[hotpath::measure(label = "lsp.protocol.try_handle_client_payload")]
     pub fn try_handle_client_payload(
         &mut self,
         payload: &[u8],
@@ -168,10 +169,7 @@ where
     /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
     /// server notifications remain queued until a typed daemon-session
     /// transport acknowledges delivery to the bridge.
-    #[hotpath::measure(
-        label = "lsp_protocol_handle_payload",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.protocol.handle_payload")]
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         self.prepare_payload_dispatch(now_ms);
         self.handle_prepared_payload(payload, now_ms)
@@ -185,6 +183,7 @@ where
         self.reconcile_dynamic_diagnostics();
     }
 
+    #[hotpath::measure(label = "lsp.protocol.handle_prepared_payload")]
     fn handle_prepared_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
         if payload.len() > MAX_LSP_FRAME_BYTES {
@@ -254,6 +253,7 @@ where
         Ok(())
     }
 
+    #[hotpath::measure(label = "lsp.protocol.apply_workspace_folder_mutation")]
     pub fn apply_workspace_folder_mutation(
         &mut self,
         mutation: &WorkspaceFolderMutation,
@@ -287,6 +287,7 @@ where
         Ok(())
     }
 
+    #[hotpath::measure(label = "lsp.protocol.workspace_folders_changed")]
     pub(crate) fn handle_workspace_folders_changed(
         &mut self,
         params: &Value,
@@ -315,6 +316,7 @@ where
 
     /// Runs only coalesced overlay work. A daemon scheduler can call this when
     /// no new frame arrives so a quiet editor still receives its refresh.
+    #[hotpath::measure(label = "lsp.protocol.flush_due")]
     pub fn flush_due(&mut self, now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
         self.expire_requests(now_ms);
@@ -341,10 +343,7 @@ where
             }
         }
     }
-    #[hotpath::measure(
-        label = "lsp_protocol_did_open",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.protocol.did_open")]
     pub(crate) fn handle_did_open(
         &mut self,
         params: &Value,
@@ -392,10 +391,7 @@ where
         Ok(())
     }
 
-    #[hotpath::measure(
-        label = "lsp_protocol_did_change",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.protocol.did_change")]
     pub(crate) fn handle_did_change(
         &mut self,
         params: &Value,
@@ -441,6 +437,7 @@ where
         Ok(())
     }
 
+    #[hotpath::measure(label = "lsp.protocol.did_close")]
     pub(crate) fn handle_did_close(
         &mut self,
         params: &Value,
@@ -471,6 +468,7 @@ where
         Ok(())
     }
 
+    #[hotpath::measure(label = "lsp.protocol.did_save")]
     pub(crate) fn handle_did_save(
         &mut self,
         params: &Value,

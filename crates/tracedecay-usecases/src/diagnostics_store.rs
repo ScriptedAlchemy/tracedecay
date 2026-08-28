@@ -142,55 +142,73 @@ impl DiagnosticsConnection<'_> {
     where
         P: IntoParams,
     {
-        let params = params
-            .into_params()
-            .map_err(|error| db_error("diagnostics query parameters", error))?;
-        match self {
-            Self::Database(database) => database
-                .read_connection()
-                .query(sql, params)
-                .await
-                .map_err(|error| db_error("diagnostics guarded query", error)),
-            #[cfg(test)]
-            Self::Runtime(connection) => MemoryConnection::query(connection, sql, params)
-                .await
-                .map_err(|error| db_error("diagnostics runtime query", error)),
-            Self::Transaction(transaction) => transaction.query_values(sql, params).await,
-        }
+        hotpath::future!(
+            async {
+                let params = params
+                    .into_params()
+                    .map_err(|error| db_error("diagnostics query parameters", error))?;
+                match self {
+                    Self::Database(database) => database
+                        .read_connection()
+                        .query(sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics guarded query", error)),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::query(connection, sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime query", error)),
+                    Self::Transaction(transaction) => transaction.query_values(sql, params).await,
+                }
+            },
+            label = "usecases.diagnostics_store.query"
+        )
+        .await
     }
 
     async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
-        let params = params
-            .into_params()
-            .map_err(|error| db_error("diagnostics write parameters", error))?;
-        match self {
-            Self::Database(_) => Err(db_message(
-                "diagnostics guarded write",
-                "diagnostics writes require a canonical memory write transaction",
-            )),
-            #[cfg(test)]
-            Self::Runtime(connection) => MemoryConnection::execute(connection, sql, params)
-                .await
-                .map_err(|error| db_error("diagnostics runtime write", error)),
-            Self::Transaction(transaction) => transaction.execute_values(sql, params).await,
-        }
+        hotpath::future!(
+            async {
+                let params = params
+                    .into_params()
+                    .map_err(|error| db_error("diagnostics write parameters", error))?;
+                match self {
+                    Self::Database(_) => Err(db_message(
+                        "diagnostics guarded write",
+                        "diagnostics writes require a canonical memory write transaction",
+                    )),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::execute(connection, sql, params)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime write", error)),
+                    Self::Transaction(transaction) => transaction.execute_values(sql, params).await,
+                }
+            },
+            label = "usecases.diagnostics_store.execute"
+        )
+        .await
     }
 
     async fn execute_batch(&self, sql: &str) -> Result<()> {
-        match self {
-            Self::Database(_) => Err(db_message(
-                "diagnostics guarded write",
-                "diagnostics writes require a canonical memory write transaction",
-            )),
-            #[cfg(test)]
-            Self::Runtime(connection) => MemoryConnection::execute_batch(connection, sql)
-                .await
-                .map_err(|error| db_error("diagnostics runtime write", error)),
-            Self::Transaction(transaction) => transaction.execute_batch(sql).await,
-        }
+        hotpath::future!(
+            async {
+                match self {
+                    Self::Database(_) => Err(db_message(
+                        "diagnostics guarded write",
+                        "diagnostics writes require a canonical memory write transaction",
+                    )),
+                    #[cfg(test)]
+                    Self::Runtime(connection) => MemoryConnection::execute_batch(connection, sql)
+                        .await
+                        .map_err(|error| db_error("diagnostics runtime write", error)),
+                    Self::Transaction(transaction) => transaction.execute_batch(sql).await,
+                }
+            },
+            label = "usecases.diagnostics_store.execute_batch"
+        )
+        .await
     }
 }
 
@@ -216,15 +234,18 @@ impl<'a> DiagnosticsStore<'a> {
     /// Creates the diagnostics schema idempotently. Safe to call on every
     /// open; existing rows are never touched.
     pub async fn ensure_schema(&self) -> Result<()> {
-        self.with_immediate_tx("diagnostics ensure_schema", |store| {
-            Box::pin(async move {
-                store
-                    .conn
-                    .execute_batch(SCHEMA)
-                    .await
-                    .map_err(|error| db_error("diagnostics ensure_schema", error))
-            })
-        })
+        hotpath::future!(
+            self.with_immediate_tx("diagnostics ensure_schema", |store| {
+                Box::pin(async move {
+                    store
+                        .conn
+                        .execute_batch(SCHEMA)
+                        .await
+                        .map_err(|error| db_error("diagnostics ensure_schema", error))
+                })
+            }),
+            label = "usecases.diagnostics_store.ensure_schema"
+        )
         .await
     }
 
@@ -233,67 +254,79 @@ impl<'a> DiagnosticsStore<'a> {
     /// Generation publication is recorded even when the snapshot contains no
     /// diagnostics, preserving clean-generation identity across restarts.
     pub async fn current_generation(&self) -> Result<Option<CodeGenerationId>> {
-        let operation = "diagnostics current_generation";
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT generation_id
+        hotpath::future!(
+            async {
+                let operation = "diagnostics current_generation";
+                let mut rows = self
+                    .conn
+                    .query(
+                        "SELECT generation_id
                  FROM diagnostic_generation_publications
                  WHERE record_state = ?1",
-                params![STATE_CURRENT],
-            )
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let generation = rows
-            .next()
-            .await
-            .map_err(|e| db_error(operation, e))?
-            .map(|row| {
-                row.get::<String>(0)
-                    .map_err(|e| db_error(operation, e))
-                    .and_then(|value| stored_id(value, operation, "generation_id"))
-            })
-            .transpose()?;
-        if rows
-            .next()
-            .await
-            .map_err(|e| db_error(operation, e))?
-            .is_some()
-        {
-            return Err(db_message(
-                operation,
-                "multiple current diagnostic generations",
-            ));
-        }
-        Ok(generation)
+                        params![STATE_CURRENT],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let generation = rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .map(|row| {
+                        row.get::<String>(0)
+                            .map_err(|e| db_error(operation, e))
+                            .and_then(|value| stored_id(value, operation, "generation_id"))
+                    })
+                    .transpose()?;
+                if rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .is_some()
+                {
+                    return Err(db_message(
+                        operation,
+                        "multiple current diagnostic generations",
+                    ));
+                }
+                Ok(generation)
+            },
+            label = "usecases.diagnostics_store.current_generation"
+        )
+        .await
     }
 
     /// Every published generation id in deterministic order. This stays on
     /// the guarded diagnostics store so read-only query clients never need a
     /// raw engine connection.
     pub(crate) async fn published_generation_ids(&self) -> Result<Vec<String>> {
-        let operation = "diagnostics published_generation_ids";
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT generation_id FROM diagnostic_generation_publications \
+        hotpath::future!(
+            async {
+                let operation = "diagnostics published_generation_ids";
+                let mut rows = self
+                    .conn
+                    .query(
+                        "SELECT generation_id FROM diagnostic_generation_publications \
                  ORDER BY generation_id",
-                params![],
-            )
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        let mut generations = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| db_error(operation, error))?
-        {
-            generations.push(
-                row.get::<String>(0)
-                    .map_err(|error| db_error(operation, error))?,
-            );
-        }
-        Ok(generations)
+                        params![],
+                    )
+                    .await
+                    .map_err(|error| db_error(operation, error))?;
+                let mut generations = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|error| db_error(operation, error))?
+                {
+                    generations.push(
+                        row.get::<String>(0)
+                            .map_err(|error| db_error(operation, error))?,
+                    );
+                }
+                Ok(generations)
+            },
+            label = "usecases.diagnostics_store.published_generation_ids"
+        )
+        .await
     }
 
     /// Runs `work` inside an immediate transaction, committing on success and
@@ -442,7 +475,8 @@ impl<'a> DiagnosticsStore<'a> {
             ));
         }
         let generation = generation.clone();
-        self.with_immediate_tx(operation, move |store| Box::pin(async move {
+        hotpath::future!(
+            self.with_immediate_tx(operation, move |store| Box::pin(async move {
             if let Some(state) = store.generation_publication_state(&generation).await? {
                 if state != STATE_CURRENT {
                     return Err(db_message(
@@ -532,7 +566,9 @@ impl<'a> DiagnosticsStore<'a> {
                 .await
                 .map_err(|e| db_error(operation, e))?;
             Ok((records.len() as u64, cleared, false))
-        }))
+        })),
+            label = "usecases.diagnostics_store.publish"
+        )
         .await
     }
 
@@ -553,41 +589,44 @@ impl<'a> DiagnosticsStore<'a> {
         }
         let prior_generation = prior_generation.clone();
         let successor_generation = successor_generation.clone();
-        self.with_immediate_tx(operation, move |store| {
-            Box::pin(async move {
-                let transitioned = store
-                    .conn
-                    .execute(
-                        "UPDATE generation_diagnostics
+        hotpath::future!(
+            self.with_immediate_tx(operation, move |store| {
+                Box::pin(async move {
+                    let transitioned = store
+                        .conn
+                        .execute(
+                            "UPDATE generation_diagnostics
                      SET record_state = ?1, state_generation = ?2
                      WHERE record_state = ?3 AND generation_id = ?4",
-                        params![
-                            STATE_SUPERSEDED,
-                            successor_generation.as_str(),
-                            STATE_CURRENT,
-                            prior_generation.as_str()
-                        ],
-                    )
-                    .await
-                    .map_err(|e| db_error(operation, e))?;
-                store
-                    .conn
-                    .execute(
-                        "UPDATE diagnostic_generation_publications
+                            params![
+                                STATE_SUPERSEDED,
+                                successor_generation.as_str(),
+                                STATE_CURRENT,
+                                prior_generation.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|e| db_error(operation, e))?;
+                    store
+                        .conn
+                        .execute(
+                            "UPDATE diagnostic_generation_publications
                      SET record_state = ?1, state_generation = ?2
                      WHERE record_state = ?3 AND generation_id = ?4",
-                        params![
-                            STATE_SUPERSEDED,
-                            successor_generation.as_str(),
-                            STATE_CURRENT,
-                            prior_generation.as_str()
-                        ],
-                    )
-                    .await
-                    .map_err(|e| db_error(operation, e))?;
-                Ok(transitioned)
-            })
-        })
+                            params![
+                                STATE_SUPERSEDED,
+                                successor_generation.as_str(),
+                                STATE_CURRENT,
+                                prior_generation.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|e| db_error(operation, e))?;
+                    Ok(transitioned)
+                })
+            }),
+            label = "usecases.diagnostics_store.supersede"
+        )
         .await
     }
 
@@ -601,37 +640,43 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        let mut chain = Vec::new();
-        let Some(start) = self.record_by_anchor(anchor).await? else {
-            return Ok(chain);
-        };
-        chain.push(start);
-        loop {
-            let Some(last) = chain.last() else {
-                // Unreachable: `chain` is seeded before the loop and only
-                // grows; bail out with what we have rather than panic.
-                return Ok(chain);
-            };
-            let DiagnosticRecordStateV1::Superseded {
-                successor_generation,
-            } = &last.state
-            else {
-                return Ok(chain);
-            };
-            let successor = self
-                .find_logical_successor(last, successor_generation)
-                .await?;
-            match successor {
-                Some(record)
-                    if !chain
-                        .iter()
-                        .any(|seen| seen.diagnostic_anchor == record.diagnostic_anchor) =>
-                {
-                    chain.push(record);
+        hotpath::future!(
+            async {
+                let mut chain = Vec::new();
+                let Some(start) = self.record_by_anchor(anchor).await? else {
+                    return Ok(chain);
+                };
+                chain.push(start);
+                loop {
+                    let Some(last) = chain.last() else {
+                        // Unreachable: `chain` is seeded before the loop and only
+                        // grows; bail out with what we have rather than panic.
+                        return Ok(chain);
+                    };
+                    let DiagnosticRecordStateV1::Superseded {
+                        successor_generation,
+                    } = &last.state
+                    else {
+                        return Ok(chain);
+                    };
+                    let successor = self
+                        .find_logical_successor(last, successor_generation)
+                        .await?;
+                    match successor {
+                        Some(record)
+                            if !chain
+                                .iter()
+                                .any(|seen| seen.diagnostic_anchor == record.diagnostic_anchor) =>
+                        {
+                            chain.push(record);
+                        }
+                        _ => return Ok(chain),
+                    }
                 }
-                _ => return Ok(chain),
-            }
-        }
+            },
+            label = "usecases.diagnostics_store.supersession_chain"
+        )
+        .await
     }
 
     /// All records bound to `generation`, any state, ordered by anchor.
@@ -639,7 +684,11 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        self.query_generation(generation, None).await
+        hotpath::future!(
+            self.query_generation(generation, None),
+            label = "usecases.diagnostics_store.records_for_generation"
+        )
+        .await
     }
 
     /// Current records bound to `generation` — the only set eligible for
@@ -648,7 +697,11 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        self.query_generation(generation, Some(STATE_CURRENT)).await
+        hotpath::future!(
+            self.query_generation(generation, Some(STATE_CURRENT)),
+            label = "usecases.diagnostics_store.current_records"
+        )
+        .await
     }
 
     /// One bounded page of current records plus the exact lane cardinality.
@@ -659,91 +712,98 @@ impl<'a> DiagnosticsStore<'a> {
         after_anchor: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<GenerationDiagnosticV1>, usize, bool)> {
-        let operation = "diagnostics current_records_page";
-        let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
-            db_message(
-                operation,
-                "diagnostic page limit exceeds the SQLite integer range",
-            )
-        })?;
-        let (sql, query_params) = match (file_occurrence_id, after_anchor) {
-            (None, None) => (
-                format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+        hotpath::future!(
+            async {
+                let operation = "diagnostics current_records_page";
+                let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
+                    db_message(
+                        operation,
+                        "diagnostic page limit exceeds the SQLite integer range",
+                    )
+                })?;
+                let (sql, query_params) = match (file_occurrence_id, after_anchor) {
+                    (None, None) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
                      ORDER BY diagnostic_anchor LIMIT ?3"
-                ),
-                params![generation.as_str(), STATE_CURRENT, fetch_limit],
-            ),
-            (None, Some(anchor)) => (
-                format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                        ),
+                        params![generation.as_str(), STATE_CURRENT, fetch_limit],
+                    ),
+                    (None, Some(anchor)) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
                      AND diagnostic_anchor > ?3 ORDER BY diagnostic_anchor LIMIT ?4"
-                ),
-                params![generation.as_str(), STATE_CURRENT, anchor, fetch_limit],
-            ),
-            (Some(file), None) => (
-                format!(
-                    "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                        ),
+                        params![generation.as_str(), STATE_CURRENT, anchor, fetch_limit],
+                    ),
+                    (Some(file), None) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
                      AND record_state = ?3 ORDER BY diagnostic_anchor LIMIT ?4"
-                ),
-                params![
-                    file.as_str(),
-                    generation.as_str(),
-                    STATE_CURRENT,
-                    fetch_limit
-                ],
-            ),
-            (Some(file), Some(anchor)) => (
-                format!(
-                    "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                        ),
+                        params![
+                            file.as_str(),
+                            generation.as_str(),
+                            STATE_CURRENT,
+                            fetch_limit
+                        ],
+                    ),
+                    (Some(file), Some(anchor)) => (
+                        format!(
+                            "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
                      AND record_state = ?3 AND diagnostic_anchor > ?4 \
                      ORDER BY diagnostic_anchor LIMIT ?5"
-                ),
-                params![
-                    file.as_str(),
-                    generation.as_str(),
-                    STATE_CURRENT,
-                    anchor,
-                    fetch_limit
-                ],
-            ),
-        };
-        let mut rows = self
-            .conn
-            .query(&sql, query_params)
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let mut records = collect_rows(&mut rows, operation).await?;
-        let has_more = records.len() > limit;
-        records.truncate(limit);
+                        ),
+                        params![
+                            file.as_str(),
+                            generation.as_str(),
+                            STATE_CURRENT,
+                            anchor,
+                            fetch_limit
+                        ],
+                    ),
+                };
+                let mut rows = self
+                    .conn
+                    .query(&sql, query_params)
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let mut records = collect_rows(&mut rows, operation).await?;
+                let has_more = records.len() > limit;
+                records.truncate(limit);
 
-        let (count_sql, count_params) = match file_occurrence_id {
-            None => (
-                "SELECT COUNT(*) FROM generation_diagnostics \
+                let (count_sql, count_params) = match file_occurrence_id {
+                    None => (
+                        "SELECT COUNT(*) FROM generation_diagnostics \
                  WHERE generation_id = ?1 AND record_state = ?2",
-                params![generation.as_str(), STATE_CURRENT],
-            ),
-            Some(file) => (
-                "SELECT COUNT(*) FROM generation_diagnostics \
+                        params![generation.as_str(), STATE_CURRENT],
+                    ),
+                    Some(file) => (
+                        "SELECT COUNT(*) FROM generation_diagnostics \
                  WHERE file_occurrence_id = ?1 AND generation_id = ?2 AND record_state = ?3",
-                params![file.as_str(), generation.as_str(), STATE_CURRENT],
-            ),
-        };
-        let mut count_rows = self
-            .conn
-            .query(count_sql, count_params)
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let total = count_rows
-            .next()
-            .await
-            .map_err(|e| db_error(operation, e))?
-            .ok_or_else(|| db_message(operation, "diagnostic count returned no row"))?
-            .get::<i64>(0)
-            .map_err(|e| db_error(operation, e))?;
-        let total = usize::try_from(total)
-            .map_err(|_| db_message(operation, "diagnostic count is outside the usize range"))?;
-        Ok((records, total, has_more))
+                        params![file.as_str(), generation.as_str(), STATE_CURRENT],
+                    ),
+                };
+                let mut count_rows = self
+                    .conn
+                    .query(count_sql, count_params)
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let total = count_rows
+                    .next()
+                    .await
+                    .map_err(|e| db_error(operation, e))?
+                    .ok_or_else(|| db_message(operation, "diagnostic count returned no row"))?
+                    .get::<i64>(0)
+                    .map_err(|e| db_error(operation, e))?;
+                let total = usize::try_from(total).map_err(|_| {
+                    db_message(operation, "diagnostic count is outside the usize range")
+                })?;
+                Ok((records, total, has_more))
+            },
+            label = "usecases.diagnostics_store.current_records_page"
+        )
+        .await
     }
 
     /// Current records for one file occurrence inside `generation`.
@@ -752,23 +812,29 @@ impl<'a> DiagnosticsStore<'a> {
         generation: &CodeGenerationId,
         file_occurrence_id: &FileOccurrenceId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        let operation = "diagnostics current_records_for_file";
-        let mut rows = self
-            .conn
-            .query(
-                &format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND file_occurrence_id = ?2 \
+        hotpath::future!(
+            async {
+                let operation = "diagnostics current_records_for_file";
+                let mut rows = self
+                    .conn
+                    .query(
+                        &format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND file_occurrence_id = ?2 \
                      AND record_state = ?3 ORDER BY diagnostic_anchor"
-                ),
-                params![
-                    generation.as_str(),
-                    file_occurrence_id.as_str(),
-                    STATE_CURRENT
-                ],
-            )
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        collect_rows(&mut rows, operation).await
+                        ),
+                        params![
+                            generation.as_str(),
+                            file_occurrence_id.as_str(),
+                            STATE_CURRENT
+                        ],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                collect_rows(&mut rows, operation).await
+            },
+            label = "usecases.diagnostics_store.current_records_for_file"
+        )
+        .await
     }
 
     /// Stale (superseded or cleared) records bound to `generation`. Stale
@@ -777,19 +843,25 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        let operation = "diagnostics stale_records";
-        let mut rows = self
-            .conn
-            .query(
-                &format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state != ?2 \
+        hotpath::future!(
+            async {
+                let operation = "diagnostics stale_records";
+                let mut rows = self
+                    .conn
+                    .query(
+                        &format!(
+                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state != ?2 \
                      ORDER BY diagnostic_anchor"
-                ),
-                params![generation.as_str(), STATE_CURRENT],
-            )
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        collect_rows(&mut rows, operation).await
+                        ),
+                        params![generation.as_str(), STATE_CURRENT],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                collect_rows(&mut rows, operation).await
+            },
+            label = "usecases.diagnostics_store.stale_records"
+        )
+        .await
     }
 
     /// Fetches one record by its Plan 13 anchor.
@@ -797,17 +869,23 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<Option<GenerationDiagnosticV1>> {
-        let operation = "diagnostics record_by_anchor";
-        let mut rows = self
-            .conn
-            .query(
-                &format!("{SELECT_RECORDS} WHERE diagnostic_anchor = ?1"),
-                params![anchor.as_str()],
-            )
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let mut records = collect_rows(&mut rows, operation).await?;
-        Ok(records.pop())
+        hotpath::future!(
+            async {
+                let operation = "diagnostics record_by_anchor";
+                let mut rows = self
+                    .conn
+                    .query(
+                        &format!("{SELECT_RECORDS} WHERE diagnostic_anchor = ?1"),
+                        params![anchor.as_str()],
+                    )
+                    .await
+                    .map_err(|e| db_error(operation, e))?;
+                let mut records = collect_rows(&mut rows, operation).await?;
+                Ok(records.pop())
+            },
+            label = "usecases.diagnostics_store.record_by_anchor"
+        )
+        .await
     }
 
     /// Merges the durable current set for `generation` with a dirty overlay
@@ -832,7 +910,11 @@ impl<'a> DiagnosticsStore<'a> {
             ));
         }
         Ok(MergedGenerationDiagnostics {
-            durable: self.current_records(generation).await?,
+            durable: hotpath::future!(
+                self.current_records(generation),
+                label = "usecases.diagnostics_store.current_with_overlay"
+            )
+            .await?,
             overlay_only: overlay.records(),
         })
     }

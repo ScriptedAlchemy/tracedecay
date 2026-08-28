@@ -221,6 +221,7 @@ impl DaemonNativeIntegrationOwner {
     /// Reconciles every cleanup fenced during project-open before holder
     /// runtimes are published. Any unresolved journal keeps its exact-root
     /// fence and fails project-open closed.
+    #[hotpath::measure(label = "daemon.native_integration.worktree_recover", future = true)]
     pub(crate) async fn recover_worktree_cleanups(
         &self,
     ) -> Result<usize, NativeIntegrationPortError> {
@@ -374,7 +375,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// Returns the retained owner for this exact identity, or composes exactly
     /// one: store actor, topology, mechanics, pinned-policy authorization,
     /// then durable startup recovery. A failed recovery mounts nothing.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.native_integration.native_ensure", future = true)]
     pub(crate) async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,

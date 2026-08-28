@@ -270,6 +270,7 @@ mod wipe_safety_tests {
 /// non-interactive acceptance every other destructive first-party command
 /// takes, so a scripted caller no longer has to feed `go!` through a pipe on
 /// stdin to reach the wipe.
+#[hotpath::measure(label = "cli.wipe.run", future = true)]
 pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let home_tracedecay = Some(profile_root.clone());
@@ -413,6 +414,7 @@ pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::erro
 }
 
 /// Handles the `list` and `list --all` commands.
+#[hotpath::measure(label = "cli.list.run", future = true)]
 pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     use tracedecay::display::format_token_count;
 

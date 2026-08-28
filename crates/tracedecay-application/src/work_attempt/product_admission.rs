@@ -279,6 +279,7 @@ where
         Self { storage }
     }
 
+    #[hotpath::measure(label = "application.work.attempt.start")]
     pub fn start_against_registered_topology(
         &self,
         context: &RequestContext,

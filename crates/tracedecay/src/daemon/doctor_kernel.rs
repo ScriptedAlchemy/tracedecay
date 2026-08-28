@@ -416,6 +416,7 @@ impl AdvisoryFeedbackDoctorPort for AdvisoryFeedbackDoctorAdapterV1 {
 /// stale, restored-unverified, or busy schedulers report `Indexing` and schedule
 /// background reconciliation. Doctor never performs code-index catch-up on its
 /// request path.
+#[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
 pub(in crate::daemon) async fn code_index_read_from_registry(
     registry: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -690,6 +691,7 @@ fn orphan_store_findings_from_census(
 /// a store directory with no `code_projects` row at all, invisible to the
 /// registry-driven census performs). Runs the bottom-up sweep in
 /// classification-only mode (no collection).
+#[hotpath::measure(label = "daemon.doctor.unregistered_stores", future = true)]
 pub async fn collect_unregistered_store_findings(
     global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
@@ -833,6 +835,7 @@ fn permits_synchronous_table_growth(
     )
 }
 
+#[hotpath::measure(label = "daemon.doctor.over_budget", future = true)]
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
@@ -941,6 +944,7 @@ fn incident_debris_findings_from_census(
 /// Read the configured session-retention backlog from the retained session
 /// store. This mirrors the retention SQL in read-only form and emits clean
 /// zero-byte records when a configured window has no eligible rows.
+#[hotpath::measure(label = "daemon.doctor.retention_backlog", future = true)]
 pub async fn collect_retention_backlog_findings(
     profile_sessions: &crate::global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
@@ -993,6 +997,7 @@ pub async fn collect_retention_backlog_findings(
 /// budget made the finding unreachable on every profile that actually had
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
+#[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
 pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
@@ -1248,6 +1253,7 @@ pub struct DoctorKernelInputsV1 {
 /// whose read is unavailable is carried with its real evidence state and an
 /// explicit coverage record, and the report asserts health only when every
 /// family was consulted with complete coverage and every finding is healthy.
+#[hotpath::measure(label = "daemon.doctor.compose", future = true)]
 pub async fn compose_doctor_report(
     context: &RequestContext,
     inputs: &DoctorKernelInputsV1,
@@ -1450,33 +1456,42 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 advisory_feedback,
                 host_read,
                 code_index,
-            ) = tokio::join!(
-                graph.quick_check_report(),
-                observation_authority_audit_ok(registry.as_ref()),
-                project_sessions.session_temporal_doctor_health(),
-                profile_storage_reads,
-                collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
-                collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now),
-                collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now),
-                collect_code_generation_retention_findings(
-                    &schedulers,
-                    &store_telemetry_sampling,
-                    semantic_configuration_inventory.as_ref(),
-                    &code_index_store_root,
-                    &project_root,
-                ),
-                language_server_read_from_broker(&diagnostic_broker),
-                tracedecay_usecases::feedback::concrete::feedback_observation_read_model(&graph,),
-                async {
-                    tokio::join!(
-                        profile_sessions.observation_refusal_census(),
-                        project_sessions.observation_refusal_census(),
-                    )
-                },
-                advisory_feedback_read,
-                host_scan,
-                code_index_read_from_registry(&schedulers, &project_root),
-            );
+            ) =
+                hotpath::future!(
+                    async {
+                        tokio::join!(
+                    graph.quick_check_report(),
+                    observation_authority_audit_ok(registry.as_ref()),
+                    project_sessions.session_temporal_doctor_health(),
+                    profile_storage_reads,
+                    collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
+                    collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now),
+                    collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now),
+                    collect_code_generation_retention_findings(
+                        &schedulers,
+                        &store_telemetry_sampling,
+                        semantic_configuration_inventory.as_ref(),
+                        &code_index_store_root,
+                        &project_root,
+                    ),
+                    language_server_read_from_broker(&diagnostic_broker),
+                    tracedecay_usecases::feedback::concrete::feedback_observation_read_model(
+                        &graph,
+                    ),
+                    async {
+                        tokio::join!(
+                            profile_sessions.observation_refusal_census(),
+                            project_sessions.observation_refusal_census(),
+                        )
+                    },
+                    advisory_feedback_read,
+                    host_scan,
+                    code_index_read_from_registry(&schedulers, &project_root),
+                )
+                    },
+                    label = "daemon.doctor.collect"
+                )
+                .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
             let temporal_ok = match temporal.status() {
                 crate::global_db::session_temporal::SessionTemporalHealthStatus::Complete => {

@@ -663,6 +663,7 @@ pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
     discover_open_prs_with_control(repo_root, default_pr_command_control())
 }
 
+#[hotpath::measure(label = "daemon.pr_autotrack.discover")]
 fn discover_open_prs_with_control(
     repo_root: &Path,
     control: &PrCommandControl,
@@ -827,6 +828,7 @@ pub(crate) async fn activate_manual_branch_head(
         .await
 }
 
+#[hotpath::measure(label = "daemon.pr_autotrack.activate", future = true)]
 pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     repo_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
@@ -1778,6 +1780,7 @@ fn remove_owned_manual_worktree(
     Ok(())
 }
 
+#[hotpath::measure(label = "daemon.pr_autotrack.reconcile", future = true)]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
     data_root: &Path,
@@ -1973,6 +1976,7 @@ async fn reconcile_project_with_administration(
 /// Fetches a PR head, checks it out into a linked worktree, and mounts that
 /// worktree on the injected code-index scheduler. Refuses before Git mutation
 /// when the scheduler, retained graph, or Git worktree authority is missing.
+#[hotpath::measure(label = "daemon.pr_autotrack.track", future = true)]
 async fn track_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -2241,6 +2245,7 @@ fn checkout_linked_worktree(
 /// Untracks a managed PR: removes its branch store, its worktree, its local
 /// tracking branch, and its ref. The Git artifacts are released only after the
 /// coordinator reports that the store is gone (or was already absent).
+#[hotpath::measure(label = "daemon.pr_autotrack.untrack", future = true)]
 async fn untrack_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -2283,6 +2288,7 @@ async fn untrack_pr(
 /// Its synthetic branch and fetch ref are cleaned up alongside the checkout.
 /// Only called for a *complete* discovery (never when `partial`), so an open PR
 /// that merely fell outside a truncated listing is never swept.
+#[hotpath::measure(label = "daemon.pr_autotrack.sweep", future = true)]
 async fn sweep_orphan_pr_worktrees(
     repo_root: &Path,
     data_root: &Path,

@@ -194,6 +194,7 @@ impl StoreObservabilityRegistryV1 {
     /// store, or start them via `start_producer`. An incumbent that does not
     /// match the mount's store-authority fields refuses the mount instead of
     /// running a second store owner.
+    #[hotpath::measure(label = "daemon.service.project_runtime.observability_acquire")]
     pub(crate) fn acquire_or_start(
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
@@ -467,6 +468,10 @@ impl RegisteredObservabilityProducerV1 {
     /// Releases this alias; the last release drains and closes the store
     /// owners. Consuming the handle is what makes the release single-shot:
     /// the token taken here is the same one drop would take.
+    #[hotpath::measure(
+        label = "daemon.service.project_runtime.observability_shutdown",
+        future = true
+    )]
     pub(crate) async fn shutdown(mut self) -> Result<(), ApplicationContractError> {
         let Some(core) = self.release.take() else {
             // Unreachable for an owned handle: only drop takes the token

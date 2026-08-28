@@ -271,7 +271,7 @@ impl HookAdmissionLedgerV1 {
 
     /// Records one attempt and exposes the durable entry order. Exact
     /// duplicates reuse the original order, including after ledger reopen.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.admission.admit")]
     pub fn admit_with_receipt(
         &mut self,
         envelope: &HookEventEnvelopeV2,
@@ -388,7 +388,7 @@ impl HookAdmissionLedgerV1 {
         dropped as u32
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.admission.rewrite")]
     fn rewrite(&mut self) -> Result<(), HookAdmissionLedgerError> {
         let mut ordered = self
             .entries
@@ -422,7 +422,7 @@ impl HookAdmissionLedgerV1 {
         self.write_work_completions()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.admission.write_completions")]
     fn write_work_completions(&self) -> Result<(), HookAdmissionLedgerError> {
         let bytes = canonical_json_bytes(&self.completed_work.iter().copied().collect::<Vec<_>>())
             .map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;

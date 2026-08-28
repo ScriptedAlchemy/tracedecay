@@ -206,6 +206,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    #[hotpath::measure(label = "lsp.diagnostics.native_notification")]
     pub(crate) fn handle_native_diagnostics_notification(&mut self, params: &Value, now_ms: u64) {
         if !self.diagnostics.cursor_native_mode || self.require_ready().is_err() {
             return;
@@ -242,6 +243,7 @@ where
             self.diagnostics.native_upstream.remove(&uri);
         }
     }
+    #[hotpath::measure(label = "lsp.diagnostics.pull")]
     pub(crate) fn pull_diagnostics(
         &mut self,
         uri: &str,
@@ -375,6 +377,7 @@ where
         Ok(value)
     }
 
+    #[hotpath::measure(label = "lsp.diagnostics.flush_debounced")]
     pub(super) fn flush_debounced_diagnostics(&mut self, now_ms: u64) {
         if self.lifecycle.control.lifecycle() != SessionLifecycle::Ready {
             return;
@@ -616,10 +619,7 @@ where
         true
     }
 
-    #[hotpath::measure(
-        label = "lsp_diagnostics_merge_document",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.diagnostics.merge_document")]
     pub(super) fn merge_document_diagnostics(
         &self,
         uri: &str,
@@ -654,10 +654,7 @@ where
             .collect()
     }
 
-    #[hotpath::measure(
-        label = "lsp_diagnostics_publish",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.diagnostics.publish")]
     pub(super) fn publish_diagnostics(
         &mut self,
         uri: &str,

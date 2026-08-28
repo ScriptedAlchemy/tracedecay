@@ -20,6 +20,7 @@ where
         .map_err(|_| project_warming_error(project_path))?
 }
 
+#[hotpath::measure(label = "daemon.project.orchestrate.start", future = true)]
 pub(super) async fn start_lifecycle_project_open<OpenOperation, OpenFuture>(
     tasks: &ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
@@ -98,16 +99,20 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     let Some(activity) = lifecycle.try_enter() else {
         return;
     };
-    tokio::spawn(async move {
-        let _activity = activity;
-        tokio::select! {
-            biased;
-            () = lifecycle.wait_for_draining() => {}
-            () = activation => {}
-        }
-    });
+    tokio::spawn(hotpath::future!(
+        async move {
+            let _activity = activity;
+            tokio::select! {
+                biased;
+                () = lifecycle.wait_for_draining() => {}
+                () = activation => {}
+            }
+        },
+        label = "daemon.project.activate.automation"
+    ));
 }
 
+#[hotpath::measure(label = "daemon.project.enroll.route", future = true)]
 pub(super) async fn ensure_registered_project_route(
     store_administration: &StoreAdministration,
     project_path: &Path,
@@ -288,6 +293,7 @@ fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
 }
 
 #[cfg(any(not(unix), test))]
+#[hotpath::measure(label = "daemon.project.orchestrate.cached", future = true)]
 pub(super) async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
@@ -316,7 +322,7 @@ pub(super) async fn portable_cached_project_server(
 #[cfg(any(not(unix), test))]
 // Cohesive route-open context; a params struct would only move the same ownership bundle.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.project.orchestrate.begin", future = true)]
 async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -362,6 +368,7 @@ async fn begin_portable_project_open(
 }
 
 #[cfg(any(not(unix), test))]
+#[hotpath::measure(label = "daemon.project.orchestrate.warmup", future = true)]
 pub(super) async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -406,6 +413,7 @@ pub(super) async fn schedule_portable_project_server_warmup(
 }
 
 #[cfg(any(not(unix), test))]
+#[hotpath::measure(label = "daemon.project.orchestrate.request", future = true)]
 pub(super) async fn portable_project_server_for_request(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,

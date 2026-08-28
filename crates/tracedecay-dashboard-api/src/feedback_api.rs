@@ -47,6 +47,7 @@ where
     })
 }
 
+#[hotpath::measure(label = "dashboard_api.feedback.status", future = true)]
 pub async fn status(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<FeedbackObservationReadModelV1>> {

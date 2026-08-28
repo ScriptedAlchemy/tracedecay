@@ -101,6 +101,10 @@ impl GraphDbRegistry {
             .map_err(map_staging_error)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.resume",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn resume_generation_stage(
         &self,
         registration: GraphDbRegistration,
@@ -305,6 +309,10 @@ impl GraphDbRegistry {
         Ok(VerifiedGenerationBatchApply { commit })
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.cancel",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn cancel_generation_stage(
         &self,
         registration: GraphDbRegistration,
@@ -360,6 +368,10 @@ impl GraphDbRegistry {
         Ok(outcome)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.settle",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn settle_verified_generation_batch(
         &self,
         registration: GraphDbRegistration,
@@ -437,6 +449,10 @@ impl GraphDbRegistry {
         Ok(effect)
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.publish",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn publish_ready_generation(
         &self,
         registration: GraphDbRegistration,
@@ -499,6 +515,10 @@ impl GraphDbRegistry {
         )
     }
 
+    #[hotpath::measure(
+        label = "graph_db.generation.stage.prepare",
+        impl_type = "GraphDbRegistry"
+    )]
     pub fn prepare_publication_from_staged_native(
         &self,
         registration: GraphDbRegistration,

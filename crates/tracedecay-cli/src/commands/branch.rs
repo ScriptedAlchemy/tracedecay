@@ -16,6 +16,7 @@ fn branch_list_rpc_args() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure(label = "cli.branch.dispatch", future = true)]
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
     use tracedecay::branch;
     use tracedecay::branch_meta;
@@ -331,6 +332,7 @@ fn parse_daemon_branch_add_outcome(
 
 /// Reads or mutates the project-scoped `sync.auto_track_pr_branches` setting and
 /// reports the daemon's PR-autotrack status for a project.
+#[hotpath::measure(label = "cli.branch.autotrack", future = true)]
 async fn handle_branch_autotrack_action(
     action: crate::cli::BranchAutotrackAction,
 ) -> tracedecay::errors::Result<()> {

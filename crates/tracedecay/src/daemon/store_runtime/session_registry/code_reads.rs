@@ -187,6 +187,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database.as_ref().clone())
     }
 
+    #[hotpath::measure(
+        label = "daemon.session_registry.destructive_maintenance",
+        future = true
+    )]
     pub(crate) async fn begin_destructive_code_maintenance(
         &self,
         root: &Path,
@@ -255,6 +259,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         replacement.restore_old_ready()
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.retire_relation_graph", future = true)]
     pub(crate) async fn retire_project_session_relation_graph(
         &self,
         project_id: &ProjectId,
@@ -427,6 +432,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         vacancy.commit_without_sessions()
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.retire_memory_graph", future = true)]
     pub(crate) async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
         let Some(mut retirement) = self.reserve_project_runtime_retirement(project_id)? else {
             return Ok(());

@@ -260,6 +260,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// Filesystem sizing, `SQLite` family copy, and per-store probes run on the
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
+#[hotpath::measure(label = "retention.storage.report", future = true)]
 pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
@@ -403,6 +404,7 @@ fn sample_registered_storage(
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
 /// census performs an unbounded profile-wide scan.
+#[hotpath::measure(label = "retention.storage.report_page", future = true)]
 pub(crate) async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &crate::global_db::RegisteredGlobalDb,
@@ -590,6 +592,7 @@ pub async fn build_project_storage_report_from_daemon(
 /// [`build_project_storage_report_from_daemon`] — pass `None` and the
 /// retention dry run reports itself unavailable rather than planning against
 /// an unproven protection set.
+#[hotpath::measure(label = "retention.storage.project_report")]
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,

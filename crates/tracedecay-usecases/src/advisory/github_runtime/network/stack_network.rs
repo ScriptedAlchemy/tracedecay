@@ -17,6 +17,7 @@ impl GitHubReadOnlyClientV1 {
     /// Reads the optional GitHub stack through an authenticated static GraphQL
     /// query and fixed compare GETs for exact merge-base evidence. No query
     /// text, HTTP verb, or provider mutation is supplied by the caller.
+    #[hotpath::measure(label = "usecases.github_network.read_stack")]
     pub(in crate::advisory::github_runtime) fn read_stack(
         &self,
         context: &RequestContext,

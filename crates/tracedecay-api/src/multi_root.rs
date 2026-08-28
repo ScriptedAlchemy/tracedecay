@@ -114,5 +114,9 @@ where
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::measure_block!("api.http.handler", owner.invoke_multi_root(request).await)
+    hotpath::future!(
+        async move { owner.invoke_multi_root(request).await },
+        label = "api.http.handler"
+    )
+    .await
 }

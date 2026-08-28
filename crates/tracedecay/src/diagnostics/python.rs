@@ -39,33 +39,37 @@ impl Driver for PyrightDriver {
         project_root: &'a Path,
         _scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut cmd = tokio::process::Command::new("pyright");
-            cmd.arg("--outputjson")
-                .current_dir(project_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
+        Box::pin(hotpath::future!(
+            async move {
+                let mut cmd = tokio::process::Command::new("pyright");
+                cmd.arg("--outputjson")
+                    .current_dir(project_root)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
 
-            // Spawn errors (pyright not installed) fall through to an empty
-            // diagnostic list rather than killing the broader diagnostics
-            // call. The detect() probe gates on pyproject.toml / pyrightconfig
-            // which can be present on projects that don't actually want
-            // pyright to run; punishing them with a hard error is wrong.
-            let Ok(output) = cmd.output().await else {
-                return Ok(Vec::new());
-            };
+                // Spawn errors (pyright not installed) fall through to an empty
+                // diagnostic list rather than killing the broader diagnostics
+                // call. The detect() probe gates on pyproject.toml / pyrightconfig
+                // which can be present on projects that don't actually want
+                // pyright to run; punishing them with a hard error is wrong.
+                let Ok(output) = cmd.output().await else {
+                    return Ok(Vec::new());
+                };
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Ok(parse_pyright_output(&stdout, project_root))
-        })
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                Ok(parse_pyright_output(&stdout, project_root))
+            },
+            label = "diagnostics.python.pyright"
+        ))
     }
 }
 
 /// Parse a pyright `--outputjson` document into a flat diagnostic list.
 /// Returns an empty Vec for unparseable input rather than erroring — a
 /// pyright crash shouldn't take down a sync.
+#[hotpath::measure(label = "diagnostics.python.parse")]
 pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic> {
     let parsed: PyrightReport = match serde_json::from_str(stdout) {
         Ok(p) => p,

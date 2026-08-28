@@ -4,6 +4,7 @@ use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::{RegisteredGlobalDb, global_db_operation_error};
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
     pub async fn list_session_sync_source_frontiers(
         &self,
     ) -> Result<Vec<(String, String, String)>, TraceDecayError> {
@@ -103,11 +104,13 @@ impl RegisteredGlobalDb {
         Ok(journals)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.insert")]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
         value: &str,
     ) -> Result<bool, TraceDecayError> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let writer = self.writer_connection().map_err(|error| {
             global_db_operation_error("open session sync journal writer", error)
         })?;
@@ -122,12 +125,14 @@ impl RegisteredGlobalDb {
             .map_err(|error| global_db_operation_error("insert session sync journal", error))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.cas")]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,
         expected: &str,
         replacement: &str,
     ) -> Result<bool, TraceDecayError> {
+        crate::hotpath_observe::record_transaction_rows(1);
         let writer = self.writer_connection().map_err(|error| {
             global_db_operation_error("open session sync journal writer", error)
         })?;

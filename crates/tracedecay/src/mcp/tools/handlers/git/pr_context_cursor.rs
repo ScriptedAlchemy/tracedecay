@@ -41,13 +41,17 @@ pub(super) struct PrContextCursorPosition {
     pub impact_bytes_admitted: usize,
 }
 
+#[hotpath::measure(label = "mcp.git.cursor.authority")]
 pub(super) async fn pr_context_cursor_authority(
     session_db: &RegisteredGlobalDb,
     binding: &PrContextCursorBinding<'_>,
 ) -> Result<(TemporalExecutionSnapshot, GlobalDbCursorKeyProvider)> {
-    let digest = canonical_sha256(binding).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to bind PR context cursor: {error}"),
-    })?;
+    let digest = hotpath::measure_block!(
+        "mcp.git.cursor.binding_digest",
+        canonical_sha256(binding).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind PR context cursor: {error}"),
+        })?
+    );
     let graph_digest = canonical_sha256(&(
         "tracedecay.pr-context.graph-generation.v1",
         binding.graph_generation,
@@ -67,16 +71,18 @@ pub(super) async fn pr_context_cursor_authority(
             message: format!("invalid PR context graph generation watermark: {error}"),
         })?
         .max(1);
-    let authenticator = session_db
-        .load_preprovisioned_session_cursor_key_provider_result()
-        .await
-        .map_err(|error| {
-            TraceDecayError::project_route(
-                "pr_context_cursor_authority_unavailable",
-                true,
-                format!("pre-provisioned PR context cursor key is unavailable: {error}"),
-            )
-        })?;
+    let authenticator = hotpath::future!(
+        session_db.load_preprovisioned_session_cursor_key_provider_result(),
+        label = "mcp.git.cursor.key_provider"
+    )
+    .await
+    .map_err(|error| {
+        TraceDecayError::project_route(
+            "pr_context_cursor_authority_unavailable",
+            true,
+            format!("pre-provisioned PR context cursor key is unavailable: {error}"),
+        )
+    })?;
     let key = authenticator.active_key_ref().clone();
     let request = TemporalSnapshotRequest::new(
         SessionId::new(PR_CONTEXT_CURSOR_SESSION).map_err(|error| TraceDecayError::Config {
@@ -118,6 +124,7 @@ pub(super) async fn pr_context_cursor_authority(
     Ok((snapshot, authenticator))
 }
 
+#[hotpath::measure(label = "mcp.git.cursor.decode")]
 pub(super) fn decode_pr_context_cursor(
     encoded: &str,
     snapshot: &TemporalExecutionSnapshot,
@@ -144,6 +151,7 @@ pub(super) fn decode_pr_context_cursor(
     })
 }
 
+#[hotpath::measure(label = "mcp.git.cursor.encode")]
 pub(super) fn encode_pr_context_cursor(
     after: &SymbolOccurrenceId,
     impact_nodes_admitted: usize,

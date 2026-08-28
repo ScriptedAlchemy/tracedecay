@@ -103,6 +103,7 @@ impl AgentIntegration for ClaudeIntegration {
         uninstall_claude_md_rules(&claude_md_path)
     }
 
+    #[hotpath::measure(label = "hosts.agent.claude.install")]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if !claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let claude = require_claude_cli()?;
@@ -111,6 +112,7 @@ impl AgentIntegration for ClaudeIntegration {
         ensure_claude_plugin_permission(&ctx.home)
     }
 
+    #[hotpath::measure(label = "hosts.agent.claude.uninstall")]
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if !claude_plugin_registration_is_active(&ctx.home)? {
             return Ok(());
@@ -119,6 +121,7 @@ impl AgentIntegration for ClaudeIntegration {
         claude_plugin_deactivate_with(&claude, &ctx.home)
     }
 
+    #[hotpath::measure(label = "hosts.agent.claude.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         if !plugin_marketplace_manifest_path(&ctx.home).exists() {
             return Ok(UpdatePluginOutcome::NotInstalled);
@@ -139,6 +142,7 @@ impl AgentIntegration for ClaudeIntegration {
         ))
     }
 
+    #[hotpath::measure(label = "hosts.agent.claude.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home);
@@ -198,6 +202,7 @@ impl AgentIntegration for ClaudeIntegration {
         }
     }
 
+    #[hotpath::measure(label = "hosts.agent.claude.export")]
     fn export_managed_skills(
         &self,
         home: &Path,

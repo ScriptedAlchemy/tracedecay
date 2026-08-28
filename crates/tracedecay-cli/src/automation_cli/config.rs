@@ -20,6 +20,7 @@ pub(crate) async fn notify_project_automation_scheduler(
     .map(|_| ())
 }
 
+#[hotpath::measure(label = "cli.automation.config", future = true)]
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay::errors::Result<()> {

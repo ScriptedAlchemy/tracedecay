@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::errors::TraceDecayError;
+use crate::profiled_lock::ProfiledMutex;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
 use super::memory_graph_reconciliation::{
@@ -151,7 +152,7 @@ struct DatabaseOwnerStateV1 {
     inner: Arc<DatabaseInner>,
     access: DatabaseAccessMode,
     owner_id: DatabaseRuntimeOwnerIdentityV1,
-    lifecycle: Mutex<DatabaseOwnerLifecycleV1>,
+    lifecycle: ProfiledMutex<DatabaseOwnerLifecycleV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,7 +447,10 @@ impl DatabaseOwnerV1 {
                 inner,
                 access,
                 owner_id,
-                lifecycle: Mutex::new(DatabaseOwnerLifecycleV1::Ready),
+                lifecycle: hotpath::mutex!(
+                    Mutex::new(DatabaseOwnerLifecycleV1::Ready),
+                    label = "runtime_core.db.lease.lifecycle"
+                ),
             }),
         })
     }
@@ -454,7 +458,7 @@ impl DatabaseOwnerV1 {
     /// Issues one independently counted client facade with this owner's
     /// original access policy. Cloning the returned `Database` shares both
     /// its issuance token and access mode.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.lease.issue")]
     pub fn issue_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(self.state.access)
     }
@@ -464,7 +468,7 @@ impl DatabaseOwnerV1 {
     /// A read-write owner may reduce an issued client to read-only, while an
     /// owner published read-only remains read-only. No client can elevate its
     /// access mode after issuance.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.lease.issue_read")]
     pub fn issue_read_only_lease(&self) -> Result<Database, DatabaseOwnerErrorV1> {
         self.issue_client_lease(DatabaseAccessMode::ReadOnly)
     }
@@ -536,7 +540,7 @@ impl DatabaseOwnerV1 {
         self.state.inner.registered_verified_locator()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.lease.reserve_retirement")]
     pub fn reserve_retirement(
         &self,
     ) -> Result<DatabaseOwnerRetirementReservationV1, DatabaseOwnerErrorV1> {

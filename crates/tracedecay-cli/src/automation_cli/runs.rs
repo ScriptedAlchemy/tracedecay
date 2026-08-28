@@ -2,6 +2,7 @@ use super::daemon_project_dashboard_root;
 use crate::cli::AutomationRunsAction;
 use crate::resolve_cli_project_root;
 
+#[hotpath::measure(label = "cli.automation.runs", future = true)]
 pub(super) async fn handle_automation_runs_command(
     action: AutomationRunsAction,
 ) -> tracedecay::errors::Result<()> {

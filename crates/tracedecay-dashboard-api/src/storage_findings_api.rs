@@ -60,6 +60,7 @@ pub struct StorageFindingsPayloadV1 {
 }
 
 /// `GET /api/storage/findings`
+#[hotpath::measure(label = "dashboard_api.storage.findings", future = true)]
 pub async fn findings(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<StorageFindingsPayloadV1>> {

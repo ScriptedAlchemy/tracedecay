@@ -92,6 +92,7 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
+    #[hotpath::measure(label = "daemon.invocation.semantic_qualification", future = true)]
     pub(super) async fn execute_semantic_qualification(
         &self,
         project_root: Option<&Path>,
@@ -114,6 +115,7 @@ impl DaemonInvocationService {
         .await
     }
 
+    #[hotpath::measure(label = "daemon.invocation.semantic_evaluation", future = true)]
     pub(super) async fn execute_semantic_evaluation(
         &self,
         project_root: Option<&Path>,
@@ -137,6 +139,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.service.semantic.execute", future = true)]
     async fn execute_semantic_operation(
         &self,
         project_root: Option<&Path>,

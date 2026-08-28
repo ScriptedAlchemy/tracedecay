@@ -58,6 +58,7 @@ impl DaemonRemoteExactObservationQueryPortV1 {
 }
 
 impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQueryPortV1 {
+    #[hotpath::measure(label = "daemon.remote.query_observation")]
     fn read_exact_observation(
         &self,
         command: &RemoteExactObservationQueryCommandV1,

@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "mcp.health.dsm.total")]
 pub(crate) async fn handle_dsm(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -18,63 +19,73 @@ pub(crate) async fn handle_dsm(
         .and_then(serde_json::Value::as_u64)
         .map_or(30, |v| v.min(200) as usize);
 
-    let adj = graph.build_file_adjacency(path_prefix).await?;
+    let adj = hotpath::future!(
+        graph.build_file_adjacency(path_prefix),
+        label = "mcp.health.dsm.graph"
+    )
+    .await?;
 
-    let file_count = adj.len();
-    let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();
-    let density = if file_count > 1 {
-        edge_count as f64 / (file_count * (file_count - 1)) as f64
-    } else {
-        0.0
-    };
+    let (mut clusters, stats) = hotpath::measure_block!("mcp.health.dsm.compute", {
+        let file_count = adj.len();
+        let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();
+        let density = if file_count > 1 {
+            edge_count as f64 / (file_count * (file_count - 1)) as f64
+        } else {
+            0.0
+        };
 
-    let cluster_rows = dsm_clusters(&adj);
-    let mut clusters: Vec<Value> = cluster_rows
-        .iter()
-        .map(|cluster| {
-            json!({
-                "directory": cluster.directory,
-                "file_count": cluster.file_count,
-                "internal_edges": cluster.internal_edges,
-                "outgoing_edges": cluster.outgoing_edges,
-                "incoming_edges": cluster.incoming_edges,
-                "boundary_edges": cluster.boundary_edges(),
+        let cluster_rows = dsm_clusters(&adj);
+        let clusters: Vec<Value> = cluster_rows
+            .iter()
+            .map(|cluster| {
+                json!({
+                    "directory": cluster.directory,
+                    "file_count": cluster.file_count,
+                    "internal_edges": cluster.internal_edges,
+                    "outgoing_edges": cluster.outgoing_edges,
+                    "incoming_edges": cluster.incoming_edges,
+                    "boundary_edges": cluster.boundary_edges(),
+                })
             })
-        })
-        .collect();
-    let largest_cluster = cluster_rows
-        .iter()
-        .map(|cluster| cluster.file_count as u64)
-        .max()
-        .unwrap_or(0);
-    let stats = json!({
-        "files": file_count,
-        "edges": edge_count,
-        "density": (density * 10000.0).round() / 10000.0,
-        "clusters": cluster_rows.len(),
-        "largest_cluster": largest_cluster,
+            .collect();
+        let largest_cluster = cluster_rows
+            .iter()
+            .map(|cluster| cluster.file_count as u64)
+            .max()
+            .unwrap_or(0);
+        let stats = json!({
+            "files": file_count,
+            "edges": edge_count,
+            "density": (density * 10000.0).round() / 10000.0,
+            "clusters": cluster_rows.len(),
+            "largest_cluster": largest_cluster,
+        });
+        (clusters, stats)
     });
-    let output = match shape {
-        "clusters" => json!({
-            "shape": "clusters",
-            "stats": stats,
-            "clusters": clusters,
-        }),
-        "matrix" => json!({
-            "shape": "matrix",
-            "stats": stats,
-            "clusters": clusters.into_iter().take(10).collect::<Vec<_>>(),
-            "matrix": dsm_matrix(&adj, max_files),
-        }),
-        _ => {
-            clusters.truncate(10);
-            json!({
-                "shape": "stats",
+    let output = hotpath::measure_block!(
+        "mcp.health.dsm.assemble",
+        match shape {
+            "clusters" => json!({
+                "shape": "clusters",
                 "stats": stats,
                 "clusters": clusters,
-            })
+            }),
+            "matrix" => json!({
+                "shape": "matrix",
+                "stats": stats,
+                "clusters": clusters.into_iter().take(10).collect::<Vec<_>>(),
+                "matrix": dsm_matrix(&adj, max_files),
+            }),
+            _ => {
+                clusters.truncate(10);
+                json!({
+                    "shape": "stats",
+                    "stats": stats,
+                    "clusters": clusters,
+                })
+            }
         }
-    };
+    );
 
     Ok(rendered_tool_result(
         Some(cg.project_root()),

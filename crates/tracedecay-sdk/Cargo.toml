@@ -19,18 +19,21 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
 ]
 
 [dependencies]

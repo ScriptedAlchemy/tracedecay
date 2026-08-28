@@ -123,30 +123,32 @@ impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for DaemonCodeGraphR
         request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'a>,
     ) -> tracedecay_usecases::graph::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
-            let access = self
-                .authorization
-                .current(request.observed_at)
-                .await
+            hotpath::measure_block!("daemon.authority.callable_code.admit", {
+                let access = self
+                    .authorization
+                    .current(request.observed_at)
+                    .await
+                    .map_err(map_graph_admission_problem)?;
+                if access.scope != self.scope {
+                    return Err(tracedecay_usecases::graph::CodeGraphReadError::Denied);
+                }
+                let context = crate::daemon::service::invocation::callable_code_request_context(
+                    &self.scope,
+                    &access,
+                    request.request_id.as_str(),
+                    request.operation,
+                    request.observed_at,
+                    request.deadline,
+                    request.cancellation.context(),
+                )
                 .map_err(map_graph_admission_problem)?;
-            if access.scope != self.scope {
-                return Err(tracedecay_usecases::graph::CodeGraphReadError::Denied);
-            }
-            let context = crate::daemon::service::invocation::callable_code_request_context(
-                &self.scope,
-                &access,
-                request.request_id.as_str(),
-                request.operation,
-                request.observed_at,
-                request.deadline,
-                request.cancellation.context(),
-            )
-            .map_err(map_graph_admission_problem)?;
-            self.authorization
-                .authorize(access)
-                .admit(&context, request.operation, request.observed_at)
-                .await
-                .map_err(map_graph_admission_problem)?;
-            Ok(context)
+                self.authorization
+                    .authorize(access)
+                    .admit(&context, request.operation, request.observed_at)
+                    .await
+                    .map_err(map_graph_admission_problem)?;
+                Ok(context)
+            })
         })
     }
 }
@@ -187,6 +189,7 @@ pub(super) struct DaemonCallableCodeAuthorization {
 }
 
 impl DaemonCallableCodeAuthorization {
+    #[hotpath::measure(label = "daemon.authority.callable_code.authorize", future = true)]
     async fn route_receipt(
         &self,
         context: &RequestContext,
@@ -239,20 +242,22 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
-                return Err(concealed());
-            };
-            let current = self.route_receipt(context, operation, observed_at).await?;
-            if admission.grant_id != current.grant_id
-                || admission.grant_revision != current.grant_revision
-                || admission.grant_digest != current.grant_digest
-                || admission.authorized_scope_digest != current.authorized_scope_digest
-                || admission.disclosure != current.disclosure
-                || admission.policy != current.policy
-            {
-                return Err(concealed());
-            }
-            Ok(current)
+            hotpath::measure_block!("daemon.authority.callable_code.recheck", {
+                let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
+                    return Err(concealed());
+                };
+                let current = self.route_receipt(context, operation, observed_at).await?;
+                if admission.grant_id != current.grant_id
+                    || admission.grant_revision != current.grant_revision
+                    || admission.grant_digest != current.grant_digest
+                    || admission.authorized_scope_digest != current.authorized_scope_digest
+                    || admission.disclosure != current.disclosure
+                    || admission.policy != current.policy
+                {
+                    return Err(concealed());
+                }
+                Ok(current)
+            })
         })
     }
 }

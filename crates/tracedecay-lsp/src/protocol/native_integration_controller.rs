@@ -38,6 +38,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    #[hotpath::measure(label = "lsp.protocol.native_integration_flush")]
     pub(super) fn flush_native_integration_status(&mut self) {
         if self.lifecycle.control.lifecycle() != SessionLifecycle::Ready
             || !self.has_outbound_capacity(MAX_NATIVE_INTEGRATION_STATUS_BYTES)

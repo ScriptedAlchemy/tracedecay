@@ -41,6 +41,7 @@ fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
     None
 }
 
+#[hotpath::measure(label = "mcp.info.todos.total")]
 pub(crate) async fn handle_todos(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -71,7 +72,7 @@ pub(crate) async fn handle_todos(
         .or_else(|| scope_prefix.map(str::to_owned));
     let limit = request.limit.map_or(200, |value| value.min(2000) as usize);
 
-    let symbols = all_symbols(graph)?;
+    let symbols = hotpath::measure_block!("mcp.info.todos.symbols", all_symbols(graph)?);
     let mut files = symbols
         .iter()
         .map(|symbol| required_file_path(symbol).map(str::to_owned))
@@ -91,70 +92,71 @@ pub(crate) async fn handle_todos(
     // Graph phase is done. The marker walk reads every candidate source file,
     // so it belongs on a blocking worker like the sibling analysis scans.
     let project_root = cg.project_root().to_path_buf();
-    let (markers, touched, by_kind) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut markers = Vec::<TodoMarkerV1>::new();
-        let mut touched: Vec<String> = Vec::new();
-        let mut by_kind = BTreeMap::<String, u64>::new();
+    let (markers, touched, by_kind) =
+        hotpath::future!(
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let mut markers = Vec::<TodoMarkerV1>::new();
+                let mut touched: Vec<String> = Vec::new();
+                let mut by_kind = BTreeMap::<String, u64>::new();
 
-        'outer: for file in &files {
-            if let Some(prefix) = path.as_deref()
-                && !crate::path_scope::path_matches_scope(file, Some(prefix))
-            {
-                continue;
-            }
-            let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
-            let source =
-                crate::sync::read_source_file(&project_path.absolute_path()).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("cannot read indexed source '{file}': {error}"),
+                'outer: for file in &files {
+                    if let Some(prefix) = path.as_deref()
+                        && !crate::path_scope::path_matches_scope(file, Some(prefix))
+                    {
+                        continue;
                     }
-                })?;
-            let nodes = symbols_by_file.get(file);
+                    let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
+                    let source = crate::sync::read_source_file(&project_path.absolute_path())
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!("cannot read indexed source '{file}': {error}"),
+                        })?;
+                    let nodes = symbols_by_file.get(file);
 
-            for (idx, line) in source.lines().enumerate() {
-                let line_no = (idx as u32) + 1;
-                for kind in &kinds {
-                    if contains_marker_word(line, kind).is_some() {
-                        let mut enclosing = None;
-                        if let Some(nodes) = nodes {
-                            for (qualified_name, start, end) in nodes {
-                                if *start <= line_no && line_no <= *end {
-                                    let span = *end - *start;
-                                    if enclosing
-                                        .as_ref()
-                                        .is_none_or(|(_, shortest_span)| span < *shortest_span)
-                                    {
-                                        enclosing = Some((qualified_name.clone(), span));
+                    for (idx, line) in source.lines().enumerate() {
+                        let line_no = (idx as u32) + 1;
+                        for kind in &kinds {
+                            if contains_marker_word(line, kind).is_some() {
+                                let mut enclosing = None;
+                                if let Some(nodes) = nodes {
+                                    for (qualified_name, start, end) in nodes {
+                                        if *start <= line_no && line_no <= *end {
+                                            let span = *end - *start;
+                                            if enclosing.as_ref().is_none_or(
+                                                |(_, shortest_span)| span < *shortest_span,
+                                            ) {
+                                                enclosing = Some((qualified_name.clone(), span));
+                                            }
+                                        }
                                     }
                                 }
+                                let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
+                                *by_kind.entry(kind.clone()).or_insert(0) += 1;
+                                markers.push(TodoMarkerV1 {
+                                    kind: kind.clone(),
+                                    file: file.clone(),
+                                    line: line_no,
+                                    text: line.trim().to_owned(),
+                                    enclosing,
+                                });
+                                if !touched.contains(file) {
+                                    touched.push(file.clone());
+                                }
+                                if markers.len() >= limit {
+                                    break 'outer;
+                                }
+                                break; // one marker per line is enough
                             }
                         }
-                        let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
-                        *by_kind.entry(kind.clone()).or_insert(0) += 1;
-                        markers.push(TodoMarkerV1 {
-                            kind: kind.clone(),
-                            file: file.clone(),
-                            line: line_no,
-                            text: line.trim().to_owned(),
-                            enclosing,
-                        });
-                        if !touched.contains(file) {
-                            touched.push(file.clone());
-                        }
-                        if markers.len() >= limit {
-                            break 'outer;
-                        }
-                        break; // one marker per line is enough
                     }
                 }
-            }
-        }
-        Ok((markers, touched, by_kind))
-    })
-    .await
-    .map_err(|join_error| TraceDecayError::Config {
-        message: format!("tracedecay_todos scan failed to join: {join_error}"),
-    })??;
+                Ok((markers, touched, by_kind))
+            }),
+            label = "mcp.info.todos.scan"
+        )
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!("tracedecay_todos scan failed to join: {join_error}"),
+        })??;
 
     let result = TodosResultV1 {
         match_count: markers.len(),

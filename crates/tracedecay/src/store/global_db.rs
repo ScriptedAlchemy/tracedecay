@@ -173,6 +173,7 @@ impl<D> TranscriptStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    #[hotpath::measure(label = "store.get_parse_offset", future = true)]
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
@@ -182,7 +183,7 @@ where
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
-    #[hotpath::measure(label = "store.persist_transcript_batch")]
+    #[hotpath::measure(label = "store.persist_transcript_batch", future = true)]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
@@ -200,17 +201,20 @@ where
         first: (&Path, ParseOffset, ParseOffset),
         second: (&Path, ParseOffset, ParseOffset),
     ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
-        async move {
-            let first_path = Self::path_text(first.0);
-            let second_path = Self::path_text(second.0);
-            self.db()
-                .replace_parse_offset_pair_result(
-                    (&first_path, first.1, first.2),
-                    (&second_path, second.1, second.2),
-                )
-                .await
-                .map_err(|error| Self::persistence_error(first.0, error))
-        }
+        hotpath::future!(
+            async move {
+                let first_path = Self::path_text(first.0);
+                let second_path = Self::path_text(second.0);
+                self.db()
+                    .replace_parse_offset_pair_result(
+                        (&first_path, first.1, first.2),
+                        (&second_path, second.1, second.2),
+                    )
+                    .await
+                    .map_err(|error| Self::persistence_error(first.0, error))
+            },
+            label = "store.replace_parse_offset_pair"
+        )
     }
 
     fn advance_parse_offset_monotonic(
@@ -218,12 +222,15 @@ where
         cursor_path: &Path,
         offset: ParseOffset,
     ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
-        async move {
-            self.db()
-                .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
-                .await
-                .map_err(|error| Self::persistence_error(cursor_path, error))
-        }
+        hotpath::future!(
+            async move {
+                self.db()
+                    .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
+                    .await
+                    .map_err(|error| Self::persistence_error(cursor_path, error))
+            },
+            label = "store.advance_parse_offset"
+        )
     }
 
     fn record_session_ingest_activity(
@@ -232,19 +239,23 @@ where
         units: u64,
         provider: &'static str,
     ) -> impl Future<Output = ()> + Send {
-        async move {
-            tracedecay_usecases::event_lane::publish(
-                self.db(),
-                tracedecay_usecases::event_lane::ActivityFamilyV1::SessionIngest,
-                project_root,
-                None,
-                units,
-                Some(provider),
-            )
-            .await;
-        }
+        hotpath::future!(
+            async move {
+                tracedecay_usecases::event_lane::publish(
+                    self.db(),
+                    tracedecay_usecases::event_lane::ActivityFamilyV1::SessionIngest,
+                    project_root,
+                    None,
+                    units,
+                    Some(provider),
+                )
+                .await;
+            },
+            label = "store.record_session_ingest_activity"
+        )
     }
 
+    #[hotpath::measure(label = "store.get_session", future = true)]
     async fn get_session(
         &self,
         provider: &str,
@@ -265,6 +276,7 @@ where
             })
     }
 
+    #[hotpath::measure(label = "store.persist_transcript_batch_git", future = true)]
     async fn persist_transcript_batch_with_git_evidence(
         &self,
         batch: TranscriptWriteBatch,

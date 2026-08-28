@@ -87,7 +87,7 @@ impl std::fmt::Display for GrepSearchError {
 
 impl std::error::Error for GrepSearchError {}
 
-#[hotpath::measure]
+#[hotpath::measure(label = "code_index.search.grep")]
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,

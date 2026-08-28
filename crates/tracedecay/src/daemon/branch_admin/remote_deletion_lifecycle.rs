@@ -56,6 +56,7 @@ impl StoreAdministration {
     /// profile's one registered authority. The durable tombstone is written
     /// before any runtime is retired or store directory is removed, so a
     /// failed cleanup stays fail-closed and a retry resumes safely.
+    #[hotpath::measure(label = "daemon.branch_admin.remote_deletion", future = true)]
     pub(in super::super) async fn execute_remote_deletion(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,

@@ -30,6 +30,7 @@ const READER_UNSUPPORTED_NOTE: &str =
     "the dashboard is not attached to a daemon-owned remote operational status reader";
 
 /// `GET /api/remote/status`
+#[hotpath::measure(label = "dashboard_api.remote.status", future = true)]
 pub async fn status(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1>> {
@@ -43,7 +44,7 @@ pub(crate) fn status_from_reader(
     scope: DashboardScopeV1,
     reader: Option<crate::RemoteOperationalStatusReader>,
 ) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
-    let envelope = hotpath::measure_block!("dashboard.status.projection", {
+    let envelope = hotpath::measure_block!("dashboard_api.status.projection", {
         project_remote_status(scope, reader)
     });
     crate::observe::record_freshness_state(envelope.freshness.state);

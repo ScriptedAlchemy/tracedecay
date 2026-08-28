@@ -13,6 +13,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{RegisteredWorkRuntime, work_product_problem};
 
+#[hotpath::measure(label = "daemon.service.work.retrieve_evidence", future = true)]
 pub(super) async fn retrieve(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,

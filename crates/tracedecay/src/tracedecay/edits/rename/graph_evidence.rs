@@ -240,6 +240,7 @@ pub(super) fn ensure_active(graph: &SourceEditGraphReadV1) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "edits.rename.load_evidence")]
 pub(super) fn load(
     graph: &SourceEditGraphReadV1,
     binding: &RenameSymbolBindingV1,

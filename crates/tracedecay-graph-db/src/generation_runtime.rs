@@ -705,6 +705,7 @@ impl GraphDb {
         state.remember(lease)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.delete", impl_type = "GraphDb")]
     pub(crate) fn delete_generation_contents(
         &self,
         locator: &GenerationLocator,
@@ -832,6 +833,7 @@ impl GraphDb {
         )
     }
 
+    #[hotpath::measure(label = "graph_db.read.generation_relation", impl_type = "GraphDb")]
     pub(crate) fn generation_relation(
         &self,
         snapshot: &VerifiedGraphSnapshot,
@@ -1062,6 +1064,7 @@ impl GraphDb {
         Ok(namespaces)
     }
 
+    #[hotpath::measure(label = "graph_db.generation.quarantine", impl_type = "GraphDb")]
     pub(crate) fn quarantine_generation(
         &self,
         manifest: &GraphGenerationManifest,

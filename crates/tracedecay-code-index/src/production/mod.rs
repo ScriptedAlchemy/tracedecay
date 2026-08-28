@@ -1216,7 +1216,7 @@ where
     /// the foreign generation is never adopted, never config-checked, and the
     /// refusal is a reset journey, not a transient error to retry on a
     /// cadence.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.build.active_generation")]
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -1265,7 +1265,7 @@ where
     /// Build one complete generation and atomically publish it only after
     /// intake, parser evidence, lineage, exact admission, projection receipt,
     /// and capability validation have all succeeded.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.build.publish")]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,
@@ -1685,7 +1685,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.build.materialize_full")]
     fn materialize_full(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -1740,7 +1740,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.build.materialize_increment")]
     fn materialize_increment(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,

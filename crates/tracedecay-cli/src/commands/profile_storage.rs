@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cli::ProfileStorageAction;
 use tracedecay::display::format_bytes;
 
+#[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
 pub(crate) async fn handle_profile_storage_action(
     action: ProfileStorageAction,
     assume_yes: bool,
@@ -38,6 +39,7 @@ pub(crate) async fn handle_profile_storage_action(
 /// next daemon open recreates the graph at the canonical schema and re-ingests
 /// from those durable inputs. A store already at the canonical schema is
 /// refused untouched — this command cannot be used to wipe a healthy store.
+#[hotpath::measure(label = "cli.storage.reset_project_store")]
 fn handle_reset_project_store(
     project_root: Option<String>,
     project_id: Option<String>,
@@ -283,6 +285,7 @@ fn reset_refused_project_graph_store(
 /// reset runs offline under the profile's exclusive maintenance lease; the
 /// next daemon open recreates the authority at the canonical schema and its
 /// content re-derives from the preserved transcripts.
+#[hotpath::measure(label = "cli.storage.reset_authority")]
 fn handle_reset_authority(
     authority: String,
     db: Option<String>,
@@ -424,6 +427,7 @@ fn merge_storage_report_page(
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
 /// (plan 38 §7). The active profile routes through the daemon's retained
 /// authority; explicit offline profiles retain the bounded read-only path.
+#[hotpath::measure(label = "cli.storage.report", future = true)]
 async fn handle_storage_report(
     profile_root: Option<String>,
     project_id: Option<String>,
@@ -573,6 +577,7 @@ async fn handle_storage_report(
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.storage.backup_profile")]
 fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let created_at = SystemTime::now()
@@ -607,6 +612,7 @@ fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.storage.rehearse_backup")]
 fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,

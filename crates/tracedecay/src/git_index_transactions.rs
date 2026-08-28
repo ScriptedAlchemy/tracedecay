@@ -7,7 +7,12 @@
 
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, Write};
+
+#[cfg(feature = "hotpath")]
+type ProfiledFile = hotpath::io::InstrumentedIo<File>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledFile = File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -102,7 +107,7 @@ pub(crate) struct FixedGitIndexRunner {
 /// exact lock file over the real index.
 pub(crate) struct NativeIndexLock {
     path: PathBuf,
-    file: File,
+    file: ProfiledFile,
     published: bool,
 }
 
@@ -211,6 +216,7 @@ impl FixedGitIndexRunner {
             })
     }
 
+    #[hotpath::measure(label = "daemon.git.index_tx.lock.acquire")]
     pub(crate) fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
         let path = self.index_lock_path();
         let file = OpenOptions::new()
@@ -227,7 +233,7 @@ impl FixedGitIndexRunner {
             })?;
         Ok(NativeIndexLock {
             path,
-            file,
+            file: hotpath::io!(file, label = "daemon.git.index_tx.lock.file"),
             published: false,
         })
     }
@@ -302,6 +308,7 @@ impl FixedGitIndexRunner {
         self.preview_candidate_tree_inner(&[], false)
     }
 
+    #[hotpath::measure(label = "daemon.git.index_tx.stage")]
     pub(crate) fn stage_hunks(
         &self,
         lock: &mut NativeIndexLock,
@@ -317,6 +324,7 @@ impl FixedGitIndexRunner {
         )
     }
 
+    #[hotpath::measure(label = "daemon.git.index_tx.unstage")]
     pub(crate) fn unstage_hunks(
         &self,
         lock: &mut NativeIndexLock,
@@ -357,6 +365,7 @@ impl FixedGitIndexRunner {
         self.preview_candidate_tree_inner(patches, reverse)
     }
 
+    #[hotpath::measure(label = "daemon.git.index_tx.preview")]
     fn preview_candidate_tree_inner(
         &self,
         patches: &[ValidatedIndexPatch],
@@ -410,11 +419,16 @@ impl FixedGitIndexRunner {
     }
 
     pub(crate) fn index_bytes(&self) -> Result<Vec<u8>, NativeGitIndexError> {
-        if self.index_path.exists() {
-            std::fs::read(&self.index_path)
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-        } else {
-            Ok(Vec::new())
+        match File::open(&self.index_path) {
+            Ok(file) => {
+                let mut file = hotpath::io!(file, label = "daemon.git.index_tx.index.file");
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+                Ok(bytes)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
         }
     }
 
@@ -472,16 +486,19 @@ impl FixedGitIndexRunner {
         if reverse {
             command.arg("--reverse");
         }
-        run_command_with_stdin(command, "apply", &patch_bytes)?;
+        hotpath::measure_block!("daemon.git.index_tx.apply.patch", {
+            run_command_with_stdin(command, "apply", &patch_bytes)
+        })?;
 
-        let candidate_tree = self
-            .command()
-            .env("GIT_INDEX_FILE", &candidate_index)
-            .arg("write-tree")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let candidate_tree = hotpath::measure_block!("daemon.git.index_tx.apply.write_tree", {
+            self.command()
+                .env("GIT_INDEX_FILE", &candidate_index)
+                .arg("write-tree")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
         if !candidate_tree.status.success() {
             return Err(NativeGitIndexError::GitFailed {
                 operation: "apply write-tree",
@@ -504,20 +521,33 @@ impl FixedGitIndexRunner {
         let candidate_permissions = std::fs::metadata(&candidate_index)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
             .permissions();
-        let candidate_bytes = std::fs::read(&candidate_index)
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-        lock.file
-            .set_permissions(candidate_permissions)
-            .and_then(|()| lock.file.rewind())
-            .and_then(|()| lock.file.set_len(0))
-            .and_then(|()| lock.file.write_all(&candidate_bytes))
-            .and_then(|()| lock.file.sync_all())
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let candidate_bytes = {
+            let mut file = hotpath::io!(
+                File::open(&candidate_index)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
+                label = "daemon.git.index_tx.candidate.file"
+            );
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+            bytes
+        };
+        hotpath::measure_block!("daemon.git.index_tx.index.write", {
+            lock.file
+                .set_permissions(candidate_permissions)
+                .and_then(|()| lock.file.rewind())
+                .and_then(|()| lock.file.set_len(0))
+                .and_then(|()| lock.file.write_all(&candidate_bytes))
+                .and_then(|()| lock.file.sync_all())
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
         // rename either publishes atomically or reports failure without
         // changing the destination. Durability becomes ambiguous only after a
         // successful rename when syncing the parent directory fails.
-        std::fs::rename(&lock.path, &self.index_path)
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        hotpath::measure_block!("daemon.git.index_tx.index.rename", {
+            std::fs::rename(&lock.path, &self.index_path)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
         lock.published = true;
         sync_parent_directory(&self.index_path)
             .map_err(|error| error.into_commit_boundary_unknown("index publish"))?;

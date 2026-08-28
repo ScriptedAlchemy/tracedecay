@@ -38,6 +38,7 @@ impl DaemonInvocationService {
         protocol_owners_retired.then_some(runtime_quiescence)
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.retire_protocol_owners", future = true)]
     async fn retire_project_protocol_owners(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,

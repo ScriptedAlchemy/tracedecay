@@ -3,6 +3,7 @@ use crate::cli::AutomationSkillsAction;
 /// Managed-skill commands operate on the profile authority and then run the
 /// same project-scoped deployment reconciliation used by automatic curation.
 /// There is no separate operator export/install phase.
+#[hotpath::measure(label = "cli.automation.skills", future = true)]
 pub(super) async fn handle_automation_skills_command(
     action: AutomationSkillsAction,
 ) -> tracedecay::errors::Result<()> {

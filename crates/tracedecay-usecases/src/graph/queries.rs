@@ -57,6 +57,7 @@ impl<'a> GraphQueryManager<'a> {
         }
     }
 
+    #[hotpath::measure(label = "usecases.graph.query.page")]
     pub(crate) fn page_all_symbols(
         &self,
         page_size: usize,
@@ -86,6 +87,7 @@ impl<'a> GraphQueryManager<'a> {
         }
     }
 
+    #[hotpath::measure(label = "usecases.graph.dead_code", future = true)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
@@ -185,6 +187,7 @@ impl<'a> GraphQueryManager<'a> {
         Ok(dead)
     }
 
+    #[hotpath::measure(label = "usecases.graph.node_metrics", future = true)]
     pub async fn get_node_metrics(&self, node_id: &str) -> Result<NodeMetrics> {
         let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
             TraceDecayError::Config {
@@ -232,10 +235,12 @@ impl<'a> GraphQueryManager<'a> {
         })
     }
 
+    #[hotpath::measure(label = "usecases.graph.file_dependencies", future = true)]
     pub async fn get_file_dependencies(&self, file_path: &str) -> Result<Vec<String>> {
         self.file_neighbors(file_path, false)
     }
 
+    #[hotpath::measure(label = "usecases.graph.file_dependents", future = true)]
     pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
         self.file_neighbors(file_path, true)
     }
@@ -283,6 +288,7 @@ impl<'a> GraphQueryManager<'a> {
         Ok(paths)
     }
 
+    #[hotpath::measure(label = "usecases.graph.circular_dependencies", future = true)]
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
         let adjacency = self.build_file_adjacency(None).await?;
         let mut cycles = super::scc::tarjan_scc(&adjacency)
@@ -295,6 +301,7 @@ impl<'a> GraphQueryManager<'a> {
         Ok(cycles)
     }
 
+    #[hotpath::measure(label = "usecases.graph.file_adjacency", future = true)]
     pub async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
@@ -377,6 +384,7 @@ impl<'a> GraphQueryManager<'a> {
     /// Folds every health input from one immutable graph generation. Symbol
     /// metrics are parser-attested metadata; liveness and test annotations are
     /// derived from the same generation's canonical relation set.
+    #[hotpath::measure(label = "usecases.graph.health_file_aggregates", future = true)]
     pub async fn health_file_aggregates(
         &self,
         path_prefix: Option<&str>,

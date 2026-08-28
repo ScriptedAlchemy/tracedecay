@@ -5,6 +5,7 @@ use tracedecay_store::ProjectionPersistOutcome;
 use super::*;
 
 impl HostAdmissionFacade<'_> {
+    #[hotpath::measure(label = "usecases.admission.drain_projection", future = true)]
     pub async fn drain_projection_queue(
         &self,
         provider: &str,

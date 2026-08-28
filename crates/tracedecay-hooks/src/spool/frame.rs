@@ -31,7 +31,7 @@ pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpool
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.scan_records")]
 pub(super) fn scan_records(
     root: &Path,
     config: HookSpoolConfigV1,
@@ -50,7 +50,10 @@ pub(super) fn scan_records(
     if physical_len > config.limits.max_host_bytes {
         return Err(HookSpoolError::SpoolFull);
     }
-    let mut file = File::open(&path).map_err(|_| HookSpoolError::Io)?;
+    let mut file = hotpath::io!(
+        File::open(&path).map_err(|_| HookSpoolError::Io)?,
+        label = "hooks.spool.scan"
+    );
     let mut records = Vec::new();
     let mut offset = 0u64;
     let mut previous_sequence = None;
@@ -114,7 +117,7 @@ pub(super) fn partial_scan(
     records: Vec<HookSpoolRecordV1>,
     offset: u64,
     physical_len: u64,
-    file: &mut File,
+    file: &mut impl Read,
 ) -> Result<ScanResult, HookSpoolError> {
     let mut partial_tail = Vec::with_capacity((physical_len - offset) as usize);
     file.read_to_end(&mut partial_tail)
@@ -142,7 +145,7 @@ pub(super) fn corrupt_scan(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.encode_frame")]
 pub(super) fn encode_frame(
     sequence: u64,
     queued_at: UtcMicros,
@@ -172,7 +175,7 @@ pub(super) fn encode_frame(
     Ok(frame)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.decode_frame")]
 pub(super) fn decode_complete_frame(
     frame: &[u8],
     file_offset: u64,

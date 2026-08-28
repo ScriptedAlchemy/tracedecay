@@ -589,6 +589,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 }
 
 /// Registers code-index-independent owners for one newly inserted project.
+#[hotpath::measure(label = "daemon.project.owners.register", future = true)]
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
@@ -1136,6 +1137,7 @@ pub(super) async fn register_project_open_production_owners(
     })
 }
 
+#[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
 async fn register_semantic_activation_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1348,6 +1350,7 @@ async fn register_semantic_activation_owner(
         .await
 }
 
+#[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,

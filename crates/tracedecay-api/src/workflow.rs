@@ -332,7 +332,11 @@ where
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::measure_block!("api.http.handler", owner.invoke_workflow(request).await)
+    hotpath::future!(
+        async move { owner.invoke_workflow(request).await },
+        label = "api.http.handler"
+    )
+    .await
 }
 
 pub fn workflow_invalid_request_response(request_id: RequestId) -> Response {

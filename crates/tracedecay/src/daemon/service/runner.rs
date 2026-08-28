@@ -28,6 +28,7 @@ impl ServiceRunner {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.runner.install")]
     pub(super) fn install(
         &self,
         service_path: &Path,
@@ -51,6 +52,7 @@ impl ServiceRunner {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.runner.refresh")]
     pub(super) fn refresh(
         &self,
         service_path: &Path,
@@ -122,6 +124,7 @@ impl ServiceRunner {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.runner.before_uninstall")]
     pub(super) fn before_uninstall(&self, stop: bool) -> Result<()> {
         match self {
             Self::Systemd => {
@@ -136,6 +139,7 @@ impl ServiceRunner {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.runner.start")]
     pub(super) fn start(&self, service_path: &Path, socket_path: &Path) -> Result<()> {
         match self {
             Self::Systemd => run_systemctl(&["start", super::super::SERVICE_NAME]),
@@ -147,6 +151,7 @@ impl ServiceRunner {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.runner.stop")]
     pub(super) fn stop(&self) -> Result<()> {
         match self {
             Self::Systemd => run_systemctl(&["stop", super::super::SERVICE_NAME]),

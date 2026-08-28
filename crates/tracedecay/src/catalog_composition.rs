@@ -102,27 +102,34 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
     assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "catalog_composition.assemble")]
 fn assemble_application_catalog()
 -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
     let mut contributions = application_catalog_contributions()?;
     let handlers = application_handler_descriptors()?;
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
-    validate_application_catalog(&contributions, &handlers)?;
-    let profiles = application_profiles(&contributions)?;
-    let mut builder = CatalogSnapshotBuilderV1::new();
-
-    for contribution in contributions {
-        builder.add_contribution(contribution);
-    }
-    for handler in handlers.catalog_descriptors()? {
-        builder.add_handler(handler);
-    }
-    for profile in profiles {
-        builder.add_profile(profile);
-    }
-
-    Ok((builder.build()?, handlers))
+    hotpath::measure_block!(
+        "catalog_composition.validate",
+        validate_application_catalog(&contributions, &handlers)?
+    );
+    let profiles = hotpath::measure_block!(
+        "catalog_composition.profiles",
+        application_profiles(&contributions)?
+    );
+    let snapshot = hotpath::measure_block!("catalog_composition.snapshot", {
+        let mut builder = CatalogSnapshotBuilderV1::new();
+        for contribution in contributions {
+            builder.add_contribution(contribution);
+        }
+        for handler in handlers.catalog_descriptors()? {
+            builder.add_handler(handler);
+        }
+        for profile in profiles {
+            builder.add_profile(profile);
+        }
+        builder.build()?
+    });
+    Ok((snapshot, handlers))
 }
 
 /// Validates the application-owned catalog before application-only handler

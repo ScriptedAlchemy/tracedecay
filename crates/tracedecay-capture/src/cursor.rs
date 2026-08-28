@@ -31,7 +31,7 @@ pub fn normalize_cursor_observation(
 }
 
 /// Cursor host composition for one source record, not a per-token walk.
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.cursor.normalize")]
 pub fn normalize_cursor_observation_with_message_id(
     native: &Value,
     session_id: &str,

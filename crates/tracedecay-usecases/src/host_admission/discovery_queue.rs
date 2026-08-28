@@ -6,6 +6,7 @@ use tracedecay_sessions::admission::HostDiscoveryQueueEntry;
 use super::{HostAdmissionFacade, HostAdmissionOutcome, host_scope};
 
 impl HostAdmissionFacade<'_> {
+    #[hotpath::measure(label = "usecases.admission.has_session_message", future = true)]
     pub(super) async fn has_session_message(
         &self,
         scope: &ObservationScopeV1,
@@ -22,6 +23,7 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
+    #[hotpath::measure(label = "usecases.admission.get_parse_offset", future = true)]
     pub(super) async fn get_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -41,6 +43,7 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
+    #[hotpath::measure(label = "usecases.admission.advance_parse_offset", future = true)]
     pub(super) async fn advance_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -61,6 +64,7 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
+    #[hotpath::measure(label = "usecases.admission.replace_parse_offset", future = true)]
     pub(super) async fn replace_registered_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -141,6 +145,7 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("enqueue", error))
     }
 
+    #[hotpath::measure(label = "usecases.admission.discovery_paths_after", future = true)]
     pub(super) async fn discovery_paths_after(
         &self,
         scope: &ObservationScopeV1,
@@ -156,6 +161,7 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("read", error))
     }
 
+    #[hotpath::measure(label = "usecases.admission.discovery_path", future = true)]
     pub(super) async fn discovery_path(
         &self,
         scope: &ObservationScopeV1,

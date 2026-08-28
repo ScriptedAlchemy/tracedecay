@@ -32,6 +32,26 @@ mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
+#[cfg(all(unix, feature = "hotpath"))]
+type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(all(unix, not(feature = "hotpath")))]
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
+#[cfg(all(unix, feature = "hotpath"))]
+type ProfiledStdMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
+#[cfg(all(unix, not(feature = "hotpath")))]
+type ProfiledStdMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+#[cfg(feature = "hotpath")]
+type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
+
+type HostAdmissionBrokers = Arc<
+    ProfiledTokioMutex<
+        HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
+    >,
+>;
+
 /// Resolves the writer scope for one store family.
 ///
 /// The key is the canonical `data_root` — the exact value
@@ -95,7 +115,7 @@ struct MaintenanceReaperRegistryState {
 
 #[cfg(unix)]
 struct MaintenanceReaperRegistry {
-    state: std::sync::Mutex<MaintenanceReaperRegistryState>,
+    state: ProfiledStdMutex<MaintenanceReaperRegistryState>,
     changed: tokio::sync::Notify,
     #[cfg(test)]
     registration_barrier: std::sync::Mutex<Option<Arc<RetirementReaperRegistrationBarrier>>>,
@@ -109,12 +129,15 @@ struct MaintenanceReaperRegistry {
 impl Default for MaintenanceReaperRegistry {
     fn default() -> Self {
         Self {
-            state: std::sync::Mutex::new(MaintenanceReaperRegistryState {
-                accepting: true,
-                pending: HashMap::new(),
-                next_generation: 1,
-                reapers: HashMap::new(),
-            }),
+            state: hotpath::mutex!(
+                std::sync::Mutex::new(MaintenanceReaperRegistryState {
+                    accepting: true,
+                    pending: HashMap::new(),
+                    next_generation: 1,
+                    reapers: HashMap::new(),
+                }),
+                label = "daemon.branch_admin.retirement_reapers.state"
+            ),
             changed: tokio::sync::Notify::new(),
             #[cfg(test)]
             registration_barrier: std::sync::Mutex::new(None),
@@ -128,10 +151,17 @@ impl Default for MaintenanceReaperRegistry {
 
 #[cfg(unix)]
 impl MaintenanceReaperRegistry {
-    fn state(&self) -> std::sync::MutexGuard<'_, MaintenanceReaperRegistryState> {
+    fn state(&self) -> ProfiledStdMutexGuard<'_, MaintenanceReaperRegistryState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish_counts(state: &MaintenanceReaperRegistryState) {
+        hotpath::gauge!("daemon.branch_admin.retirement_reapers.pending")
+            .set(state.pending.values().copied().sum::<usize>() as u64);
+        hotpath::gauge!("daemon.branch_admin.retirement_reapers.active")
+            .set(state.reapers.len() as u64);
     }
 
     fn reserve(self: &Arc<Self>, owner: &ProjectServerKey) -> Option<MaintenanceReaperReservation> {
@@ -140,6 +170,7 @@ impl MaintenanceReaperRegistry {
             return None;
         }
         *state.pending.entry(owner.owner.clone()).or_default() += 1;
+        Self::publish_counts(&state);
         drop(state);
         self.changed.notify_waiters();
         Some(MaintenanceReaperReservation {
@@ -160,6 +191,7 @@ impl MaintenanceReaperRegistry {
         if remove {
             state.pending.remove(owner);
         }
+        Self::publish_counts(&state);
         drop(state);
         self.changed.notify_waiters();
     }
@@ -184,7 +216,10 @@ impl MaintenanceReaperRegistry {
     }
 
     fn finish(&self, key: &MaintenanceReaperKey) {
-        self.state().reapers.remove(key);
+        let mut state = self.state();
+        state.reapers.remove(key);
+        Self::publish_counts(&state);
+        drop(state);
         self.changed.notify_waiters();
     }
 }
@@ -289,7 +324,7 @@ pub(super) struct SessionRuntimeRegistryEntryV1 {
     >,
 }
 type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
-pub(super) type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
+pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionRuntimeRegistries>>;
 
 #[derive(Clone)]
 struct ProfileHostAdmissionBootstrapContext {
@@ -300,12 +335,8 @@ struct ProfileHostAdmissionBootstrapContext {
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
-    host_admission_brokers: Arc<
-        tokio::sync::Mutex<
-            HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
-        >,
-    >,
-    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
+    host_admission_brokers: HostAdmissionBrokers,
+    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
 }
 
@@ -363,6 +394,7 @@ impl ProfileHostAdmissionBootstrapContext {
         Ok(())
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.open_broker", future = true)]
     async fn open_broker(
         &self,
         path: &Path,
@@ -379,7 +411,12 @@ impl ProfileHostAdmissionBootstrapContext {
         drop(brokers);
         let open_path = path.to_path_buf();
         let (runtime, _) = tokio::task::spawn_blocking(move || {
-            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+            hotpath::measure_block!(
+                "daemon.branch_admin.host_admission_runtime.open",
+                tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
+                    &open_path
+                )
+            )
         })
         .await
         .map_err(|_| {
@@ -413,7 +450,7 @@ impl ProfileHostAdmissionBootstrapContext {
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     authenticated_profile_database_scopes:
-        Arc<tokio::sync::Mutex<HashMap<PathBuf, crate::db::DaemonDatabaseScope>>>,
+        Arc<ProfiledTokioMutex<HashMap<PathBuf, crate::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
@@ -423,12 +460,8 @@ pub(super) struct StoreAdministration {
     pub(super) retained_project_shutdown_owners:
         Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
-    host_admission_brokers: Arc<
-        tokio::sync::Mutex<
-            HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
-        >,
-    >,
-    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
+    host_admission_brokers: HostAdmissionBrokers,
+    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     session_sync_service: Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
@@ -456,18 +489,28 @@ impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
             profile_identity: None,
-            authenticated_profile_database_scopes: Arc::new(
+            authenticated_profile_database_scopes: Arc::new(hotpath::mutex!(
                 tokio::sync::Mutex::new(HashMap::new()),
-            ),
-            session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                label = "daemon.branch_admin.profile_scopes"
+            )),
+            session_runtime_registries: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(HashMap::new()),
+                label = "daemon.branch_admin.session_runtime_registries"
+            )),
             session_runtime_registry_admission_closed: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             retained_project_shutdown_owners: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
-            host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_admission_brokers: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(HashMap::new()),
+                label = "daemon.branch_admin.host_admission_brokers"
+            )),
+            host_admission_broker_gate: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(()),
+                label = "daemon.branch_admin.host_admission_broker.gate"
+            )),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
             session_sync_service: Arc::new(
                 crate::daemon::session_sync::DaemonSessionSyncService::default(),
@@ -536,6 +579,7 @@ impl StoreAdministration {
     /// project/runtime owners keep the authority after the admitting socket
     /// closes. Concurrent first requests for one profile reuse exactly one
     /// process-stable election scope.
+    #[hotpath::measure(label = "daemon.branch_admin.retain_profile_scope", future = true)]
     pub(super) async fn retain_authenticated_profile_database_scope(
         &self,
         profile_root: &Path,
@@ -554,6 +598,10 @@ impl StoreAdministration {
         Ok(())
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.registered_profile_session_database",
+        future = true
+    )]
     pub(super) async fn registered_profile_session_database(
         &self,
     ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
@@ -564,6 +612,10 @@ impl StoreAdministration {
             .await
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.registered_profile_database",
+        future = true
+    )]
     pub(super) async fn registered_profile_database(
         &self,
     ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
@@ -592,6 +644,7 @@ impl StoreAdministration {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.ensure_account_active", future = true)]
     pub(super) async fn ensure_account_active(&self) -> Result<()> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
@@ -609,6 +662,10 @@ impl StoreAdministration {
         Ok(())
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.remote_account_deletion_tombstone",
+        future = true
+    )]
     pub(super) async fn remote_account_deletion_tombstone(
         &self,
     ) -> Result<Option<crate::global_db::RemoteDeletionTombstone>> {
@@ -618,6 +675,7 @@ impl StoreAdministration {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.mounted_session_databases", future = true)]
     pub(super) async fn mounted_registered_session_databases(
         &self,
     ) -> Vec<crate::global_db::RegisteredGlobalDbLeaseV1> {
@@ -639,6 +697,7 @@ impl StoreAdministration {
         registry.mounted_session_databases().await
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.mounted_project_servers", future = true)]
     pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
         let Ok(profile_root) = self
             .profile_identity()
@@ -658,6 +717,7 @@ impl StoreAdministration {
         }
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.mounted_project_graphs", future = true)]
     pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
         let servers = self.mounted_project_servers().await;
         let mut graphs = Vec::with_capacity(servers.len());
@@ -667,6 +727,7 @@ impl StoreAdministration {
         graphs
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.project_session_database", future = true)]
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
@@ -735,6 +796,10 @@ impl StoreAdministration {
         &self.project_servers
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.host_admission_broker.admit",
+        future = true
+    )]
     pub(super) async fn host_admission_broker(
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
@@ -755,6 +820,7 @@ impl StoreAdministration {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.host_admission_broker", future = true)]
     async fn host_admission_broker_for_path(
         &self,
         database_path: &Path,
@@ -777,8 +843,11 @@ impl StoreAdministration {
                 drop(brokers);
                 let open_path = path.clone();
                 let (runtime, _) = tokio::task::spawn_blocking(move || {
-                    tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
-                        &open_path,
+                    hotpath::measure_block!(
+                        "daemon.branch_admin.host_admission_runtime.open",
+                        tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
+                            &open_path
+                        )
                     )
                 })
                 .await
@@ -805,6 +874,10 @@ impl StoreAdministration {
     }
 
     /// Kick the coalesced user-profile replay worker. Never awaits a replay pass.
+    #[hotpath::measure(
+        label = "daemon.branch_admin.host_admission_replay.ensure",
+        future = true
+    )]
     pub(super) async fn ensure_user_profile_host_admission_replay(
         &self,
         profile_root: &Path,
@@ -816,6 +889,7 @@ impl StoreAdministration {
             .await;
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.profile_bootstrap", future = true)]
     pub(super) async fn ensure_profile_host_admission_bootstrap(
         &self,
         profile_root: &Path,
@@ -869,7 +943,10 @@ impl StoreAdministration {
         };
         let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
             let context = context.clone();
-            Box::pin(async move { context.ensure().await })
+            Box::pin(hotpath::future!(
+                async move { context.ensure().await },
+                label = "daemon.branch_admin.profile_bootstrap.ensure"
+            ))
         });
         self.profile_host_admission_replay
             .ensure_bootstrap(&profile_root, operation)
@@ -912,6 +989,10 @@ impl StoreAdministration {
             .await;
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.host_admission_replay.wait_idle",
+        future = true
+    )]
     pub(super) async fn wait_user_profile_host_admission_replay_idle(
         &self,
         broker_path: &Path,
@@ -922,6 +1003,10 @@ impl StoreAdministration {
             .await
     }
 
+    #[hotpath::measure(
+        label = "daemon.branch_admin.host_admission_replay.shutdown",
+        future = true
+    )]
     pub(super) async fn shutdown_host_admission_replay(&self) {
         self.profile_host_admission_replay.shutdown().await;
     }
@@ -932,6 +1017,7 @@ impl StoreAdministration {
         Arc::clone(&self.session_sync_service)
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.session_sync.shutdown", future = true)]
     pub(super) async fn shutdown_session_sync(&self) {
         tracedecay_application::session_sync::SessionSyncServicePort::shutdown(
             self.session_sync_service.as_ref(),
@@ -973,6 +1059,7 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
+    #[hotpath::measure(label = "daemon.branch_admin.retirement_reaper.spawn")]
     pub(super) fn spawn_retirement_reaper<F>(
         &self,
         mut reservation: MaintenanceReaperReservation,
@@ -1007,12 +1094,15 @@ impl StoreAdministration {
             termination: Arc::clone(&termination),
         };
         let (start, registered) = tokio::sync::oneshot::channel();
-        let reaper = tokio::spawn(async move {
-            let _finalizer = finalizer;
-            let _ = registered.await;
-            let _ = task.await;
-            cleanup.await;
-        });
+        let reaper = tokio::spawn(hotpath::future!(
+            async move {
+                let _finalizer = finalizer;
+                let _ = registered.await;
+                let _ = task.await;
+                cleanup.await;
+            },
+            label = "daemon.branch_admin.retirement_reaper"
+        ));
         let replaced = state.reapers.insert(
             key,
             MaintenanceReaperHandle {
@@ -1032,12 +1122,17 @@ impl StoreAdministration {
             state.pending.remove(&reservation.owner);
         }
         reservation.active = false;
+        MaintenanceReaperRegistry::publish_counts(&state);
         drop(state);
         self.retirement_reapers.changed.notify_waiters();
         let _ = start.send(());
     }
 
     #[cfg(unix)]
+    #[hotpath::measure(
+        label = "daemon.branch_admin.retirement_reapers.shutdown",
+        future = true
+    )]
     pub(super) async fn shutdown_retirement_reapers(&self) {
         loop {
             let changed = self.retirement_reapers.changed.notified();
@@ -1104,6 +1199,7 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
+    #[hotpath::measure(label = "daemon.branch_admin.retirement_reapers.settle", future = true)]
     async fn settle_retirement_reapers_for_owner(
         &self,
         owner: Option<(&Path, &str)>,
@@ -1219,6 +1315,7 @@ impl StoreAdministration {
         }
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.reconcile_automation", future = true)]
     pub(super) async fn reconcile_cached_automation_for_profile(
         &self,
         profile_root: &Path,
@@ -1277,7 +1374,11 @@ impl StoreAdministration {
         // Queueing for the writer is a park, not work: a background refresh or a
         // generation rebuild can hold a store's gate for minutes. Surrender the
         // admission slot while queued and take it back before running.
-        let _writer = super::park_admission(self.gate.acquire(&scope)).await;
+        let _writer = hotpath::future!(
+            super::park_admission(self.gate.acquire(&scope)),
+            label = "daemon.branch_admin.writer.acquire"
+        )
+        .await;
         operation().await
     }
 
@@ -1297,6 +1398,7 @@ impl StoreAdministration {
 
     /// Resolves the authenticated client's project layout and runs destructive
     /// branch administration against that exact profile-owned store.
+    #[hotpath::measure(label = "daemon.branch_admin.handshake", future = true)]
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
         schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -1356,6 +1458,7 @@ impl StoreAdministration {
 
     /// Prepares, proves, and commits one destructive branch-store mutation under
     /// the physical runtime registry's exact path reservation.
+    #[hotpath::measure(label = "daemon.branch_admin.execute", future = true)]
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
         schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -1457,6 +1560,7 @@ impl StoreAdministration {
     }
 }
 
+#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[crate::branch::SingleStoreBranchRetirementV1],
@@ -1475,6 +1579,7 @@ fn acquire_manual_branch_retirement_leases(
         .collect()
 }
 
+#[hotpath::measure(label = "daemon.branch_admin.cleanup_retirements", future = true)]
 async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
@@ -1622,6 +1727,7 @@ fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -
     JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string())
 }
 
+#[hotpath::measure(label = "daemon.branch_admin.response", future = true)]
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,

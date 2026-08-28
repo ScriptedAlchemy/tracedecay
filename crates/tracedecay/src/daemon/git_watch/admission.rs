@@ -25,6 +25,7 @@ impl GitWatcher {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.git.watch.ensure", future = true)]
     pub(in crate::daemon) async fn ensure_watching_with_config(
         &self,
         project_root: &Path,
@@ -85,6 +86,7 @@ impl GitWatcher {
 
     /// Admission for a repository whose identity is already resolved: pure
     /// in-memory registration against the live capacity caps, no git IO.
+    #[hotpath::measure(label = "daemon.git.watch.admit", future = true)]
     pub(super) async fn admit_resolved(
         &self,
         identity: GitRepositoryIdentity,
@@ -177,9 +179,12 @@ impl GitWatcher {
         }
         let watcher = self.clone();
         let root = project_root.clone();
-        let owner = tokio::spawn(async move {
-            watcher.retry_identity_discovery(root, config).await;
-        });
+        let owner = tokio::spawn(hotpath::future!(
+            async move {
+                watcher.retry_identity_discovery(root, config).await;
+            },
+            label = "daemon.git.watch.identity_retry"
+        ));
         retries.insert(project_root, owner);
     }
 

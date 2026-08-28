@@ -52,6 +52,7 @@ static STANDALONE_SESSION_REGISTRIES: LazyLock<
     AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
+#[hotpath::measure(label = "lifecycle.join_session_registry", future = true)]
 async fn join_standalone_session_registry(
     identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
@@ -160,6 +161,7 @@ impl TraceDecay {
         Ok(runtime)
     }
 
+    #[hotpath::measure(label = "lifecycle.mount_project_graph", future = true)]
     pub(super) async fn mount_project_graph(
         runtime_registry: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
@@ -230,6 +232,7 @@ impl TraceDecay {
     /// still mounts configuration and session storage through the canonical
     /// registered runtime; the lease only replaces daemon ownership during
     /// this bounded maintenance operation.
+    #[hotpath::measure(label = "lifecycle.init.exclusive", future = true)]
     pub async fn init_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -309,6 +312,7 @@ impl TraceDecay {
         Ok((graph, runtime))
     }
 
+    #[hotpath::measure(label = "lifecycle.init.registered", future = true)]
     pub(crate) async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -450,6 +454,7 @@ impl TraceDecay {
     /// Refuses a read-only store that is not at the one schema shape this
     /// binary creates. There is no upgrade path to name: the store was written
     /// by an incompatible binary, so the only remedy is a fresh one.
+    #[hotpath::measure(label = "lifecycle.ensure_schema", future = true)]
     pub async fn ensure_schema_current(&self) -> Result<()> {
         Self::ensure_database_schema_current(&self.db).await
     }
@@ -495,6 +500,7 @@ impl TraceDecay {
 
     /// Opens an initialized project through the canonical registered runtime
     /// while the caller holds the exact profile's exclusive maintenance lease.
+    #[hotpath::measure(label = "lifecycle.open.exclusive", future = true)]
     pub async fn open_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -538,6 +544,7 @@ impl TraceDecay {
         .await
     }
 
+    #[hotpath::measure(label = "lifecycle.open.registered", future = true)]
     pub(crate) async fn open_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -699,6 +706,7 @@ impl TraceDecay {
     }
 
     #[cfg(not(any(test, feature = "test-transport")))]
+    #[hotpath::measure(label = "lifecycle.open_read_only.exclusive", future = true)]
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -743,6 +751,7 @@ impl TraceDecay {
         .await
     }
 
+    #[hotpath::measure(label = "lifecycle.open_read_only.registered", future = true)]
     pub(crate) async fn open_read_only_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,

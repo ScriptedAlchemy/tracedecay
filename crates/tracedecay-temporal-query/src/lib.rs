@@ -273,7 +273,7 @@ pub enum TemporalKernelError {
     Context(#[from] ContextError),
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "temporal.kernel.execute")]
 pub async fn execute_temporal_kernel(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -290,7 +290,7 @@ pub async fn execute_temporal_kernel(
 ///
 /// Hotpath names are static crate stages. Candidate-page and record-page
 /// ports are left unmeasured so storage/query crates own those spans.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "temporal.candidates.export")]
 pub async fn execute_temporal_candidate_export(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,

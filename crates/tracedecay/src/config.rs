@@ -1021,6 +1021,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// A fresh project receives one canonical registry-backed revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
+#[hotpath::measure(label = "daemon.config.open", future = true)]
 pub(crate) async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1048,6 +1049,7 @@ pub(crate) async fn read_or_initialize_profile_code_index_worker_selection(
         .map(|configuration| configuration.selection)
 }
 
+#[hotpath::measure(label = "daemon.config.profile_workers.read", future = true)]
 pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
@@ -1071,6 +1073,7 @@ pub(crate) fn profile_code_index_worker_mutation(
         .map_err(map_configuration_error)
 }
 
+#[hotpath::measure(label = "daemon.config.profile_workers.commit", future = true)]
 pub(crate) async fn commit_profile_code_index_worker_selection(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
@@ -1263,6 +1266,7 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
 
 /// Loads an already-persisted current configuration without creating a store
 /// or publishing a fallback revision.
+#[hotpath::measure(label = "daemon.config.open.read_only", future = true)]
 pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1404,6 +1408,7 @@ pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
 /// with a synthetic bootstrap revision. It does not read or write
 /// `config.json`, and a daemon must replace it with its durable canonical
 /// snapshot before a subsequent process can serve the project.
+#[hotpath::measure(label = "daemon.config.bootstrap")]
 pub fn bootstrap_runtime_configuration(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1439,6 +1444,7 @@ pub fn bootstrap_runtime_configuration(
 /// Converts a complete typed snapshot into the runtime materialization without
 /// defaults, file reads, or environment reads. This is intentionally public so
 /// daemon composition can validate snapshot-to-runtime parity before publish.
+#[hotpath::measure(label = "daemon.config.parse")]
 pub fn runtime_config_from_snapshot(
     project_root: &Path,
     snapshot: &ConfigurationSnapshotV1,
@@ -1859,6 +1865,7 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 /// Like [`discover_project_root`], but on a sync miss checks the git worktree
 /// root with [`crate::tracedecay::TraceDecay::has_initialized_store`] so renamed
 /// or global-only repos still resolve without probing unrelated ancestors.
+#[hotpath::measure(label = "daemon.config.discover", future = true)]
 pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf> {
     if let Some(root) = discover_project_root(start) {
         return Some(root);

@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
+use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
+
 pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
     NonZeroU64::MIN.saturating_add(6 * 1024 * 1024 * 1024 - 1);
 
@@ -131,7 +133,7 @@ struct ResidentMemoryStateV1 {
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
-    state: Mutex<ResidentMemoryStateV1>,
+    state: ProfiledMutex<ResidentMemoryStateV1>,
 }
 
 impl fmt::Debug for ProcessResidentMemoryV1 {
@@ -149,11 +151,14 @@ impl ProcessResidentMemoryV1 {
     pub fn new(limit_bytes: NonZeroU64) -> Self {
         Self {
             limit_bytes,
-            state: Mutex::new(ResidentMemoryStateV1::default()),
+            state: hotpath::mutex!(
+                Mutex::new(ResidentMemoryStateV1::default()),
+                label = "runtime_core.resident.state"
+            ),
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.resident.reserve")]
     pub fn reserve(
         self: &Arc<Self>,
         key: ResidentMemoryKeyV1,
@@ -179,7 +184,7 @@ impl ProcessResidentMemoryV1 {
     /// Reserves one process-shared component without fabricating a project,
     /// worktree, or code-generation owner. These reservations use the same
     /// process ceiling and RAII release authority as project generations.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.resident.reserve_shared")]
     pub fn reserve_process_shared(
         self: &Arc<Self>,
         component: ResidentMemoryComponentIdV1,
@@ -248,7 +253,7 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryStateV1> {
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

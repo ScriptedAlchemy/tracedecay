@@ -13,6 +13,10 @@ impl RegisteredGlobalDb {
     /// has reached the detail-retention boundary. The application owns the
     /// opaque retention evaluation; storage owns only this bounded selection
     /// and CAS.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.observability_rollup.query.compaction"
+    )]
     pub async fn next_observability_rollup_compaction(
         &self,
         authorized_scope_ref: &str,
@@ -72,6 +76,10 @@ impl RegisteredGlobalDb {
     /// CAS-publishes one application-evaluated opaque fragment and stamps the
     /// 30-day retention check. A concurrent correction or projector rebuild
     /// wins and makes this candidate stale without overwriting it.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.observability_rollup.persist.compact"
+    )]
     pub async fn compact_observability_rollup_fragment(
         &self,
         request: ObservabilityRollupCompactionV1,

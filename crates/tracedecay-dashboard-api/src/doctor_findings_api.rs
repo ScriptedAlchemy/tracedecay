@@ -36,6 +36,7 @@ pub struct DoctorFindingsPayloadV1 {
 }
 
 /// `GET /api/doctor/findings`
+#[hotpath::measure(label = "dashboard_api.doctor.findings", future = true)]
 pub async fn findings(
     State(state): State<DashboardState>,
     Query(params): Query<DoctorFindingsQueryV1>,
@@ -68,6 +69,7 @@ async fn findings_with_authorities(
 ///
 /// Compatibility routes such as `/api/storage/findings` call this seam instead
 /// of evaluating health from dashboard-held database handles.
+#[hotpath::measure(label = "dashboard_api.doctor.findings_for_family", future = true)]
 pub async fn findings_for_family(
     state: DashboardState,
     family_filter: Option<DoctorFindingFamilyV1>,

@@ -14,16 +14,19 @@ include = ["/src/**"]
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-private-fs/hotpath",
+    "tracedecay-store/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
 ]
 test-helpers = []
 eval-helpers = []

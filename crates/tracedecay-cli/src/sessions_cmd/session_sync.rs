@@ -7,6 +7,7 @@ use super::{call_daemon_tool, resolve_cli_project_root};
 /// Default lower bound for `git-sync`: 90 days before now.
 const GIT_SYNC_DEFAULT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
+#[hotpath::measure(label = "cli.sessions.git_sync", future = true)]
 pub(super) async fn run_git_sync(
     project_id: Option<String>,
     project_path: Option<String>,

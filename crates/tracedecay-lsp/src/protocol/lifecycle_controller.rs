@@ -439,10 +439,12 @@ where
             );
         }
     }
+    #[hotpath::measure(label = "lsp.lifecycle.initialized_notification")]
     pub(crate) fn handle_initialized_notification(&mut self) {
         let _ = self.lifecycle.control.initialized();
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.initialized_request")]
     pub(crate) fn handle_initialized_request(&mut self, response_id: Value) {
         let _ = self.enqueue_value(error_response(
             response_id,
@@ -454,6 +456,7 @@ where
         ));
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.shutdown")]
     pub(crate) fn handle_shutdown_request(&mut self, response_id: Value) {
         if self.lifecycle.control.lifecycle() != SessionLifecycle::Ready {
             let _ = self.enqueue_value(error_response(
@@ -484,6 +487,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.exit_notification")]
     pub(crate) fn handle_exit_notification(&mut self) {
         if self.lifecycle.control.exit().is_err() {
             self.expire();
@@ -492,6 +496,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.exit_request")]
     pub(crate) fn handle_exit_request(&mut self, response_id: Value) {
         let _ = self.enqueue_value(error_response(
             response_id,
@@ -503,6 +508,7 @@ where
         ));
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.client_response")]
     pub(crate) fn handle_client_response(&mut self, id: LspRequestId, succeeded: bool) {
         if self.handle_dynamic_diagnostic_response(&id, succeeded) {
             return;
@@ -519,6 +525,7 @@ where
         self.lifecycle.overlays.version(uri).unwrap_or_default()
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.initialize")]
     pub(crate) fn handle_initialize(&mut self, id: Value, params: &Value) {
         if self.lifecycle.control.lifecycle() != SessionLifecycle::AwaitingInitialize {
             self.enqueue_value(error_response(
@@ -675,6 +682,7 @@ where
             .bind_initialized_capabilities(effective.clone());
     }
 
+    #[hotpath::measure(label = "lsp.lifecycle.cancel")]
     pub(crate) fn handle_cancel(&mut self, params: &Value) {
         let Some(id) = params.get("id").and_then(request_id) else {
             return;

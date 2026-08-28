@@ -141,7 +141,7 @@ async fn attach_doctor_report(
 
 /// Surfaces process and database telemetry so users hitting unexpected
 /// CPU/RAM pressure can attach a structured snapshot to a bug report.
-#[hotpath::measure]
+#[hotpath::measure(label = "mcp.health.runtime.total")]
 pub(crate) async fn handle_runtime(
     cg: &TraceDecay,
     args: Value,
@@ -154,10 +154,13 @@ pub(crate) async fn handle_runtime(
         .get("authority_audit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let snap = crate::runtime_telemetry::collect_with_integrity_and_generation_census(
-        cg,
-        authority_audit,
-        generation_census_reader,
+    let snap = hotpath::future!(
+        crate::runtime_telemetry::collect_with_integrity_and_generation_census(
+            cg,
+            authority_audit,
+            generation_census_reader
+        ),
+        label = "mcp.health.runtime.telemetry"
     )
     .await?;
     let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
@@ -172,14 +175,26 @@ pub(crate) async fn handle_runtime(
         let (authority, temporal) = tokio::join!(
             async {
                 if authority_audit {
-                    Some(observation_authority_audit(registry).await)
+                    Some(
+                        hotpath::future!(
+                            observation_authority_audit(registry),
+                            label = "mcp.health.runtime.authority_audit"
+                        )
+                        .await,
+                    )
                 } else {
                     None
                 }
             },
             async {
                 if include_session_temporal_health {
-                    Some(session_temporal_health_value(project_session_db).await)
+                    Some(
+                        hotpath::future!(
+                            session_temporal_health_value(project_session_db),
+                            label = "mcp.health.runtime.session_temporal"
+                        )
+                        .await,
+                    )
                 } else {
                     None
                 }
@@ -209,7 +224,12 @@ pub(crate) async fn handle_runtime(
     {
         match project_session_db {
             Some(db) => {
-                value["cursor_session_ingest"] = match db.cursor_session_ingest_health().await {
+                value["cursor_session_ingest"] = match hotpath::future!(
+                    db.cursor_session_ingest_health(),
+                    label = "mcp.health.runtime.session_ingest"
+                )
+                .await
+                {
                     Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
                         json!({
                             "status": "unavailable",
@@ -223,10 +243,19 @@ pub(crate) async fn handle_runtime(
                         "message": error,
                     }),
                 };
-                match db.read_snapshot().await {
+                match hotpath::future!(
+                    db.read_snapshot(),
+                    label = "mcp.health.runtime.session_snapshot"
+                )
+                .await
+                {
                     Ok(snapshot) => {
                         value["cursor_session_placeholder_paths"] = json!(
-                            literal_workspace_placeholder_transcript_paths(&snapshot, 10).await
+                            hotpath::future!(
+                                literal_workspace_placeholder_transcript_paths(&snapshot, 10),
+                                label = "mcp.health.runtime.placeholder_paths"
+                            )
+                            .await
                         );
                     }
                     Err(_) => {
@@ -248,23 +277,27 @@ pub(crate) async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        attach_doctor_report(&mut value, doctor_report_reader).await;
+        hotpath::future!(
+            attach_doctor_report(&mut value, doctor_report_reader),
+            label = "mcp.health.runtime.doctor_report"
+        )
+        .await;
     }
-    let semantic_configuration = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
+    let semantic_configuration = hotpath::future!(
+        cg.configuration_runtime().client().current(),
+        label = "mcp.health.runtime.semantic"
+    )
+    .await
+    .ok()
+    .and_then(|pinned| {
+        tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                revision_id: pinned.revision_id,
+                snapshot: pinned.snapshot,
+            },
+        )
         .ok()
-        .and_then(|pinned| {
-            tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
-            .ok()
-        });
+    });
     if let Some(semantic) =
         tracedecay_usecases::semantic_runtime::project_semantic_application_status(
             cg.project_root(),

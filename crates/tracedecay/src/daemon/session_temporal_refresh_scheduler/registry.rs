@@ -204,11 +204,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             Arc::clone(&worker_history),
                             policy,
                         ),
-                        label = "session_temporal_refresh.worker"
+                        label = "daemon.scheduler.session_temporal.worker"
                     ));
                     let Some(result) = hotpath::future!(
                         workers.join_next(),
-                        label = "session_temporal_refresh.worker_join_wait"
+                        label = "daemon.scheduler.session_temporal.worker_join_wait"
                     )
                     .await
                     else {
@@ -231,14 +231,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             tokio::select! {
                                 () = hotpath::future!(
                                     worker_state.wait_for_cancellation(),
-                                    label = "session_temporal_refresh.cancellation_wait"
+                                    label = "daemon.scheduler.session_temporal.cancellation_wait"
                                 ) => return,
                                 () = hotpath::future!(
                                     tokio::time::sleep(session_refresh_retry_delay(
                                         SessionTemporalRefreshRetryClass::Projector,
                                         panic_attempt,
                                     )),
-                                    label = "session_temporal_refresh.supervisor_retry_wait"
+                                    label = "daemon.scheduler.session_temporal.supervisor_retry_wait"
                                 ) => {}
                             }
                         }
@@ -249,7 +249,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     }
                 }
             },
-            label = "session_temporal_refresh.supervisor"
+            label = "daemon.scheduler.session_temporal.supervisor"
         );
         let task = tokio::spawn(supervisor);
         SessionTemporalRefreshSchedulerEntry {

@@ -51,6 +51,7 @@ pub(super) fn decode_observation_row(
     Ok((sequence, observation))
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.query.observation")]
 pub(super) async fn read_observation(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
@@ -98,6 +99,10 @@ pub(super) async fn read_checkpoint(
     Ok(ProjectionCheckpoint::new(sequence))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_state.persist.checkpoint"
+)]
 pub(super) async fn write_checkpoint(
     conn: &impl Executor,
     sequence: u64,
@@ -201,6 +206,7 @@ pub(super) async fn projection_retry_state(
 /// first catch-up pass instead of waiting out a dead process's backoff.
 /// Attempt counts and last errors persist, so a projection that fails again
 /// resumes its escalating delay from the recorded attempt history.
+#[hotpath::measure(future = true, label = "global_db.observation_state.persist.rearm")]
 pub(crate) async fn rearm_queued_projection_retries(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<u64> {
@@ -212,6 +218,7 @@ pub(crate) async fn rearm_queued_projection_retries(
     .map_err(|error| storage("rearm queued projection retries", error))
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.persist.retry")]
 pub(super) async fn schedule_projection_retry(
     conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
@@ -240,6 +247,7 @@ pub(super) async fn schedule_projection_retry(
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.persist.consume")]
 pub(super) async fn consume_projection_queue_item(
     conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
@@ -403,6 +411,10 @@ fn output_state_aggregation_sql(provenance_filter: &str) -> String {
 /// through the canonical aggregation ([`output_state_aggregation_sql`]), so
 /// convergence paths (e.g. collided-provenance reconciliation) share the
 /// initialization's single definition.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_state.persist.reaggregate"
+)]
 pub(super) async fn reaggregate_output_state_for_output(
     conn: &impl Executor,
     output_provider: &str,
@@ -448,6 +460,7 @@ pub(super) struct ProjectionOutputState {
     pub(super) owner_count: u64,
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.persist.cache")]
 pub(super) async fn ensure_projection_output_state_cache(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
@@ -720,6 +733,7 @@ pub(super) fn same_projection_lineage(
     candidate.source() == owner.source() && candidate.scope() == owner.scope()
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.query.verify")]
 pub(super) async fn verify_output_state(
     conn: &impl QueryExecutor,
     state: &ProjectionOutputState,
@@ -740,6 +754,7 @@ pub(super) async fn verify_output_state(
     verify_rows(conn, &owner_projection).await
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_state.query.authority")]
 pub(in super::super) async fn verify_output_authority(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,

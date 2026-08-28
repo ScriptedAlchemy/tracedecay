@@ -70,6 +70,7 @@ pub fn observatory_unavailable_read_model(
 }
 
 /// Canonical Observatory projection shared by CLI, MCP, and dashboard HTTP.
+#[hotpath::measure(label = "usecases.observability.read_model", future = true)]
 pub async fn observatory_read_model(
     db: &RegisteredGlobalDb,
     scope_ref: Option<&str>,

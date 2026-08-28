@@ -544,6 +544,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.graph.read")]
     pub fn read_graph(
         &self,
         context: &RequestContext,

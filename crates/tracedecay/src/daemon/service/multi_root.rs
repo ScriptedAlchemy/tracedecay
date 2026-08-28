@@ -10,6 +10,7 @@ use super::invocation::DaemonInvocationService;
 impl DaemonInvocationService {
     /// Execute one federated query after transport admission has supplied the
     /// exact contexts and frozen root generations.
+    #[hotpath::measure(label = "daemon.service.multi_root.execute")]
     pub(crate) fn execute_multi_root_query<P, Q, T>(
         &self,
         port: P,

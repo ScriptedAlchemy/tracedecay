@@ -19,6 +19,7 @@ hotpath = [
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
 ]
 hotpath-alloc = [
@@ -30,6 +31,7 @@ hotpath-alloc = [
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -41,6 +43,7 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
 ]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper

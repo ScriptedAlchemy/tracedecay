@@ -141,7 +141,7 @@ fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Resul
 }
 
 /// Entry point for `tracedecay tool ...`.
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.tool.dispatch", future = true)]
 pub(crate) async fn run(
     project: Option<String>,
     name: Option<String>,
@@ -264,7 +264,7 @@ pub(crate) async fn run(
 /// This is the same normalized-argument, deadline, and warm-up-retry path the
 /// `tracedecay tool` fallback uses, so first-class commands cannot drift from
 /// the typed surface's transport behavior.
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.tool.catalog", future = true)]
 pub(crate) async fn dispatch_catalogued_cli_operation(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -305,7 +305,7 @@ fn cli_surface_invocation(
 /// without a project reaches the profile-scoped projectless route, where those
 /// operations can only answer `application.surface.unavailable` /
 /// `not_found_or_not_authorized`.
-#[hotpath::measure(label = "cli.tool.application")]
+#[hotpath::measure(label = "cli.tool.application", future = true)]
 async fn dispatch_cli_application_surface(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -511,7 +511,7 @@ fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDeca
 ///
 /// Owner: root MCP tool-dispatch migration. The operation has already passed
 /// definition admission and, when declared, catalog binding resolution.
-#[hotpath::measure(label = "cli.tool.compatibility")]
+#[hotpath::measure(label = "cli.tool.compatibility", future = true)]
 async fn dispatch_compatibility_tool(
     dispatch: DaemonToolDispatch,
     tool_name: &str,

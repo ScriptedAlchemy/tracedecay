@@ -65,6 +65,7 @@ impl RegisteredGlobalDbOwnerV1 {
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
     /// whose guard triggers were altered) fails the attach instead of opening
     /// on unaudited authority rows.
+    #[hotpath::measure(future = true, label = "global_db.registered.admit")]
     pub async fn admit_and_attach(
         database: DatabaseOwnerV1,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
@@ -82,6 +83,7 @@ impl RegisteredGlobalDbOwnerV1 {
 
     /// Returns the resumable convergence plan for an already admitted schema
     /// without retaining an unowned client lease.
+    #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
     ) -> tracedecay_runtime_core::errors::Result<(
@@ -535,6 +537,7 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.registered.schema")]
     pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
@@ -662,6 +665,7 @@ impl RegisteredGlobalDb {
         self.project_graph.get()
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.txn.snapshot")]
     pub async fn read_snapshot(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<DatabaseEngineReadSnapshot> {
@@ -670,6 +674,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.snapshot_to")]
     pub async fn snapshot_to(
         &self,
         destination: &Path,
@@ -681,6 +686,10 @@ impl RegisteredGlobalDb {
     /// Produces an interruption-aware snapshot over this exact guarded
     /// registered database. The request probe cannot acquire a raw runtime or
     /// authority; writer authorization remains inside the database facade.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.registered.snapshot_to_interruptible"
+    )]
     pub async fn snapshot_to_interruptible(
         &self,
         destination: &Path,
@@ -785,6 +794,7 @@ impl RegisteredGlobalDb {
         })
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.txn.begin")]
     pub async fn begin_write_transaction(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
@@ -960,6 +970,7 @@ impl RegisteredGlobalDb {
         self.database.storage_page_counts().await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.compact")]
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
@@ -967,6 +978,7 @@ impl RegisteredGlobalDb {
         self.database.run_incremental_vacuum(max_pages).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.retention.sessions")]
     pub async fn run_session_lcm_retention(
         &self,
         provider: &str,
@@ -996,6 +1008,7 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.retention.observations")]
     pub async fn run_observation_retention(
         &self,
         generation: Option<&str>,
@@ -1152,6 +1165,7 @@ impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
 impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
     for RegisteredGlobalDbWriteTransaction<'_>
 {
+    #[hotpath::measure(future = true, label = "global_db.registered.txn.attach")]
     async fn attach_database(
         &self,
         path: &Path,
@@ -1196,6 +1210,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute_batch(sql).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.txn.commit")]
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         if let Err(error) = self
             .authority
@@ -1214,6 +1229,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.commit().await.map_err(engine_error)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.txn.rollback")]
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
     }

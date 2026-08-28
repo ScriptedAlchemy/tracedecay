@@ -131,7 +131,7 @@ impl<'a> DatabaseFactStore<'a> {
 }
 
 impl FactStore for DatabaseFactStore<'_> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.commit")]
     async fn commit_fact(
         &self,
         batch: FactWriteBatch,
@@ -244,7 +244,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.lineage")]
     async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
@@ -261,7 +261,7 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.lineage_response")]
     async fn query_fact_lineage_response(
         &self,
         query: FactLineageQuery,
@@ -476,7 +476,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.add")]
     async fn add_project_memory_fact(
         &self,
         request: ProjectMemoryFactAddCommandV1,
@@ -494,7 +494,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.update")]
     async fn update_project_memory_fact(
         &self,
         request: ProjectMemoryFactUpdateCommandV1,
@@ -510,7 +510,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.memory.remove")]
     async fn remove_project_memory_fact(
         &self,
         request: ProjectMemoryFactRemoveCommandV1,

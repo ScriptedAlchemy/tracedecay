@@ -20,7 +20,7 @@ use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_re
 
 use super::tool_call_support::json_result;
 
-#[hotpath::measure(label = "mcp.dispatch.workflow")]
+#[hotpath::measure(future = true, label = "mcp.workflow.total")]
 pub(super) async fn handle_workflow(
     tool_name: &str,
     mut body: Value,
@@ -29,25 +29,27 @@ pub(super) async fn handle_workflow(
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
-    let operation =
-        crate::mcp::tools::binding::workflow_operation_for_tool(tool_name).ok_or_else(|| {
-            TraceDecayError::Config {
-                message: format!("unknown tool: {tool_name}"),
+    let (operation, request_id, controls) =
+        hotpath::measure_block!("mcp.workflow.request_build", {
+            let operation = crate::mcp::tools::binding::workflow_operation_for_tool(tool_name)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("unknown tool: {tool_name}"),
+                })?;
+            let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
+            let controls = workflow_controls(
+                operation,
+                &request_id,
+                protocol_deadline,
+                protocol_cancellation,
+            )?;
+            if let Some(object) = body.as_object_mut() {
+                // MCP presentation and request-correlation fields never belong to a
+                // typed Workflow request body.
+                object.remove("format");
+                object.remove("__mcp_request_id");
             }
-        })?;
-    let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
-    let controls = workflow_controls(
-        operation,
-        &request_id,
-        protocol_deadline,
-        protocol_cancellation,
-    )?;
-    if let Some(object) = body.as_object_mut() {
-        // MCP presentation and request-correlation fields never belong to a
-        // typed Workflow request body.
-        object.remove("format");
-        object.remove("__mcp_request_id");
-    }
+            (operation, request_id, controls)
+        });
     let response = crate::application_surface::invoke_workflow_operation(
         executor,
         WorkflowHttpRequest {
@@ -67,21 +69,23 @@ pub(super) async fn handle_workflow(
                 format!("The Workflow application response could not be read: {error}"),
             )
         })?;
-    let payload = serde_json::from_slice::<Value>(&body).map_err(|error| {
-        TraceDecayError::project_route(
-            "workflow.response_invalid",
-            true,
-            format!("The Workflow application response was not valid JSON: {error}"),
+    hotpath::measure_block!("mcp.workflow.result_assemble", {
+        let payload = serde_json::from_slice::<Value>(&body).map_err(|error| {
+            TraceDecayError::project_route(
+                "workflow.response_invalid",
+                true,
+                format!("The Workflow application response was not valid JSON: {error}"),
+            )
+        })?;
+        let result = json_result(&payload);
+        Ok(
+            if payload.get("kind").and_then(Value::as_str) == Some("problem") {
+                result.with_semantic_error(true)
+            } else {
+                result.with_semantic_error(false)
+            },
         )
-    })?;
-    let result = json_result(&payload);
-    Ok(
-        if payload.get("kind").and_then(Value::as_str) == Some("problem") {
-            result.with_semantic_error(true)
-        } else {
-            result.with_semantic_error(false)
-        },
-    )
+    })
 }
 
 fn mint_request_id() -> Result<RequestId> {

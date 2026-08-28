@@ -12,6 +12,7 @@ use super::*;
 
 static WARMING_BOOTSTRAP_TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
 
+#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
 fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
     if let Some(definitions) = WARMING_BOOTSTRAP_TOOLS.get() {
         return Ok(definitions.clone());
@@ -51,6 +52,7 @@ pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
     warming_bootstrap_tool_definitions().map(|_| ())
 }
 
+#[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
     first_request_line: &str,
@@ -122,13 +124,16 @@ pub(super) fn daemon_bootstrap_response(
                 let authority = default_catalog_discovery_authority();
                 match (profile_id, authority) {
                     (Ok(profile_id), Ok(authority)) => {
-                        let definitions = get_catalog_filtered_tool_definitions_with_budget(
-                            node_count,
-                            budget,
-                            &profile_id,
-                            &authority,
-                            &project_catalog_discovery_scope(),
-                            ToolRegistryMode::HostAvailable,
+                        let definitions = hotpath::measure_block!(
+                            "daemon.bootstrap.catalog",
+                            get_catalog_filtered_tool_definitions_with_budget(
+                                node_count,
+                                budget,
+                                &profile_id,
+                                &authority,
+                                &project_catalog_discovery_scope(),
+                                ToolRegistryMode::HostAvailable
+                            )
                         );
                         match definitions {
                             Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
@@ -151,6 +156,7 @@ pub(super) fn daemon_bootstrap_response(
     }
 }
 
+#[hotpath::measure(label = "daemon.bootstrap.project_node_count", future = true)]
 pub(super) async fn cached_project_node_count(
     store_administration: &StoreAdministration,
     handshake: &DaemonHandshake,

@@ -49,26 +49,32 @@ impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
         project_id: &'a str,
         limit: u32,
     ) -> HintOutcomePortFuture<'a, Vec<String>> {
-        Box::pin(async move {
-            self.analytics
-                .query_analytics_events(&AnalyticsEventQuery {
-                    project_id: Some(project_id.to_owned()),
-                    event_kind: Some("hint_outcome".to_owned()),
-                    limit: limit as usize,
-                    ..Default::default()
-                })
-                .await
-                .map(|events| {
-                    events
-                        .into_iter()
-                        .filter_map(|event| event.hint_id)
-                        .filter(|hint_id| !hint_id.is_empty())
-                        .collect()
-                })
-                .map_err(|error| {
-                    HintOutcomePortError::new(HintOutcomePortOperation::QueryResolvedHints, error)
-                })
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                self.analytics
+                    .query_analytics_events(&AnalyticsEventQuery {
+                        project_id: Some(project_id.to_owned()),
+                        event_kind: Some("hint_outcome".to_owned()),
+                        limit: limit as usize,
+                        ..Default::default()
+                    })
+                    .await
+                    .map(|events| {
+                        events
+                            .into_iter()
+                            .filter_map(|event| event.hint_id)
+                            .filter(|hint_id| !hint_id.is_empty())
+                            .collect()
+                    })
+                    .map_err(|error| {
+                        HintOutcomePortError::new(
+                            HintOutcomePortOperation::QueryResolvedHints,
+                            error,
+                        )
+                    })
+            },
+            label = "hints.query_resolved"
+        ))
     }
 
     fn emitted_hints<'a>(
@@ -76,36 +82,42 @@ impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
         project_id: &'a str,
         limit: u32,
     ) -> HintOutcomePortFuture<'a, Vec<HintEmission>> {
-        Box::pin(async move {
-            let events = self
-                .analytics
-                .query_analytics_events(&AnalyticsEventQuery {
-                    project_id: Some(project_id.to_owned()),
-                    event_kind: Some("hint_emitted".to_owned()),
-                    limit: limit as usize,
-                    ..Default::default()
-                })
-                .await
-                .map_err(|error| {
-                    HintOutcomePortError::new(HintOutcomePortOperation::QueryEmittedHints, error)
-                })?;
-            events
-                .into_iter()
-                .map(|event| {
-                    let session_id = required_event_field(event.session_id, "session_id")?;
-                    let category = required_event_field(event.hint_category, "hint_category")?;
-                    let hint_id = required_event_field(event.hint_id, "hint_id")?;
-                    Ok(HintEmission {
-                        provider: event.provider,
-                        project_id: event.project_id,
-                        session_id,
-                        timestamp: event.timestamp,
-                        category,
-                        hint_id,
+        Box::pin(hotpath::future!(
+            async move {
+                let events = self
+                    .analytics
+                    .query_analytics_events(&AnalyticsEventQuery {
+                        project_id: Some(project_id.to_owned()),
+                        event_kind: Some("hint_emitted".to_owned()),
+                        limit: limit as usize,
+                        ..Default::default()
                     })
-                })
-                .collect()
-        })
+                    .await
+                    .map_err(|error| {
+                        HintOutcomePortError::new(
+                            HintOutcomePortOperation::QueryEmittedHints,
+                            error,
+                        )
+                    })?;
+                events
+                    .into_iter()
+                    .map(|event| {
+                        let session_id = required_event_field(event.session_id, "session_id")?;
+                        let category = required_event_field(event.hint_category, "hint_category")?;
+                        let hint_id = required_event_field(event.hint_id, "hint_id")?;
+                        Ok(HintEmission {
+                            provider: event.provider,
+                            project_id: event.project_id,
+                            session_id,
+                            timestamp: event.timestamp,
+                            category,
+                            hint_id,
+                        })
+                    })
+                    .collect()
+            },
+            label = "hints.query_emitted"
+        ))
     }
 
     fn session_tool_activity<'a>(
@@ -115,41 +127,51 @@ impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
         after_timestamp: i64,
         limit: u32,
     ) -> HintOutcomePortFuture<'a, Vec<HintToolActivity>> {
-        Box::pin(async move {
-            let rows = self
-                .sessions
-                .session_messages_after(provider, session_id, after_timestamp, limit as usize)
-                .await
-                .map_err(|error| {
-                    HintOutcomePortError::new(HintOutcomePortOperation::QuerySessionActivity, error)
-                })?;
-            let mut activity = Vec::new();
-            for row in rows {
-                if let Some(step) = activity_from_row(row)? {
-                    activity.push(step);
+        Box::pin(hotpath::future!(
+            async move {
+                let rows = self
+                    .sessions
+                    .session_messages_after(provider, session_id, after_timestamp, limit as usize)
+                    .await
+                    .map_err(|error| {
+                        HintOutcomePortError::new(
+                            HintOutcomePortOperation::QuerySessionActivity,
+                            error,
+                        )
+                    })?;
+                let mut activity = Vec::new();
+                for row in rows {
+                    if let Some(step) = activity_from_row(row)? {
+                        activity.push(step);
+                    }
                 }
-            }
-            Ok(activity)
-        })
+                Ok(activity)
+            },
+            label = "hints.query_activity"
+        ))
     }
 
     fn append_outcomes<'a>(
         &'a self,
         outcomes: &'a [HintOutcomeObservation],
     ) -> HintOutcomePortFuture<'a, ()> {
-        Box::pin(async move {
-            let events = outcomes.iter().map(outcome_event).collect::<Vec<_>>();
-            self.analytics
-                .append_analytics_events(&events)
-                .await
-                .map(|_| ())
-                .map_err(|error| {
-                    HintOutcomePortError::new(HintOutcomePortOperation::AppendOutcomes, error)
-                })
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                let events = outcomes.iter().map(outcome_event).collect::<Vec<_>>();
+                self.analytics
+                    .append_analytics_events(&events)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| {
+                        HintOutcomePortError::new(HintOutcomePortOperation::AppendOutcomes, error)
+                    })
+            },
+            label = "hints.append"
+        ))
     }
 }
 
+#[hotpath::measure(label = "hints.correlate", future = true)]
 pub(crate) async fn correlate_registered_hint_outcomes(
     analytics: &RegisteredGlobalDb,
     sessions: &RegisteredGlobalDb,
@@ -228,6 +250,7 @@ impl HintOutcomeSettlement {
 /// operator state on its own. Best-effort by contract — failures come back
 /// as typed [`HintOutcomeSettlement`] states and are logged here so every
 /// caller inherits the same observability.
+#[hotpath::measure(label = "hints.settle", future = true)]
 pub(crate) async fn settle_project_hint_outcomes(
     analytics: Option<&RegisteredGlobalDb>,
     sessions: Option<&RegisteredGlobalDb>,
@@ -246,7 +269,11 @@ pub(crate) async fn settle_project_hint_outcomes(
         };
     };
 
-    let import = crate::analytics_bridge::import_hook_analytics(analytics, sources).await;
+    let import = hotpath::future!(
+        crate::analytics_bridge::import_hook_analytics(analytics, sources),
+        label = "hints.import"
+    )
+    .await;
     let import_errors: Vec<String> = import
         .sources
         .iter()
@@ -278,7 +305,11 @@ pub(crate) async fn settle_project_hint_outcomes(
                     "hint-outcome settlement pass completed"
                 );
             }
-            record_settled_adoption_outcomes(sessions, stats).await;
+            hotpath::future!(
+                record_settled_adoption_outcomes(sessions, stats),
+                label = "hints.record_adoption"
+            )
+            .await;
             HintOutcomeSettlement::Settled {
                 imported_events: import.imported(),
                 import_errors,
@@ -372,6 +403,7 @@ fn activity_from_row(
     }))
 }
 
+#[hotpath::measure(label = "hints.activity_parse")]
 fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {

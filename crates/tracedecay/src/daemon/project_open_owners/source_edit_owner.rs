@@ -94,6 +94,7 @@ pub(super) fn source_edit_surface_result(
     })
 }
 
+#[hotpath::measure(label = "daemon.project.source_edit_rollback", future = true)]
 pub(super) async fn invoke_project_open_source_edit_rollback(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,

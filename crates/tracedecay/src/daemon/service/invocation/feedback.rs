@@ -256,6 +256,7 @@ pub(super) fn feedback_scope_matches(
         .is_ok_and(|scope| &scope == expected)
 }
 
+#[hotpath::measure(label = "daemon.service.feedback.execute", future = true)]
 pub(super) async fn execute_feedback(
     wire_request_id: String,
     owner: Option<DaemonFeedbackInvocationOwner>,
@@ -560,6 +561,7 @@ fn advisory_cycle_contract_problem() -> ApplicationProblem {
     })
 }
 
+#[hotpath::measure(label = "daemon.service.feedback.advisory_cycle", future = true)]
 pub(super) async fn execute_feedback_advisory_cycle(
     wire_request_id: String,
     owner: Option<DaemonAdvisoryCycleInvocationOwner>,

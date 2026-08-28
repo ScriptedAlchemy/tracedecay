@@ -58,6 +58,7 @@ struct DiscoveredRun {
 ///
 /// The registered-database entry points live on the root store adapter, which
 /// implements [`WorkflowIngestSink`]; this sweep sees only that port.
+#[hotpath::measure(label = "sessions.workflow_ingest.sweep", future = true)]
 pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     sink: &S,
     project_id: &ProjectId,
@@ -125,6 +126,7 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
 
 /// Discover every workflow run under `projects_dir` by walking
 /// `<slug>/<session_id>/subagents/workflows/<run_id>/`.
+#[hotpath::measure(label = "sessions.workflow_ingest.discover")]
 fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
     let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_RUNS);
     let mut runs = Vec::new();
@@ -236,6 +238,7 @@ fn run_belongs_to_project(run: &DiscoveredRun, project_matcher: &ProjectRootMatc
 /// The owning session's working directory, probed from the parent transcript
 /// (`<session_id>.jsonl`, two levels above `subagents/workflows/`) or, failing
 /// that, an agent transcript in the run dir.
+#[hotpath::measure(label = "sessions.workflow_ingest.resolve_cwd")]
 fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
     // Parent transcript sits at <slug>/<session_id>.jsonl. agents_dir is
     // <slug>/<session_id>/subagents/workflows/<run_id>; `ancestors()` yields
@@ -264,6 +267,7 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
 
 /// Absolute paths to the `agent-<id>.jsonl` transcripts in a run directory,
 /// excluding the sibling `.meta.json` files and `journal.jsonl`.
+#[hotpath::measure(label = "sessions.workflow_ingest.agent_transcripts")]
 fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
     let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_AGENTS);
     let mut paths: Vec<PathBuf> = collect_files_with_ext_bounded(agents_dir, "jsonl", 0, bounds)
@@ -286,6 +290,7 @@ fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse one discovered run and upsert its run row plus every agent row.
+#[hotpath::measure(label = "sessions.workflow_ingest.ingest_run", future = true)]
 async fn ingest_one_run<S: WorkflowIngestSink>(
     sink: &S,
     run: &DiscoveredRun,
@@ -317,6 +322,7 @@ async fn ingest_one_run<S: WorkflowIngestSink>(
 
 /// Read and JSON-parse a `workflows/<run_id>.json` file, or `None` when it is
 /// missing or malformed (fail-open — the run is then treated as dir-only).
+#[hotpath::measure(label = "sessions.workflow_ingest.read_meta")]
 fn read_run_meta(path: &Path) -> Option<Value> {
     let text = read_snapshot_text_bounded("claude-workflow", path, MAX_SNAPSHOT_METADATA_BYTES)
         .ok()
@@ -330,6 +336,7 @@ fn read_run_meta(path: &Path) -> Option<Value> {
 
 /// Build a [`WorkflowRun`] and its agent roster from a parsed run-meta JSON
 /// (`workflows/<run_id>.json`).
+#[hotpath::measure(label = "sessions.workflow_ingest.parse_meta")]
 fn parse_run_from_meta(
     run_id: &str,
     parent_session_id: &str,
@@ -382,6 +389,7 @@ fn parse_run_from_meta(
 
 /// Synthesize a Running [`WorkflowRun`] for a dir-only (in-progress / orphan)
 /// run and build its roster from `journal.jsonl` plus the agent files present.
+#[hotpath::measure(label = "sessions.workflow_ingest.parse_dir")]
 fn parse_run_from_dir(
     run_id: &str,
     parent_session_id: &str,
@@ -566,10 +574,12 @@ struct TranscriptSummary {
     last_ts: Option<i64>,
 }
 
+#[hotpath::measure(label = "sessions.workflow_ingest.summarize_transcript")]
 fn summarize_transcript_file(path: &Path) -> TranscriptSummary {
     let Ok(file) = File::open(path) else {
         return TranscriptSummary::default();
     };
+    let file = hotpath::io!(file, label = "sessions.workflow_ingest.transcript_io");
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut summary = TranscriptSummary::default();
     loop {
@@ -634,11 +644,13 @@ struct JournalEvent {
 
 /// Parse `journal.jsonl` into its events, skipping malformed lines. Absent
 /// journal yields an empty list.
+#[hotpath::measure(label = "sessions.workflow_ingest.read_journal")]
 fn read_journal(agents_dir: &Path) -> Vec<JournalEvent> {
     let path = agents_dir.join("journal.jsonl");
     let Ok(file) = File::open(&path) else {
         return Vec::new();
     };
+    let file = hotpath::io!(file, label = "sessions.workflow_ingest.journal_io");
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut events = Vec::new();
     while events.len() < MAX_WORKFLOW_JOURNAL_EVENTS {

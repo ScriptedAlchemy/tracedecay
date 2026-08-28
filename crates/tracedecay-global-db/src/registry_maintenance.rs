@@ -112,6 +112,7 @@ pub struct RegistryOrphanRelinkDiffReport {
     pub issues: Vec<String>,
 }
 
+#[hotpath::measure(future = true, label = "global_db.registry_maintenance.query")]
 pub async fn diff_registry_orphan_relink_report(
     db: &RegisteredGlobalDb,
     report: &RegistryOrphanRelinkReport,
@@ -279,6 +280,7 @@ where
     Ok(false)
 }
 
+#[hotpath::measure(future = true, label = "global_db.registry_maintenance.persist")]
 pub async fn apply_registry_orphan_relink_report(
     db: &RegisteredGlobalDb,
     report: &RegistryOrphanRelinkReport,

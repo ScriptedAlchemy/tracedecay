@@ -45,6 +45,7 @@ pub(crate) fn projection_mismatch(
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.recover.open")]
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
@@ -164,6 +165,7 @@ fn close_recovered_after_error<T>(
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.recover.checkpoint")]
 pub(crate) fn checkpoint_recovered_database(
     recovered: GrafeoDB,
     reopen: &ValidatedOpen,

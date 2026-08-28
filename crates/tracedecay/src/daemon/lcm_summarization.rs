@@ -31,6 +31,7 @@ pub(super) async fn resolve_authoritative_summary(
     generate_provider_summary(provider, request, timeout).await
 }
 
+#[hotpath::measure(label = "daemon.lcm.summarize", future = true)]
 async fn generate_provider_summary(
     provider: &str,
     request: LcmSummaryRequest,
@@ -50,6 +51,7 @@ async fn generate_provider_summary(
 /// The scan is provider-neutral: it decodes each row once and offers it to the
 /// recognizers registered for this provider, which own every provider-specific
 /// recognition rule, corroboration query, and route label.
+#[hotpath::measure(label = "daemon.lcm.evidence", future = true)]
 pub(super) async fn native_summary_evidence(
     database: &RegisteredGlobalDb,
     provider: &str,

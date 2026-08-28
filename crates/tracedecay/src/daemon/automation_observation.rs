@@ -85,6 +85,7 @@ pub(crate) fn record_project_run(
     record_run_with_producer(Some(producer), project_path, record, surface);
 }
 
+#[hotpath::measure(label = "daemon.automation.observation.record")]
 pub(in crate::daemon) fn record_run_with_producer(
     producer: Option<&BoundedObservabilityProducerV1>,
     project_path: &Path,

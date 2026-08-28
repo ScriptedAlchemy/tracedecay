@@ -153,6 +153,7 @@ impl DaemonSessionRetrievalService {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session.lcm_describe", future = true)]
     pub(super) async fn execute_lcm_describe_admitted(
         &self,
         context: &RequestContext,
@@ -346,6 +347,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
+    #[hotpath::measure(label = "daemon.session.lcm_expand", future = true)]
     pub(super) async fn execute_lcm_expand_admitted(
         &self,
         context: &RequestContext,

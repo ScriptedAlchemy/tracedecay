@@ -197,6 +197,7 @@ fn authority_still_matches(
         && authority.proof == request.proof
 }
 
+#[hotpath::measure(label = "usecases.edit.execute", future = true)]
 pub(super) async fn execute_source_edit_inner<A>(
     graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
@@ -622,6 +623,7 @@ where
     Ok(record.into_live_application_result(outcome, verification))
 }
 
+#[hotpath::measure(label = "usecases.edit.preview", future = true)]
 pub(super) async fn resolve_source_edit_preview(
     graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,

@@ -137,6 +137,7 @@ impl ProjectMemoryFactAddPreflight {
 /// Converts an automation item without manufacturing a second identity. The
 /// deterministic operation identity makes repeated processing of the same
 /// run/apply identity idempotent at the authority boundary.
+#[hotpath::measure(label = "usecases.memory.automatic.command")]
 pub fn automatic_fact_add_command(
     owner: FactOwnerV1,
     request: ProjectMemoryFactAddRequest,
@@ -214,6 +215,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Canonicalizes one retained add before any external effect identity is
     /// prepared. The accepted path and store command share the store-owned
     /// input digest; the refusal path contains no command or raw secret.
+    #[hotpath::measure(label = "usecases.memory.add.preflight")]
     pub fn preflight_project_memory_fact_add(
         &self,
         request: ProjectMemoryFactAddRequest,
@@ -250,6 +252,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         })
     }
 
+    #[hotpath::measure(label = "usecases.memory.add", future = true)]
     pub async fn add_project_memory_fact(
         &self,
         request: ProjectMemoryFactAddCommandV1,
@@ -270,6 +273,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Consumes a canonical add preflight. Privacy refusals are truthful
     /// no-write outcomes and committed authority failures retain their exact
     /// outcome for external partial-effect settlement.
+    #[hotpath::measure(label = "usecases.memory.add.preflighted", future = true)]
     pub async fn add_preflighted_project_memory_fact(
         &self,
         preflight: ProjectMemoryFactAddPreflight,

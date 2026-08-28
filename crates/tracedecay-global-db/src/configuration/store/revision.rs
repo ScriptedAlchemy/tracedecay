@@ -63,6 +63,7 @@ pub(super) async fn insert_revision_with_registry(
 }
 
 impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
+    #[hotpath::measure(future = true, label = "global_db.configuration.query")]
     async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
         let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
         let revision_id = current_revision_id_from_executor(&read).await?;
@@ -81,8 +82,14 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
             revision_id
                 .validate()
                 .map_err(ConfigurationStoreError::from)?;
-            let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            read_revision_from_executor(&read, &revision_id).await
+            hotpath::future!(
+                async {
+                    let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
+                    read_revision_from_executor(&read, &revision_id).await
+                },
+                label = "global_db.configuration.query"
+            )
+            .await
         }
     }
 
@@ -92,23 +99,33 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send {
         let plan = plan.clone();
         async move {
-            plan.validate().map_err(ConfigurationStoreError::from)?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(unavailable_store)?;
-            let outcome =
-                match read_change_plan_from_executor(&transaction, &plan.plan.plan_id).await {
-                    Ok(Some(existing)) if existing == plan => Ok(()),
-                    Ok(Some(_)) => Err(ConfigurationStoreError::IdempotencyConflict),
-                    Ok(None) => insert_change_plan(&transaction, &plan).await,
-                    Err(error) => Err(error),
-                };
-            match outcome {
-                Ok(()) => transaction.commit().await.map_err(unavailable_store),
-                Err(error) => Err(error),
-            }
+            hotpath::future!(
+                async {
+                    plan.validate().map_err(ConfigurationStoreError::from)?;
+                    let transaction = self
+                        .db
+                        .begin_write_transaction()
+                        .await
+                        .map_err(unavailable_store)?;
+                    let outcome = match read_change_plan_from_executor(
+                        &transaction,
+                        &plan.plan.plan_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(existing)) if existing == plan => Ok(()),
+                        Ok(Some(_)) => Err(ConfigurationStoreError::IdempotencyConflict),
+                        Ok(None) => insert_change_plan(&transaction, &plan).await,
+                        Err(error) => Err(error),
+                    };
+                    match outcome {
+                        Ok(()) => transaction.commit().await.map_err(unavailable_store),
+                        Err(error) => Err(error),
+                    }
+                },
+                label = "global_db.configuration.persist.plan"
+            )
+            .await
         }
     }
 
@@ -120,11 +137,18 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         let plan_id = plan_id.clone();
         async move {
             plan_id.validate().map_err(ConfigurationStoreError::from)?;
-            let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            read_change_plan_from_executor(&read, &plan_id).await
+            hotpath::future!(
+                async {
+                    let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
+                    read_change_plan_from_executor(&read, &plan_id).await
+                },
+                label = "global_db.configuration.query"
+            )
+            .await
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.configuration.persist.commit")]
     async fn commit(
         &self,
         commit: ConfigurationCommitV1,
@@ -153,8 +177,14 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>> + Send {
         let after = after.cloned();
         async move {
-            let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
-            audit_from_transaction(&read, after.as_ref(), limit).await
+            hotpath::future!(
+                async {
+                    let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
+                    audit_from_transaction(&read, after.as_ref(), limit).await
+                },
+                label = "global_db.configuration.query"
+            )
+            .await
         }
     }
 }

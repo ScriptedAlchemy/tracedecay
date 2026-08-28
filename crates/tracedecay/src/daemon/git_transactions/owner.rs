@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::{
@@ -34,6 +34,16 @@ use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
+
+#[cfg(feature = "hotpath")]
+type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdRwLock<T> = std::sync::RwLock<T>;
+
+#[cfg(feature = "hotpath")]
+type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DaemonGitAuthorityStateV1 {
@@ -72,6 +82,7 @@ struct ProductionDaemonGitAuthoritySource {
 }
 
 impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
+    #[hotpath::measure(label = "daemon.git.tx.authority")]
     fn current_capability(
         &self,
         capability_id: &CapabilityId,
@@ -197,9 +208,19 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
     }
 }
 
-#[derive(Default)]
 struct DaemonGitAuthoritySlot {
-    source: RwLock<Option<Arc<dyn DaemonGitAuthoritySource>>>,
+    source: ProfiledStdRwLock<Option<Arc<dyn DaemonGitAuthoritySource>>>,
+}
+
+impl Default for DaemonGitAuthoritySlot {
+    fn default() -> Self {
+        Self {
+            source: hotpath::rw_lock!(
+                std::sync::RwLock::new(None),
+                label = "daemon.git.tx.authority_source"
+            ),
+        }
+    }
 }
 
 impl DaemonGitAuthoritySlot {
@@ -252,6 +273,7 @@ impl DaemonGitIndexPolicyRecheck {
 }
 
 impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
+    #[hotpath::measure(label = "daemon.git.tx.recheck")]
     fn recheck(
         &self,
         request: &GitIndexApplyRequestV1,
@@ -421,14 +443,35 @@ impl ServiceKey {
 /// repository queue for each exact project/worktree identity. Linked
 /// worktrees share one session store actor without sharing native executors or
 /// mutation authority.
-#[derive(Default)]
 pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
     stores: GitIndexTransactionStoreRegistry,
     mutation_queue: Arc<RepositoryMutationQueue>,
-    services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
-    creation_gate: tokio::sync::Mutex<()>,
+    services: ProfiledTokioMutex<HashMap<ServiceKey, ServiceEntry>>,
+    creation_gate: ProfiledTokioMutex<()>,
     shutdown_fenced: AtomicBool,
-    shutdown_receipt: tokio::sync::Mutex<Option<DaemonGitIndexShutdownReceiptV1>>,
+    shutdown_receipt: ProfiledTokioMutex<Option<DaemonGitIndexShutdownReceiptV1>>,
+}
+
+impl Default for DaemonGitIndexTransactionServiceRegistry {
+    fn default() -> Self {
+        Self {
+            stores: GitIndexTransactionStoreRegistry::default(),
+            mutation_queue: Arc::new(RepositoryMutationQueue::default()),
+            services: hotpath::mutex!(
+                tokio::sync::Mutex::new(HashMap::new()),
+                label = "daemon.git.tx.services"
+            ),
+            creation_gate: hotpath::mutex!(
+                tokio::sync::Mutex::new(()),
+                label = "daemon.git.tx.creation_gate"
+            ),
+            shutdown_fenced: AtomicBool::new(false),
+            shutdown_receipt: hotpath::mutex!(
+                tokio::sync::Mutex::new(None),
+                label = "daemon.git.tx.shutdown_receipt"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,7 +481,7 @@ pub(crate) struct DaemonGitIndexShutdownReceiptV1 {
 }
 
 impl DaemonGitIndexTransactionServiceRegistry {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.git.tx.ensure", future = true)]
     pub(crate) async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -550,6 +593,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
             .map(|entry| Arc::clone(&entry.service)))
     }
 
+    #[hotpath::measure(label = "daemon.git.tx.install_authority", future = true)]
     pub(crate) async fn install_authority(
         &self,
         repository_root: &std::path::Path,
@@ -592,6 +636,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
     /// database. The caller has already fenced admission with a durable
     /// tombstone; dropping these process-local owners prevents a stale actor
     /// from retaining the deleted database.
+    #[hotpath::measure(label = "daemon.git.tx.retire", future = true)]
     pub(crate) async fn retire_project_database(
         &self,
         project_id: &ProjectId,
@@ -635,6 +680,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         }))
     }
 
+    #[hotpath::measure(label = "daemon.git.tx.shutdown", future = true)]
     pub(crate) async fn shutdown(
         &self,
     ) -> Result<DaemonGitIndexShutdownReceiptV1, GitIndexTransactionPortError> {

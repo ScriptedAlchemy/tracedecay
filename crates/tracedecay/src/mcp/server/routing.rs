@@ -66,6 +66,7 @@ impl ConnectionRouteState {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.routing.observe_initialize", future = true)]
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
@@ -251,6 +252,7 @@ async fn resolve_initialize_roots_project_path(
     None
 }
 
+#[hotpath::measure(label = "mcp.server.routing.initialize_root", future = true)]
 async fn resolve_initialize_root_project_path(
     root: &Path,
     registry_db: &RegisteredGlobalDb,

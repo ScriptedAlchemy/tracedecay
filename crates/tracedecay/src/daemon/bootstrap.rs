@@ -247,7 +247,7 @@ pub async fn run_foreground(
                 ))
                 .await
             }),
-            label = "daemon.client.broker_connection"
+            label = "daemon.bootstrap.broker_connection"
         ));
     }
     lifecycle.begin_draining();
@@ -480,294 +480,307 @@ async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
-    let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
-    prewarm_static_daemon_bootstrap_catalog();
-    let endpoint = transport::DaemonEndpoint::Unix(socket_path);
-    let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
-        &profile_root,
-        "managed daemon database ownership",
-    )?;
-    let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
-    let _database_scope = crate::db::enter_daemon_database_scope(
-        &profile_root,
-        authority.record().epoch,
-        &authority.record().process_run_id,
-    )?;
-    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
-    let engine = DaemonEngine::default()
-        .with_progress_producer_incarnation(authority.record().epoch)
-        .with_profile_identity(authority.profile_identity().clone())
-        .with_http_application_registry(http_application_registry.clone());
-    engine
-        .store_administration
-        .configure_codex_preparation_resources(
-            engine
-                .invocation
-                .code_index_schedulers
-                .process_resident_memory(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
-    engine
-        .store_administration
-        .install_remote_recovery_project_lifecycle(
+    run_foreground_unix_inner(socket_path, remote_tls).await
+}
+
+#[cfg(unix)]
+fn run_foreground_unix_inner(
+    socket_path: PathBuf,
+    remote_tls: Option<RemoteBrainTlsConfig>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(async move {
+        let profile_root =
+            crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+                message: "could not determine TraceDecay user data directory".to_string(),
+            })?;
+        prewarm_static_daemon_bootstrap_catalog();
+        let endpoint = transport::DaemonEndpoint::Unix(socket_path);
+        let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
+            &profile_root,
+            "managed daemon database ownership",
+        )?;
+        let mut authority =
+            authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
+        let _database_scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            authority.record().epoch,
+            &authority.record().process_run_id,
+        )?;
+        let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
+        let engine = DaemonEngine::default()
+            .with_progress_producer_incarnation(authority.record().epoch)
+            .with_profile_identity(authority.profile_identity().clone())
+            .with_http_application_registry(http_application_registry.clone());
+        engine
+            .store_administration
+            .configure_codex_preparation_resources(
+                engine
+                    .invocation
+                    .code_index_schedulers
+                    .process_resident_memory(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to configure Codex preparation resources: {error}"),
+            })?;
+        engine
+            .store_administration
+            .install_remote_recovery_project_lifecycle(
+                engine.invocation.clone(),
+                Arc::clone(&engine.project_open_gates),
+            )?;
+        let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
+            administration: engine.store_administration.clone(),
+            invocation: engine.invocation.clone(),
+            project_open_gates: Arc::clone(&engine.project_open_gates),
+        };
+        if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
+            remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
+        {
+            log_daemon_event(
+                "remote_account_deletion_resume",
+                &[("outcome", format!("{:?}", receipt.status))],
+            );
+            return Ok(());
+        }
+        install_profile_worker_plan(&engine.store_administration, &engine.invocation).await?;
+        let socket_path = match authority.endpoint() {
+            transport::DaemonEndpoint::Unix(path) => path.clone(),
+            transport::DaemonEndpoint::Loopback(_) => {
+                return Err(TraceDecayError::Config {
+                    message: "Unix daemon requires a Unix socket endpoint".to_string(),
+                });
+            }
+        };
+        if let Some(parent) = socket_path.parent() {
+            match tracedecay_private_fs::create_private_directory(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
+                        TraceDecayError::Config {
+                            message: format!(
+                                "refusing daemon socket directory '{}': {error}",
+                                parent.display()
+                            ),
+                        }
+                    })?;
+                }
+                Err(error) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "failed to create private socket directory '{}': {error}",
+                            parent.display()
+                        ),
+                    });
+                }
+            }
+        }
+        prepare_socket_path(&authority).await?;
+
+        let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+        authority.publish_endpoint(&bound_endpoint)?;
+        set_owner_only_permissions(&socket_path, 0o600)?;
+        log_daemon_event(
+            "daemon_listening",
+            &[("endpoint", bound_endpoint.to_string())],
+        );
+        install_http_application_cold_resolver(
+            &http_application_registry,
+            engine.store_administration.clone(),
             engine.invocation.clone(),
             Arc::clone(&engine.project_open_gates),
         )?;
-    let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
-        administration: engine.store_administration.clone(),
-        invocation: engine.invocation.clone(),
-        project_open_gates: Arc::clone(&engine.project_open_gates),
-    };
-    if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
-        remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
-    {
-        log_daemon_event(
-            "remote_account_deletion_resume",
-            &[("outcome", format!("{:?}", receipt.status))],
-        );
-        return Ok(());
-    }
-    install_profile_worker_plan(&engine.store_administration, &engine.invocation).await?;
-    let socket_path = match authority.endpoint() {
-        transport::DaemonEndpoint::Unix(path) => path.clone(),
-        transport::DaemonEndpoint::Loopback(_) => {
-            return Err(TraceDecayError::Config {
-                message: "Unix daemon requires a Unix socket endpoint".to_string(),
-            });
-        }
-    };
-    if let Some(parent) = socket_path.parent() {
-        match tracedecay_private_fs::create_private_directory(parent) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!(
-                            "refusing daemon socket directory '{}': {error}",
-                            parent.display()
-                        ),
-                    }
-                })?;
-            }
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "failed to create private socket directory '{}': {error}",
-                        parent.display()
-                    ),
-                });
-            }
-        }
-    }
-    prepare_socket_path(&authority).await?;
-
-    let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
-    authority.publish_endpoint(&bound_endpoint)?;
-    set_owner_only_permissions(&socket_path, 0o600)?;
-    log_daemon_event(
-        "daemon_listening",
-        &[("endpoint", bound_endpoint.to_string())],
-    );
-    install_http_application_cold_resolver(
-        &http_application_registry,
-        engine.store_administration.clone(),
-        engine.invocation.clone(),
-        Arc::clone(&engine.project_open_gates),
-    )?;
-    install_remote_http_application_router(
-        &http_application_registry,
-        &engine.store_administration,
-        &engine.invocation,
-    )
-    .await?;
-    let http_application_service =
-        http_application::DaemonHttpApplicationService::bind_with_remote_tls(
-            http_application_registry.clone(),
-            authority.auth_token(),
-            remote_tls.as_ref(),
+        install_remote_http_application_router(
+            &http_application_registry,
+            &engine.store_administration,
+            &engine.invocation,
         )
         .await?;
-    authority.publish_http_application_endpoint(http_application_service.endpoint())?;
-    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
-        authority.publish_remote_brain_tls_endpoint(endpoint)?;
-    }
-    log_daemon_event(
-        "daemon_http_application_listening",
-        &[("endpoint", http_application_service.endpoint().to_string())],
-    );
-    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+        let http_application_service =
+            http_application::DaemonHttpApplicationService::bind_with_remote_tls(
+                http_application_registry.clone(),
+                authority.auth_token(),
+                remote_tls.as_ref(),
+            )
+            .await?;
+        authority.publish_http_application_endpoint(http_application_service.endpoint())?;
+        if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+            authority.publish_remote_brain_tls_endpoint(endpoint)?;
+        }
         log_daemon_event(
-            "daemon_remote_brain_tls_listening",
-            &[("endpoint", format!("https://{endpoint}/remote/"))],
+            "daemon_http_application_listening",
+            &[("endpoint", http_application_service.endpoint().to_string())],
         );
-    }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
-    let profile_database = engine
-        .store_administration
-        .registered_profile_database()
-        .await?;
-    let maintenance = maintenance::MaintenanceCoordinator::spawn(
-        profile_root.clone(),
-        profile_database.clone(),
-        engine.store_administration.clone(),
-        engine.invocation.code_index_schedulers.clone(),
-        sync_config.retention.clone(),
-        maintenance::BranchStoreGcCadenceV1 {
-            branch_gc_days: sync_config.branch_gc_days,
-            orphan_db_gc_days: sync_config.orphan_db_gc_days,
-        },
-    )
-    .await;
-    // Install the daemon-wide git-metadata owner. Individual projects provide
-    // every watcher setting from the pinned configuration already held by
-    // their retained server; bootstrap never supplies activation authority.
-    let git_watcher = git_watch::GitWatcher::new_with_canonical_scheduler(
-        maintenance.clone(),
-        engine.invocation.code_index_schedulers.clone(),
-    );
-    if matches!(
-        git_watcher.spawn().await,
-        git_watch::GitWatcherStart::ShuttingDown
-    ) {
-        log_daemon_event(
-            "git_watch_start_rejected",
-            &[("reason", "shutting_down".to_string())],
-        );
-    }
-    // PR-branch auto-tracking runs independently of the metadata watcher: it is
-    // gated per-project on `sync.auto_track_pr_branches` (default off), so this
-    // loop is inert unless a project opts in.
-    let pr_autotrack_task = pr_autotrack::spawn_with_administration(
-        engine.store_administration.clone(),
-        engine.invocation.code_index_schedulers.clone(),
-    );
-    let engine = engine
-        .with_git_watcher(git_watcher)
-        .with_maintenance_coordinator(maintenance)
-        .with_pr_autotrack_task(pr_autotrack_task)
+        if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+            log_daemon_event(
+                "daemon_remote_brain_tls_listening",
+                &[("endpoint", format!("https://{endpoint}/remote/"))],
+            );
+        }
+        let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+        let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+        let profile_database = engine
+            .store_administration
+            .registered_profile_database()
+            .await?;
+        let maintenance = maintenance::MaintenanceCoordinator::spawn(
+            profile_root.clone(),
+            profile_database.clone(),
+            engine.store_administration.clone(),
+            engine.invocation.code_index_schedulers.clone(),
+            sync_config.retention.clone(),
+            maintenance::BranchStoreGcCadenceV1 {
+                branch_gc_days: sync_config.branch_gc_days,
+                orphan_db_gc_days: sync_config.orphan_db_gc_days,
+            },
+        )
         .await;
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
-    let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+        // Install the daemon-wide git-metadata owner. Individual projects provide
+        // every watcher setting from the pinned configuration already held by
+        // their retained server; bootstrap never supplies activation authority.
+        let git_watcher = git_watch::GitWatcher::new_with_canonical_scheduler(
+            maintenance.clone(),
+            engine.invocation.code_index_schedulers.clone(),
+        );
+        if matches!(
+            git_watcher.spawn().await,
+            git_watch::GitWatcherStart::ShuttingDown
+        ) {
+            log_daemon_event(
+                "git_watch_start_rejected",
+                &[("reason", "shutting_down".to_string())],
+            );
+        }
+        // PR-branch auto-tracking runs independently of the metadata watcher: it is
+        // gated per-project on `sync.auto_track_pr_branches` (default off), so this
+        // loop is inert unless a project opts in.
+        let pr_autotrack_task = pr_autotrack::spawn_with_administration(
+            engine.store_administration.clone(),
+            engine.invocation.code_index_schedulers.clone(),
+        );
+        let engine = engine
+            .with_git_watcher(git_watcher)
+            .with_maintenance_coordinator(maintenance)
+            .with_pr_autotrack_task(pr_autotrack_task)
+            .await;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
+        let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
 
-    loop {
-        let stream = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok(stream) => stream,
-                Err(error) => {
-                    log_accept_error_and_backoff(&error).await;
+        loop {
+            let stream = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        log_accept_error_and_backoff(&error).await;
+                        continue;
+                    }
+                },
+                completed = client_tasks.join_next(), if !client_tasks.is_empty() => {
+                    if let Some(completed) = completed {
+                        log_client_task_result(completed);
+                    }
+                    continue;
+                },
+                _ = tokio::signal::ctrl_c() => break,
+                _ = sigterm.recv() => break,
+            };
+            let permit = match admission.try_admit() {
+                DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+                DaemonClientAdmissionOutcome::Saturated(response) => {
+                    reject_saturated_daemon_client(stream, response).await;
                     continue;
                 }
-            },
-            completed = client_tasks.join_next(), if !client_tasks.is_empty() => {
-                if let Some(completed) = completed {
-                    log_client_task_result(completed);
+            };
+            let admission_class = permit.class();
+            let engine = engine.clone();
+            let auth_token = authority.auth_token().to_string();
+            let client: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>,
+            > = Box::pin(serve_authenticated_socket_client_with_class(
+                stream,
+                engine,
+                auth_token,
+                admission_class,
+            ));
+            client_tasks.spawn(hotpath::future!(
+                with_connection_admission(permit, client),
+                label = "daemon.bootstrap.socket_connection"
+            ));
+        }
+        engine.lifecycle.begin_draining();
+        // Stop accepting and unlink the socket before draining so clients that
+        // connect during shutdown get NotFound/ConnectionRefused (which they retry
+        // via `connect_with_restart_grace`) instead of a queued connection that
+        // will never be served.
+        drop(listener);
+        let endpoint_cleanup = authority.cleanup_owned_endpoint();
+        cancel_retained_session_history(&engine.store_administration).await;
+        let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
+            - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+        // Keep auxiliary process creation blocked until every scheduler and client
+        // task is drained or abandoned. A killed app-server call may retry before
+        // unwinding, so a shorter guard leaves a shutdown-time respawn race. The
+        // coordinator owns every spawned shutdown task and applies one deadline to
+        // each of them; awaiting its receipt keeps this fence active until those
+        // owners have either joined or reported a typed timeout.
+        let _codex_shutdown =
+            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+        log_daemon_event(
+            "daemon_shutdown",
+            &[("socket", socket_path.display().to_string())],
+        );
+        let shutdown_lifecycle = engine.lifecycle.clone();
+        let shutdown_engine = engine.clone();
+        let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
+        let semantic_artifact_gc_join = semantic_artifact_gc;
+        let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
+            &shutdown_lifecycle,
+            shutdown_deadline,
+            async move {
+                let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
+                let memory_graph_reconciliation =
+                    shutdown_engine.memory_graph_reconciliation_shutdown_owner();
+                let semantic_artifact_gc_owner =
+                    shutdown_coordination::ShutdownOwner::with_deadline_result(
+                        "semantic_artifact_gc",
+                        move || semantic_artifact_gc_cancel.cancel(),
+                        move |_| async move { semantic_artifact_gc_join.shutdown().await },
+                    );
+                let http_application_owner =
+                    shutdown_coordination::ShutdownOwner::with_deadline_result(
+                        "http_application",
+                        || {},
+                        move |_| async move { http_application_service.shutdown().await },
+                    );
+                let hosted_dashboard_owner = hosted_dashboard_shutdown_owner();
+                match owner_phases.first_mut() {
+                    Some(producers) => {
+                        producers.push(semantic_artifact_gc_owner);
+                        producers.push(http_application_owner);
+                        producers.push(hosted_dashboard_owner);
+                    }
+                    None => owner_phases.push(vec![
+                        semantic_artifact_gc_owner,
+                        http_application_owner,
+                        hosted_dashboard_owner,
+                    ]),
                 }
-                continue;
+                let server_engine = shutdown_engine.clone();
+                shutdown_orchestration::DaemonShutdownPlan::new(
+                    client_tasks,
+                    owner_phases,
+                    async move { server_engine.shutdown_servers(shutdown_deadline).await },
+                )
+                .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
             },
-            _ = tokio::signal::ctrl_c() => break,
-            _ = sigterm.recv() => break,
-        };
-        let permit = match admission.try_admit() {
-            DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-            DaemonClientAdmissionOutcome::Saturated(response) => {
-                reject_saturated_daemon_client(stream, response).await;
-                continue;
-            }
-        };
-        let admission_class = permit.class();
-        let engine = engine.clone();
-        let auth_token = authority.auth_token().to_string();
-        let client: std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>,
-        > = Box::pin(serve_authenticated_socket_client_with_class(
-            stream,
-            engine,
-            auth_token,
-            admission_class,
-        ));
-        client_tasks.spawn(hotpath::future!(
-            with_connection_admission(permit, client),
-            label = "daemon.client.socket_connection"
-        ));
-    }
-    engine.lifecycle.begin_draining();
-    // Stop accepting and unlink the socket before draining so clients that
-    // connect during shutdown get NotFound/ConnectionRefused (which they retry
-    // via `connect_with_restart_grace`) instead of a queued connection that
-    // will never be served.
-    drop(listener);
-    let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    cancel_retained_session_history(&engine.store_administration).await;
-    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
-        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
-    // Keep auxiliary process creation blocked until every scheduler and client
-    // task is drained or abandoned. A killed app-server call may retry before
-    // unwinding, so a shorter guard leaves a shutdown-time respawn race. The
-    // coordinator owns every spawned shutdown task and applies one deadline to
-    // each of them; awaiting its receipt keeps this fence active until those
-    // owners have either joined or reported a typed timeout.
-    let _codex_shutdown =
-        tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
-    log_daemon_event(
-        "daemon_shutdown",
-        &[("socket", socket_path.display().to_string())],
-    );
-    let shutdown_lifecycle = engine.lifecycle.clone();
-    let shutdown_engine = engine.clone();
-    let semantic_artifact_gc_cancel = semantic_artifact_gc.clone();
-    let semantic_artifact_gc_join = semantic_artifact_gc;
-    let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
-        &shutdown_lifecycle,
-        shutdown_deadline,
-        async move {
-            let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
-            let memory_graph_reconciliation =
-                shutdown_engine.memory_graph_reconciliation_shutdown_owner();
-            let semantic_artifact_gc_owner =
-                shutdown_coordination::ShutdownOwner::with_deadline_result(
-                    "semantic_artifact_gc",
-                    move || semantic_artifact_gc_cancel.cancel(),
-                    move |_| async move { semantic_artifact_gc_join.shutdown().await },
-                );
-            let http_application_owner = shutdown_coordination::ShutdownOwner::with_deadline_result(
-                "http_application",
-                || {},
-                move |_| async move { http_application_service.shutdown().await },
-            );
-            let hosted_dashboard_owner = hosted_dashboard_shutdown_owner();
-            match owner_phases.first_mut() {
-                Some(producers) => {
-                    producers.push(semantic_artifact_gc_owner);
-                    producers.push(http_application_owner);
-                    producers.push(hosted_dashboard_owner);
-                }
-                None => owner_phases.push(vec![
-                    semantic_artifact_gc_owner,
-                    http_application_owner,
-                    hosted_dashboard_owner,
-                ]),
-            }
-            let server_engine = shutdown_engine.clone();
-            shutdown_orchestration::DaemonShutdownPlan::new(
-                client_tasks,
-                owner_phases,
-                async move { server_engine.shutdown_servers(shutdown_deadline).await },
-            )
-            .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
-        },
-    )
-    .await;
-    log_client_drain_shutdown_receipt(&shutdown);
-    log_background_shutdown_receipt(&shutdown.background);
-    log_project_server_shutdown_receipt(&shutdown.project_servers);
-    endpoint_cleanup
+        )
+        .await;
+        log_client_drain_shutdown_receipt(&shutdown);
+        log_background_shutdown_receipt(&shutdown.background);
+        log_project_server_shutdown_receipt(&shutdown.project_servers);
+        endpoint_cleanup
+    })
 }
 
 /// Install the daemon-wide worker authority from the profile's exact
@@ -862,6 +875,7 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.bootstrap.prepare_socket", future = true)]
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {

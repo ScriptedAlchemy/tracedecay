@@ -401,7 +401,7 @@ pub fn materialize_admission<P: ContextPayload>(
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "temporal.context.measure")]
 pub fn measure_context<P: ContextPayload>(
     bundle: &CompactContextBundleV1,
     summary_omissions: &[SummaryOmission],

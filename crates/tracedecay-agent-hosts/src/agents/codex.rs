@@ -133,6 +133,7 @@ impl AgentIntegration for CodexIntegration {
         uninstall_codex_repo_plugin_if_present(&local)
     }
 
+    #[hotpath::measure(label = "hosts.agent.codex.update_plugin")]
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let cached_install_present =
             codex_exact_cache_manifest_path(&ctx.home)?.is_some_and(|path| path.is_file());
@@ -171,6 +172,7 @@ impl AgentIntegration for CodexIntegration {
         Ok(UpdatePluginOutcome::Refreshed(staged))
     }
 
+    #[hotpath::measure(label = "hosts.agent.codex.export")]
     fn export_managed_skills(
         &self,
         home: &Path,
@@ -220,6 +222,7 @@ impl AgentIntegration for CodexIntegration {
         ])
     }
 
+    #[hotpath::measure(label = "hosts.agent.codex.healthcheck")]
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
@@ -387,6 +390,7 @@ impl AgentIntegration for CodexIntegration {
     /// would give the operator two identical tracedecay servers, one of them
     /// outside `codex plugin` management. See [`mcp_registry`] and
     /// [`plugin_registry`] for the full rulings.
+    #[hotpath::measure(label = "hosts.agent.codex.install")]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -405,6 +409,7 @@ impl AgentIntegration for CodexIntegration {
     /// Mirrors `activate_deployed_host_component_registration`: the
     /// MCP-only set is removed through Codex's own `codex mcp remove`, and a
     /// `Core`-bearing set keeps the manual plugin-removal guidance.
+    #[hotpath::measure(label = "hosts.agent.codex.uninstall")]
     fn deactivate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],

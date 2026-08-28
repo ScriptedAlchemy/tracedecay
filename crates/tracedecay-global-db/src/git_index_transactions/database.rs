@@ -67,7 +67,7 @@ impl Executor for GitMutationWriteTransaction<'_> {
 }
 
 impl GitMutationDatabase<'_> {
-    #[hotpath::measure]
+    #[hotpath::measure(future = true, label = "global_db.git_index.txn.begin")]
     pub(crate) async fn begin_write(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<GitMutationWriteTransaction<'_>> {

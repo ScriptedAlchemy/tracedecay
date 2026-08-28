@@ -289,6 +289,7 @@ async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedSc
     })
 }
 
+#[hotpath::measure(label = "mcp.analytics.report.total")]
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
@@ -311,10 +312,12 @@ pub(super) async fn handle_analytics(
     let scope = resolve_scope(cg, all_projects).await?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
-    let event_count = gdb
-        .count_analytics_events(scope.filter.as_deref(), since)
-        .await
-        .map_err(config_error)?;
+    let event_count = hotpath::future!(
+        gdb.count_analytics_events(scope.filter.as_deref(), since),
+        label = "mcp.analytics.report.events"
+    )
+    .await
+    .map_err(config_error)?;
     let mut value = json!({
         "status": "ok",
         "scope": if all_projects { "all" } else { "project" },
@@ -327,10 +330,13 @@ pub(super) async fn handle_analytics(
     });
 
     if section.is_none() {
-        let observatory = tracedecay_usecases::observability::observatory_read_model(
-            gdb,
-            scope.filter.as_deref(),
-            since,
+        let observatory = hotpath::future!(
+            tracedecay_usecases::observability::observatory_read_model(
+                gdb,
+                scope.filter.as_deref(),
+                since,
+            ),
+            label = "mcp.analytics.report.observatory"
         )
         .await;
         let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
@@ -351,12 +357,15 @@ pub(super) async fn handle_analytics(
             })
         };
         let provider_usage_db = if all_projects { None } else { project_sessions };
-        let costs = tracedecay_usecases::observability::costs_read_model(
-            gdb,
-            provider_usage_db,
-            provider_scope.as_ref(),
-            scope.filter.as_deref(),
-            since,
+        let costs = hotpath::future!(
+            tracedecay_usecases::observability::costs_read_model(
+                gdb,
+                provider_usage_db,
+                provider_scope.as_ref(),
+                scope.filter.as_deref(),
+                since,
+            ),
+            label = "mcp.analytics.report.costs"
         )
         .await;
         let costs =
@@ -369,32 +378,44 @@ pub(super) async fn handle_analytics(
     }
 
     if wants_section(section, "tools") {
-        let counts = gdb
-            .query_analytics_tool_counts(scope.filter.as_deref(), since)
-            .await
-            .map_err(config_error)?;
+        let counts = hotpath::future!(
+            gdb.query_analytics_tool_counts(scope.filter.as_deref(), since),
+            label = "mcp.analytics.report.tools"
+        )
+        .await
+        .map_err(config_error)?;
         if let Some(object) = value.as_object_mut() {
             object.insert("tools".to_string(), tools_section(&counts)?);
         }
     }
     if wants_section(section, "hints") {
-        let counts = gdb
-            .query_analytics_hint_counts(scope.filter.as_deref(), since)
-            .await
-            .map_err(config_error)?;
+        let counts = hotpath::future!(
+            gdb.query_analytics_hint_counts(scope.filter.as_deref(), since),
+            label = "mcp.analytics.report.hints"
+        )
+        .await
+        .map_err(config_error)?;
         let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
         if let Some(object) = value.as_object_mut() {
             object.insert("hints".to_string(), hints);
         }
     }
     if wants_section(section, "facts") {
-        let facts = facts_section(cg, &scope, &read_control).await;
+        let facts = hotpath::future!(
+            facts_section(cg, &scope, &read_control),
+            label = "mcp.analytics.report.facts"
+        )
+        .await;
         if let Some(object) = value.as_object_mut() {
             object.insert("facts".to_string(), facts);
         }
     }
     if wants_section(section, "automation") {
-        let automation = automation_section(&scope.root, since).await;
+        let automation = hotpath::future!(
+            automation_section(&scope.root, since),
+            label = "mcp.analytics.report.automation"
+        )
+        .await;
         if let Some(object) = value.as_object_mut() {
             object.insert("automation".to_string(), automation);
         }

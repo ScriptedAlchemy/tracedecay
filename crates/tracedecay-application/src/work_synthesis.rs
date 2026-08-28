@@ -193,6 +193,7 @@ pub enum WorkSynthesisAttemptV1 {
 /// and atomically commits the product link, attempt, and synthesis record.
 /// Every source outcome is read from the attempt authority — never trusted
 /// from the caller — and preserved verbatim in the admission record.
+#[hotpath::measure(label = "application.work.synthesis.admit")]
 pub fn admit_work_synthesis_against_registered_topology<S>(
     attempts: &WorkProductSynthesisAttemptServiceV1<S>,
     context: &RequestContext,

@@ -109,6 +109,7 @@ fn write_str(mmap: &mut memmap2::MmapMut, offset: usize, value: &str) {
     mmap[offset..offset + copy_len].copy_from_slice(&bytes[..copy_len]);
 }
 
+#[hotpath::measure(label = "doctor.monitor.write")]
 fn write_entry_inner(
     mmap_path: &Path,
     prefix: &str,
@@ -186,6 +187,7 @@ impl MmapReader {
     }
 
     /// Open a monitor mmap at an explicit directory (for testing).
+    #[hotpath::measure(label = "doctor.monitor.open")]
     pub fn open_at(dir: &Path) -> std::io::Result<Self> {
         let mmap_path = dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;
@@ -262,6 +264,7 @@ impl MmapReader {
 use std::io::Write;
 
 /// Run the monitor TUI. Blocks until Ctrl+C.
+#[hotpath::measure(label = "doctor.monitor.run")]
 pub fn run() -> std::io::Result<()> {
     use crossterm::{
         cursor, execute, terminal,

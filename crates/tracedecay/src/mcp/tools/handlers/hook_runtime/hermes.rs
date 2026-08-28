@@ -14,6 +14,7 @@ use tracedecay_usecases::host_admission::{
 use super::errors::map_host_admission_outcome;
 use super::required_str;
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.review")]
 pub(super) async fn user_review(
     args: &Value,
     profile_root: &Path,
@@ -99,6 +100,7 @@ async fn apply_projectless_hermes_receipt_plan(
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.replay")]
 async fn replay_projectless_hermes_receipts(
     broker: &SharedHostAdmissionBroker,
     profile_root: &Path,
@@ -267,6 +269,7 @@ async fn continue_projectless_hermes_review(
     Ok(json!({ "action": "hermes_receipt", "status": "reviewed" }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.hermes")]
 pub(super) async fn hermes_receipt(
     args: &Value,
     profile_root: &Path,

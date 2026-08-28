@@ -168,7 +168,7 @@ pub enum StreamValidationError {
 }
 
 /// Validate a bounded event sequence before an adapter renders it.
-#[hotpath::measure]
+#[hotpath::measure(label = "application.result.stream.validate")]
 pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidationError> {
     let mut terminal_seen = false;
     let mut expected = events.first().map(|event| event.sequence);

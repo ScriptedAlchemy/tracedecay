@@ -77,9 +77,14 @@ macro_rules! execute_scoped_memory {
             DirectRetainedMemoryAuthorityV1::Profile { registry } => {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
-                    crate::daemon::store_runtime::session_registry::open_user_memory_db(registry)
-                        .await
-                        .map_err(map_execution_error)
+                    hotpath::future!(
+                        crate::daemon::store_runtime::session_registry::open_user_memory_db(
+                            registry
+                        ),
+                        label = "daemon.retained.memory.open_profile"
+                    )
+                    .await
+                    .map_err(map_execution_error)
                 })
                 .await?;
                 $executor(
@@ -161,6 +166,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         }
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_add", future = true)]
     async fn execute_add(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -176,6 +182,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_read", future = true)]
     async fn execute_read(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -192,6 +199,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_status", future = true)]
     async fn execute_status(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -207,6 +215,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_update", future = true)]
     async fn execute_update(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -222,6 +231,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_remove", future = true)]
     async fn execute_remove(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -237,6 +247,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::measure(label = "daemon.retained.memory_feedback", future = true)]
     async fn execute_feedback(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -259,46 +270,49 @@ impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedMemoryRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move {
-            match request {
-                RetainedMemoryRequestV1::FactStoreAdd(request) => {
-                    self.execute_add(&context, request).await
+        Box::pin(hotpath::future!(
+            async move {
+                match request {
+                    RetainedMemoryRequestV1::FactStoreAdd(request) => {
+                        self.execute_add(&context, request).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreSearch(request) => {
+                        self.execute_read(&context, Read::Search(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreProbe(request) => {
+                        self.execute_read(&context, Read::Probe(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreRelated(request) => {
+                        self.execute_read(&context, Read::Related(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreReason(request) => {
+                        self.execute_read(&context, Read::Reason(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreContradict(request) => {
+                        self.execute_read(&context, Read::Contradict(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreGet(request) => {
+                        self.execute_read(&context, Read::Get(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreUpdate(request) => {
+                        self.execute_update(&context, request).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreRemove(request) => {
+                        self.execute_remove(&context, request).await
+                    }
+                    RetainedMemoryRequestV1::FactStoreList(request) => {
+                        self.execute_read(&context, Read::List(request)).await
+                    }
+                    RetainedMemoryRequestV1::FactFeedback(request) => {
+                        self.execute_feedback(&context, request).await
+                    }
+                    RetainedMemoryRequestV1::MemoryStatus(request) => {
+                        self.execute_status(&context, request).await
+                    }
                 }
-                RetainedMemoryRequestV1::FactStoreSearch(request) => {
-                    self.execute_read(&context, Read::Search(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreProbe(request) => {
-                    self.execute_read(&context, Read::Probe(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreRelated(request) => {
-                    self.execute_read(&context, Read::Related(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreReason(request) => {
-                    self.execute_read(&context, Read::Reason(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreContradict(request) => {
-                    self.execute_read(&context, Read::Contradict(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreGet(request) => {
-                    self.execute_read(&context, Read::Get(request)).await
-                }
-                RetainedMemoryRequestV1::FactStoreUpdate(request) => {
-                    self.execute_update(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreRemove(request) => {
-                    self.execute_remove(&context, request).await
-                }
-                RetainedMemoryRequestV1::FactStoreList(request) => {
-                    self.execute_read(&context, Read::List(request)).await
-                }
-                RetainedMemoryRequestV1::FactFeedback(request) => {
-                    self.execute_feedback(&context, request).await
-                }
-                RetainedMemoryRequestV1::MemoryStatus(request) => {
-                    self.execute_status(&context, request).await
-                }
-            }
-        })
+            },
+            label = "daemon.retained.memory"
+        ))
     }
 }
 
@@ -327,9 +341,11 @@ async fn execute_add_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(memory
-            .add_preflighted_project_memory_fact(preflight, &write_control)
-            .await)
+        Ok(hotpath::future!(
+            memory.add_preflighted_project_memory_fact(preflight, &write_control),
+            label = "daemon.retained.memory.add.commit"
+        )
+        .await)
     })
     .await?;
     let outcome = validate_memory_mutation(outcome, &prepared, |outcome| match outcome {
@@ -392,9 +408,11 @@ async fn execute_update_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(memory
-            .update_project_memory_fact(command, &write_control)
-            .await)
+        Ok(hotpath::future!(
+            memory.update_project_memory_fact(command, &write_control),
+            label = "daemon.retained.memory.update.commit"
+        )
+        .await)
     })
     .await?;
     let outcome = validate_memory_mutation(outcome, &prepared, |outcome| {
@@ -442,9 +460,11 @@ async fn execute_remove_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(memory
-            .remove_project_memory_fact(command, &write_control)
-            .await)
+        Ok(hotpath::future!(
+            memory.remove_project_memory_fact(command, &write_control),
+            label = "daemon.retained.memory.remove.commit"
+        )
+        .await)
     })
     .await?;
     let outcome = validate_memory_mutation(outcome, &prepared, |outcome| {
@@ -508,9 +528,11 @@ async fn execute_feedback_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(memory
-            .record_project_memory_fact_feedback(command, &write_control)
-            .await)
+        Ok(hotpath::future!(
+            memory.record_project_memory_fact_feedback(command, &write_control),
+            label = "daemon.retained.memory.feedback.commit"
+        )
+        .await)
     })
     .await?;
     let outcome = validate_memory_mutation(outcome, &prepared, |outcome| {
@@ -532,6 +554,7 @@ async fn execute_feedback_on_db(
     )
 }
 
+#[hotpath::measure(label = "daemon.retained.memory_read_db", future = true)]
 async fn execute_read_on_db(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     database: &Database,
@@ -581,10 +604,12 @@ async fn search_on_db(
             .map_err(memory_mapping::map_memory_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        memory
-            .search_project_memory_facts(query, &read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.search_project_memory_facts(query, &read_control),
+            label = "daemon.retained.memory.search.query"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let prepared = if page.hits().is_empty() {
@@ -742,19 +767,25 @@ async fn semantic_search_on_db(
     let (page, _) = bounded_memory_operation(context, async {
         let page = match request {
             SemanticRead::Probe(_) => {
-                memory
-                    .probe_project_memory_facts(query, &read_control)
-                    .await
+                hotpath::future!(
+                    memory.probe_project_memory_facts(query, &read_control),
+                    label = "daemon.retained.memory.probe"
+                )
+                .await
             }
             SemanticRead::Related(_) => {
-                memory
-                    .related_project_memory_facts(query, &read_control)
-                    .await
+                hotpath::future!(
+                    memory.related_project_memory_facts(query, &read_control),
+                    label = "daemon.retained.memory.related"
+                )
+                .await
             }
             SemanticRead::Reason(_) => {
-                memory
-                    .reason_project_memory_facts(query, &read_control)
-                    .await
+                hotpath::future!(
+                    memory.reason_project_memory_facts(query, &read_control),
+                    label = "daemon.retained.memory.reason"
+                )
+                .await
             }
         };
         page.map_err(memory_mapping::map_memory_error)
@@ -781,10 +812,12 @@ async fn contradict_on_db(
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        memory
-            .find_project_memory_contradictions(query, &read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.find_project_memory_contradictions(query, &read_control),
+            label = "daemon.retained.memory.contradict.query"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let result =
@@ -807,10 +840,12 @@ async fn get_on_db(
         .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (projection, _) = bounded_memory_operation(context, async {
-        memory
-            .get_project_memory_fact(target.clone(), &read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.get_project_memory_fact(target.clone(), &read_control),
+            label = "daemon.retained.memory.get.fact"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let projection = projection.ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)?;
@@ -821,10 +856,12 @@ async fn get_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let (history, _) = bounded_memory_operation(context, async {
-        memory
-            .get_project_memory_feedback_history(history_query, &read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.get_project_memory_feedback_history(history_query, &read_control),
+            label = "daemon.retained.memory.get.history"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let result = memory_mapping::get_result(&projection, &history)?;
@@ -848,10 +885,12 @@ async fn list_on_db(
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        memory
-            .list_project_memory_facts(query, &read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.list_project_memory_facts(query, &read_control),
+            label = "daemon.retained.memory.list.query"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let result = RetainedSurfaceResultV1::FactStoreList(memory_mapping::list_page(&page)?);
@@ -868,10 +907,12 @@ async fn execute_status_on_db(
     let memory = memory_application(database, owner)?;
     let read_control = fact_read_control(context);
     let (status, _) = bounded_memory_operation(context, async {
-        memory
-            .project_memory_status(&read_control)
-            .await
-            .map_err(memory_mapping::map_memory_error)
+        hotpath::future!(
+            memory.project_memory_status(&read_control),
+            label = "daemon.retained.memory.status.query"
+        )
+        .await
+        .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let result = memory_mapping::status_result(&status);
@@ -917,6 +958,7 @@ fn effective_expiry(
     effective_memory_deadline(context).expires_at
 }
 
+#[hotpath::measure(label = "daemon.retained.memory.bounded_operation", future = true)]
 pub(super) async fn bounded_memory_operation<T, F>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     future: F,

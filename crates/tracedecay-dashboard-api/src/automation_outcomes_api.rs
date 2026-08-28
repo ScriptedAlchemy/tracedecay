@@ -22,6 +22,7 @@ use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_store::FactReadControl;
 
+#[hotpath::measure(label = "dashboard_api.outcomes.read", future = true)]
 pub async fn outcomes(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,

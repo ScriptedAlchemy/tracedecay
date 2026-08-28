@@ -300,7 +300,7 @@ fn participant_freshness(
 
 /// Hydrate only the globally selected temporal anchors, in the supplied
 /// selected order, through the canonical temporal content authority.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "temporal.hydrate.selection")]
 pub async fn hydrate_temporal_candidate_selection(
     request: &TemporalKernelRequest,
     mut export: TemporalCandidateExport,
@@ -342,7 +342,7 @@ pub async fn hydrate_temporal_candidate_selection(
 }
 
 /// Hydrate the entire temporal page without changing its lane-local selection.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "temporal.hydrate.export")]
 pub async fn hydrate_temporal_candidate_export(
     request: &TemporalKernelRequest,
     export: TemporalCandidateExport,

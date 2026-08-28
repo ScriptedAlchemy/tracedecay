@@ -993,6 +993,7 @@ impl DeterministicFixedPointFusion {
         Ok(fused)
     }
 
+    #[hotpath::measure(label = "query.fusion.order")]
     fn order_fused(&self, mut candidates: Vec<FusedCandidate>) -> Vec<FusedCandidate> {
         candidates.sort_by(compare_fused);
         for candidate in &mut candidates {

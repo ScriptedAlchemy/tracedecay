@@ -39,6 +39,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         }
     }
 
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.preview_input")]
     pub async fn save_preview_input(
         &self,
         input: GitIndexPreviewInputV1,
@@ -80,6 +81,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         next_live_preview_input_expiry(&snapshot).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.purge")]
     pub async fn purge_expired_preview_inputs_and_next(
         &self,
         observed_at: UtcMicros,
@@ -125,6 +127,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.preview")]
     pub async fn save_preview(
         &self,
         preview: GitIndexPreviewV1,
@@ -159,6 +162,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
 
     /// Atomically binds a client input and its prepared journal to an immutable
     /// preview before native Git is permitted to run.
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.begin")]
     pub async fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
@@ -226,6 +230,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.cas")]
     pub async fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
@@ -278,6 +283,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// database transaction. A failed receipt insert rolls back the journal
     /// phase and any newly required quarantine, so restart recovery never
     /// observes a terminal phase without its immutable receipt or fence.
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.terminal")]
     pub async fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
@@ -421,6 +427,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         Ok(repositories)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.git_index.persist.quarantine")]
     pub async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
@@ -543,7 +550,7 @@ where
     Ok(expiry)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "global_db.git_index.txn.commit")]
 async fn commit_outcome<T>(
     transaction: GitMutationWriteTransaction<'_>,
     outcome: GitIndexTransactionStoreResult<T>,

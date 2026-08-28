@@ -33,6 +33,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    #[hotpath::measure(label = "lsp.diagnostics.workspace_pull")]
     pub(crate) fn pull_workspace_diagnostics(
         &mut self,
         params: &Value,

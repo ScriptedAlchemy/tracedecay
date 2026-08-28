@@ -34,6 +34,7 @@ pub(super) fn is_configuration_operation(operation: ApplicationSurfaceOperation)
     CONFIGURATION_WIRE_OPERATIONS.contains(&operation)
 }
 
+#[hotpath::measure(label = "application_surface.configuration.schema_registry")]
 pub(super) fn build_configuration_wire_schema_registry(
     catalog: &CatalogSnapshotV1,
 ) -> Result<ConfigurationWireSchemaRegistryV1, ApplicationSurfaceAdapterError> {
@@ -73,6 +74,7 @@ pub(super) fn build_configuration_wire_schema_registry(
 /// re-parse a tagged wrapper against a `deny_unknown_fields` request struct,
 /// so every configuration read and write routed through the daemon invocation
 /// executor failed admission as `InvalidRequest`.
+#[hotpath::measure(label = "application_surface.configuration.payload")]
 pub(super) fn configuration_invocation_payload(
     request: &tracedecay_application::ConfigurationWireRequestV1,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {

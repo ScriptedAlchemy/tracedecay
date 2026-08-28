@@ -335,6 +335,7 @@ impl DaemonInvocationService {
         Some((scope, ApplicationOutcome::Evidence(packet)))
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.expire_all", future = true)]
     pub(crate) async fn expire_all(&self) -> bool {
         self.begin_shutdown().await;
         let lease_shutdown = self.lsp_lease_tasks.shutdown().await;
@@ -375,6 +376,7 @@ impl DaemonInvocationService {
         self.worktree_holder_admission.admit_holders(roots).await
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.open", future = true)]
     pub(super) async fn open_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -518,6 +520,7 @@ impl DaemonInvocationService {
         )
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.send", future = true)]
     pub(super) async fn send_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -609,6 +612,7 @@ impl DaemonInvocationService {
         };
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.poll", future = true)]
     pub(super) async fn poll_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -650,6 +654,7 @@ impl DaemonInvocationService {
         )
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.acknowledge", future = true)]
     pub(super) async fn acknowledge_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -681,6 +686,7 @@ impl DaemonInvocationService {
         )
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.detach", future = true)]
     pub(super) async fn detach_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -739,6 +745,7 @@ impl DaemonInvocationService {
         DaemonInvocationResponse::with_outcome(request_id, DaemonInvocationOutcome::LspDetached)
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.reconnect", future = true)]
     pub(super) async fn reconnect_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -840,6 +847,7 @@ impl DaemonInvocationService {
         )
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.disconnect", future = true)]
     pub(crate) async fn disconnect_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,

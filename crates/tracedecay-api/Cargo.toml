@@ -17,16 +17,19 @@ hotpath = [
     "hotpath/hotpath",
     "hotpath/axum-0-8",
     "tracedecay-application/hotpath",
+    "tracedecay-tool-catalog/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
 ]
 
 [dependencies]

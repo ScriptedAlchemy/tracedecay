@@ -76,6 +76,7 @@ pub(crate) struct WorktreeChangeClassificationV1 {
 
 impl WorktreeChangeClassificationV1 {
     /// Classify the current status of `repository` truthfully.
+    #[hotpath::measure(label = "daemon.code_index.capture.classify")]
     pub(crate) fn classify(repository: &gix::Repository) -> Result<Self, ClassificationErrorV1> {
         let index = repository
             .index_or_empty()

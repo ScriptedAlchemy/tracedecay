@@ -34,11 +34,14 @@ impl RetainedAutomationExecutionPortV1 for DirectRetainedAutomationPortV1 {
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
         Box::pin(async move {
             let cg = self.cg.read().await.clone();
-            crate::daemon::dashboard_automation::execute_retained_memory_curator(
-                cg.as_ref(),
-                &self.invocation_service,
-                &context,
-                request,
+            hotpath::future!(
+                crate::daemon::dashboard_automation::execute_retained_memory_curator(
+                    cg.as_ref(),
+                    &self.invocation_service,
+                    &context,
+                    request
+                ),
+                label = "daemon.retained.automation.curate"
             )
             .await
         })

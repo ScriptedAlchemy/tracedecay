@@ -10,6 +10,10 @@ use super::{
 impl RegisteredGlobalDb {
     /// Records the first full UTC day this mounted scope can truthfully cover.
     /// Repeated mounts return the original boundary unchanged.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.observability_rollup.persist.frontier"
+    )]
     pub async fn initialize_observability_rollup_frontier(
         &self,
         authorized_scope_ref: &str,

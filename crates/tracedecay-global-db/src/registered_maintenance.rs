@@ -58,6 +58,7 @@ impl RegisteredGlobalDb {
     /// is truncated when this client holds the exclusive maintenance
     /// authority; otherwise the receipt records that reclaim is deferred to a
     /// maintenance-scoped pass.
+    #[hotpath::measure(future = true, label = "global_db.registered.checkpoint")]
     pub async fn checkpoint_result(
         &self,
     ) -> Result<RegisteredWalCheckpointReceiptV1, TraceDecayError> {

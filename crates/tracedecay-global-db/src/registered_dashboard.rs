@@ -61,6 +61,7 @@ impl RegisteredGlobalDb {
     /// Reads the dashboard project registry through the retained registered
     /// runtime. Query failures stay typed so callers never mistake an
     /// unavailable registry for an empty one.
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.list")]
     pub async fn list_code_projects(&self, limit: usize) -> Result<Vec<CodeProjectRecord>> {
         let snapshot = self.dashboard_snapshot("list code projects").await?;
         let mut rows = snapshot
@@ -88,6 +89,7 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.list_page")]
     pub async fn list_code_projects_after(
         &self,
         after_project_id: Option<&str>,
@@ -154,6 +156,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| dashboard_error("read code project registration", error))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.context")]
     pub async fn project_registry_context_by_id(
         &self,
         project_id: &str,
@@ -187,6 +190,7 @@ impl RegisteredGlobalDb {
     /// Read every registered checkout spelling for one project from a single
     /// database snapshot. The `LIMIT + 1` row is a fail-closed overflow
     /// sentinel: callers never receive a truncated live-root set.
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.inventory")]
     pub async fn registered_project_root_inventory(
         &self,
         project_id: &str,
@@ -335,6 +339,7 @@ impl RegisteredGlobalDb {
     /// written before commit and restored if commit fails, so retries can
     /// safely resume either side of an interrupted filesystem/database pair.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.relink")]
     pub async fn relink_orphan_store_instance(
         &self,
         source_project_id: &str,

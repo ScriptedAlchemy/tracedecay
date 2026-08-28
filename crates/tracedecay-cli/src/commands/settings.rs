@@ -327,7 +327,7 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
 pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::Result<()> {
     let resolved =
         super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
@@ -364,7 +364,7 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::R
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "cli.settings.gitignore", future = true)]
 pub(crate) async fn handle_gitignore(
     path: Option<String>,
     action: Option<String>,

@@ -19,6 +19,7 @@ use tracedecay_application::retained_surfaces::{
 
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
+#[hotpath::measure(label = "daemon.dashboard.automation.curate", future = true)]
 pub(crate) async fn execute_retained_memory_curator(
     cg: &TraceDecay,
     invocation_service: &crate::daemon::service::invocation::DaemonInvocationService,

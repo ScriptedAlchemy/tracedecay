@@ -215,6 +215,7 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
     }
 }
 
+#[hotpath::measure(label = "cli.hook.native_capture")]
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,

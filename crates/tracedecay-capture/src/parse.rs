@@ -198,7 +198,7 @@ pub fn parse_observation_record_v1(
 /// envelope. The native record is never decoded a second time.
 ///
 /// Measured at source-record composition, not per JSON token or structure value.
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.parse.normalized_record")]
 pub fn parse_normalized_observation_record_v1(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
@@ -213,7 +213,7 @@ pub fn parse_normalized_observation_record_v1(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.parse.prepare_record")]
 pub fn prepare_observation_record_v1(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
@@ -238,7 +238,7 @@ pub fn prepare_observation_record_v1(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.parse.normalize_prepared")]
 pub fn normalize_prepared_observation_record_v1(
     prepared: PreparedObservationRecordV1,
     normalize: impl FnOnce(
@@ -276,7 +276,7 @@ pub fn normalize_prepared_observation_record_v1(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.parse.record")]
 fn parse_observation_record(
     record: &[u8],
     source_range: ClaudeByteRangeV1,

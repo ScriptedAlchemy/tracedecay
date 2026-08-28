@@ -410,6 +410,7 @@ impl DaemonInvocationClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.invoke", future = true)]
     pub(crate) async fn invoke(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
@@ -473,6 +474,7 @@ impl DaemonInvocationClient {
         result
     }
 
+    #[hotpath::measure(label = "daemon_client.acknowledge_delivery", future = true)]
     pub(crate) async fn acknowledge_work_delivery(
         &self,
         target_request_id: &str,
@@ -558,6 +560,7 @@ impl DaemonInvocationClient {
         result
     }
 
+    #[hotpath::measure(label = "daemon_client.observe_feedback", future = true)]
     pub async fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
@@ -601,6 +604,7 @@ impl DaemonInvocationClient {
         .await
     }
 
+    #[hotpath::measure(label = "daemon_client.semantic_evaluate", future = true)]
     pub async fn evaluate_and_publish_semantic_profile_until(
         &self,
         evaluated_profile_id: &str,
@@ -674,6 +678,7 @@ impl DaemonInvocationClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.semantic_qualify", future = true)]
     pub async fn qualify_semantic_profile_until(
         &self,
         candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
@@ -733,6 +738,7 @@ impl DaemonInvocationClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.cancel", future = true)]
     async fn cancel_invocation(&self, target_request_id: &str) -> crate::errors::Result<()> {
         let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
         let (_reader, mut writer) = stream.into_split();
@@ -789,29 +795,30 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
         &self,
         invocation: ApplicationInvocation,
     ) -> ApplicationInvocationFuture<'_, Result<ApplicationResponse, InvocationError>> {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let (request_id, target, deadline, cancellation) = context.into_parts();
-            match request {
-                ApplicationRequest::Surface { binding, payload } => {
-                    let (_binding_id, surface, operation, result_contract, _page) =
-                        binding.into_parts();
-                    let operation =
+        Box::pin(hotpath::future!(
+            async move {
+                let (context, request) = invocation.into_parts();
+                let (request_id, target, deadline, cancellation) = context.into_parts();
+                match request {
+                    ApplicationRequest::Surface { binding, payload } => {
+                        let (_binding_id, surface, operation, result_contract, _page) =
+                            binding.into_parts();
+                        let operation =
                         crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
                             operation.as_str(),
                         )
                         .ok_or(InvocationError::InvalidRequest)?;
-                    let typed = crate::application_surface::parse_application_surface_request(
-                        operation, payload,
-                    )
-                    .map_err(|_| InvocationError::InvalidRequest)?;
-                    let observed_at = invocation_now_micros();
-                    let cancellation_context = cancellation.context();
-                    let scope = match target {
-                        InvocationTarget::CurrentProject => None,
-                        InvocationTarget::Resolved(scope) => Some(scope),
-                    };
-                    let policy = if matches!(
+                        let typed = crate::application_surface::parse_application_surface_request(
+                            operation, payload,
+                        )
+                        .map_err(|_| InvocationError::InvalidRequest)?;
+                        let observed_at = invocation_now_micros();
+                        let cancellation_context = cancellation.context();
+                        let scope = match target {
+                            InvocationTarget::CurrentProject => None,
+                            InvocationTarget::Resolved(scope) => Some(scope),
+                        };
+                        let policy = if matches!(
                         operation,
                         crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
@@ -821,7 +828,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     } else {
                         InvocationCancellationPolicy::ReadOnly
                     };
-                    let request = match (operation, typed) {
+                        let request = match (operation, typed) {
                         (
                             crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
@@ -856,28 +863,32 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                         _ => return Err(InvocationError::InvalidRequest),
                     }
                     .with_delivery_route(application_delivery_route(surface));
-                    let response = self
-                        .invoke_controlled(request, deadline, cancellation, policy)
-                        .await
-                        .map_err(map_invocation_error)?;
-                    application_response(request_id, result_contract, response.outcome)
+                        let response = self
+                            .invoke_controlled(request, deadline, cancellation, policy)
+                            .await
+                            .map_err(map_invocation_error)?;
+                        application_response(request_id, result_contract, response.outcome)
+                    }
+                    ApplicationRequest::FeedbackObservation {
+                        configuration_digest,
+                        observed_at,
+                        event,
+                    } => {
+                        let event = serde_json::from_value(event)
+                            .map_err(|_| InvocationError::InvalidRequest)?;
+                        self.observe_feedback(configuration_digest, observed_at, event)
+                            .await
+                            .map_err(|_| InvocationError::Unavailable)?;
+                        Ok(ApplicationResponse::ObservationAccepted)
+                    }
+                    ApplicationRequest::OperationEvents { .. }
+                    | ApplicationRequest::OperationCancel { .. } => {
+                        Err(InvocationError::Unavailable)
+                    }
                 }
-                ApplicationRequest::FeedbackObservation {
-                    configuration_digest,
-                    observed_at,
-                    event,
-                } => {
-                    let event = serde_json::from_value(event)
-                        .map_err(|_| InvocationError::InvalidRequest)?;
-                    self.observe_feedback(configuration_digest, observed_at, event)
-                        .await
-                        .map_err(|_| InvocationError::Unavailable)?;
-                    Ok(ApplicationResponse::ObservationAccepted)
-                }
-                ApplicationRequest::OperationEvents { .. }
-                | ApplicationRequest::OperationCancel { .. } => Err(InvocationError::Unavailable),
-            }
-        })
+            },
+            label = "daemon_client.application_invoke"
+        ))
     }
 }
 

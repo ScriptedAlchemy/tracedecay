@@ -155,24 +155,28 @@ impl SessionRefreshRecoveryV1 {
 }
 
 impl RegisteredGlobalDb {
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.begin_refresh")]
     pub async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?
+        });
         let request_digest = refresh_binding_digest(&request)?;
 
         if let Some(existing) =
             read_joinable_operation_by_digest(&transaction, request.session_id(), &request_digest)
                 .await?
         {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| storage(BEGIN_REFRESH, error))?
+            });
             return Ok(SessionRefreshBeginOrJoinReceiptV1::new(
                 existing.operation_id,
                 request.session_id().clone(),
@@ -295,10 +299,12 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?
+        });
         Ok(SessionRefreshBeginOrJoinReceiptV1::new(
             operation_id,
             request.session_id().clone(),
@@ -324,6 +330,10 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.persist.refresh_batch"
+    )]
     pub async fn persist_session_refresh_projection_batch_controlled_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -334,10 +344,11 @@ impl RegisteredGlobalDb {
         SessionTemporalProjectionBatchReceiptV1,
     )> {
         validate_progress_batch_identity(&progress, &batch)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?
+        });
         let binding = require_running_binding(
             &transaction,
             progress.session_id(),
@@ -370,10 +381,12 @@ impl RegisteredGlobalDb {
                 )
                 .await?;
                 checkpoint_relation_rebuild_control(&execution_control)?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
+                hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(|error| storage(PERSIST_REFRESH, error))?
+                });
                 return Ok((existing, receipt));
             }
             if existing.committed_batches() == progress.committed_batches() {
@@ -409,21 +422,28 @@ impl RegisteredGlobalDb {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?
+        });
         Ok((progress, receipt))
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.persist.refresh_progress"
+    )]
     pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
     ) -> SessionStoreResult<SessionRefreshProgressV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?
+        });
         let binding = require_running_binding(
             &transaction,
             progress.session_id(),
@@ -437,10 +457,12 @@ impl RegisteredGlobalDb {
             read_progress(&transaction, progress.session_id(), progress.operation_id()).await?
         {
             if progress_logically_equal(&existing, &progress) {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
+                hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(|error| storage(PERSIST_REFRESH, error))?
+                });
                 return Ok(existing);
             }
             if existing.committed_batches() == progress.committed_batches() {
@@ -485,13 +507,19 @@ impl RegisteredGlobalDb {
             progress.updated_at(),
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?
+        });
         Ok(progress)
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.query.refresh_progress"
+    )]
     pub async fn session_refresh_progress_result(
         &self,
         request: SessionRefreshProgressRequestV1,
@@ -503,6 +531,10 @@ impl RegisteredGlobalDb {
         read_progress(&snapshot, request.session_id(), request.operation_id()).await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.txn.complete_refresh"
+    )]
     pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
@@ -522,10 +554,11 @@ impl RegisteredGlobalDb {
         }
         drop(snapshot);
 
-        let preflight = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        let preflight = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        });
         let binding = require_running_binding(
             &preflight,
             request.session_id(),
@@ -538,10 +571,12 @@ impl RegisteredGlobalDb {
                 context: "refresh completion target coverage",
             });
         }
-        preflight
-            .commit()
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            preflight
+                .commit()
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        });
 
         let relation_projection = rebuild_candidate_session_relations(
             self,
@@ -552,19 +587,22 @@ impl RegisteredGlobalDb {
         )
         .await?;
 
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        });
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_completion(&receipt, &request)?;
             checkpoint_relation_rebuild_control(&execution_control)?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| storage(COMPLETE_REFRESH, error))?
+            });
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -638,29 +676,35 @@ impl RegisteredGlobalDb {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        });
         Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.fail_refresh")]
     pub async fn fail_session_refresh_result(
         &self,
         request: SessionRefreshFailureRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(FAIL_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(FAIL_REFRESH, error))?
+        });
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_failure(&receipt, &request)?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(FAIL_REFRESH, error))?;
+            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| storage(FAIL_REFRESH, error))?
+            });
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -727,29 +771,35 @@ impl RegisteredGlobalDb {
             terminal_at,
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(FAIL_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(FAIL_REFRESH, error))?
+        });
         Ok(SessionRefreshReceiptV1::failed(request, terminal_at))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.txn.cancel_refresh")]
     pub async fn cancel_session_refresh_result(
         &self,
         request: SessionRefreshCancellationRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(CANCEL_REFRESH, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(CANCEL_REFRESH, error))?
+        });
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_cancellation(&receipt, &request)?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(CANCEL_REFRESH, error))?;
+            hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| storage(CANCEL_REFRESH, error))?
+            });
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -815,13 +865,19 @@ impl RegisteredGlobalDb {
             terminal_at,
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(CANCEL_REFRESH, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(CANCEL_REFRESH, error))?
+        });
         Ok(SessionRefreshReceiptV1::cancelled(request, terminal_at))
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.query.refresh_receipt"
+    )]
     pub async fn session_refresh_receipt_result(
         &self,
         request: SessionRefreshReceiptRequestV1,
@@ -833,6 +889,10 @@ impl RegisteredGlobalDb {
         read_receipt(&snapshot, request.session_id(), request.operation_id()).await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.query.refresh_recovery"
+    )]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
@@ -845,6 +905,10 @@ impl RegisteredGlobalDb {
         Ok(recoveries.pop())
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.query.refresh_running"
+    )]
     pub async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {

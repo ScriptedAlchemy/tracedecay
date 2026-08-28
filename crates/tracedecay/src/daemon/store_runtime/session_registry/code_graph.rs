@@ -348,6 +348,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_manifest")]
     pub(crate) fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -736,6 +737,7 @@ impl RetainedCodeGraphRuntimeV1 {
         (&self.code_shard, self.authority.binding())
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
     pub(crate) fn publish_verified_snapshot(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,

@@ -123,6 +123,7 @@ impl QueryMcpReadAdmissionProviderV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.query_mcp.admit")]
 fn admit_query_mcp_read_at(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
@@ -197,6 +198,7 @@ impl QueryMcpReadAdmissionV1 {
         self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
+    #[hotpath::measure(label = "daemon.query_mcp.authorize")]
     fn authorize_at(
         &self,
         scope: &ResolvedScope,

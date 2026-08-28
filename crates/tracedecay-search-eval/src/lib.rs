@@ -303,6 +303,7 @@ pub fn compare_default_direct(
 /// The selected profile determines the required comparison chain:
 /// query baseline; semantic with semantic-disabled query ablations; and, for the
 /// reranked profile, the same semantic profile with rerank disabled.
+#[hotpath::measure(label = "search_eval.activation.evaluate")]
 pub fn evaluate_default_activation_candidate(
     evaluated_profile_id: &str,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,

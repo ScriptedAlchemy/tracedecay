@@ -353,7 +353,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.enqueue")]
     pub fn enqueue(
         &self,
         batch: SemanticProjectionBatchV1,
@@ -361,7 +361,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         self.enqueue_inner(batch, None)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.enqueue_work")]
     pub fn enqueue_work(
         &self,
         batch: SemanticProjectionBatchV1,
@@ -495,7 +495,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.dispatch")]
     pub fn try_dispatch(&self) -> Option<SemanticProjectionLeaseV1> {
         self.try_dispatch_matching(false).map(|(lease, _)| lease)
     }
@@ -592,7 +592,7 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         None
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.cancel")]
     pub fn cancel_generation(
         &self,
         worktree_id: &WorktreeId,
@@ -653,7 +653,6 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         }
     }
 
-    #[hotpath::measure]
     pub fn stats(&self) -> SemanticProjectionSchedulerStatsV1 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.observe_hotpath();
@@ -776,7 +775,7 @@ impl SemanticProjectionLeaseV1 {
         self.cancellation.load(Ordering::Acquire)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.begin_publication")]
     pub fn try_begin_publication(
         &self,
     ) -> Result<SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1> {

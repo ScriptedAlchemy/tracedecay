@@ -30,6 +30,7 @@ fn admitted_control(
     Ok((deadline, cancellation))
 }
 
+#[hotpath::measure(future = true, label = "mcp.dispatch.analytics")]
 pub(super) async fn dispatch_analytics(
     cg: &TraceDecay,
     args: Value,

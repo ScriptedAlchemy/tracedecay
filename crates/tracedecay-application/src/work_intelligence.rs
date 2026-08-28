@@ -435,6 +435,7 @@ where
         }
     }
 
+    #[hotpath::measure(label = "application.work.intelligence.generate_proposal")]
     pub fn generate_proposal(
         &self,
         context: &RequestContext,
@@ -538,6 +539,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "application.work.intelligence.experience")]
     pub fn experience(
         &self,
         context: &RequestContext,
@@ -671,6 +673,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "application.work.intelligence.compare_proposal")]
     pub fn compare_proposal(
         &self,
         context: &RequestContext,

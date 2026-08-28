@@ -97,6 +97,7 @@ pub enum ProjectSettingsPreviewErrorV1 {
     InvalidAuthority,
 }
 
+#[hotpath::measure(label = "usecases.settings.preview")]
 pub fn preview_project_settings(
     project_id: &ProjectId,
     current: &PinnedRuntimeConfiguration,

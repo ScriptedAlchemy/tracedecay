@@ -62,6 +62,7 @@ mod unix {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
+    #[hotpath::measure(label = "private_fs.create_directory")]
     pub fn create_private_directory(path: &Path) -> io::Result<()> {
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
@@ -80,6 +81,7 @@ mod unix {
         Ok(())
     }
 
+    #[hotpath::measure(label = "private_fs.open_directory")]
     pub fn open_private_directory(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -96,6 +98,7 @@ mod unix {
 
     /// Creates a new private file and returns its exact handle with any
     /// post-creation validation failure.
+    #[hotpath::measure(label = "private_fs.create_file")]
     pub fn create_private_file_retained(
         path: &Path,
     ) -> Result<fs::File, crate::PrivateFileCreationFailure> {
@@ -118,6 +121,7 @@ mod unix {
         Ok(file)
     }
 
+    #[hotpath::measure(label = "private_fs.open_file")]
     pub fn open_private_file(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -129,6 +133,7 @@ mod unix {
         Ok(file)
     }
 
+    #[hotpath::measure(label = "private_fs.make_private_file")]
     pub fn make_private_file(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
@@ -161,6 +166,7 @@ mod unix {
     }
 
     /// Returns bytes available to the current user at `path` (quota-aware).
+    #[hotpath::measure(label = "private_fs.available_space")]
     pub fn available_space(path: &Path) -> io::Result<u64> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;

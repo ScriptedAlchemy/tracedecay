@@ -260,6 +260,7 @@ impl ProductionCiDiscoveryReadPortV1 for GitHubCiReadOnlyClientV1 {
     }
 }
 
+#[hotpath::measure(label = "usecases.ci_runtime.discover", future = true)]
 pub async fn discover_production_ci_failure_request_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
@@ -851,7 +852,11 @@ impl ProductionGitHubCiArchiveV1 {
         if let Err(failure) = self.authorize_source(context, request).await {
             return source_failure_result(&self.provider, request, failure);
         }
-        let retained = self.retained.load(context, request).await;
+        let retained = hotpath::future!(
+            self.retained.load(context, request),
+            label = "usecases.ci_runtime.cache_load"
+        )
+        .await;
         if let Err(failure) = self.authorize_source(context, request).await {
             return source_failure_result(&self.provider, request, failure);
         }
@@ -895,6 +900,7 @@ impl ProductionGitHubCiArchiveV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.ci_runtime.live_record", future = true)]
     async fn live_record(
         &self,
         context: &RequestContext,
@@ -1016,139 +1022,144 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
         context: &'a RequestContext,
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
-        Box::pin(async move {
-            if !context_admitted(context) {
-                return unavailable_result(&self.provider, request);
-            }
-            if let Err(failure) = self.authorize_source(context, request).await {
-                return source_failure_result(&self.provider, request, failure);
-            }
-            let live = match self.live_consensus_record(context, request).await {
-                Ok(record) => record,
-                Err(LiveCiReadFailureV1::Denied) => {
+        Box::pin(hotpath::future!(
+            async move {
+                if !context_admitted(context) {
+                    return unavailable_result(&self.provider, request);
+                }
+                if let Err(failure) = self.authorize_source(context, request).await {
+                    return source_failure_result(&self.provider, request, failure);
+                }
+                let live = match self.live_consensus_record(context, request).await {
+                    Ok(record) => record,
+                    Err(LiveCiReadFailureV1::Denied) => {
+                        return CiProviderReadResultV1 {
+                            provider: self.provider.clone(),
+                            run: request.run.clone(),
+                            state: CiFailureLocalizationStateV1::Denied,
+                            coverage: CiFailureCoverageV1::Denied,
+                            source_degradation: None,
+                            failures: 0,
+                            checks: 0,
+                            annotations: 0,
+                            record: None,
+                        };
+                    }
+                    Err(LiveCiReadFailureV1::Unavailable) => {
+                        return unavailable_result(&self.provider, request);
+                    }
+                    Err(LiveCiReadFailureV1::RateLimited(checkpoint)) => {
+                        if !context_admitted(context) {
+                            return unavailable_result(&self.provider, request);
+                        }
+                        if let Err(failure) = self.authorize_source(context, request).await {
+                            return source_failure_result(&self.provider, request, failure);
+                        }
+                        return self
+                            .retained_result(
+                                context,
+                                request,
+                                CiFailureSourceDegradationV1::RateLimited(checkpoint),
+                            )
+                            .await;
+                    }
+                    Err(LiveCiReadFailureV1::Failed(cause)) => {
+                        if !context_admitted(context) {
+                            return unavailable_result(&self.provider, request);
+                        }
+                        if let Err(failure) = self.authorize_source(context, request).await {
+                            return source_failure_result(&self.provider, request, failure);
+                        }
+                        return self
+                            .retained_result(
+                                context,
+                                request,
+                                CiFailureSourceDegradationV1::Failed(cause),
+                            )
+                            .await;
+                    }
+                };
+                let failures = live
+                    .workflow_job
+                    .steps
+                    .iter()
+                    .filter(|step| step.is_failed())
+                    .count();
+                if failures == 0
+                    || failures > MAX_CI_RETAINED_FAILURES_V1
+                    || live.annotations.len() > MAX_CI_RETAINED_ANNOTATIONS_V1
+                {
                     return CiProviderReadResultV1 {
                         provider: self.provider.clone(),
                         run: request.run.clone(),
-                        state: CiFailureLocalizationStateV1::Denied,
-                        coverage: CiFailureCoverageV1::Denied,
+                        state: CiFailureLocalizationStateV1::Partial,
+                        coverage: CiFailureCoverageV1::Partial,
                         source_degradation: None,
-                        failures: 0,
-                        checks: 0,
-                        annotations: 0,
+                        failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
+                        checks: 1,
+                        annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
                         record: None,
                     };
                 }
-                Err(LiveCiReadFailureV1::Unavailable) => {
+                let complete = failures <= MAX_CI_RETAINED_FAILURES_V1
+                    && live.annotations.len() <= MAX_CI_RETAINED_ANNOTATIONS_V1
+                    && live.check_run.output.annotations_count as usize == live.annotations.len();
+                let state = if complete {
+                    CiFailureLocalizationStateV1::Complete
+                } else {
+                    CiFailureLocalizationStateV1::Partial
+                };
+                let coverage = if complete {
+                    CiFailureCoverageV1::Complete
+                } else {
+                    CiFailureCoverageV1::Partial
+                };
+                if !context_admitted(context) {
                     return unavailable_result(&self.provider, request);
                 }
-                Err(LiveCiReadFailureV1::RateLimited(checkpoint)) => {
-                    if !context_admitted(context) {
-                        return unavailable_result(&self.provider, request);
-                    }
-                    if let Err(failure) = self.authorize_source(context, request).await {
-                        return source_failure_result(&self.provider, request, failure);
-                    }
-                    return self
-                        .retained_result(
-                            context,
-                            request,
-                            CiFailureSourceDegradationV1::RateLimited(checkpoint),
-                        )
-                        .await;
+                if let Err(failure) = self.authorize_source(context, request).await {
+                    return source_failure_result(&self.provider, request, failure);
                 }
-                Err(LiveCiReadFailureV1::Failed(cause)) => {
-                    if !context_admitted(context) {
-                        return unavailable_result(&self.provider, request);
-                    }
-                    if let Err(failure) = self.authorize_source(context, request).await {
-                        return source_failure_result(&self.provider, request, failure);
-                    }
-                    return self
-                        .retained_result(
-                            context,
-                            request,
-                            CiFailureSourceDegradationV1::Failed(cause),
-                        )
-                        .await;
-                }
-            };
-            let failures = live
-                .workflow_job
-                .steps
-                .iter()
-                .filter(|step| step.is_failed())
-                .count();
-            if failures == 0
-                || failures > MAX_CI_RETAINED_FAILURES_V1
-                || live.annotations.len() > MAX_CI_RETAINED_ANNOTATIONS_V1
-            {
-                return CiProviderReadResultV1 {
-                    provider: self.provider.clone(),
-                    run: request.run.clone(),
-                    state: CiFailureLocalizationStateV1::Partial,
-                    coverage: CiFailureCoverageV1::Partial,
-                    source_degradation: None,
-                    failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
-                    checks: 1,
-                    annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
-                    record: None,
-                };
-            }
-            let complete = failures <= MAX_CI_RETAINED_FAILURES_V1
-                && live.annotations.len() <= MAX_CI_RETAINED_ANNOTATIONS_V1
-                && live.check_run.output.annotations_count as usize == live.annotations.len();
-            let state = if complete {
-                CiFailureLocalizationStateV1::Complete
-            } else {
-                CiFailureLocalizationStateV1::Partial
-            };
-            let coverage = if complete {
-                CiFailureCoverageV1::Complete
-            } else {
-                CiFailureCoverageV1::Partial
-            };
-            if !context_admitted(context) {
-                return unavailable_result(&self.provider, request);
-            }
-            if let Err(failure) = self.authorize_source(context, request).await {
-                return source_failure_result(&self.provider, request, failure);
-            }
-            let retained = self
-                .retained
-                .retain(context, request, &live, state, coverage)
+                let retained = hotpath::future!(
+                    self.retained
+                        .retain(context, request, &live, state, coverage),
+                    label = "usecases.ci_runtime.cache_store"
+                )
                 .await
                 .filter(|observation| observation.validate_for(request, &live));
-            if let Err(failure) = self.authorize_source(context, request).await {
-                return source_failure_result(&self.provider, request, failure);
-            }
-            let Some(observation) = retained else {
-                return CiProviderReadResultV1 {
+                if let Err(failure) = self.authorize_source(context, request).await {
+                    return source_failure_result(&self.provider, request, failure);
+                }
+                let Some(observation) = retained else {
+                    return CiProviderReadResultV1 {
+                        provider: self.provider.clone(),
+                        run: request.run.clone(),
+                        state: CiFailureLocalizationStateV1::Partial,
+                        coverage: CiFailureCoverageV1::Partial,
+                        source_degradation: None,
+                        failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
+                        checks: 1,
+                        annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
+                        record: None,
+                    };
+                };
+                CiProviderReadResultV1 {
                     provider: self.provider.clone(),
                     run: request.run.clone(),
-                    state: CiFailureLocalizationStateV1::Partial,
-                    coverage: CiFailureCoverageV1::Partial,
+                    state,
+                    coverage,
                     source_degradation: None,
-                    failures: failures.min(MAX_CI_RETAINED_FAILURES_V1),
+                    failures,
                     checks: 1,
-                    annotations: live.annotations.len().min(MAX_CI_RETAINED_ANNOTATIONS_V1),
-                    record: None,
-                };
-            };
-            CiProviderReadResultV1 {
-                provider: self.provider.clone(),
-                run: request.run.clone(),
-                state,
-                coverage,
-                source_degradation: None,
-                failures,
-                checks: 1,
-                annotations: live.annotations.len(),
-                record: Some(CiRetainedProviderRecordV1 {
-                    provider_record: live,
-                    observation,
-                }),
-            }
-        })
+                    annotations: live.annotations.len(),
+                    record: Some(CiRetainedProviderRecordV1 {
+                        provider_record: live,
+                        observation,
+                    }),
+                }
+            },
+            label = "usecases.ci_runtime.read_record"
+        ))
     }
 }
 

@@ -133,7 +133,7 @@ const SEMANTIC_EMBEDS_PER_COMMIT: usize =
 ///
 /// Returns immediately after enqueueing; artifact load, model download, and
 /// indexing run asynchronously and never join into ordinary search.
-#[hotpath::measure]
+#[hotpath::measure(label = "usecases.semantic.schedule")]
 pub fn schedule_saved_code_generation<LoadArtifact, StageProjection, StageFuture>(
     handle: &DaemonSemanticRuntimeHandleV1,
     generation: &CodeIndexPublishedGenerationV1,
@@ -1257,7 +1257,7 @@ impl ProductionSemanticRuntimeV1 {
     /// succeed. Daemon publication holds this as its final lease through
     /// commit, so lifecycle writers cannot change the evaluated model between
     /// validation and durable profile publication.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.evaluation_lease", future = true)]
     pub async fn acquire_verified_evaluation_target_publication_lease(
         &self,
         verification: &SemanticEvaluationLifecycleVerificationV1,
@@ -1355,7 +1355,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Freeze vector-pointer mutation while a freshness-bound accepted profile
     /// publication commits. Every vector mutation enters this same writer
     /// lane, so a validated revision/generation remains exact for the lease.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.vector_lease", future = true)]
     pub async fn acquire_vector_publication_lease(
         &self,
         expected_revision: i64,
@@ -1427,7 +1427,6 @@ impl ProductionSemanticRuntimeV1 {
             .is_some()
     }
 
-    #[hotpath::measure]
     fn schedule_saved_generation_fair(
         &self,
         generation: Arc<CodeIndexPublishedGenerationV1>,
@@ -1436,7 +1435,7 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, Some(lease))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.semantic.schedule_inner")]
     fn schedule_saved_generation_inner(
         &self,
         generation: Arc<CodeIndexPublishedGenerationV1>,
@@ -2980,6 +2979,7 @@ pub struct ApplicationSemanticSearchParametersV1<'a, V, C> {
 /// Non-ready / indexing / degraded states never construct the retriever and
 /// return the frozen query fallback without waiting on `FastEmbed` download or
 /// projection. Exact/lexical/graph owners stay independently callable.
+#[hotpath::measure(label = "usecases.semantic.search")]
 pub fn compose_application_semantic_search<'a, V, C>(
     parameters: ApplicationSemanticSearchParametersV1<'a, V, C>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
@@ -3028,6 +3028,7 @@ where
 
 /// Project-scoped application search consumer over the retained production
 /// runtime and committed configuration-selected vector generation.
+#[hotpath::measure(label = "usecases.semantic.project_search", future = true)]
 pub async fn compose_project_application_semantic_search<C>(
     project_root: &Path,
     code_generation: &CodeIndexPublishedGenerationV1,

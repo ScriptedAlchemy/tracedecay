@@ -40,6 +40,7 @@ impl DashboardDeliveryReadAdapter {
         }
     }
 
+    #[hotpath::measure(label = "mcp.dashboard.delivery.total")]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -105,7 +106,10 @@ impl DashboardDeliveryReadAdapter {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => ProjectDeliveryReadOutcomeV1::Unavailable,
-            outcome = handle.read(&context, &request, &release_control) => outcome,
+            outcome = hotpath::future!(
+                handle.read(&context, &request, &release_control),
+                label = "mcp.dashboard.delivery.read"
+            ) => outcome,
         }
     }
 }
@@ -118,6 +122,7 @@ impl Drop for GitReadCancellationGuard {
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.dashboard.delivery.head")]
 async fn live_expected_head_commit_id(
     control: &DashboardHttpRequestControlV1,
     project_root: &std::path::Path,

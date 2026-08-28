@@ -94,6 +94,7 @@ pub(crate) struct UnregisteredStoreSweepReport {
 /// honoring cancellation/deadline before each bounded filesystem/registry
 /// action. A cancellation never reports an empty successful page or mutates a
 /// partially inspected plan.
+#[hotpath::measure(label = "retention.orphan.sweep_unregistered_page", future = true)]
 pub(crate) async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,

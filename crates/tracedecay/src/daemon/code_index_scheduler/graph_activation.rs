@@ -196,7 +196,7 @@ impl CodeGraphActivationAuthorityV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.graph.activate", future = true)]
     pub(super) async fn activate(
         &self,
         project_id: &ProjectId,

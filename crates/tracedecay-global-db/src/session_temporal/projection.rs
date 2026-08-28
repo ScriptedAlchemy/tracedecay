@@ -74,7 +74,10 @@ impl SessionTemporalRefreshDiscoveryPage {
 impl RegisteredGlobalDb {
     /// Discovers sessions that need temporal projection.
     ///
-    #[hotpath::measure]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.query.pending_refresh"
+    )]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -263,7 +266,10 @@ impl RegisteredGlobalDb {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.projection.materialize"
+    )]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -339,15 +345,19 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.txn.persist_projection"
+    )]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
     ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let transaction = hotpath::measure_block!("global_db.session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+        });
         let receipt = persist_session_temporal_projection_batch_in_transaction(
             &transaction,
             &batch,
@@ -355,10 +365,12 @@ impl RegisteredGlobalDb {
             ProjectionProgressBaseline::Empty,
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        hotpath::measure_block!("global_db.session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+        });
         Ok(receipt)
     }
 }

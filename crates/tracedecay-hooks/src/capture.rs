@@ -49,7 +49,7 @@ pub enum NativeHookCaptureOutcomeV1 {
 /// the coarse boundary that matters for hook latency: it decodes, binds, and
 /// spools one event, so its cost and outcome mix stand in for the whole
 /// capture path without measuring the decode/bind/spool internals separately.
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.capture.native_event")]
 pub fn capture_native_event_for_replay(
     data_root: &Path,
     source: NativeHookCaptureSourceV1,
@@ -60,7 +60,7 @@ pub fn capture_native_event_for_replay(
     let outcome = capture_native_event_for_replay_inner(data_root, source, payload, material, now);
     #[cfg(feature = "hotpath")]
     {
-        let name = match outcome {
+        hotpath::gauge!(match outcome {
             NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
             NativeHookCaptureOutcomeV1::Unsupported => "hooks.capture.outcome.unsupported",
             NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
@@ -68,8 +68,8 @@ pub fn capture_native_event_for_replay(
             NativeHookCaptureOutcomeV1::Full => "hooks.capture.outcome.full",
             NativeHookCaptureOutcomeV1::ResetRequired => "hooks.capture.outcome.reset_required",
             NativeHookCaptureOutcomeV1::Unavailable => "hooks.capture.outcome.unavailable",
-        };
-        hotpath::gauge!(name).inc(1);
+        })
+        .inc(1);
     }
     outcome
 }

@@ -17,6 +17,7 @@ pub(super) fn automatic_fact_receipt_view_rpc_args(id: &str) -> serde_json::Valu
     serde_json::json!({ "action": "automatic_fact_receipt_view", "id": id })
 }
 
+#[hotpath::measure(label = "cli.automation.facts", future = true)]
 pub(super) async fn handle_automation_facts_command(
     action: AutomationFactsAction,
 ) -> tracedecay::errors::Result<()> {

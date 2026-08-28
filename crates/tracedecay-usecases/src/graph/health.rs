@@ -33,6 +33,7 @@ pub struct VerifiedHealthSnapshotV1 {
     pub skip_coverage_count: usize,
 }
 
+#[hotpath::measure(label = "usecases.graph.health_snapshot", future = true)]
 pub async fn compute_verified_health_snapshot(
     graph: &GraphQueryManager<'_>,
     path_prefix: Option<&str>,
@@ -111,6 +112,7 @@ pub async fn compute_verified_health_snapshot(
 /// Computes the Gini coefficient for a slice of non-negative values.
 /// Returns 0.0 for empty slices, single-element slices, or all-zero slices.
 /// Result is in \[0.0, 1.0\] where 0.0 = perfect equality.
+#[hotpath::measure(label = "usecases.graph.gini")]
 pub fn gini_coefficient(values: &[f64]) -> f64 {
     if values.len() <= 1 {
         return 0.0;
@@ -159,6 +161,7 @@ pub fn gini_label(gini: f64) -> &'static str {
 /// Computes the acyclicity score for a directed graph.
 /// Uses Tarjan's SCC algorithm. Score = 1.0 - (`edges_in_nontrivial_SCCs` / `total_edges`).
 /// Returns (score, `number_of_edges_in_cycles`).
+#[hotpath::measure(label = "usecases.graph.acyclicity")]
 pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
@@ -220,6 +223,7 @@ pub struct DepthResult {
 
 /// Computes longest dependency chains. Breaks cycles via Tarjan's SCC
 /// (collapses each SCC to a single node), then runs topo sort + DP.
+#[hotpath::measure(label = "usecases.graph.dependency_depth")]
 pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
@@ -373,6 +377,7 @@ impl DsmCluster {
 /// Groups the file adjacency by parent directory and orders clusters by
 /// cross-boundary coupling, then cluster size. This is the shared authority for
 /// both the MCP DSM tool and dashboard graph strata.
+#[hotpath::measure(label = "usecases.graph.dsm_clusters")]
 pub fn dsm_clusters<AdjHasher, EdgeHasher>(
     adj: &HashMap<String, HashSet<String, EdgeHasher>, AdjHasher>,
 ) -> Vec<DsmCluster>
@@ -450,6 +455,7 @@ pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
 /// Hub nodes = files with (fan\_in + fan\_out) > mean + 2\*stddev.
 /// Score = 1.0 - (1.0 / component\_count), clamped to \[0, 1\].
 /// Returns (score, component\_count\_after\_hub\_removal).
+#[hotpath::measure(label = "usecases.graph.modularity")]
 pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {

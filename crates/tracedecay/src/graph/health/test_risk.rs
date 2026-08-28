@@ -127,6 +127,7 @@ impl TestAttributionMethod {
     }
 }
 
+#[hotpath::measure(label = "graph.health.test_risk", future = true)]
 pub(crate) async fn analyze_test_risk(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

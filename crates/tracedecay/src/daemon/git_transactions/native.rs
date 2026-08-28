@@ -1372,6 +1372,7 @@ impl<A> GitIndexNativeExecutor for FixedDaemonGitIndexExecutor<A>
 where
     A: GitIndexPreviewAssembler,
 {
+    #[hotpath::measure(label = "daemon.git.tx.native_preview")]
     fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
@@ -1387,6 +1388,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "daemon.git.tx.native_apply")]
     fn apply(
         &self,
         transaction_id: &GitIndexTransactionId,
@@ -1550,6 +1552,7 @@ fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOu
     }
 }
 
+#[hotpath::measure(label = "daemon.git.tx.snapshot")]
 pub(crate) fn capture_exact_snapshot(
     repository_root: &std::path::Path,
     project_id: ProjectId,

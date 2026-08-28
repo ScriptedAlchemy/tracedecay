@@ -141,6 +141,7 @@ pub(crate) enum ParsedIncoming {
     },
 }
 
+#[hotpath::measure(label = "lsp.protocol.parse_incoming")]
 pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, RpcFailure)> {
     let Some(object) = value.as_object() else {
         return Err((
@@ -213,7 +214,7 @@ pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, Rpc
     }
 }
 
-#[hotpath::measure(label = "lsp_dispatch_incoming")]
+#[hotpath::measure(label = "lsp.protocol.dispatch_incoming")]
 pub(crate) fn dispatch_incoming<P, S, D>(
     session: &mut DaemonLspProtocolSession<P, S, D>,
     incoming: ParsedIncoming,
@@ -238,6 +239,7 @@ pub(crate) fn dispatch_incoming<P, S, D>(
     }
 }
 
+#[hotpath::measure(label = "lsp.protocol.dispatch_notification")]
 fn dispatch_notification<P, S, D>(
     session: &mut DaemonLspProtocolSession<P, S, D>,
     method: LspClientMethod,
@@ -274,6 +276,7 @@ fn dispatch_notification<P, S, D>(
     }
 }
 
+#[hotpath::measure(label = "lsp.protocol.dispatch_request")]
 fn dispatch_request<P, S, D>(
     session: &mut DaemonLspProtocolSession<P, S, D>,
     response_id: Value,

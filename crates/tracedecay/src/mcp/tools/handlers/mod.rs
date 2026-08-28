@@ -209,6 +209,7 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "mcp.tool.handle_tool_call", future = true)]
 pub async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,

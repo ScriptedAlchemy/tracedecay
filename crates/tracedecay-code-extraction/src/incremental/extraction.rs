@@ -198,8 +198,18 @@ fn parse_reset_reason(reason: ParseResetReason) -> ParsedExtractionResetReason {
     }
 }
 
-#[hotpath::measure]
 fn merge_changed_artifact(
+    previous: &ExtractionArtifactV1,
+    delta: ExtractionArtifactV1,
+    edit: ParseInputEdit,
+    old_end_row: u32,
+) -> Option<ExtractionArtifactV1> {
+    crate::hotpath_observe::measure_emit(|| {
+        merge_changed_artifact_unmeasured(previous, delta, edit, old_end_row)
+    })
+}
+
+fn merge_changed_artifact_unmeasured(
     previous: &ExtractionArtifactV1,
     delta: ExtractionArtifactV1,
     edit: ParseInputEdit,

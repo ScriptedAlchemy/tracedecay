@@ -328,6 +328,7 @@ pub fn deploy_managed_skills_to_project(
     deploy_managed_skills(profile_root, Some(project_root))
 }
 
+#[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
 fn deploy_managed_skills(
     profile_root: &Path,
     project_root: Option<&Path>,

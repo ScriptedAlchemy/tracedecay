@@ -3,7 +3,7 @@
 use super::*;
 
 /// Structured TOML / JSON queries by dotted key path.
-#[hotpath::measure]
+#[hotpath::measure(label = "mcp.info.config.total")]
 pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let key = args
         .get("key")
@@ -27,7 +27,8 @@ pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolR
     }
 
     let project_root = cg.project_root().to_path_buf();
-    let (payload, touched) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (payload, touched) = hotpath::future!(
+        tokio::task::spawn_blocking(move || -> Result<_> {
         let mut files: Vec<String> = Vec::new();
         if let Some(p) = path {
             let project_path = ProjectPath::resolve(&project_root, Path::new(&p))?;
@@ -82,7 +83,9 @@ pub(crate) async fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolR
             }),
             touched,
         ))
-    })
+    }),
+        label = "mcp.info.config.scan"
+    )
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_config scan failed to join: {join_error}"),

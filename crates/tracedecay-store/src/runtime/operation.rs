@@ -280,99 +280,101 @@ impl Default for AdmissionConfigV1 {
 
 impl AdmissionConfigV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        self.per_shard_queue.validate()?;
-        self.foreground_batch.validate()?;
-        self.background_batch.validate()?;
-        self.readers.validate()?;
-        self.wal.validate()?;
+        hotpath::measure_block!("store.runtime_operation.validate_admission", {
+            self.per_shard_queue.validate()?;
+            self.foreground_batch.validate()?;
+            self.background_batch.validate()?;
+            self.readers.validate()?;
+            self.wal.validate()?;
 
-        if self.per_shard_queue.max_operations > DEFAULT_PER_SHARD_QUEUE_OPERATIONS {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "per-shard queue operations",
-                actual: u64::from(self.per_shard_queue.max_operations),
-                max: u64::from(DEFAULT_PER_SHARD_QUEUE_OPERATIONS),
-            });
-        }
-        if self.per_shard_queue.max_bytes > DEFAULT_PER_SHARD_QUEUE_BYTES {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "per-shard queue bytes",
-                actual: self.per_shard_queue.max_bytes,
-                max: DEFAULT_PER_SHARD_QUEUE_BYTES,
-            });
-        }
+            if self.per_shard_queue.max_operations > DEFAULT_PER_SHARD_QUEUE_OPERATIONS {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "per-shard queue operations",
+                    actual: u64::from(self.per_shard_queue.max_operations),
+                    max: u64::from(DEFAULT_PER_SHARD_QUEUE_OPERATIONS),
+                });
+            }
+            if self.per_shard_queue.max_bytes > DEFAULT_PER_SHARD_QUEUE_BYTES {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "per-shard queue bytes",
+                    actual: self.per_shard_queue.max_bytes,
+                    max: DEFAULT_PER_SHARD_QUEUE_BYTES,
+                });
+            }
 
-        let allowed_global = match self.global_queue_profile {
-            GlobalQueueProfileV1::Standard => DEFAULT_GLOBAL_QUEUE_BYTES,
-            GlobalQueueProfileV1::ExplicitWorkstation => WORKSTATION_GLOBAL_QUEUE_BYTES,
-        };
-        if self.global_queue_max_bytes > allowed_global {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "global queue bytes",
-                actual: self.global_queue_max_bytes,
-                max: allowed_global,
-            });
-        }
-        if self.global_queue_max_bytes < self.per_shard_queue.max_bytes {
-            return Err(StorageRuntimeContractErrorV1::BelowMinimum {
-                field: "global queue bytes",
-                actual: self.global_queue_max_bytes,
-                min: self.per_shard_queue.max_bytes,
-            });
-        }
-        validate_batch_ceiling(
-            &self.foreground_batch,
-            "foreground batch",
-            FOREGROUND_BATCH_MAX_OPERATIONS,
-            FOREGROUND_BATCH_MAX_BYTES,
-            FOREGROUND_BATCH_MAX_DELAY_MS,
-        )?;
-        validate_batch_ceiling(
-            &self.background_batch,
-            "background batch",
-            BACKGROUND_BATCH_MAX_OPERATIONS,
-            BACKGROUND_BATCH_MAX_BYTES,
-            BACKGROUND_BATCH_MAX_DELAY_MS,
-        )?;
-        if self.wal.soft_limit_bytes > WAL_SOFT_LIMIT_BYTES {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "WAL soft limit",
-                actual: self.wal.soft_limit_bytes,
-                max: WAL_SOFT_LIMIT_BYTES,
-            });
-        }
-        if self.wal.hard_limit_bytes > WAL_HARD_LIMIT_BYTES {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "WAL hard limit",
-                actual: self.wal.hard_limit_bytes,
-                max: WAL_HARD_LIMIT_BYTES,
-            });
-        }
-        if self.foreground_batch.max_operations > self.per_shard_queue.max_operations
-            || self.background_batch.max_operations > self.per_shard_queue.max_operations
-        {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "batch operations",
-                actual: u64::from(
-                    self.foreground_batch
-                        .max_operations
-                        .max(self.background_batch.max_operations),
-                ),
-                max: u64::from(self.per_shard_queue.max_operations),
-            });
-        }
-        if self.foreground_batch.max_bytes > self.per_shard_queue.max_bytes
-            || self.background_batch.max_bytes > self.per_shard_queue.max_bytes
-        {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "batch bytes",
-                actual: self
-                    .foreground_batch
-                    .max_bytes
-                    .max(self.background_batch.max_bytes),
-                max: self.per_shard_queue.max_bytes,
-            });
-        }
-        Ok(())
+            let allowed_global = match self.global_queue_profile {
+                GlobalQueueProfileV1::Standard => DEFAULT_GLOBAL_QUEUE_BYTES,
+                GlobalQueueProfileV1::ExplicitWorkstation => WORKSTATION_GLOBAL_QUEUE_BYTES,
+            };
+            if self.global_queue_max_bytes > allowed_global {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "global queue bytes",
+                    actual: self.global_queue_max_bytes,
+                    max: allowed_global,
+                });
+            }
+            if self.global_queue_max_bytes < self.per_shard_queue.max_bytes {
+                return Err(StorageRuntimeContractErrorV1::BelowMinimum {
+                    field: "global queue bytes",
+                    actual: self.global_queue_max_bytes,
+                    min: self.per_shard_queue.max_bytes,
+                });
+            }
+            validate_batch_ceiling(
+                &self.foreground_batch,
+                "foreground batch",
+                FOREGROUND_BATCH_MAX_OPERATIONS,
+                FOREGROUND_BATCH_MAX_BYTES,
+                FOREGROUND_BATCH_MAX_DELAY_MS,
+            )?;
+            validate_batch_ceiling(
+                &self.background_batch,
+                "background batch",
+                BACKGROUND_BATCH_MAX_OPERATIONS,
+                BACKGROUND_BATCH_MAX_BYTES,
+                BACKGROUND_BATCH_MAX_DELAY_MS,
+            )?;
+            if self.wal.soft_limit_bytes > WAL_SOFT_LIMIT_BYTES {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "WAL soft limit",
+                    actual: self.wal.soft_limit_bytes,
+                    max: WAL_SOFT_LIMIT_BYTES,
+                });
+            }
+            if self.wal.hard_limit_bytes > WAL_HARD_LIMIT_BYTES {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "WAL hard limit",
+                    actual: self.wal.hard_limit_bytes,
+                    max: WAL_HARD_LIMIT_BYTES,
+                });
+            }
+            if self.foreground_batch.max_operations > self.per_shard_queue.max_operations
+                || self.background_batch.max_operations > self.per_shard_queue.max_operations
+            {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "batch operations",
+                    actual: u64::from(
+                        self.foreground_batch
+                            .max_operations
+                            .max(self.background_batch.max_operations),
+                    ),
+                    max: u64::from(self.per_shard_queue.max_operations),
+                });
+            }
+            if self.foreground_batch.max_bytes > self.per_shard_queue.max_bytes
+                || self.background_batch.max_bytes > self.per_shard_queue.max_bytes
+            {
+                return Err(StorageRuntimeContractErrorV1::LimitExceeded {
+                    field: "batch bytes",
+                    actual: self
+                        .foreground_batch
+                        .max_bytes
+                        .max(self.background_batch.max_bytes),
+                    max: self.per_shard_queue.max_bytes,
+                });
+            }
+            Ok(())
+        })
     }
 }
 
@@ -626,30 +628,32 @@ impl GraphNodeV1 {
     pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_canonical_id(&self.id, "graph node id", 4_096)?;
-        validate_canonical_id(&self.kind, "graph node kind", 128)?;
-        validate_canonical_id(&self.name, "graph node name", 16_384)?;
-        validate_canonical_id(&self.file_path, "graph node file path", 65_536)?;
-        validate_canonical_id(&self.visibility, "graph node visibility", 128)?;
-        if let Some(parent_id) = &self.parent_id {
-            validate_canonical_id(parent_id, "graph parent node id", 4_096)?;
-        }
-        for (field, value) in [
-            ("graph qualified name", Some(self.qualified_name.as_str())),
-            ("graph node signature", self.signature.as_deref()),
-            ("graph node docstring", self.docstring.as_deref()),
-        ] {
-            if let Some(value) = value
-                && value.len() > Self::MAX_TEXT_BYTES
-            {
-                return Err(StorageRuntimeContractErrorV1::TooLong {
-                    field,
-                    actual: value.len(),
-                    max: Self::MAX_TEXT_BYTES,
-                });
+        hotpath::measure_block!("store.runtime_operation.validate_graph_node", {
+            validate_canonical_id(&self.id, "graph node id", 4_096)?;
+            validate_canonical_id(&self.kind, "graph node kind", 128)?;
+            validate_canonical_id(&self.name, "graph node name", 16_384)?;
+            validate_canonical_id(&self.file_path, "graph node file path", 65_536)?;
+            validate_canonical_id(&self.visibility, "graph node visibility", 128)?;
+            if let Some(parent_id) = &self.parent_id {
+                validate_canonical_id(parent_id, "graph parent node id", 4_096)?;
             }
-        }
-        Ok(())
+            for (field, value) in [
+                ("graph qualified name", Some(self.qualified_name.as_str())),
+                ("graph node signature", self.signature.as_deref()),
+                ("graph node docstring", self.docstring.as_deref()),
+            ] {
+                if let Some(value) = value
+                    && value.len() > Self::MAX_TEXT_BYTES
+                {
+                    return Err(StorageRuntimeContractErrorV1::TooLong {
+                        field,
+                        actual: value.len(),
+                        max: Self::MAX_TEXT_BYTES,
+                    });
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -937,77 +941,82 @@ impl RepositoryWritePayloadV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        match self {
-            Self::Configuration(commit) => commit.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
+        hotpath::measure_block!("store.runtime_operation.validate_payload", {
+            match self {
+                Self::Configuration(commit) => commit.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::GitIndexTransaction(record) => record.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::EnqueueOutbox(entry) => entry.validate(),
+                Self::ApplyInbox(entry) => entry.validate(),
+                Self::AcknowledgeOutbox(inbox) => inbox.validate(),
+                Self::RetrievalAnchorDisposition(record) => record.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::RetrievalAnchorDerivative(derivative) => {
+                    derivative.validate().map_err(|_| {
+                        StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                            payload: self.name(),
+                        }
+                    })
                 }
-            }),
-            Self::GitIndexTransaction(record) => record.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
+                Self::EvidenceAssembly(write) => write.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::ExternalSource(commit) => commit.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::ExternalSourceBatch(commits) => {
+                    if commits.is_empty() || commits.iter().any(|commit| commit.validate().is_err())
+                    {
+                        Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                            payload: self.name(),
+                        })
+                    } else {
+                        Ok(())
+                    }
                 }
-            }),
-            Self::EnqueueOutbox(entry) => entry.validate(),
-            Self::ApplyInbox(entry) => entry.validate(),
-            Self::AcknowledgeOutbox(inbox) => inbox.validate(),
-            Self::RetrievalAnchorDisposition(record) => record.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::RetrievalAnchorDerivative(derivative) => derivative.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::EvidenceAssembly(write) => write.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::ExternalSource(commit) => commit.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::ExternalSourceBatch(commits) => {
-                if commits.is_empty() || commits.iter().any(|commit| commit.validate().is_err()) {
+                Self::ExternalSourceProjection(projection) => projection.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::ExternalSourceAcquisition(command) => command.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::DiagnosticSupersession(request) => request.validate().map_err(|_| {
+                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                        payload: self.name(),
+                    }
+                }),
+                Self::RemoteObservationReplay(write) => write.validate(),
+                Self::RemoteWriterFenceInstall(install) => install.validate(),
+                Self::ObservationBatch(writes) if writes.is_empty() => {
                     Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                         payload: self.name(),
                     })
-                } else {
-                    Ok(())
                 }
+                Self::Fact(_)
+                | Self::Observation(_)
+                | Self::ObservationBatch(_)
+                | Self::ObservationCursorAdvance(_)
+                | Self::Diagnostics(_) => Ok(()),
             }
-            Self::ExternalSourceProjection(projection) => projection.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::ExternalSourceAcquisition(command) => command.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::DiagnosticSupersession(request) => request.validate().map_err(|_| {
-                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                }
-            }),
-            Self::RemoteObservationReplay(write) => write.validate(),
-            Self::RemoteWriterFenceInstall(install) => install.validate(),
-            Self::ObservationBatch(writes) if writes.is_empty() => {
-                Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                    payload: self.name(),
-                })
-            }
-            Self::Fact(_)
-            | Self::Observation(_)
-            | Self::ObservationBatch(_)
-            | Self::ObservationCursorAdvance(_)
-            | Self::Diagnostics(_) => Ok(()),
-        }
+        })
     }
 }
 
@@ -1038,72 +1047,49 @@ pub struct RepositoryOperationEnvelopeV1 {
 
 impl RepositoryOperationEnvelopeV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        self.metadata.validate()?;
-        self.payload.validate()?;
-        if !self.metadata.shard_id.is_mutable() {
-            return Err(StorageRuntimeContractErrorV1::ImmutableShard {
-                operation: self.payload.name(),
-            });
-        }
-        if !self.payload.matches_scope(&self.metadata.shard_id.scope) {
-            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.payload.family_name(),
-                shard_family: match self.metadata.shard_id.scope {
-                    StoreShardScopeV1::Profile => "profile",
-                    StoreShardScopeV1::ProfileMemory => "profile_memory",
-                    StoreShardScopeV1::ProfileSessions => "profile_sessions",
-                    StoreShardScopeV1::RemoteNode { .. } => "remote_node",
-                    StoreShardScopeV1::Project { .. } => "project",
-                    StoreShardScopeV1::ProjectSessions { .. } => "sessions",
-                    StoreShardScopeV1::Code { .. } => "code",
-                },
-            });
-        }
-        if let RepositoryWritePayloadV1::Fact(batch) = &self.payload
-            && !fact_owner_matches_shard(batch.owner(), &self.metadata.shard_id)
-        {
-            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.payload.family_name(),
-                shard_family: "memory",
-            });
-        }
-        if let RepositoryWritePayloadV1::EvidenceAssembly(write) = &self.payload {
-            let exact_owner = write.owner.owner.profile_id() == &self.metadata.shard_id.profile_id
-                && write.owner.owner.project_id() == self.metadata.shard_id.scope.project_id();
-            if !exact_owner {
-                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                    operation: self.payload.family_name(),
-                    shard_family: "project",
+        hotpath::measure_block!("store.runtime_operation.validate_envelope", {
+            self.metadata.validate()?;
+            self.payload.validate()?;
+            if !self.metadata.shard_id.is_mutable() {
+                return Err(StorageRuntimeContractErrorV1::ImmutableShard {
+                    operation: self.payload.name(),
                 });
             }
-        }
-        if let RepositoryWritePayloadV1::ExternalSource(commit) = &self.payload {
-            let exact_owner = match (&commit.binding().owner, &self.metadata.shard_id.scope) {
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
-                    StoreShardScopeV1::Project {
-                        project_id: shard_project,
-                    }
-                    | StoreShardScopeV1::ProjectSessions {
-                        project_id: shard_project,
+            if !self.payload.matches_scope(&self.metadata.shard_id.scope) {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: match self.metadata.shard_id.scope {
+                        StoreShardScopeV1::Profile => "profile",
+                        StoreShardScopeV1::ProfileMemory => "profile_memory",
+                        StoreShardScopeV1::ProfileSessions => "profile_sessions",
+                        StoreShardScopeV1::RemoteNode { .. } => "remote_node",
+                        StoreShardScopeV1::Project { .. } => "project",
+                        StoreShardScopeV1::ProjectSessions { .. } => "sessions",
+                        StoreShardScopeV1::Code { .. } => "code",
                     },
-                ) => project_id == shard_project,
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
-                    StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
-                ) => profile_id == &self.metadata.shard_id.profile_id,
-                _ => false,
-            };
-            if !exact_owner {
-                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                    operation: self.payload.family_name(),
-                    shard_family: "external_source",
                 });
             }
-        }
-        if let RepositoryWritePayloadV1::ExternalSourceBatch(commits) = &self.payload {
-            let exact_owner = commits.iter().all(|commit| {
-                match (&commit.binding().owner, &self.metadata.shard_id.scope) {
+            if let RepositoryWritePayloadV1::Fact(batch) = &self.payload
+                && !fact_owner_matches_shard(batch.owner(), &self.metadata.shard_id)
+            {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: "memory",
+                });
+            }
+            if let RepositoryWritePayloadV1::EvidenceAssembly(write) = &self.payload {
+                let exact_owner = write.owner.owner.profile_id()
+                    == &self.metadata.shard_id.profile_id
+                    && write.owner.owner.project_id() == self.metadata.shard_id.scope.project_id();
+                if !exact_owner {
+                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                        operation: self.payload.family_name(),
+                        shard_family: "project",
+                    });
+                }
+            }
+            if let RepositoryWritePayloadV1::ExternalSource(commit) = &self.payload {
+                let exact_owner = match (&commit.binding().owner, &self.metadata.shard_id.scope) {
                     (
                         tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
                         StoreShardScopeV1::Project {
@@ -1118,99 +1104,128 @@ impl RepositoryOperationEnvelopeV1 {
                         StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
                     ) => profile_id == &self.metadata.shard_id.profile_id,
                     _ => false,
+                };
+                if !exact_owner {
+                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                        operation: self.payload.family_name(),
+                        shard_family: "external_source",
+                    });
                 }
-            });
-            if !exact_owner {
-                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                    operation: self.payload.family_name(),
-                    shard_family: "external_source",
-                });
             }
-        }
-        if let RepositoryWritePayloadV1::ExternalSourceAcquisition(command) = &self.payload {
-            let exact_owner = match (&command.binding().owner, &self.metadata.shard_id.scope) {
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
-                    StoreShardScopeV1::Project {
-                        project_id: shard_project,
+            if let RepositoryWritePayloadV1::ExternalSourceBatch(commits) = &self.payload {
+                let exact_owner = commits.iter().all(|commit| {
+                    match (&commit.binding().owner, &self.metadata.shard_id.scope) {
+                        (
+                            tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
+                            StoreShardScopeV1::Project {
+                                project_id: shard_project,
+                            }
+                            | StoreShardScopeV1::ProjectSessions {
+                                project_id: shard_project,
+                            },
+                        ) => project_id == shard_project,
+                        (
+                            tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
+                            StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                        ) => profile_id == &self.metadata.shard_id.profile_id,
+                        _ => false,
                     }
-                    | StoreShardScopeV1::ProjectSessions {
-                        project_id: shard_project,
-                    },
-                ) => project_id == shard_project,
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
-                    StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
-                ) => profile_id == &self.metadata.shard_id.profile_id,
-                _ => false,
-            };
-            if !exact_owner {
+                });
+                if !exact_owner {
+                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                        operation: self.payload.family_name(),
+                        shard_family: "external_source",
+                    });
+                }
+            }
+            if let RepositoryWritePayloadV1::ExternalSourceAcquisition(command) = &self.payload {
+                let exact_owner = match (&command.binding().owner, &self.metadata.shard_id.scope) {
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
+                        StoreShardScopeV1::Project {
+                            project_id: shard_project,
+                        }
+                        | StoreShardScopeV1::ProjectSessions {
+                            project_id: shard_project,
+                        },
+                    ) => project_id == shard_project,
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    ) => profile_id == &self.metadata.shard_id.profile_id,
+                    _ => false,
+                };
+                if !exact_owner {
+                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                        operation: self.payload.family_name(),
+                        shard_family: "external_source",
+                    });
+                }
+            }
+            if let RepositoryWritePayloadV1::ExternalSourceProjection(projection) = &self.payload {
+                let exact_owner = match (
+                    &projection.source_frontier().binding().owner,
+                    &self.metadata.shard_id.scope,
+                ) {
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
+                        StoreShardScopeV1::Project {
+                            project_id: shard_project,
+                        }
+                        | StoreShardScopeV1::ProjectSessions {
+                            project_id: shard_project,
+                        },
+                    ) => project_id == shard_project,
+                    (
+                        tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
+                        StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+                    ) => profile_id == &self.metadata.shard_id.profile_id,
+                    _ => false,
+                };
+                if !exact_owner {
+                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                        operation: self.payload.family_name(),
+                        shard_family: "external_source",
+                    });
+                }
+            }
+            if let RepositoryWritePayloadV1::RemoteObservationReplay(write) = &self.payload
+                && self.metadata.shard_id.scope.project_id() != Some(&write.project_id)
+            {
                 return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
                     operation: self.payload.family_name(),
-                    shard_family: "external_source",
+                    shard_family: "sessions",
                 });
             }
-        }
-        if let RepositoryWritePayloadV1::ExternalSourceProjection(projection) = &self.payload {
-            let exact_owner = match (
-                &projection.source_frontier().binding().owner,
-                &self.metadata.shard_id.scope,
-            ) {
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Project(project_id),
-                    StoreShardScopeV1::Project {
-                        project_id: shard_project,
-                    }
-                    | StoreShardScopeV1::ProjectSessions {
-                        project_id: shard_project,
-                    },
-                ) => project_id == shard_project,
-                (
-                    tracedecay_domain::SourceBindingOwnerV1::Profile(profile_id),
-                    StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
-                ) => profile_id == &self.metadata.shard_id.profile_id,
-                _ => false,
-            };
-            if !exact_owner {
+            if let RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) = &self.payload
+                && !retrieval_anchor_owner_matches_shard(record.owner(), &self.metadata.shard_id)
+            {
                 return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
                     operation: self.payload.family_name(),
-                    shard_family: "external_source",
+                    shard_family: "project",
                 });
             }
-        }
-        if let RepositoryWritePayloadV1::RemoteObservationReplay(write) = &self.payload
-            && self.metadata.shard_id.scope.project_id() != Some(&write.project_id)
-        {
-            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.payload.family_name(),
-                shard_family: "sessions",
-            });
-        }
-        if let RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) = &self.payload
-            && !retrieval_anchor_owner_matches_shard(record.owner(), &self.metadata.shard_id)
-        {
-            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.payload.family_name(),
-                shard_family: "project",
-            });
-        }
-        if let RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) = &self.payload
-            && !retrieval_anchor_owner_matches_shard(derivative.owner(), &self.metadata.shard_id)
-        {
-            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: self.payload.family_name(),
-                shard_family: "project",
-            });
-        }
-        let required = self.payload.required_durability();
-        if self.metadata.durability != required {
-            return Err(StorageRuntimeContractErrorV1::DurabilityMismatch {
-                operation: self.payload.name(),
-                required,
-                actual: self.metadata.durability,
-            });
-        }
-        Ok(())
+            if let RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) = &self.payload
+                && !retrieval_anchor_owner_matches_shard(
+                    derivative.owner(),
+                    &self.metadata.shard_id,
+                )
+            {
+                return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                    operation: self.payload.family_name(),
+                    shard_family: "project",
+                });
+            }
+            let required = self.payload.required_durability();
+            if self.metadata.durability != required {
+                return Err(StorageRuntimeContractErrorV1::DurabilityMismatch {
+                    operation: self.payload.name(),
+                    required,
+                    actual: self.metadata.durability,
+                });
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1292,35 +1307,37 @@ impl StoreCommitReceiptV1 {
         &self,
         metadata: &StoreOperationMetadataV1,
     ) -> Result<(), StorageRuntimeContractErrorV1> {
-        self.validate()?;
-        if self.operation_id != metadata.operation_id {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "receipt operation id",
-            });
-        }
-        if self.idempotency != metadata.idempotency {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "receipt idempotency identity",
-            });
-        }
-        if self.shard_id != metadata.shard_id {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "receipt shard id",
-            });
-        }
-        if self.incarnation != metadata.incarnation {
-            return Err(StorageRuntimeContractErrorV1::IncarnationMismatch {
-                field: "receipt incarnation",
-                expected: metadata.incarnation,
-                actual: self.incarnation,
-            });
-        }
-        if self.authority_epoch != metadata.authority_epoch {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "receipt authority epoch",
-            });
-        }
-        Ok(())
+        hotpath::measure_block!("store.runtime_operation.validate_receipt", {
+            self.validate()?;
+            if self.operation_id != metadata.operation_id {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "receipt operation id",
+                });
+            }
+            if self.idempotency != metadata.idempotency {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "receipt idempotency identity",
+                });
+            }
+            if self.shard_id != metadata.shard_id {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "receipt shard id",
+                });
+            }
+            if self.incarnation != metadata.incarnation {
+                return Err(StorageRuntimeContractErrorV1::IncarnationMismatch {
+                    field: "receipt incarnation",
+                    expected: metadata.incarnation,
+                    actual: self.incarnation,
+                });
+            }
+            if self.authority_epoch != metadata.authority_epoch {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "receipt authority epoch",
+                });
+            }
+            Ok(())
+        })
     }
 
     /// A replay returns the original durable receipt. It must bind to the
@@ -1330,30 +1347,32 @@ impl StoreCommitReceiptV1 {
         &self,
         metadata: &StoreOperationMetadataV1,
     ) -> Result<(), StorageRuntimeContractErrorV1> {
-        self.validate()?;
-        if self.idempotency != metadata.idempotency {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "replay receipt idempotency identity",
-            });
-        }
-        if self.shard_id != metadata.shard_id {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "replay receipt shard id",
-            });
-        }
-        if self.incarnation != metadata.incarnation {
-            return Err(StorageRuntimeContractErrorV1::IncarnationMismatch {
-                field: "replay receipt incarnation",
-                expected: metadata.incarnation,
-                actual: self.incarnation,
-            });
-        }
-        if self.authority_epoch != metadata.authority_epoch {
-            return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "replay receipt authority epoch",
-            });
-        }
-        Ok(())
+        hotpath::measure_block!("store.runtime_operation.validate_replay", {
+            self.validate()?;
+            if self.idempotency != metadata.idempotency {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "replay receipt idempotency identity",
+                });
+            }
+            if self.shard_id != metadata.shard_id {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "replay receipt shard id",
+                });
+            }
+            if self.incarnation != metadata.incarnation {
+                return Err(StorageRuntimeContractErrorV1::IncarnationMismatch {
+                    field: "replay receipt incarnation",
+                    expected: metadata.incarnation,
+                    actual: self.incarnation,
+                });
+            }
+            if self.authority_epoch != metadata.authority_epoch {
+                return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
+                    field: "replay receipt authority epoch",
+                });
+            }
+            Ok(())
+        })
     }
 }
 

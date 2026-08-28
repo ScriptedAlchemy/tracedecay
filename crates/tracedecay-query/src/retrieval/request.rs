@@ -69,6 +69,7 @@ impl RawRetrievalRequestV1 {
         }
     }
 
+    #[hotpath::measure(label = "query.request.sanitize")]
     pub fn sanitize(
         self,
         sanitizer_revision: SanitizerRevision,

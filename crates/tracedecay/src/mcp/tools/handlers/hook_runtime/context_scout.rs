@@ -55,6 +55,7 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
     lifecycle.matches_envelope(envelope).then_some(lifecycle)
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
     provider: ProviderId,
@@ -241,6 +242,7 @@ fn release_hook_v2_delivery_claim(
     outcome == crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_prepare")]
 pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let envelope = hook_v2_envelope(args, "hook_v2_scout_prepare")?;
     let now = hook_now();
@@ -287,6 +289,7 @@ fn orchestration_response(
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_delivery")]
 pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let receipt = required_value(args, "receipt")?;
     let receipt = serde_json::from_value::<
@@ -324,6 +327,7 @@ pub(super) async fn hook_v2_delivery_receipt(cg: &TraceDecay, args: &Value) -> R
     Ok(json!({ "status": scout_store_outcome(outcome) }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_notice")]
 pub(super) async fn hook_v2_feedback_notice_delivery(
     cg: &TraceDecay,
     args: &Value,
@@ -356,6 +360,7 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
     Ok(json!({ "status": status }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_feedback")]
 pub(super) async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let receipt = serde_json::from_value::<
         crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
@@ -374,6 +379,7 @@ pub(super) async fn hook_v2_feedback(cg: &TraceDecay, args: &Value) -> Result<Va
     }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_cancel")]
 pub(super) async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let work = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutWorkV1>(
         required_value(args, "work")?,
@@ -389,6 +395,7 @@ pub(super) async fn hook_v2_cancel(cg: &TraceDecay, args: &Value) -> Result<Valu
     Ok(json!({ "status": status }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_status")]
 pub(super) async fn hook_v2_status(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let control = serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutControlV1>(
         required_value(args, "control")?,
@@ -425,6 +432,7 @@ impl ContextScoutReadSurfaceV1 {
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_read")]
 pub(super) async fn hook_v2_scout_read(
     cg: &TraceDecay,
     args: &Value,

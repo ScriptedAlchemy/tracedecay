@@ -41,6 +41,7 @@ const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 pub struct RepositoryPhysicalAttachmentFactory;
 
 impl RepositoryPhysicalAttachmentFactory {
+    #[hotpath::measure(label = "rusqlite.attachment.attach_read_only")]
     pub fn attach_read_only(
         &self,
         binding: StoreRuntimeBindingV1,
@@ -121,6 +122,7 @@ impl RepositoryPhysicalAttachmentFactory {
         )
     }
 
+    #[hotpath::measure(label = "rusqlite.attachment.initialize")]
     pub fn initialize(
         &self,
         binding: StoreRuntimeBindingV1,
@@ -142,6 +144,7 @@ impl RepositoryPhysicalAttachmentFactory {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "rusqlite.attachment.attach")]
     fn attach_opened(
         &self,
         binding: StoreRuntimeBindingV1,
@@ -557,6 +560,7 @@ impl RepositoryRuntimePhysicalAttachment {
     /// draining is irreversible, so a misrouted permit, revoked authority, or
     /// stale inventory (`Blocked`) must leave admission open and the writer
     /// `Ready`.
+    #[hotpath::measure(label = "rusqlite.attachment.maintenance_checkpoint", future = true)]
     pub async fn run_maintenance_checkpoint(
         &self,
         request: MaintenanceCheckpointRequest,
@@ -672,6 +676,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(RepositoryDispatchError::Reader)
     }
 
+    #[hotpath::measure(label = "rusqlite.attachment.drain")]
     pub fn drain(&self) -> Result<(), String> {
         let mut state = self.lock_state();
         if state.closed {
@@ -739,6 +744,7 @@ impl RepositoryRuntimePhysicalAttachment {
         Ok(())
     }
 
+    #[hotpath::measure(label = "rusqlite.attachment.close")]
     pub fn close_and_join(&self) -> Result<(), String> {
         let mut state = self.lock_state();
         if state.closed {

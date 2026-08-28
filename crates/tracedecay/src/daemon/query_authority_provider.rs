@@ -374,6 +374,7 @@ impl DaemonQueryAuthorityProviderV1 {
         });
     }
 
+    #[hotpath::measure(label = "daemon.query.prepare_activation")]
     pub(crate) fn prepare_after_successful_activation(
         &self,
         profile_id: UserProfileId,
@@ -425,6 +426,7 @@ impl DaemonQueryAuthorityProviderV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.query.commit_activation")]
     pub(crate) fn commit_prepared_activation(
         &self,
         prepared: &PreparedQueryActivationV1,
@@ -463,6 +465,7 @@ impl DaemonQueryAuthorityProviderV1 {
     /// initial state. Initial installation has no mutation audit event, so it
     /// is admitted only while the exact query profile is active with no rollback
     /// slot or audit history.
+    #[hotpath::measure(label = "daemon.query.install_initial")]
     pub(crate) fn install_evaluated_initial_state(
         &self,
         profile_id: UserProfileId,
@@ -623,6 +626,7 @@ impl DaemonQueryAuthorityProviderV1 {
         .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)
     }
 
+    #[hotpath::measure(label = "daemon.query.federated_authority")]
     pub(crate) fn federated_authority_for(
         &self,
         scope: &ResolvedScope,

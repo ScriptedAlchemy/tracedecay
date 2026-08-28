@@ -1,5 +1,6 @@
 use super::daemon::daemon_tool_json;
 
+#[hotpath::measure(label = "cli.bench.run", future = true)]
 pub(crate) async fn handle_bench(
     queries: Option<String>,
     json: bool,

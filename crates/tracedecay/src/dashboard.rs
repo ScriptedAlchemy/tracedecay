@@ -56,14 +56,14 @@ pub async fn dashboard_automation_authority_for_test(
 ) -> crate::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
     let profile_root = profile_root.as_ref().canonicalize()?;
     let project_root = cg.project_root().canonicalize()?;
-    let configuration = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|error| crate::errors::TraceDecayError::Config {
-            message: format!("dashboard automation fixture configuration is unavailable: {error}"),
-        })?;
+    let configuration = hotpath::future!(
+        cg.configuration_runtime().client().current(),
+        label = "dashboard.automation.configuration"
+    )
+    .await
+    .map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!("dashboard automation fixture configuration is unavailable: {error}"),
+    })?;
     let configured_project_root = configuration.target.project_root.canonicalize()?;
     if configured_project_root != project_root {
         return Err(crate::errors::TraceDecayError::Config {
@@ -77,10 +77,12 @@ pub async fn dashboard_automation_authority_for_test(
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!("dashboard automation fixture scope is invalid: {error}"),
             })?;
-    let project_database = cg
-        .store_runtime_registry()
-        .project_sessions(project_id.clone(), [project_root.clone()])
-        .await?;
+    let project_database = hotpath::future!(
+        cg.store_runtime_registry()
+            .project_sessions(project_id.clone(), [project_root.clone()]),
+        label = "dashboard.automation.project_sessions"
+    )
+    .await?;
     let configuration_policy_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,
@@ -102,21 +104,26 @@ pub async fn dashboard_automation_authority_for_test(
             resident_memory,
         ),
     );
-    invocation_service
-        .mount_observability_producer(
+    hotpath::future!(
+        invocation_service.mount_observability_producer(
             project_root.clone(),
             project_database,
             project_id.clone(),
             configuration.snapshot.effective_behavior_digest,
             configuration.snapshot.resolution_provenance_digest,
             configuration_policy_digest,
-        )
-        .await?;
-    crate::daemon::register_dashboard_test_retained_runtime(
-        &invocation_service,
-        &cg,
-        project_root.clone(),
-        project_id,
+        ),
+        label = "dashboard.automation.mount"
+    )
+    .await?;
+    hotpath::future!(
+        crate::daemon::register_dashboard_test_retained_runtime(
+            &invocation_service,
+            &cg,
+            project_root.clone(),
+            project_id,
+        ),
+        label = "dashboard.automation.runtime"
     )
     .await?;
     let authority =
@@ -176,13 +183,24 @@ impl DashboardGraphTestRuntimeV1 {
             "dashboard-graph-test-runtime",
         )?;
         let registry = std::sync::Arc::new(
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
+            hotpath::future!(
+                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                    identity,
+                ),
+                label = "dashboard.graph.registry"
             )
             .await?,
         );
-        let profile_database = registry.profile_database().await?;
-        let profile_sessions_database = registry.profile_sessions().await?;
+        let profile_database = hotpath::future!(
+            registry.profile_database(),
+            label = "dashboard.graph.profile_database"
+        )
+        .await?;
+        let profile_sessions_database = hotpath::future!(
+            registry.profile_sessions(),
+            label = "dashboard.graph.profile_sessions"
+        )
+        .await?;
         Ok(Self {
             profile_root,
             profile_database,
@@ -205,20 +223,24 @@ impl DashboardGraphTestRuntimeV1 {
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
     ) -> crate::errors::Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
-        let registered = self
-            .registry
-            .project_sessions(project_id.clone(), [project_root.to_path_buf()])
-            .await?;
+        let registered = hotpath::future!(
+            self.registry
+                .project_sessions(project_id.clone(), [project_root.to_path_buf()]),
+            label = "dashboard.graph.project_sessions"
+        )
+        .await?;
         // Production project open binds a weak project graph proxy to the
         // registered project-sessions authority before any ingest runs;
         // git-evidence publication (Loom spans) requires that mount, so the
         // dashboard test composition provides the same binding. The registry
         // caches the mount per project, so repeated opens reuse the proxy.
         if registered.project_graph_runtime().is_none() {
-            let project_database = self
-                .registry
-                .project_memory(project_id.clone(), [project_root.to_path_buf()])
-                .await?;
+            let project_database = hotpath::future!(
+                self.registry
+                    .project_memory(project_id.clone(), [project_root.to_path_buf()]),
+                label = "dashboard.graph.project_memory"
+            )
+            .await?;
             let graph_proxy = project_database.memory_graph_runtime().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind dashboard project graph".to_owned(),
@@ -244,10 +266,13 @@ impl DashboardGraphTestRuntimeV1 {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
-        let layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-            project_root,
-            &options,
-            self.profile_database.as_ref(),
+        let layout = hotpath::future!(
+            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+                project_root,
+                &options,
+                self.profile_database.as_ref(),
+            ),
+            label = "dashboard.graph.layout"
         )
         .await?;
         if layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
@@ -256,13 +281,16 @@ impl DashboardGraphTestRuntimeV1 {
             });
         }
         let project_database = self.project_sessions(project_root, project_id).await?;
-        crate::tracedecay::TraceDecay::init_with_registered_configuration(
-            project_root,
-            options,
-            layout,
-            project_database,
-            self.profile_database.clone(),
-            std::sync::Arc::clone(&self.registry),
+        hotpath::future!(
+            crate::tracedecay::TraceDecay::init_with_registered_configuration(
+                project_root,
+                options,
+                layout,
+                project_database,
+                self.profile_database.clone(),
+                std::sync::Arc::clone(&self.registry),
+            ),
+            label = "dashboard.graph.init"
         )
         .await
     }
@@ -275,10 +303,13 @@ impl DashboardGraphTestRuntimeV1 {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
-        let layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-            project_root,
-            &options,
-            self.profile_database.as_ref(),
+        let layout = hotpath::future!(
+            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+                project_root,
+                &options,
+                self.profile_database.as_ref(),
+            ),
+            label = "dashboard.graph.reopen.layout"
         )
         .await?;
         let project_id = layout
@@ -296,13 +327,16 @@ impl DashboardGraphTestRuntimeV1 {
                 })
             })?;
         let project_database = self.project_sessions(project_root, project_id).await?;
-        crate::tracedecay::TraceDecay::open_with_registered_configuration(
-            project_root,
-            options,
-            layout,
-            project_database,
-            self.profile_database.clone(),
-            std::sync::Arc::clone(&self.registry),
+        hotpath::future!(
+            crate::tracedecay::TraceDecay::open_with_registered_configuration(
+                project_root,
+                options,
+                layout,
+                project_database,
+                self.profile_database.clone(),
+                std::sync::Arc::clone(&self.registry),
+            ),
+            label = "dashboard.graph.reopen.open"
         )
         .await
     }
@@ -320,15 +354,15 @@ pub async fn dashboard_lcm_read_authority_for_test(
     registry: &crate::global_db::RegisteredGlobalDb,
     project_database: crate::global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
-    let root =
-        match crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry)
-            .await
-        {
-            Some(root) => root,
-            None => {
-                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(cg)
-            }
-        };
+    let root = match hotpath::future!(
+        crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry),
+        label = "dashboard.lcm.root"
+    )
+    .await
+    {
+        Some(root) => root,
+        None => crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(cg),
+    };
     let identity = root.identity().clone();
     let service = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
         project_database.clone(),
@@ -369,13 +403,16 @@ pub async fn record_project_span_for_test(
     observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
     merge_gap_secs: i64,
 ) -> crate::errors::Result<i64> {
-    crate::store::GlobalDbGitCorrelationStore::new(project_database)
-        .record_span_observation(observation, merge_gap_secs)
-        .await
-        .map_err(|error| crate::errors::TraceDecayError::Database {
-            operation: "record dashboard test git span".to_owned(),
-            message: error.to_string(),
-        })
+    hotpath::future!(
+        crate::store::GlobalDbGitCorrelationStore::new(project_database)
+            .record_span_observation(observation, merge_gap_secs),
+        label = "dashboard.span.persist"
+    )
+    .await
+    .map_err(|error| crate::errors::TraceDecayError::Database {
+        operation: "record dashboard test git span".to_owned(),
+        message: error.to_string(),
+    })
 }
 
 #[cfg(test)]

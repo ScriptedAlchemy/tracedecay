@@ -166,6 +166,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some(entry.server)
     }
 
+    #[hotpath::measure(label = "daemon.owner_registry.remove_owner")]
     pub(super) fn remove_owner(&mut self, owner: &StoreOwnerKey) -> Vec<Server> {
         let keys = self
             .servers
@@ -237,6 +238,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         (candidate, true)
     }
 
+    #[hotpath::measure(label = "daemon.owner_registry.bind_or_insert")]
     pub(super) fn bind_or_insert_route_bounded<F>(
         &mut self,
         route: ProjectRouteKey,
@@ -285,6 +287,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     /// Removes one fully published least-recently-used idle owner after the
     /// canonical graph registry reports project-admission pressure. The caller
     /// must transfer the owner directly to retirement and wait before opening.
+    #[hotpath::measure(label = "daemon.owner_registry.retire_lru")]
     pub(super) fn retire_lru_ready_under_graph_pressure<F>(
         &mut self,
         mut is_leased: F,
@@ -340,6 +343,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Ok(Some((evict, retired)))
     }
 
+    #[hotpath::measure(label = "daemon.owner_registry.rekey")]
     pub(super) fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
         if old == new {
             return true;

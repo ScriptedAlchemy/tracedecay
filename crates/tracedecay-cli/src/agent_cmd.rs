@@ -63,6 +63,7 @@ fn prepare_native_activation_if_needed(
     }
 }
 
+#[hotpath::measure(label = "cli.agent.host_bundle_component", future = true)]
 pub(crate) async fn handle_host_bundle_component_command(
     agent: Option<String>,
     operation: HostBundleCliOperation,
@@ -238,6 +239,7 @@ fn ensure_artifact_only_restore_boundary(
     })
 }
 
+#[hotpath::measure(label = "cli.agent.artifact")]
 fn apply_host_bundle_artifact_action_at(
     action: crate::cli::HostBundleAction,
     options: crate::cli::HostBundleCliOptions,
@@ -333,6 +335,7 @@ fn apply_host_bundle_artifact_action_at(
     Ok(operation_id)
 }
 
+#[hotpath::measure(label = "cli.agent.host_bundle_artifact", future = true)]
 pub(crate) async fn handle_host_bundle_artifact_command(
     action: crate::cli::HostBundleAction,
     options: crate::cli::HostBundleCliOptions,
@@ -654,6 +657,7 @@ impl ComponentSetApplyContext {
     }
 }
 
+#[hotpath::measure(label = "cli.agent.component.apply")]
 fn apply_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -830,6 +834,7 @@ fn load_host_lifecycle_user_config() -> tracedecay::errors::Result<UserConfig> {
     })
 }
 
+#[hotpath::measure(label = "cli.agent.project_local_lifecycle", future = true)]
 pub(crate) async fn handle_project_local_lifecycle_command(
     _agent_id: String,
     _operation: HostBundleCliOperation,
@@ -1012,6 +1017,7 @@ impl tracedecay::agents::host_bundle_v2::HostBundleLifecycleStorageV1 for Feedba
     }
 }
 
+#[hotpath::measure(label = "cli.agent.feedback_rollback", future = true)]
 pub(crate) async fn handle_feedback_rollback_command(
     action: crate::cli::FeedbackRollbackAction,
 ) -> tracedecay::errors::Result<()> {
@@ -1938,6 +1944,7 @@ fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.feedback")]
 fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::errors::Result<()> {
     let dashboard_enabled =
         load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(agent_id);
@@ -2095,6 +2102,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.feedback")]
 fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()> {
     let bytes =
         fs::read(state_path).map_err(|error| tracedecay::errors::TraceDecayError::Config {
@@ -2432,6 +2440,7 @@ fn host_bundle_component(
 /// This is the supported replacement for hand-deleting
 /// `~/.tracedecay/host-components/.tracedecay-host-bundle-v1/component-set-journal.*.json`,
 /// which used to be the only way out of a wedged host lifecycle.
+#[hotpath::measure(future = true, label = "cli.agent.recovery")]
 pub(crate) async fn handle_host_bundle_recovery_command(
     action: crate::cli::HostBundleAction,
     dry_run: bool,
@@ -2652,7 +2661,11 @@ pub(crate) async fn handle_install_command(
         refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
             let scoped_project_path = validate_codex_automation_project_path()?;
-            install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
+            hotpath::future!(
+                install_codex_daemon_automation(&scoped_project_path, &home, options),
+                label = "cli.agent.automation"
+            )
+            .await?;
         }
         user_cfg
             .agent_dashboard_enabled
@@ -2751,6 +2764,7 @@ pub(crate) async fn handle_install_command(
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.reinstall", future = true)]
 pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
@@ -2815,6 +2829,7 @@ pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay::errors:
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.update_plugin", future = true)]
 pub(crate) async fn handle_update_plugin_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
@@ -2850,6 +2865,7 @@ pub(crate) async fn handle_update_plugin_command(adopt: bool) -> tracedecay::err
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.agent.preflight")]
 pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
@@ -3112,6 +3128,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
     results
 }
 
+#[hotpath::measure(label = "cli.agent.uninstall", future = true)]
 pub(crate) async fn handle_uninstall_command(
     agent: Option<String>,
 ) -> tracedecay::errors::Result<()> {

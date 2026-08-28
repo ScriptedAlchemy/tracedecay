@@ -247,22 +247,25 @@ pub(super) async fn execute_portable_daemon_invocation(
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        let project_server = await_project_open_with_semantic_control(
-            semantic_control.as_ref(),
-            semantic_cancellation.as_ref(),
-            Box::pin(portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                project_open_gates,
-                invocation.clone(),
-                http_application_registry.clone(),
-                handshake,
-                ProjectServerRequirement::Core,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            )),
-        )
-        .await;
+        let project_server = hotpath::measure_block!(
+            "daemon.invocation.project_open",
+            await_project_open_with_semantic_control(
+                semantic_control.as_ref(),
+                semantic_cancellation.as_ref(),
+                Box::pin(portable_project_server_for_request(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    project_open_gates,
+                    invocation.clone(),
+                    http_application_registry.clone(),
+                    handshake,
+                    ProjectServerRequirement::Core,
+                    #[cfg(test)]
+                    project_open_attempts.clone(),
+                )),
+            )
+            .await
+        );
         let project_server = match project_server {
             Ok(project_server) => project_server,
             Err(problem) => {
@@ -496,7 +499,6 @@ pub(super) async fn resolve_multi_root_projects(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) async fn execute_daemon_invocation(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,
@@ -551,7 +553,7 @@ pub(super) async fn execute_daemon_invocation(
     let mut project_path = None;
     if request.requires_project() {
         let project_server = hotpath::measure_block!(
-            "execute_daemon_invocation.project_open",
+            "daemon.invocation.project_open",
             await_project_open_with_semantic_control(
                 semantic_control.as_ref(),
                 semantic_cancellation.as_ref(),

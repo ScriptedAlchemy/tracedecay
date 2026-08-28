@@ -111,11 +111,17 @@ pub async fn correlate_hint_outcomes(
     let mut stats = HintOutcomeStats::default();
 
     // Hints that already carry an outcome: never re-resolve them.
-    let mut resolved = port
-        .resolved_hint_ids(project_id, HINT_EVENT_LIMIT)
-        .await
-        .map(|ids| ids.into_iter().collect::<HashSet<_>>())?;
-    let emitted = port.emitted_hints(project_id, HINT_EVENT_LIMIT).await?;
+    let mut resolved = hotpath::future!(
+        port.resolved_hint_ids(project_id, HINT_EVENT_LIMIT),
+        label = "hosts.hooks.hint_outcomes.query_resolved"
+    )
+    .await
+    .map(|ids| ids.into_iter().collect::<HashSet<_>>())?;
+    let emitted = hotpath::future!(
+        port.emitted_hints(project_id, HINT_EVENT_LIMIT),
+        label = "hosts.hooks.hint_outcomes.query_emitted"
+    )
+    .await?;
 
     let mut pending = Vec::new();
     for emission in emitted {
@@ -131,25 +137,29 @@ pub async fn correlate_hint_outcomes(
         stats.scanned += 1;
         resolved.insert(emission.hint_id.clone());
 
-        let steps = port
-            .session_tool_activity(
+        let steps = hotpath::future!(
+            port.session_tool_activity(
                 session_provider(&emission.provider),
                 &emission.session_id,
                 emission.timestamp,
                 SESSION_SCAN_LIMIT,
-            )
-            .await
-            .map(|activity| {
-                activity
-                    .into_iter()
-                    .map(|step| ToolStep {
-                        ts: step.timestamp,
-                        tools: step.tool_names,
-                    })
-                    .collect::<Vec<_>>()
-            })?;
+            ),
+            label = "hosts.hooks.hint_outcomes.session_activity"
+        )
+        .await
+        .map(|activity| {
+            activity
+                .into_iter()
+                .map(|step| ToolStep {
+                    ts: step.timestamp,
+                    tools: step.tool_names,
+                })
+                .collect::<Vec<_>>()
+        })?;
 
-        match resolve(emission.timestamp, &steps, expected, now_secs) {
+        match hotpath::measure_block!("hosts.hooks.hint_outcomes.resolve", {
+            resolve(emission.timestamp, &steps, expected, now_secs)
+        }) {
             Some(resolution) => {
                 let resolution = match resolution {
                     Resolution::Acted(tool) => {
@@ -172,7 +182,11 @@ pub async fn correlate_hint_outcomes(
     }
 
     if !pending.is_empty() {
-        port.append_outcomes(&pending).await?;
+        hotpath::future!(
+            port.append_outcomes(&pending),
+            label = "hosts.hooks.hint_outcomes.append"
+        )
+        .await?;
     }
     Ok(stats)
 }

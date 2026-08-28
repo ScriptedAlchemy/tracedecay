@@ -515,6 +515,7 @@ fn severity_string(s: Severity) -> &'static str {
 }
 
 /// Handles `tracedecay_run_affected_tests`.
+#[hotpath::measure(label = "mcp.workflow.run_affected_tests", future = true)]
 pub(super) async fn handle_run_affected_tests(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -850,6 +851,7 @@ fn current_head_commit_id(root: &Path) -> Option<CommitId> {
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.emit")]
 async fn emit_observed_test_results(
     emitter: &OperationEmitter,
     results: &[(String, bool)],

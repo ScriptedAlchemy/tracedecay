@@ -384,12 +384,16 @@ where
                 Arc::clone(&state.service),
             )
         });
-    let execution = hotpath::measure_block!("api.http.handler", {
-        tokio::task::spawn_blocking(move || {
-            service.execute_controlled(request.request, credential, control)
-        })
-        .await
-    });
+    let execution = hotpath::future!(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                service.execute_controlled(request.request, credential, control)
+            })
+            .await
+        },
+        label = "api.http.handler"
+    )
+    .await;
     cancel_on_drop.disarm();
     match execution {
         Ok(Ok(response)) => Ok(remote_protocol_response(response.into())),

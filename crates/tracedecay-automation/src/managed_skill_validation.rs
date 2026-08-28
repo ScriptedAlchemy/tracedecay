@@ -26,7 +26,7 @@ pub fn validate_skill_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.skill.validate_native")]
 pub(crate) fn validate_native_skill_markdown(markdown: &str) -> Result<()> {
     let frontmatter = parse_skill_frontmatter(markdown)?;
     for key in frontmatter.keys() {
@@ -106,7 +106,7 @@ fn validate_relative_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.skill.validate_support")]
 pub fn validate_managed_support_files(support_files: &[ManagedSupportFile]) -> Result<()> {
     if support_files.len() > MAX_MANAGED_SUPPORT_FILES {
         return Err(config_error(format!(
@@ -260,7 +260,7 @@ fn validate_skill_targets(targets: &[SkillInstallTarget]) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.skill.validate")]
 pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_skill_id(&skill.metadata.id)?;
     validate_frontmatter_scalar("title", &skill.metadata.title)?;
@@ -275,7 +275,7 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_managed_support_files(&skill.support_files)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.skill.validate_update")]
 pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> {
     if let Some(title) = &update.title {
         validate_frontmatter_scalar("title", title)?;

@@ -3,6 +3,7 @@
 use super::*;
 
 /// Flat symbol map for a file with optional `kinds` filter.
+#[hotpath::measure(label = "mcp.info.outline.total")]
 pub(crate) async fn handle_outline(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -31,14 +32,17 @@ pub(crate) async fn handle_outline(
     )?;
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
-    let mut value = render_map(
-        graph.reader(),
-        graph.cancellation(),
-        &display_file,
-        kinds_slice,
-    )?;
+    let mut value = hotpath::measure_block!(
+        "mcp.info.outline.map",
+        render_map(
+            graph.reader(),
+            graph.cancellation(),
+            &display_file,
+            kinds_slice,
+        )?
+    );
     enrich_markdown_sections(cg.project_root(), &abs_path, &display_file, &mut value);
-    match ast_grep_outline(&abs_path) {
+    match hotpath::measure_block!("mcp.info.outline.ast_grep", ast_grep_outline(&abs_path)) {
         Ok(outline) => {
             value["ast_grep_outline"] = outline;
         }

@@ -188,7 +188,7 @@ impl CodeIndexActivationV1 {
         self.activate()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.activation.activate")]
     pub(in crate::daemon) fn activate(&self) -> bool {
         if !self.route_is_live() {
             return false;
@@ -203,7 +203,8 @@ impl CodeIndexActivationV1 {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_MOUNTING));
+                hotpath::gauge!("daemon.code_index.generation_state")
+                    .set(f64::from(ACTIVATION_MOUNTING));
             }
             Err(ACTIVATION_MOUNTING | ACTIVATION_MOUNTED) => return true,
             Err(_) => return false,
@@ -212,7 +213,7 @@ impl CodeIndexActivationV1 {
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
-            hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
+            hotpath::gauge!("daemon.code_index.generation_state").set(f64::from(ACTIVATION_IDLE));
             return false;
         };
         let project_root = self.project_root.clone();
@@ -222,56 +223,68 @@ impl CodeIndexActivationV1 {
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
         let hint_sink = Arc::clone(&self.hint_sink);
-        runtime.spawn(async move {
-            let route_is_live =
-                || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
-            if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity) {
-                state.store(ACTIVATION_IDLE, Ordering::Release);
-                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
-                return;
-            }
-            if let Err(error) = mount().await {
-                state.store(ACTIVATION_IDLE, Ordering::Release);
-                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
-                tracing::warn!(
+        runtime.spawn(hotpath::future!(
+            async move {
+                let route_is_live =
+                    || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
+                if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
+                {
+                    state.store(ACTIVATION_IDLE, Ordering::Release);
+                    hotpath::gauge!("daemon.code_index.generation_state")
+                        .set(f64::from(ACTIVATION_IDLE));
+                    return;
+                }
+                if let Err(error) = mount().await {
+                    state.store(ACTIVATION_IDLE, Ordering::Release);
+                    hotpath::gauge!("daemon.code_index.generation_state")
+                        .set(f64::from(ACTIVATION_IDLE));
+                    tracing::warn!(
+                        event = "code_index_activation",
+                        project = %project_root.display(),
+                        outcome = "degraded",
+                        error = %error,
+                        "demand-driven code-index activation failed"
+                    );
+                    return;
+                }
+                if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
+                {
+                    state.store(ACTIVATION_IDLE, Ordering::Release);
+                    hotpath::gauge!("daemon.code_index.generation_state")
+                        .set(f64::from(ACTIVATION_IDLE));
+                    return;
+                }
+                let batch = {
+                    let mut pending = pending_hooks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.store(ACTIVATION_MOUNTED, Ordering::Release);
+                    hotpath::gauge!("daemon.code_index.generation_state")
+                        .set(f64::from(ACTIVATION_MOUNTED));
+                    pending.take()
+                };
+                if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {
+                    let _ = hint_sink(batch).await;
+                }
+                tracing::info!(
                     event = "code_index_activation",
                     project = %project_root.display(),
-                    outcome = "degraded",
-                    error = %error,
-                    "demand-driven code-index activation failed"
+                    outcome = "mounted",
+                    "demand-driven code-index activation mounted"
                 );
-                return;
-            }
-            if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity) {
-                state.store(ACTIVATION_IDLE, Ordering::Release);
-                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_IDLE));
-                return;
-            }
-            let batch = {
-                let mut pending = pending_hooks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.store(ACTIVATION_MOUNTED, Ordering::Release);
-                hotpath::gauge!("generation_state").set(f64::from(ACTIVATION_MOUNTED));
-                pending.take()
-            };
-            if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {
-                let _ = hint_sink(batch).await;
-            }
-            tracing::info!(
-                event = "code_index_activation",
-                project = %project_root.display(),
-                outcome = "mounted",
-                "demand-driven code-index activation mounted"
-            );
-        });
+            },
+            label = "daemon.code_index.activation.mount"
+        ));
         true
     }
 
     /// Accept exact after-edit hints immediately, even while the background
     /// mount is still opening. Returns `true` only when this exact live route
     /// accepted the paths for queued or direct delivery.
-    #[hotpath::measure]
+    #[hotpath::measure(
+        label = "daemon.code_index.activation.notify_hook_paths",
+        future = true
+    )]
     pub(in crate::daemon) async fn notify_hook_paths(
         &self,
         project_root: &Path,
@@ -306,6 +319,10 @@ impl CodeIndexActivationV1 {
     /// indexing. The bounded pre-mount queue collapses repeated overflow
     /// requests into one bit, while a mounted route forwards the same signal
     /// to the retained scheduler owner.
+    #[hotpath::measure(
+        label = "daemon.code_index.activation.notify_hook_overflow",
+        future = true
+    )]
     pub(in crate::daemon) async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
         if !self.route_is_live() || !self.accepts_root(project_root) {
             return false;

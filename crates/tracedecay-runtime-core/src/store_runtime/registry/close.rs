@@ -45,7 +45,7 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.close_path")]
     pub async fn close_path(
         &self,
         path: &Path,
@@ -111,7 +111,7 @@ impl StoreRuntimeRegistry {
         .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.close_exact")]
     async fn close_exact_with_opened_identity(
         &self,
         expected: &StoreRuntimeBindingV1,

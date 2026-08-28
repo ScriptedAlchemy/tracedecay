@@ -313,6 +313,7 @@ impl RegisteredGlobalDb {
         read_tombstone(&snapshot, profile_id, target, project_key).await
     }
 
+    #[hotpath::measure(future = true, label = "global_db.remote_deletion.persist.record")]
     pub async fn record_remote_deletion_tombstone(
         &self,
         tombstone: RemoteDeletionTombstone,
@@ -359,6 +360,7 @@ impl RegisteredGlobalDb {
         Ok(RemoteDeletionTombstoneRecordOutcome::Recorded(tombstone))
     }
 
+    #[hotpath::measure(future = true, label = "global_db.remote_deletion.persist.transition")]
     pub async fn transition_remote_deletion_tombstone(
         &self,
         tombstone: &RemoteDeletionTombstone,

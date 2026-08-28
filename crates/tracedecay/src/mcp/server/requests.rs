@@ -348,7 +348,6 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.request", future = true)]
     pub(crate) async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
@@ -451,7 +450,6 @@ impl McpServer {
         result
     }
 
-    #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -1336,7 +1334,6 @@ impl McpServer {
         ))
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,

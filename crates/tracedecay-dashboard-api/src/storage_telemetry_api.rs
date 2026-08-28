@@ -294,6 +294,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
 }
 
 /// `GET /api/storage/telemetry`
+#[hotpath::measure(label = "dashboard_api.storage.telemetry", future = true)]
 pub async fn telemetry(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<StorageTelemetryPayloadV1>> {

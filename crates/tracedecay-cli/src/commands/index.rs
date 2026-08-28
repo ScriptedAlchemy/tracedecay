@@ -20,6 +20,7 @@ async fn is_fresh_install() -> bool {
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
+#[hotpath::measure(label = "cli.index.no_command", future = true)]
 pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(None);
     if TraceDecay::has_initialized_store(&project_path).await {
@@ -69,6 +70,7 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.init.run", future = true)]
 pub(crate) async fn handle_init(
     path: Option<String>,
     skip_folders: Vec<String>,
@@ -165,6 +167,7 @@ fn annotate_reset_required_init_error(
     }
 }
 
+#[hotpath::measure(label = "cli.index.init_with_daemon", future = true)]
 async fn handle_init_with_daemon_availability(
     project_path: PathBuf,
     skip_folders: Vec<String>,
@@ -479,6 +482,7 @@ mod init_bootstrap_tests {
     }
 }
 
+#[hotpath::measure(label = "cli.sync.run", future = true)]
 pub(crate) async fn handle_sync(
     path: Option<String>,
     force: bool,

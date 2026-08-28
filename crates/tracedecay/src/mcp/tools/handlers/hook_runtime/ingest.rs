@@ -177,6 +177,7 @@ async fn drain_host_observation_projections(
     Ok(stats.transcript.messages_upserted)
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
 pub(super) async fn codex_compact(
     cg: &TraceDecay,
     args: &Value,
@@ -205,15 +206,19 @@ pub(super) async fn codex_compact(
     // rollout must land in the owning store through the canonical ingest
     // route before pressure evidence is evaluated; compacting an unfilled
     // store would report an empty success.
-    let messages_upserted = admit_codex_rollouts_for_compaction(cg, session_authorities).await?;
+    let messages_upserted = hotpath::future!(
+        admit_codex_rollouts_for_compaction(cg, session_authorities),
+        label = "mcp.hook_runtime.compact_ingest"
+    )
+    .await?;
     let current_tokens = parsed
         .as_ref()
         .and_then(|event| event_i64(event, &["context_tokens", "current_tokens", "tokens"]));
     let context_length = parsed
         .as_ref()
         .and_then(|event| event_i64(event, &["context_window_size", "context_length"]));
-    let Some(response) = authority
-        .execute(pressure_only_command(
+    let Some(response) = hotpath::future!(
+        authority.execute(pressure_only_command(
             "codex",
             &session_id,
             current_tokens,
@@ -223,10 +228,12 @@ pub(super) async fn codex_compact(
             LcmHostProtocol::CodexContextCompacted {
                 protocol_revision: "codex.context-compacted.v1".to_owned(),
                 event_digest: tracedecay_domain::canonical_sha256(&event_json)
-                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?,
-            },
-        ))
-        .await
+                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?
+            }
+        )),
+        label = "mcp.hook_runtime.compact_execute"
+    )
+    .await
     else {
         return Ok(compaction_authority_unavailable("codex_compact"));
     };
@@ -347,6 +354,7 @@ pub(super) async fn claude_compact(
     }))
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
 pub(super) async fn cursor_compact(
     _cg: &TraceDecay,
     args: &Value,
@@ -372,8 +380,8 @@ pub(super) async fn cursor_compact(
         .map(|(count, compact)| count.saturating_sub(compact));
     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
-    let Some(response) = authority
-        .execute(pressure_only_command(
+    let Some(response) = hotpath::future!(
+        authority.execute(pressure_only_command(
             "cursor",
             session_id,
             current_tokens,
@@ -383,11 +391,13 @@ pub(super) async fn cursor_compact(
             LcmHostProtocol::CursorPreCompact {
                 protocol_revision: "cursor.precompact.v1".to_owned(),
                 event_digest: tracedecay_domain::canonical_sha256(&event_json).map_err(
-                    |error| config_error(format!("digest Cursor event failed: {error}")),
-                )?,
-            },
-        ))
-        .await
+                    |error| config_error(format!("digest Cursor event failed: {error}"))
+                )?
+            }
+        )),
+        label = "mcp.hook_runtime.compact_execute"
+    )
+    .await
     else {
         return Ok(compaction_authority_unavailable("cursor_compact"));
     };
@@ -510,6 +520,7 @@ fn pressure_only_command(
     })
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.accounting")]
 pub(super) async fn accounting_receipt(
     cg: &TraceDecay,
     provider_usage_db: &RegisteredGlobalDb,
@@ -578,6 +589,7 @@ pub(super) async fn ingest_transcript(
     .await
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.ingest")]
 pub(crate) async fn ingest_transcript_with_cancellation(
     cg: Option<&TraceDecay>,
     args: &Value,
@@ -619,8 +631,8 @@ pub(crate) async fn ingest_transcript_with_cancellation(
                 "transcript provider is unsupported",
             )
         })?;
-    let capture = kernel
-        .capture(TranscriptCaptureContext {
+    let capture = hotpath::future!(
+        kernel.capture(TranscriptCaptureContext {
             cg,
             args,
             user_scope,
@@ -629,9 +641,11 @@ pub(crate) async fn ingest_transcript_with_cancellation(
             session_authorities,
             facade: &facade,
             max_new_bytes,
-            cancellation,
-        })
-        .await?;
+            cancellation
+        }),
+        label = "mcp.hook_runtime.capture"
+    )
+    .await?;
     let TranscriptCaptureOutcome {
         messages_upserted,
         snapshot: snapshot_capture,
@@ -689,12 +703,15 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     if let Some(cg) = cg
         && !user_scope
     {
-        let settlement = crate::hint_outcomes::settle_project_hint_outcomes(
-            accounting_db,
-            session_authorities.project.map(std::convert::AsRef::as_ref),
-            crate::analytics_bridge::hook_import_sources(Some(cg.project_root())),
-            cg.project_root(),
-            crate::tracedecay::current_timestamp(),
+        let settlement = hotpath::future!(
+            crate::hint_outcomes::settle_project_hint_outcomes(
+                accounting_db,
+                session_authorities.project.map(std::convert::AsRef::as_ref),
+                crate::analytics_bridge::hook_import_sources(Some(cg.project_root())),
+                cg.project_root(),
+                crate::tracedecay::current_timestamp()
+            ),
+            label = "mcp.hook_runtime.hint_settle"
         )
         .await;
         output["hint_outcomes"] = settlement.as_json();

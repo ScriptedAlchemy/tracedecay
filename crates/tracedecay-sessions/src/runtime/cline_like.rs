@@ -182,6 +182,7 @@ impl TranscriptSource for ClineLikeSource {
         self.provider
     }
 
+    #[hotpath::measure(label = "sessions.cline_like.transcript_paths")]
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for root in &self.storage_roots {
@@ -228,6 +229,7 @@ impl ClineLikeSource {
         self.snapshot_location_from_metadata(&metadata, project_root)
     }
 
+    #[hotpath::measure(label = "sessions.cline_like.snapshot_location")]
     fn snapshot_location_from_metadata(
         &self,
         metadata: &Value,
@@ -266,6 +268,7 @@ impl ClineLikeSource {
         }
     }
 
+    #[hotpath::measure(label = "sessions.cline_like.parse_snapshot")]
     fn parse_snapshot(
         &self,
         path: &Path,
@@ -381,6 +384,7 @@ impl ClineLikeSource {
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
+#[hotpath::measure(label = "sessions.cline_like.capture", future = true)]
 pub async fn capture_cline_like_snapshot_observations(
     facade: &dyn HostAdmission,
     source: &ClineLikeSource,
@@ -427,6 +431,7 @@ fn ensure_bounded_file(
         .map_err(|_| non_durable(provider, path, "snapshot exceeds provider byte bound"))
 }
 
+#[hotpath::measure(label = "sessions.cline_like.snapshot_input_bytes")]
 fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngestResult<u64> {
     let Some(task_dir) = path.parent() else {
         return Ok(0);
@@ -452,6 +457,7 @@ fn non_durable(provider: &'static str, path: &Path, reason: &'static str) -> Tra
     non_durable_snapshot_record(provider, path, reason)
 }
 
+#[hotpath::measure(label = "sessions.cline_like.collect_task_api_paths")]
 fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -488,6 +494,7 @@ fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[hotpath::measure(label = "sessions.cline_like.read_task_metadata")]
 fn read_task_metadata(provider: &'static str, task_dir: &Path) -> Option<Value> {
     for name in TASK_METADATA_FILES {
         let path = task_dir.join(name);
@@ -544,6 +551,7 @@ fn metadata_task_title(metadata: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+#[hotpath::measure(label = "sessions.cline_like.usage_records")]
 fn usage_records(
     provider: &'static str,
     task_id: &str,
@@ -798,6 +806,7 @@ fn native_record_id(entry: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+#[hotpath::measure(label = "sessions.cline_like.normalize")]
 pub fn normalize_cline_like_snapshot_observations(
     provider: &'static str,
     messages: &[SessionMessageRecord],

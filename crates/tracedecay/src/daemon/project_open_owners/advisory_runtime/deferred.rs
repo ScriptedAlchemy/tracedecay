@@ -14,45 +14,48 @@ pub(super) fn spawn(
     project_root: PathBuf,
     mut state: ProjectOpenDependentOwnerState,
 ) -> bool {
-    owner.spawn_background_task(async move {
-        let mut publications = invocation
-            .code_index_schedulers
-            .subscribe_generation_publications();
-        let mut partial_publication_retried = false;
-        loop {
-            match try_mount(&invocation, &project_root, &mut state).await {
-                Attempt::Terminal => return,
-                Attempt::RetryPartialPublication if !partial_publication_retried => {
-                    partial_publication_retried = true;
-                    tokio::task::yield_now().await;
-                    continue;
+    owner.spawn_background_task(hotpath::future!(
+        async move {
+            let mut publications = invocation
+                .code_index_schedulers
+                .subscribe_generation_publications();
+            let mut partial_publication_retried = false;
+            loop {
+                match try_mount(&invocation, &project_root, &mut state).await {
+                    Attempt::Terminal => return,
+                    Attempt::RetryPartialPublication if !partial_publication_retried => {
+                        partial_publication_retried = true;
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Attempt::RetryPartialPublication => return,
+                    Attempt::AwaitNextPublication => {}
                 }
-                Attempt::RetryPartialPublication => return,
-                Attempt::AwaitNextPublication => {}
+                break;
             }
-            break;
-        }
-        loop {
-            match publications.recv().await {
-                Ok(publication) if publication.project_root == project_root => {}
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-            match try_mount(&invocation, &project_root, &mut state).await {
-                Attempt::Terminal => return,
-                Attempt::AwaitNextPublication => {}
-                Attempt::RetryPartialPublication => {
-                    tokio::task::yield_now().await;
-                    if try_mount(&invocation, &project_root, &mut state).await
-                        != Attempt::AwaitNextPublication
-                    {
-                        return;
+            loop {
+                match publications.recv().await {
+                    Ok(publication) if publication.project_root == project_root => {}
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+                match try_mount(&invocation, &project_root, &mut state).await {
+                    Attempt::Terminal => return,
+                    Attempt::AwaitNextPublication => {}
+                    Attempt::RetryPartialPublication => {
+                        tokio::task::yield_now().await;
+                        if try_mount(&invocation, &project_root, &mut state).await
+                            != Attempt::AwaitNextPublication
+                        {
+                            return;
+                        }
                     }
                 }
             }
-        }
-    })
+        },
+        label = "daemon.project.owners.advisory_deferred"
+    ))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,7 @@ enum Attempt {
     RetryPartialPublication,
 }
 
+#[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
 async fn try_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,

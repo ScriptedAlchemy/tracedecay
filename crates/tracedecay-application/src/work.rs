@@ -258,6 +258,7 @@ where
         Self { storage }
     }
 
+    #[hotpath::measure(label = "application.work.load")]
     pub fn load(
         &self,
         context: &RequestContext,
@@ -267,6 +268,7 @@ where
         rebuild(self.load_history(&authority, task_id)?)
     }
 
+    #[hotpath::measure(label = "application.work.create")]
     pub fn create(
         &self,
         context: &RequestContext,
@@ -301,6 +303,7 @@ where
         })
     }
 
+    #[hotpath::measure(label = "application.work.replan_dependencies")]
     pub fn replan_dependencies(
         &self,
         context: &RequestContext,
@@ -329,6 +332,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.accept_proposal")]
     pub fn accept_proposal(
         &self,
         context: &RequestContext,
@@ -337,6 +341,7 @@ where
         self.apply_proposal_disposition(context, command.review, ProposalDisposition::Accepted)
     }
 
+    #[hotpath::measure(label = "application.work.review_proposal")]
     pub fn review_proposal(
         &self,
         context: &RequestContext,
@@ -349,6 +354,7 @@ where
         self.apply_proposal_disposition(context, request.review, disposition)
     }
 
+    #[hotpath::measure(label = "application.work.reject_proposal")]
     pub fn reject_proposal(
         &self,
         context: &RequestContext,
@@ -357,6 +363,7 @@ where
         self.apply_proposal_disposition(context, command, ProposalDisposition::Rejected)
     }
 
+    #[hotpath::measure(label = "application.work.supersede_proposal")]
     pub fn supersede_proposal(
         &self,
         context: &RequestContext,
@@ -365,6 +372,7 @@ where
         self.apply_proposal_disposition(context, command, ProposalDisposition::Superseded)
     }
 
+    #[hotpath::measure(label = "application.work.admit_execution")]
     pub fn admit_execution(
         &self,
         context: &RequestContext,
@@ -390,6 +398,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.accept_task")]
     pub fn accept_task(
         &self,
         context: &RequestContext,
@@ -415,6 +424,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "application.work.readiness")]
     pub fn readiness(
         &self,
         context: &RequestContext,

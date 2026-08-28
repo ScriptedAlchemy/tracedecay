@@ -593,6 +593,7 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
     ) -> DashboardDeliveryReadFutureV1<'_>;
 }
 
+#[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
@@ -605,7 +606,7 @@ pub async fn overview(
         None => None,
     };
     let generation_freshness = hotpath::measure_block!(
-        "dashboard.freshness.projection",
+        "dashboard_api.freshness.projection",
         generation_projection(&changes, indexed_commit)
     );
     let live_head = live_head_commit(&changes).and_then(|head| CommitId::new(head).ok());

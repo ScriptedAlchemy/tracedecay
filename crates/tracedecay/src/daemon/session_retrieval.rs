@@ -445,6 +445,7 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
+    #[hotpath::measure(label = "daemon.session.temporal_query", future = true)]
     async fn execute_temporal_query_with_context(
         &self,
         context: &RequestContext,

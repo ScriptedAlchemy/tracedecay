@@ -153,6 +153,7 @@ impl WorkflowProviderPlacementService {
         Self { registry }
     }
 
+    #[hotpath::measure(label = "application.workflow.provider.place")]
     pub fn place(
         &self,
         request: &WorkflowTopologyPlacementRequest,

@@ -38,35 +38,38 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SessionLookupRequest,
     ) -> TemporalRetrievalFuture<'a> {
-        Box::pin(async move {
-            let query = SessionTemporalQuery::new(
-                request.session_id.clone(),
-                None,
-                "",
-                request
-                    .meta
-                    .page
-                    .cursor
-                    .as_ref()
-                    .map(|cursor| cursor.as_str().to_owned()),
-                request.meta.temporal,
-                RetrievalGrainV1::Occurrence,
-                usize::try_from(request.meta.page.page_size)
-                    .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
-                DiversityLimits::unbounded(),
-                ContextBudget {
-                    max_bytes: SESSION_LOOKUP_CONTEXT_BYTES,
-                    max_tokens: SESSION_LOOKUP_CONTEXT_BYTES / 4,
-                    estimator_version: "words-v1".to_owned(),
-                },
-            )
-            .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
-            let outcome = self
-                .retrieval
-                .retrieve_admitted(context.request, query)
-                .await;
-            map_outcome(outcome, request, now_micros())
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                let query = SessionTemporalQuery::new(
+                    request.session_id.clone(),
+                    None,
+                    "",
+                    request
+                        .meta
+                        .page
+                        .cursor
+                        .as_ref()
+                        .map(|cursor| cursor.as_str().to_owned()),
+                    request.meta.temporal,
+                    RetrievalGrainV1::Occurrence,
+                    usize::try_from(request.meta.page.page_size)
+                        .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
+                    DiversityLimits::unbounded(),
+                    ContextBudget {
+                        max_bytes: SESSION_LOOKUP_CONTEXT_BYTES,
+                        max_tokens: SESSION_LOOKUP_CONTEXT_BYTES / 4,
+                        estimator_version: "words-v1".to_owned(),
+                    },
+                )
+                .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+                let outcome = self
+                    .retrieval
+                    .retrieve_admitted(context.request, query)
+                    .await;
+                map_outcome(outcome, request, now_micros())
+            },
+            label = "daemon.session_retrieval.lookup"
+        ))
     }
 }
 

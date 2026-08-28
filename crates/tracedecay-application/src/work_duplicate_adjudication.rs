@@ -190,6 +190,7 @@ where
         Self { storage }
     }
 
+    #[hotpath::measure(label = "application.work.duplicate.adjudicate")]
     pub fn adjudicate(
         &self,
         context: &RequestContext,
@@ -214,6 +215,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "application.work.duplicate.prepare")]
     pub fn prepare_adjudication(
         &self,
         context: &RequestContext,
@@ -250,6 +252,7 @@ where
     /// one pinned Work projection and topology generation. Missing,
     /// conflicting, censored, and unknown relations stay explicitly
     /// unavailable.
+    #[hotpath::measure(label = "application.work.duplicate.classify")]
     pub fn classify_attempts(
         &self,
         context: &RequestContext,

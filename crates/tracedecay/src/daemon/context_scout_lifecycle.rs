@@ -189,6 +189,7 @@ fn resolve_authority(
     ))
 }
 
+#[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup", future = true)]
 pub(crate) async fn lookup_registered_context_scout_lifecycle(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -213,6 +214,7 @@ pub(crate) async fn lookup_registered_context_scout_lifecycle(
 /// envelope. The authoritative project-session shard supplies the native
 /// identity again; no hook payload or workspace path becomes durable replay
 /// identity.
+#[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup_native", future = true)]
 pub(crate) async fn lookup_registered_context_scout_native_session(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],

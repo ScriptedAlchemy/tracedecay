@@ -26,6 +26,7 @@ impl Drop for CancelSourceSearchOnDrop {
     }
 }
 
+#[hotpath::measure(label = "usecases.primitives.source_search", future = true)]
 pub(crate) async fn run_bounded_source_search<T, E, F>(
     deadline: &Deadline,
     cancellation: &CancellationContext,
@@ -144,6 +145,7 @@ pub const fn affected_test_proximity(distance: usize) -> &'static str {
     }
 }
 
+#[hotpath::measure(label = "usecases.primitives.affected_tests_traverse", future = true)]
 pub(crate) async fn collect_affected_test_files(
     graph: &crate::graph::queries::GraphQueryManager<'_>,
     files: &[String],
