@@ -522,6 +522,23 @@ impl GraphDb {
     }
 }
 
+impl GraphDb {
+    /// Bench/test-only: open a sealed artifact database directly by its
+    /// directory, exactly as production adoption opens it (mmap-backed
+    /// compact base when the artifact is compact-form), without the digest
+    /// proof. The at-rest probes time the open and then prove the reads
+    /// themselves.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn open_sealed_artifact_for_bench(
+        directory: &Path,
+    ) -> Result<Arc<GraphDb>, GraphDbError> {
+        GraphDb::open_with_store_state(
+            sealed_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
+            Some(PersistentGraphStoreState::Existing),
+        )
+    }
+}
+
 /// Builds (or adopts) the sealed store for `identity` and returns the
 /// reopened, digest-verified reader.
 #[hotpath::measure(label = "graph_db.sealed_store.build")]

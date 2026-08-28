@@ -532,3 +532,289 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
         "the successor's sealed artifact must stay"
     );
 }
+
+// ---------------------------------------------------------------------------
+// At-rest measurement probe (ignored): sealed artifact open vs staging replay
+// ---------------------------------------------------------------------------
+
+fn probe_status_kib(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let prefix = format!("{field}:");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+fn probe_mib(kib: u64) -> f64 {
+    kib as f64 / 1024.0
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    };
+    entries
+        .map(Result::unwrap)
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                directory_bytes(&path)
+            } else {
+                std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn probe_entity_id(index: usize) -> GraphEntityId {
+    GraphEntityId::new(format!("entity-{index:08}")).unwrap()
+}
+
+fn probe_manifest(
+    projection_identity: GraphProjectionIdentity,
+    rows: usize,
+) -> GraphGenerationManifest {
+    let entities = (0..rows)
+        .map(|index| {
+            GraphEntity::new(
+                probe_entity_id(index),
+                BTreeSet::new(),
+                BTreeMap::from([(
+                    GraphPropertyName::new("name").unwrap(),
+                    GraphProperty::String(format!("symbol-{index:08}")),
+                )]),
+            )
+            .unwrap()
+        })
+        .collect();
+    let relations = (0..rows / 4)
+        .map(|index| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(format!("relation-{index:08}")).unwrap(),
+                GraphEntityRef::new(projection_identity.clone(), probe_entity_id(index)),
+                GraphEntityRef::new(projection_identity.clone(), probe_entity_id(index + 1)),
+                GraphRelationKind::new("calls").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect();
+    GraphGenerationManifest::new(
+        projection_identity,
+        GraphGenerationId::new("probe-g1").unwrap(),
+        SourceGeneration::new("source:probe-g1").unwrap(),
+        GraphWatermark::new("watermark:probe-g1").unwrap(),
+        Vec::new(),
+        entities,
+        relations,
+    )
+    .unwrap()
+}
+
+/// Point reads and a bounded traversal against a raw graph handle in the
+/// generation's physical namespace.
+fn probe_reads(
+    db: &tracedecay_graph_db::GraphDb,
+    physical_namespace: &GraphNamespace,
+    rows: usize,
+) -> (Duration, usize, Duration, usize) {
+    let stride = (rows / 64).max(1);
+    let started = std::time::Instant::now();
+    let mut hits = 0usize;
+    for step in 0..64 {
+        let index = (step * stride) % rows;
+        if db
+            .entity(
+                physical_namespace,
+                &probe_entity_id(index),
+                Arc::new(TestCancellation),
+            )
+            .unwrap()
+            .is_some()
+        {
+            hits += 1;
+        }
+    }
+    let point_wall = started.elapsed();
+
+    let started = std::time::Instant::now();
+    let traversal = db
+        .traverse(TraversalRequest {
+            namespace: physical_namespace.clone(),
+            start: probe_entity_id(0),
+            relation_kinds: BTreeSet::from([GraphRelationKind::new("calls").unwrap()]),
+            direction: GraphTraversalDirection::Outgoing,
+            max_depth: 8,
+            max_visits: 4096,
+            max_results: 4096,
+            cancellation: Arc::new(TestCancellation),
+        })
+        .unwrap();
+    (point_wall, hits, started.elapsed(), traversal.visits.len())
+}
+
+/// Measurement harness, not a contract: seal one verified generation through
+/// the production publish path, then compare activating it through the
+/// staging database's full replay open against opening its sealed compact
+/// artifact directly. One process; live-RSS deltas are reported per phase
+/// (VmHWM is process-wide and stays polluted by the staging build).
+///
+/// ```text
+/// TRACEDECAY_SEALED_PROBE_ROWS=500000 \
+///   cargo test -p tracedecay-graph-db --features test-helpers,graph-sealed-store \
+///   --profile perf --test verified_generation_contract -- --ignored --nocapture \
+///   sealed_store::sealed_artifact_open_probe
+/// ```
+#[test]
+#[ignore = "at-rest measurement harness; see doc comment"]
+fn sealed_artifact_open_probe() {
+    let rows = std::env::var("TRACEDECAY_SEALED_PROBE_ROWS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500_000usize);
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:probe", "code");
+
+    let manifest = probe_manifest(identity.clone(), rows);
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:probe-g1",
+        None,
+        '9',
+    );
+    drop(manifest);
+
+    let seal_started = std::time::Instant::now();
+    let commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record.publication.key,
+    );
+    let seal_wall = seal_started.elapsed();
+    assert!(commit.snapshot.serves_from_sealed_store());
+    let receipt = receipt_for_generation(temp.path(), "probe-g1").unwrap();
+    let physical_namespace = receipt
+        .split("\"physical_namespace\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .map(|value| GraphNamespace::new(value).unwrap())
+        .unwrap();
+    let form = receipt
+        .split("\"form\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    drop(commit);
+    assert!(registered.close().unwrap());
+
+    let staging_bytes = std::fs::metadata(support::graph_path(temp.path()))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let sealed_root = sealed_store_root(temp.path());
+    let artifact_dir = std::fs::read_dir(&sealed_root)
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    let artifact_bytes = directory_bytes(&artifact_dir);
+
+    // ---- activation via the staging database (full replay open) ----
+    let rss_before = probe_status_kib("VmRSS").unwrap();
+    let open_started = std::time::Instant::now();
+    let staging_lease = registered.reopen_lease().unwrap();
+    let staging_open_wall = open_started.elapsed();
+    let rss_after_staging_open = probe_status_kib("VmRSS").unwrap();
+    let (staging_points, staging_hits, staging_traversal, staging_visits) =
+        probe_reads(&staging_lease, &physical_namespace, rows);
+    drop(staging_lease);
+    assert!(registered.close().unwrap());
+
+    // ---- activation via the sealed artifact ----
+    let rss_before_sealed = probe_status_kib("VmRSS").unwrap();
+    let open_started = std::time::Instant::now();
+    let sealed =
+        tracedecay_graph_db::GraphDb::open_sealed_artifact_for_bench(&artifact_dir).unwrap();
+    let sealed_open_wall = open_started.elapsed();
+    let rss_after_sealed_open = probe_status_kib("VmRSS").unwrap();
+    let (sealed_points, sealed_hits, sealed_traversal, sealed_visits) =
+        probe_reads(&sealed, &physical_namespace, rows);
+
+    println!("=== sealed artifact open probe ===");
+    println!(
+        "rows                 : {rows} entities + {} relations",
+        rows / 4
+    );
+    println!("artifact form        : {form}");
+    println!(
+        "seal wall (publish)  : {:.2}s  <- stage+verify+close/reopen+artifact build",
+        seal_wall.as_secs_f64()
+    );
+    println!(
+        "staging store        : {staging_bytes} bytes ({:.1} MiB)",
+        staging_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "sealed artifact      : {artifact_bytes} bytes ({:.1} MiB)",
+        artifact_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!("--- staging replay activation ---");
+    println!(
+        "open wall            : {:.3}s",
+        staging_open_wall.as_secs_f64()
+    );
+    println!(
+        "VmRSS delta          : {} KiB ({:.1} MiB) [{} -> {}]",
+        rss_after_staging_open.saturating_sub(rss_before),
+        probe_mib(rss_after_staging_open.saturating_sub(rss_before)),
+        rss_before,
+        rss_after_staging_open
+    );
+    println!(
+        "point reads          : 64 in {:.3}ms, {} hits",
+        staging_points.as_secs_f64() * 1000.0,
+        staging_hits
+    );
+    println!(
+        "traversal            : depth 8 in {:.3}ms, {} visits",
+        staging_traversal.as_secs_f64() * 1000.0,
+        staging_visits
+    );
+    println!("--- sealed artifact activation ---");
+    println!(
+        "open wall            : {:.3}s",
+        sealed_open_wall.as_secs_f64()
+    );
+    println!(
+        "VmRSS delta          : {} KiB ({:.1} MiB) [{} -> {}]",
+        rss_after_sealed_open.saturating_sub(rss_before_sealed),
+        probe_mib(rss_after_sealed_open.saturating_sub(rss_before_sealed)),
+        rss_before_sealed,
+        rss_after_sealed_open
+    );
+    println!(
+        "point reads          : 64 in {:.3}ms, {} hits",
+        sealed_points.as_secs_f64() * 1000.0,
+        sealed_hits
+    );
+    println!(
+        "traversal            : depth 8 in {:.3}ms, {} visits",
+        sealed_traversal.as_secs_f64() * 1000.0,
+        sealed_visits
+    );
+
+    // Correctness gates: an open that cannot answer reads is not a faster
+    // open, it is a broken one.
+    assert_eq!(staging_hits, 64);
+    assert_eq!(sealed_hits, 64);
+    assert!(staging_visits > 1);
+    assert_eq!(sealed_visits, staging_visits);
+}
