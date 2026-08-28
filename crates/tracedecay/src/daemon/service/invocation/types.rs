@@ -645,7 +645,21 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    /// Cancel every retained background recovery owner without awaiting.
+    ///
+    /// Hoisted out of [`Self::shut_down_background_recovery`] so daemon
+    /// shutdown can close these loops at *prepare* time, before any project
+    /// runtime drain is polled. Idempotent.
+    pub(in crate::daemon::service) fn cancel_background_recovery(&self) {
+        if let Some(recovery) = &self.workflow_fan_out_recovery {
+            recovery.cancel();
+        }
+        self.blocked_interval_observation_recovery.cancel();
+        self.workflow_census_observation_recovery.cancel();
+    }
+
     pub(in crate::daemon::service) async fn shut_down_background_recovery(&self) {
+        self.cancel_background_recovery();
         if let Some(recovery) = &self.workflow_fan_out_recovery {
             recovery.shutdown().await;
         }

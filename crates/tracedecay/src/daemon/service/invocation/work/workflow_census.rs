@@ -525,8 +525,16 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         })
     }
 
-    pub(in crate::daemon::service) async fn shutdown(&self) {
+    /// Stop this owner from starting another census recovery cycle,
+    /// synchronously. See
+    /// [`super::super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1::cancel`]
+    /// for why cancellation is hoisted ahead of the join. Idempotent.
+    pub(in crate::daemon::service) fn cancel(&self) {
         self.inner.cancellation.cancel();
+    }
+
+    pub(in crate::daemon::service) async fn shutdown(&self) {
+        self.cancel();
         let task = self
             .inner
             .task

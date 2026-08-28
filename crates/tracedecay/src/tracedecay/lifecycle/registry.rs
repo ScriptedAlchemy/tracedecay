@@ -86,54 +86,62 @@ impl TraceDecay {
 
         let global_db = self.profile_database.as_ref();
 
-        let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
+        let (meta, git_common_dir, primary_root, git_remote_url, digest) =
+            hotpath::measure_block!("lifecycle.register_project_store.digest", {
+                let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
+                // Registering without the git common dir leaves the row unreachable
+                // by repository identity, so the next first touch from a sibling
+                // checkout mints a fresh store. Detached worktrees are no exception:
+                // they belong to the same repository as every other checkout.
+                let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
+
+                // A shared project id can be reached from any linked worktree (see
+                // the git-common-dir alias registered below), so registering
+                // straight from `self.project_root` would let whichever worktree
+                // happens to touch the project last pin its canonical_root /
+                // display_root to a transient worktree path. Redirect registration
+                // to the primary checkout when one is detected and still exists.
+                let primary_root = crate::project_registry::primary_checkout_root(
+                    &self.project_root,
+                    git_common_dir.as_deref(),
+                );
+
+                let tracked_branches: BTreeSet<String> = meta
+                    .as_ref()
+                    .map(|meta| meta.branches.keys().cloned().collect())
+                    .unwrap_or_default();
+                let artifact_mtimes = vec![
+                    artifact_mtime(&self.store_layout.graph_db_path),
+                    artifact_mtime(&self.store_layout.sessions_db_path),
+                    artifact_mtime(&self.store_layout.branch_meta_path),
+                    self.store_layout
+                        .manifest_path
+                        .as_deref()
+                        .and_then(artifact_mtime),
+                ];
+                let git_remote_url = git_remote_url(&self.project_root);
+                let digest = RegistrationDigest {
+                    project_id: project_id.to_string(),
+                    canonical_root: primary_root
+                        .as_deref()
+                        .unwrap_or(&self.project_root)
+                        .to_path_buf(),
+                    git_common_dir: git_common_dir.clone(),
+                    git_remote_url: git_remote_url.clone(),
+                    tracked_branches,
+                    artifact_mtimes,
+                };
+                (meta, git_common_dir, primary_root, git_remote_url, digest)
+            });
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
-        // Registering without the git common dir leaves the row unreachable
-        // by repository identity, so the next first touch from a sibling
-        // checkout mints a fresh store. Detached worktrees are no exception:
-        // they belong to the same repository as every other checkout.
-        let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
-
-        // A shared project id can be reached from any linked worktree (see
-        // the git-common-dir alias registered below), so registering
-        // straight from `self.project_root` would let whichever worktree
-        // happens to touch the project last pin its canonical_root /
-        // display_root to a transient worktree path. Redirect registration
-        // to the primary checkout when one is detected and still exists.
-        let primary_root = crate::project_registry::primary_checkout_root(
-            &self.project_root,
-            git_common_dir.as_deref(),
-        );
         let registration_root = primary_root.as_deref().unwrap_or(&self.project_root);
-
-        let tracked_branches: BTreeSet<String> = meta
-            .as_ref()
-            .map(|meta| meta.branches.keys().cloned().collect())
-            .unwrap_or_default();
-        let artifact_mtimes = vec![
-            artifact_mtime(&self.store_layout.graph_db_path),
-            artifact_mtime(&self.store_layout.sessions_db_path),
-            artifact_mtime(&self.store_layout.branch_meta_path),
-            self.store_layout
-                .manifest_path
-                .as_deref()
-                .and_then(artifact_mtime),
-        ];
-        let git_remote_url = git_remote_url(&self.project_root);
-        let digest = RegistrationDigest {
-            project_id: project_id.to_string(),
-            canonical_root: registration_root.to_path_buf(),
-            git_common_dir: git_common_dir.clone(),
-            git_remote_url: git_remote_url.clone(),
-            tracked_branches,
-            artifact_mtimes,
-        };
 
         {
             let cache = LAST_REGISTERED_DIGEST
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if registration_digest_matches(&cache, project_id, &digest) {
+                hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
                 return Ok(());
             }
         }
@@ -146,6 +154,7 @@ impl TraceDecay {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if registration_digest_matches(&cache, project_id, &digest) {
+                hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
                 return Ok(());
             }
         }
@@ -297,6 +306,7 @@ impl TraceDecay {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(project_id.to_string(), digest);
+        hotpath::gauge!("lifecycle.register_project_store.write_total").inc(1u64);
         Ok(())
     }
 }

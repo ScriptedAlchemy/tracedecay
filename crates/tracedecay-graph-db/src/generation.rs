@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
 use std::io::{self, Write};
+use std::sync::OnceLock;
 
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
@@ -22,7 +24,7 @@ use crate::{
     GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
 };
 
-const DIGEST_CHECK_INTERVAL_BYTES: u64 = 64 * 1024;
+pub(super) const DIGEST_CHECK_INTERVAL_BYTES: u64 = 64 * 1024;
 const CHECKED_VEC_INITIAL_CAPACITY_BYTES: usize = 1_024;
 
 #[path = "generation/identity.rs"]
@@ -108,6 +110,11 @@ pub struct GraphGenerationManifest {
     pub dependencies: Vec<GraphGenerationDependency>,
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphGenerationRelation>,
+    /// Memoized canonical digests of this instance. Never serialized — the
+    /// canonical replay payload and every digest byte are unchanged — and
+    /// invisible to equality; re-validated against the fields on every read.
+    #[serde(skip)]
+    digest_memo: ManifestDigestMemo,
 }
 
 /// The small, cheaply cloned metadata half of a generation manifest: exactly
@@ -130,6 +137,11 @@ pub struct GraphGenerationManifestIdentity {
     pub source_generation: SourceGeneration,
     pub watermark: GraphWatermark,
     pub dependencies: Vec<GraphGenerationDependency>,
+    /// Memoized dependency-closure digest, seeded by
+    /// [`GraphGenerationManifest::identity`] when the manifest already proved
+    /// it. Re-validated against `dependencies` on every read and invisible to
+    /// equality and clones.
+    digest_memo: DependencyClosureDigestMemo,
 }
 
 impl GraphGenerationManifestIdentity {
@@ -137,7 +149,7 @@ impl GraphGenerationManifestIdentity {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
-        dependency_closure_digest(&self.dependencies, check)
+        self.digest_memo.digest(&self.dependencies, check)
     }
 
     pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
@@ -146,6 +158,135 @@ impl GraphGenerationManifestIdentity {
             &self.projection.projection,
             &self.generation,
         )
+    }
+}
+
+/// Memoized dependency-closure digest, re-validated on every read.
+///
+/// The digest is a pure function of a `dependencies` vector, so the memo
+/// stores the exact vector it hashed and serves the memoized digest only
+/// while the owner's dependencies still compare equal to it. A caller that
+/// mutates the owning collection after a read therefore always observes a
+/// freshly computed digest; the pinned key merely stops memoizing from that
+/// point on. Clones start cold, so memoized digests never cross instances
+/// except through [`Self::propagated`], which re-validates the binding first.
+#[derive(Default)]
+struct DependencyClosureDigestMemo {
+    slot: OnceLock<(
+        Vec<GraphGenerationDependency>,
+        GraphDependencyGenerationClosureDigestV1,
+    )>,
+}
+
+impl DependencyClosureDigestMemo {
+    fn digest(
+        &self,
+        dependencies: &[GraphGenerationDependency],
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
+        if let Some((memoized_for, digest)) = self.slot.get() {
+            if memoized_for.as_slice() == dependencies {
+                return Ok(digest.clone());
+            }
+            return dependency_closure_digest(dependencies, check);
+        }
+        let digest = dependency_closure_digest(dependencies, check)?;
+        // A lost seeding race means another reader memoized the same value.
+        let _ = self.slot.set((dependencies.to_vec(), digest.clone()));
+        Ok(digest)
+    }
+
+    /// A memo for a collection cloned from `dependencies`, carrying the
+    /// already-computed digest forward only when it still binds.
+    fn propagated(&self, dependencies: &[GraphGenerationDependency]) -> Self {
+        let memo = Self::default();
+        if let Some((memoized_for, digest)) = self.slot.get() {
+            if memoized_for.as_slice() == dependencies {
+                let _ = memo.slot.set((memoized_for.clone(), digest.clone()));
+            }
+        }
+        memo
+    }
+}
+
+impl Clone for DependencyClosureDigestMemo {
+    // A clone starts cold: the source instance can be mutated independently
+    // of the clone afterwards, so memoized digests only cross instances
+    // through validated propagation.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+// Memoization state is invisible to value equality: two identical manifests
+// or identities compare equal whether or not their digests were computed yet.
+impl PartialEq for DependencyClosureDigestMemo {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DependencyClosureDigestMemo {}
+
+impl fmt::Debug for DependencyClosureDigestMemo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DependencyClosureDigestMemo")
+    }
+}
+
+/// Memoized canonical digests of one manifest instance.
+///
+/// `expected_recovered` pins the metadata half and the row counts it hashed
+/// and is served only while those still bind the manifest, which observes
+/// every mutation pattern the repository exercises (dependency, generation,
+/// source, watermark, and row-set size changes). The bulk rows are validated
+/// by count only: replacing a row in place on the same instance after a
+/// digest read would go unobserved, and no flow does that — production
+/// manifests are constructed, proven, and then held behind `Arc`, while
+/// fixtures mutate freshly constructed or freshly cloned (cold) instances
+/// before their first digest read.
+#[derive(Default)]
+struct ManifestDigestMemo {
+    dependency_closure: DependencyClosureDigestMemo,
+    expected_recovered: OnceLock<RecoveredGenerationDigestMemo>,
+}
+
+impl Clone for ManifestDigestMemo {
+    // Cold for the same reason as `DependencyClosureDigestMemo::clone`.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for ManifestDigestMemo {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl fmt::Debug for ManifestDigestMemo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManifestDigestMemo")
+    }
+}
+
+struct RecoveredGenerationDigestMemo {
+    identity: GraphGenerationManifestIdentity,
+    entity_count: usize,
+    relation_count: usize,
+    digest: GraphRecoveredGenerationDigestV1,
+}
+
+impl RecoveredGenerationDigestMemo {
+    /// Whether the memoized digest still binds `manifest` exactly.
+    fn binds(&self, manifest: &GraphGenerationManifest) -> bool {
+        self.identity.projection == manifest.projection
+            && self.identity.generation == manifest.generation
+            && self.identity.source_generation == manifest.source_generation
+            && self.identity.watermark == manifest.watermark
+            && self.identity.dependencies == manifest.dependencies
+            && self.entity_count == manifest.entities.len()
+            && self.relation_count == manifest.relations.len()
     }
 }
 
@@ -213,6 +354,7 @@ impl GraphGenerationManifest {
             dependencies,
             entities,
             relations,
+            digest_memo: ManifestDigestMemo::default(),
         };
         manifest.validate_checked(check)?;
         Ok(manifest)
@@ -346,10 +488,16 @@ impl GraphGenerationManifest {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
-        dependency_closure_digest(&self.dependencies, check)
+        self.digest_memo
+            .dependency_closure
+            .digest(&self.dependencies, check)
     }
 
     /// The metadata half of this manifest, cloned away from its bulk rows.
+    /// Carries the memoized dependency-closure digest along when it still
+    /// binds, so later phases that hold only the identity — staging, the
+    /// close/reopen recovered-digest proof, recovery — do not recompute a
+    /// digest this manifest already proved.
     #[must_use]
     pub fn identity(&self) -> GraphGenerationManifestIdentity {
         GraphGenerationManifestIdentity {
@@ -358,6 +506,10 @@ impl GraphGenerationManifest {
             source_generation: self.source_generation.clone(),
             watermark: self.watermark.clone(),
             dependencies: self.dependencies.clone(),
+            digest_memo: self
+                .digest_memo
+                .dependency_closure
+                .propagated(&self.dependencies),
         }
     }
 
@@ -369,6 +521,32 @@ impl GraphGenerationManifest {
     }
 
     pub fn expected_recovered_digest(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+        if let Some(memo) = self.digest_memo.expected_recovered.get() {
+            if memo.binds(self) {
+                return Ok(memo.digest.clone());
+            }
+            // Mutated after seeding: the pinned key is stale, so every read
+            // recomputes from the current fields.
+            return self.compute_expected_recovered_digest(check);
+        }
+        let digest = self.compute_expected_recovered_digest(check)?;
+        // A lost seeding race means another reader memoized the same value.
+        let _ = self
+            .digest_memo
+            .expected_recovered
+            .set(RecoveredGenerationDigestMemo {
+                identity: self.identity(),
+                entity_count: self.entities.len(),
+                relation_count: self.relations.len(),
+                digest: digest.clone(),
+            });
+        Ok(digest)
+    }
+
+    fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
@@ -610,6 +788,8 @@ fn dependency_closure_digest(
     dependencies: &[GraphGenerationDependency],
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphDependencyGenerationClosureDigestV1, GraphDbError> {
+    #[cfg(test)]
+    DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
     let encoded = serde_json::to_writer(&mut writer, dependencies);
@@ -750,6 +930,8 @@ thread_local! {
         const { std::cell::Cell::new(0) };
     static CANONICAL_BUFFER_ALLOCATION_GROWTHS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static DEPENDENCY_CLOSURE_CANONICALIZATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -780,6 +962,16 @@ pub(crate) fn reset_canonical_buffer_allocation_growths() {
 #[cfg(test)]
 pub(crate) fn canonical_buffer_allocation_growths() -> usize {
     CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_dependency_closure_canonicalizations() {
+    DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn dependency_closure_canonicalizations() -> usize {
+    DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(std::cell::Cell::get)
 }
 
 fn physical_namespace_projection_map(
@@ -844,6 +1036,7 @@ fn recovered_generation_digest(
         dependencies,
         entities,
         relations,
+        digest_memo: _,
     } = manifest;
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
@@ -1287,6 +1480,277 @@ mod checked_vec_writer_tests {
         assert!(
             allocation_growths <= 8,
             "4,096 manifest rows caused {allocation_growths} canonical-buffer allocation growths"
+        );
+    }
+}
+
+#[cfg(test)]
+mod manifest_digest_memo_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use tracedecay_store::runtime::{
+        BrainId, GraphPublicationInputDigestV1, ProjectId, StoreShardIdV1, UserProfileId,
+    };
+
+    use super::{
+        GraphGenerationManifest, dependency_closure_canonicalizations, manifest_canonicalizations,
+        reset_dependency_closure_canonicalizations, reset_manifest_canonicalizations,
+    };
+    use crate::{
+        GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability, GraphEntity,
+        GraphEntityId, GraphFormatVersion, GraphGenerationDependency, GraphGenerationId,
+        GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+        GraphWatermark, NeverCancelled, SourceGeneration,
+    };
+
+    fn dependency(index: usize) -> GraphGenerationDependency {
+        GraphGenerationDependency::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(format!("memo-dependency-{index}")).unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new(format!("dependency-generation-{index}")).unwrap(),
+            GraphIdempotencyKey::new(format!("dependency-publication-{index}")).unwrap(),
+        )
+    }
+
+    fn entity(index: usize) -> GraphEntity {
+        GraphEntity::new(
+            GraphEntityId::new(format!("entity:{index:03}")).unwrap(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    fn manifest(namespace: &str, dependencies: Vec<GraphGenerationDependency>) -> GraphGenerationManifest {
+        GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new(namespace).unwrap(),
+                GraphProjectionId::new("manifest").unwrap(),
+            ),
+            GraphGenerationId::new("generation-digest-memo").unwrap(),
+            SourceGeneration::new("source-digest-memo").unwrap(),
+            GraphWatermark::new("watermark-digest-memo").unwrap(),
+            dependencies,
+            (0..16).map(entity).collect(),
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn shard() -> StoreShardIdV1 {
+        StoreShardIdV1::project(
+            BrainId::new("brain.digest-memo").unwrap(),
+            UserProfileId::new("profile.digest-memo").unwrap(),
+            ProjectId::new("project.digest-memo").unwrap(),
+        )
+    }
+
+    fn input_digest() -> GraphPublicationInputDigestV1 {
+        GraphPublicationInputDigestV1::new(format!("sha256:{}", "a".repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn produce_and_hydrate_flow_canonicalizes_each_digest_once_per_instance() {
+        let manifest = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        reset_manifest_canonicalizations();
+        reset_dependency_closure_canonicalizations();
+
+        let replay = manifest
+            .relational_replay(
+                shard(),
+                GraphIdempotencyKey::new("publish:digest-memo").unwrap(),
+                input_digest(),
+                None,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(manifest_canonicalizations(), 1);
+        assert_eq!(dependency_closure_canonicalizations(), 1);
+
+        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        assert_eq!(sealed, replay.expected_recovered_digest);
+        assert_eq!(dependency_digest, replay.dependency_generation_closure_digest);
+        assert_eq!(
+            manifest_canonicalizations(),
+            1,
+            "re-reading a produced manifest's digest must not re-canonicalize it"
+        );
+        assert_eq!(
+            dependency_closure_canonicalizations(),
+            1,
+            "re-reading a produced manifest's dependency digest must not re-encode the closure"
+        );
+
+        let hydrated = GraphGenerationManifest::from_inline_replay(&replay, &|| Ok(())).unwrap();
+        assert_eq!(
+            manifest_canonicalizations(),
+            2,
+            "hydration proves the journaled digest against the fresh instance exactly once"
+        );
+        assert_eq!(dependency_closure_canonicalizations(), 2);
+
+        let identity = hydrated.identity();
+        assert_eq!(
+            identity.dependency_closure_digest(&|| Ok(())).unwrap(),
+            dependency_digest
+        );
+        assert_eq!(
+            hydrated.expected_recovered_digest(&|| Ok(())).unwrap(),
+            sealed
+        );
+        assert_eq!(
+            manifest_canonicalizations(),
+            2,
+            "this produce/reread/hydrate/reread sequence canonicalized the manifest 4 times before memoization"
+        );
+        assert_eq!(
+            dependency_closure_canonicalizations(),
+            2,
+            "this sequence canonicalized the dependency closure 4 times before memoization"
+        );
+
+        // Byte identity: a cold instance built from the same inputs computes
+        // the exact digests the memoized reads served.
+        let control = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        assert_eq!(control.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
+        assert_eq!(
+            control.dependency_closure_digest(&|| Ok(())).unwrap(),
+            dependency_digest
+        );
+    }
+
+    #[test]
+    fn verification_reuses_the_dependency_digest_that_rode_along() {
+        let owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let database = owner.issue_lease().unwrap();
+        let manifest = Arc::new(manifest("digest-memo-verify", vec![]));
+        database
+            .apply_generation_unverified(Arc::clone(&manifest), &|| Ok(()))
+            .unwrap();
+        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let identity = manifest.identity();
+
+        reset_manifest_canonicalizations();
+        reset_dependency_closure_canonicalizations();
+        let (_, recovered) = database
+            .verify_existing_generation(&identity, &sealed, &|| Ok(()))
+            .unwrap();
+
+        assert_eq!(recovered, sealed);
+        assert_eq!(
+            identity.dependency_closure_digest(&|| Ok(())).unwrap(),
+            dependency_digest
+        );
+        assert_eq!(
+            dependency_closure_canonicalizations(),
+            0,
+            "the verify proof reuses the digest that rode along on the identity; it re-encoded the closure once per verify before memoization"
+        );
+        assert_eq!(
+            manifest_canonicalizations(),
+            0,
+            "verification must never re-canonicalize the manifest"
+        );
+        owner.close().unwrap();
+    }
+
+    #[test]
+    fn mutation_after_a_digest_read_recomputes_instead_of_serving_the_memo() {
+        let mut manifest = manifest("digest-memo-mutation", vec![dependency(1), dependency(2)]);
+        let dependency_before = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let recovered_before = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+
+        manifest.dependencies.push(dependency(3));
+        let dependency_after = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let recovered_after = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        assert_ne!(dependency_after, dependency_before);
+        assert_ne!(recovered_after, recovered_before);
+        assert_eq!(
+            manifest
+                .identity()
+                .dependency_closure_digest(&|| Ok(()))
+                .unwrap(),
+            dependency_after,
+            "an identity taken after the mutation must not inherit the stale memo"
+        );
+
+        manifest.entities.push(entity(999));
+        let recovered_rows = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        assert_ne!(recovered_rows, recovered_after);
+
+        manifest.watermark = GraphWatermark::new("watermark-digest-memo-mutated").unwrap();
+        let recovered_watermark = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        assert_ne!(recovered_watermark, recovered_rows);
+
+        // The recomputed digests are the true digests of the mutated fields:
+        // a cold instance rebuilt from them computes the same values.
+        let control = GraphGenerationManifest::new(
+            manifest.projection.clone(),
+            manifest.generation.clone(),
+            manifest.source_generation.clone(),
+            manifest.watermark.clone(),
+            manifest.dependencies.clone(),
+            manifest.entities.clone(),
+            manifest.relations.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            control.expected_recovered_digest(&|| Ok(())).unwrap(),
+            recovered_watermark
+        );
+        assert_eq!(
+            control.dependency_closure_digest(&|| Ok(())).unwrap(),
+            dependency_after
+        );
+    }
+
+    #[test]
+    fn identity_mutation_recomputes_the_propagated_digest() {
+        let manifest = manifest("digest-memo-identity", vec![dependency(1), dependency(2)]);
+        let seeded = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let mut identity = manifest.identity();
+        identity.dependencies.pop();
+
+        let recomputed = identity.dependency_closure_digest(&|| Ok(())).unwrap();
+        assert_ne!(recomputed, seeded);
+        let control = super::dependency_closure_digest(&identity.dependencies, &|| Ok(())).unwrap();
+        assert_eq!(recomputed, control);
+    }
+
+    #[test]
+    fn a_clone_starts_with_a_cold_memo() {
+        let manifest = manifest("digest-memo-clone", vec![dependency(1)]);
+        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+
+        let clone = manifest.clone();
+        reset_manifest_canonicalizations();
+        reset_dependency_closure_canonicalizations();
+        assert_eq!(
+            clone.dependency_closure_digest(&|| Ok(())).unwrap(),
+            dependency_digest
+        );
+        assert_eq!(clone.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
+        assert_eq!(
+            dependency_closure_canonicalizations(),
+            1,
+            "a clone must recompute rather than inherit its source's memo"
+        );
+        assert_eq!(
+            manifest_canonicalizations(),
+            1,
+            "a clone must recompute rather than inherit its source's memo"
         );
     }
 }

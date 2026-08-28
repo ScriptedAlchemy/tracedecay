@@ -71,24 +71,30 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
             .map_err(Into::into)
     }
 
+    /// Sampling runs after every batch, inside `rusqlite.writer.checkpoint`,
+    /// so it is measured apart from `rusqlite.wal_checkpoint`: a hot writer
+    /// span with cold checkpoints means the per-commit NOOP probe itself is
+    /// the cost, not WAL copy-back.
     fn sample_wal(&mut self) -> Result<WalSample, Self::Error> {
-        let (_, frames, _) = self.checkpoint_row("PRAGMA wal_checkpoint(NOOP)")?;
-        let page_size = self
-            .connection
-            .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
-            .map_err(RusqliteCheckpointError::Sqlite)
-            .and_then(|value| {
-                nonnegative_integer(value, 0).map_err(RusqliteCheckpointError::Sqlite)
-            })?;
-        let frame_bytes = page_size.saturating_add(WAL_FRAME_HEADER_BYTES);
-        let bytes = if frames > 0 {
-            frames
-                .saturating_mul(frame_bytes)
-                .saturating_add(WAL_HEADER_BYTES)
-        } else {
-            0
-        };
-        Ok(WalSample { frames, bytes })
+        hotpath::measure_block!("rusqlite.wal_sample", {
+            let (_, frames, _) = self.checkpoint_row("PRAGMA wal_checkpoint(NOOP)")?;
+            let page_size = self
+                .connection
+                .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+                .map_err(RusqliteCheckpointError::Sqlite)
+                .and_then(|value| {
+                    nonnegative_integer(value, 0).map_err(RusqliteCheckpointError::Sqlite)
+                })?;
+            let frame_bytes = page_size.saturating_add(WAL_FRAME_HEADER_BYTES);
+            let bytes = if frames > 0 {
+                frames
+                    .saturating_mul(frame_bytes)
+                    .saturating_add(WAL_HEADER_BYTES)
+            } else {
+                0
+            };
+            Ok(WalSample { frames, bytes })
+        })
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {

@@ -147,6 +147,7 @@ impl Admission {
         };
         let usage = state.usage(lane);
         if usage.operations >= capacity.operations {
+            crate::hotpath_observe::record_admission_refused_operations();
             return Err(SaturationScopeV1::ShardOperations);
         }
         if bytes > request_limit
@@ -156,6 +157,7 @@ impl Admission {
                 .checked_add(bytes)
                 .is_none_or(|total| total > capacity.bytes)
         {
+            crate::hotpath_observe::record_admission_refused_bytes();
             return Err(SaturationScopeV1::ShardBytes);
         }
         let usage = state.usage_mut(lane);

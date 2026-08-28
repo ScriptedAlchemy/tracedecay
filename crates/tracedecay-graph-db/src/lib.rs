@@ -11,6 +11,7 @@ mod mutation;
 mod owner;
 mod point_read;
 mod projection;
+mod projection_identity_index;
 mod projection_read;
 mod publication;
 mod recovery;

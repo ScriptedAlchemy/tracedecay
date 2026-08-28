@@ -49,17 +49,24 @@ pub(crate) fn projection_mismatch(
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    let recovered = GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
-        GraphDbError::DurabilityUncertain {
-            message: format!(
-                "Grafeo reopen failed during recovered projection verification: {error}"
-            ),
-        }
-    })?;
+    let recovered = hotpath::measure_block!(
+        "graph_db.generation.recover.open.engine",
+        GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
+            GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo reopen failed during recovered projection verification: {error}"
+                ),
+            }
+        })
+    )?;
+    record_open_corpus_gauges(&recovered);
     if let Err(error) = validate_or_initialize_format(&recovered, reopen) {
         return close_recovered_after_error("validate recovered graph format", recovered, error);
     }
-    let state = match FormatState::load(&recovered) {
+    let state = match hotpath::measure_block!(
+        "graph_db.generation.open.state",
+        FormatState::load(&recovered)
+    ) {
         Ok(state) => state,
         Err(error) => {
             return close_recovered_after_error("load recovered graph state", recovered, error);
@@ -82,16 +89,26 @@ pub(crate) fn validate_or_initialize_format(
     database: &GrafeoDB,
     validated: &ValidatedOpen,
 ) -> Result<(), GraphDbError> {
-    validate_or_initialize_format_marker(database, validated)?;
-    // Property indexes live in memory only -- grafeo persists no index section
-    // and rebuilds none on open -- so every open has to register them, not just
-    // the one that initializes the store. Without this the unique-key lookups
-    // in `state.rs` degrade from a hash hit to a full node scan on every
-    // reopened store: measured at 500k entities, 64 point reads took 23.7s
-    // instead of 1.4ms, and the bounded traversal 773ms instead of 2.7ms.
-    for property in INDEXED_PROPERTIES {
-        database.create_property_index(property);
-    }
+    hotpath::measure_block!(
+        "graph_db.generation.open.format",
+        validate_or_initialize_format_marker(database, validated)
+    )?;
+    // The pinned grafeo fork persists the store's property-index keys in the
+    // catalog section and `load_from_sections` rebuilds each one with a full
+    // node scan inside `GrafeoDB::with_config`, so on a store checkpointed by
+    // this engine these calls find the index present and return without
+    // scanning. This loop stays as the authority that *defines* the index
+    // set: a fresh store and a store whose last checkpoint predates catalog
+    // index persistence register here, and without the indexes the unique-key
+    // lookups in `state.rs` degrade from a hash hit to a full node scan —
+    // measured at 500k entities, 64 point reads took 23.7s instead of 1.4ms,
+    // and the bounded traversal 773ms instead of 2.7ms. The span shows which
+    // side of the engine boundary the rebuild cost actually lands on.
+    hotpath::measure_block!("graph_db.generation.open.property_indexes", {
+        for property in INDEXED_PROPERTIES {
+            database.create_property_index(property);
+        }
+    });
     Ok(())
 }
 
@@ -168,6 +185,20 @@ fn validate_or_initialize_format_marker(
     Ok(())
 }
 
+/// Records how much corpus the engine open just hydrated, so the phase spans
+/// around it can be correlated with store size in a Hotpath report.
+#[inline(always)]
+pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
+    #[cfg(feature = "hotpath")]
+    {
+        let store = database.graph_store();
+        hotpath::gauge!("graph_db.generation.open.nodes").set(store.node_count());
+        hotpath::gauge!("graph_db.generation.open.edges").set(store.edge_count());
+    }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = database;
+}
+
 fn close_recovered_after_error<T>(
     context: &str,
     recovered: GrafeoDB,
@@ -184,13 +215,13 @@ pub(crate) fn checkpoint_recovered_database(
     recovered: GrafeoDB,
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    recovered
-        .close()
-        .map_err(|error| GraphDbError::DurabilityUncertain {
-            message: format!(
-                "Grafeo close failed while checkpointing projection quarantine: {error}"
-            ),
-        })?;
+    hotpath::measure_block!(
+        "graph_db.generation.recover.checkpoint.close",
+        recovered.close()
+    )
+    .map_err(|error| GraphDbError::DurabilityUncertain {
+        message: format!("Grafeo close failed while checkpointing projection quarantine: {error}"),
+    })?;
     open_recovered_database(reopen)
 }
 
@@ -233,6 +264,7 @@ pub(crate) fn requarantine_after_failed_checkpoint_verification(
     Ok((recovered, state, quarantined))
 }
 
+#[hotpath::measure(label = "graph_db.generation.open.quarantine")]
 pub(crate) fn load_quarantined_projections(
     database: &GrafeoDB,
 ) -> Result<BTreeSet<(GraphNamespace, GraphProjectionId)>, GraphDbError> {

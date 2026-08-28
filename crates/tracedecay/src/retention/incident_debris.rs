@@ -140,7 +140,7 @@ pub fn sweep_incident_debris(
                 store_id: entry.store_id.clone(),
                 kind: IncidentDebrisFailureKind::MetadataInvalid,
             }));
-        return report;
+        return observed_sweep_report(report);
     }
     let profile = match canonical_profile_root(profile_root) {
         Ok(profile) => profile,
@@ -148,7 +148,7 @@ pub fn sweep_incident_debris(
             report
                 .errors
                 .extend(census.iter().map(|entry| failure(entry, kind)));
-            return report;
+            return observed_sweep_report(report);
         }
     };
     for entry in census {
@@ -165,6 +165,17 @@ pub fn sweep_incident_debris(
             .retained
             .saturating_add(retained_count(&capability, &mut report.errors));
     }
+    observed_sweep_report(report)
+}
+
+/// Items-moved/removed census for the one outer sweep wall span, including
+/// the fail-closed early exits that touch nothing but report every store.
+fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSweepReport {
+    hotpath::gauge!("retention.incident.quarantined_total").inc(report.quarantined);
+    hotpath::gauge!("retention.incident.collected_total").inc(report.collected);
+    hotpath::gauge!("retention.incident.failed_total").inc(report.errors.len());
+    hotpath::gauge!("retention.incident.reclaimed_bytes_total").inc(report.reclaimed_bytes);
+    hotpath::gauge!("retention.incident.retained").set(report.retained);
     report
 }
 

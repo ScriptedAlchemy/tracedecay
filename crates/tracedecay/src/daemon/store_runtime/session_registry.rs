@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(feature = "hotpath")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
@@ -100,6 +102,41 @@ pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWN
 /// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize =
     crate::daemon::remote_protocol::MAX_REGISTERED_REMOTE_NODES;
+
+#[cfg(feature = "hotpath")]
+static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII observation of one full (non-reuse) session-store mount attempt.
+///
+/// Entering counts the attempt; dropping restores the in-flight gauge on
+/// every exit path, so failed, denied, or cancelled mounts cannot leak it.
+#[cfg(feature = "hotpath")]
+struct StoreMountObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl StoreMountObservationV1 {
+    fn enter() -> Self {
+        let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("daemon.session_registry.mount.attempts_total").inc(1_u64);
+        hotpath::gauge!("daemon.session_registry.mount.in_flight").set(in_flight);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for StoreMountObservationV1 {
+    fn drop(&mut self) {
+        let _ = SESSION_STORE_MOUNTS_IN_FLIGHT.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |in_flight| in_flight.checked_sub(1),
+        );
+        hotpath::gauge!("daemon.session_registry.mount.in_flight")
+            .set(SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed));
+    }
+}
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
@@ -290,6 +327,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
             .collect())
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.wait_session_graph", future = true)]
     async fn wait_for_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         let (relation_graph, graph_settled) = {
             let entries = self.lock().map_err(|_| {
@@ -3096,9 +3134,14 @@ async fn open_runtime_with_presence(
     operation: &'static str,
 ) -> Result<(StoreRuntimeClientLease, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
-    let locator = match resolver.resolve_key(&key) {
+    let locator = match hotpath::measure_block!(
+        "daemon.session_registry.store_open.resolve",
+        resolver.resolve_key(&key)
+    ) {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
         LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
             return Err(session_registry_error(
                 operation,
                 format!(
@@ -3110,7 +3153,10 @@ async fn open_runtime_with_presence(
     };
     let authority = match database_authority {
         Some(authority) => authority,
-        None => DatabaseAuthority::for_runtime(locator.locator().path(), operation)?,
+        None => hotpath::measure_block!(
+            "daemon.session_registry.store_open.resolve",
+            DatabaseAuthority::for_runtime(locator.locator().path(), operation)
+        )?,
     };
     if authority.canonical_database_path() != locator.locator().path() {
         return Err(session_registry_error(
@@ -3127,7 +3173,10 @@ async fn open_runtime_with_presence(
     } else if !allow_remote_restore_fence
         && matches!(&shard_id.scope, StoreShardScopeV1::ProjectSessions { .. })
     {
-        remote_recovery::remote_restore_activated_open_identity(locator.locator().path())?
+        hotpath::measure_block!(
+            "daemon.session_registry.store_open.restore_fence_check",
+            remote_recovery::remote_restore_activated_open_identity(locator.locator().path())
+        )?
     } else {
         None
     };
@@ -3150,12 +3199,21 @@ async fn open_runtime_with_presence(
         Some(expected) => request.require_opened_file_identity(expected),
         None => request,
     };
-    match registry.open(request).await {
+    match hotpath::future!(
+        registry.open(request),
+        label = "daemon.session_registry.store_open.registry_open"
+    )
+    .await
+    {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
-        StoreRuntimeOpenResult::Failed(failure) => Err(registry_open_error(
-            "open registered session runtime",
-            failure,
-        )),
+        StoreRuntimeOpenResult::Failed(failure) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
+            Err(registry_open_error(
+                "open registered session runtime",
+                failure,
+            ))
+        }
     }
 }
 

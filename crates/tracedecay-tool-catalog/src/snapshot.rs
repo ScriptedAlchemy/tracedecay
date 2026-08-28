@@ -255,6 +255,11 @@ impl CatalogSnapshotBuilderV1 {
             &executable_schemas,
             &profiles,
         );
+        crate::hotpath_observe::snapshot_entries(
+            capabilities.len(),
+            bindings.len(),
+            profiles.len(),
+        );
 
         Ok(CatalogSnapshotV1 {
             digest,
@@ -328,7 +333,27 @@ impl CatalogSnapshotV1 {
 
     /// Resolves metadata only. `None` deliberately covers unknown, unavailable,
     /// feature-incompatible, profile-hidden, and protocol-incompatible entries.
+    #[hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")]
     pub fn resolve_binding(
+        &self,
+        profile_id: &ProfileId,
+        surface: BindingSurface,
+        operation: &SurfaceOperationName,
+        protocol_revision: u32,
+        negotiated_features: &BTreeSet<FeatureId>,
+    ) -> Option<&CapabilityManifestV1> {
+        let resolved = self.resolve_binding_capability(
+            profile_id,
+            surface,
+            operation,
+            protocol_revision,
+            negotiated_features,
+        );
+        crate::hotpath_observe::binding_resolution(resolved.is_some());
+        resolved
+    }
+
+    fn resolve_binding_capability(
         &self,
         profile_id: &ProfileId,
         surface: BindingSurface,
@@ -383,6 +408,7 @@ impl CatalogSnapshotV1 {
     /// The caller supplies its already-resolved scope and authorization
     /// intersection. This keeps transport adapters from publishing a static
     /// superset and preserves indistinguishable omission for hidden entries.
+    #[hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")]
     #[allow(clippy::too_many_arguments)]
     pub fn visible_bindings<'a>(
         &'a self,
@@ -393,38 +419,39 @@ impl CatalogSnapshotV1 {
         authorized_capabilities: &BTreeSet<CapabilityId>,
         available_scope: &BTreeSet<ScopeDimension>,
     ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
-        let Some(profile) = self.profiles.get(profile_id) else {
-            return Vec::new();
-        };
-        if !profile.enables_surface(surface) {
-            return Vec::new();
-        }
+        let surface_enabled = self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|profile| profile.enables_surface(surface));
         let mut visible = Vec::new();
-        for capability in self.visible_capabilities(profile_id, negotiated_features) {
-            if !authorized_capabilities.contains(capability.capability_id())
-                || !capability
-                    .scope()
-                    .dimensions()
-                    .iter()
-                    .all(|dimension| available_scope.contains(dimension))
-            {
-                continue;
-            }
-            for binding_id in capability.binding_ids() {
-                let Some(binding) = self.bindings.get(binding_id) else {
-                    continue;
-                };
-                if binding.surface() == surface
-                    && binding.protocol_revisions().contains(protocol_revision)
-                    && features_satisfied(binding.required_features(), negotiated_features)
+        if surface_enabled {
+            for capability in self.visible_capabilities(profile_id, negotiated_features) {
+                if !authorized_capabilities.contains(capability.capability_id())
+                    || !capability
+                        .scope()
+                        .dimensions()
+                        .iter()
+                        .all(|dimension| available_scope.contains(dimension))
                 {
-                    visible.push((binding, capability));
+                    continue;
+                }
+                for binding_id in capability.binding_ids() {
+                    let Some(binding) = self.bindings.get(binding_id) else {
+                        continue;
+                    };
+                    if binding.surface() == surface
+                        && binding.protocol_revisions().contains(protocol_revision)
+                        && features_satisfied(binding.required_features(), negotiated_features)
+                    {
+                        visible.push((binding, capability));
+                    }
                 }
             }
+            visible.sort_by(|(left, _), (right, _)| {
+                left.operation().as_str().cmp(right.operation().as_str())
+            });
         }
-        visible.sort_by(|(left, _), (right, _)| {
-            left.operation().as_str().cmp(right.operation().as_str())
-        });
+        crate::hotpath_observe::visible_bindings_published(visible.len());
         visible
     }
 }

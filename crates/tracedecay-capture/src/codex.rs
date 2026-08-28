@@ -75,8 +75,34 @@ pub fn normalize_codex_observation_with_location(
 /// Shared normalization work behind both public Codex entry points.
 /// Measuring here (rather than each thin wrapper) covers per-record capture
 /// cost exactly once regardless of caller.
-#[hotpath::measure(label = "capture.codex.normalize")]
 fn normalize_codex_observation_inner(
+    native: &Value,
+    session_id: &str,
+    native_thread_id: Option<&str>,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    location: Option<CodexObservationLocation<'_>>,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    // Codex rollouts order by file bytes, so the range length is the source
+    // record's byte length. Failed normalizations are counted, never hidden.
+    hotpath::gauge!("capture.codex.record_bytes").inc(range.end() - range.start());
+    let envelope = normalize_codex_record(
+        native,
+        session_id,
+        native_thread_id,
+        stable_record_id,
+        range,
+        location,
+    );
+    if envelope.is_err() {
+        hotpath::gauge!("capture.codex.normalize_failures").inc(1u64);
+    }
+    envelope
+}
+
+/// One source-record canonicalization, not a per-item walk.
+#[hotpath::measure(label = "capture.codex.normalize")]
+fn normalize_codex_record(
     native: &Value,
     session_id: &str,
     native_thread_id: Option<&str>,

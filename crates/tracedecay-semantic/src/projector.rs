@@ -189,7 +189,7 @@ pub struct PreparedVectorGenerationV1 {
 /// change also embeds content-identical `reused` chunks into the new profile's
 /// generation. Deleted chunks become tombstones; ordinary reused chunks remain
 /// receipt-only so the store can copy their compatible prior vectors.
-#[hotpath::measure]
+#[hotpath::measure(label = "semantic.projector.prepare")]
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
@@ -423,6 +423,7 @@ struct CanonicalEncoderGroupV1<'a> {
 ///
 /// A request the projector would reject outright is returned unsplit, so the
 /// rejection stays exactly where it was.
+#[hotpath::measure(label = "semantic.projector.batch")]
 pub fn split_projection_request(
     request: &ProjectionBatchRequestV1,
     canonical_chunks: &[CodeSearchChunkV1],
@@ -776,6 +777,7 @@ fn append_canonical_encoder_groups<'a>(
 ///   encoder's concurrency.
 /// - Results are drained in input order, so vectors, decisions, and the
 ///   lowest-index failure are identical at any width.
+#[hotpath::measure(label = "semantic.projector.encode")]
 fn encode_changes_windowed<E, Missing, Sink>(
     encoder: &mut E,
     embedding_key: &EmbeddingProjectionKeyV1,
@@ -902,14 +904,17 @@ pub async fn prepare_vector_generation_async<E>(
 where
     E: CanonicalChunkVectorEncoderV1 + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        prepare_vector_generation(
-            &admitted_projection,
-            request,
-            &canonical_chunks,
-            &mut encoder,
-        )
-    })
+    hotpath::future!(
+        tokio::task::spawn_blocking(move || {
+            prepare_vector_generation(
+                &admitted_projection,
+                request,
+                &canonical_chunks,
+                &mut encoder,
+            )
+        }),
+        label = "semantic.projector.prepare"
+    )
     .await
     .map_err(|_| SemanticProjectionErrorV1::WorkerTerminated)?
 }

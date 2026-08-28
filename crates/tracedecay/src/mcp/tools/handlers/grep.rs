@@ -140,9 +140,15 @@ pub(super) async fn handle_grep(
         scan.omissions,
     );
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output_value, || {
-        render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
-    });
+    let text = hotpath::measure_block!(
+        "mcp.search.grep.render",
+        render::finalize(Some(cg.project_root()), &args, &output_value, || {
+            render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
+        })
+    );
+    // Grep aggregates more raw content than any other search tool; the encoded
+    // payload size explains transport pressure that timing alone cannot.
+    hotpath::gauge!("mcp.search.grep.response_bytes").set(text.len());
     Ok(ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,

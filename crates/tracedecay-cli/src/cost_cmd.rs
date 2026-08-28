@@ -21,14 +21,16 @@ pub(crate) async fn handle_cost(
         return Ok(());
     }
 
-    print_cost_summary(
-        &today.provider_usage,
-        &range,
-        by_model,
-        by_task,
-        export.as_deref(),
-        &summary,
-    )?;
+    hotpath::measure_block!("cli.cost.render", {
+        print_cost_summary(
+            &today.provider_usage,
+            &range,
+            by_model,
+            by_task,
+            export.as_deref(),
+            &summary,
+        )
+    })?;
     Ok(())
 }
 
@@ -208,6 +210,7 @@ struct TodayCostPayload {
     provider_usage: ProviderUsageCostSummaryV1,
 }
 
+#[hotpath::measure(label = "cli.cost.request", future = true)]
 async fn call_cost_admin(range: &str) -> tracedecay::errors::Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);

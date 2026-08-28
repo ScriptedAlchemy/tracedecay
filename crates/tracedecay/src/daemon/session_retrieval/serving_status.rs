@@ -13,30 +13,40 @@ pub(super) fn not_current_unavailable(
     status_port: &dyn SessionProjectionServingStatusPort,
 ) -> Option<SessionRetrievalUnavailable> {
     let status = status_port.serving_status();
+    // Each refusal reason increments its own static counter so a profile can
+    // separate historical-convergence staleness from refresh-worker outages
+    // without ever recording session or project identity.
     let reason = match &status.state {
         SessionProjectionServingState::Current => return None,
         SessionProjectionServingState::Stale { reason } => match reason {
             SessionProjectionStaleReason::HistoricalConvergence => {
+                hotpath::gauge!("daemon.session_retrieval.stale.historical_convergence").inc(1.0);
                 SessionRetrievalUnavailableReason::HistoricalConvergence
             }
             SessionProjectionStaleReason::HistoricalRetry { .. } => {
+                hotpath::gauge!("daemon.session_retrieval.stale.historical_retry").inc(1.0);
                 SessionRetrievalUnavailableReason::HistoricalRetry
             }
             SessionProjectionStaleReason::HistoricalBlocked { .. } => {
+                hotpath::gauge!("daemon.session_retrieval.stale.historical_blocked").inc(1.0);
                 SessionRetrievalUnavailableReason::HistoricalBlocked
             }
         },
         SessionProjectionServingState::Unavailable { reason } => match *reason {
             SessionProjectionUnavailableReason::WorkerMissing => {
+                hotpath::gauge!("daemon.session_retrieval.refused.worker_missing").inc(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerMissing
             }
             SessionProjectionUnavailableReason::WorkerRecovering => {
+                hotpath::gauge!("daemon.session_retrieval.refused.worker_recovering").inc(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerRecovering
             }
             SessionProjectionUnavailableReason::WorkerStalled => {
+                hotpath::gauge!("daemon.session_retrieval.refused.worker_stalled").inc(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerStalled
             }
             SessionProjectionUnavailableReason::WorkerStopped => {
+                hotpath::gauge!("daemon.session_retrieval.refused.worker_stopped").inc(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerStopped
             }
         },

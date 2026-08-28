@@ -11,6 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[cfg(feature = "hotpath")]
+use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_SUPPRESSED;
+#[cfg(feature = "hotpath")]
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
+
+#[cfg(feature = "hotpath")]
+use super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
+use super::run_ledger::AutomationRunStatus;
+
+#[cfg(feature = "hotpath")]
 static QUEUED: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "hotpath")]
 static RUNNING: AtomicU64 = AtomicU64::new(0);
@@ -121,10 +130,84 @@ impl Drop for DurationGuard {
     }
 }
 
+/// Counts one constructed run terminal per status. Failed and skipped
+/// terminals are counted alongside successes because a success-only counter
+/// hides exactly the waste an automation stall/skip diagnosis needs.
+#[inline(always)]
+pub(crate) fn observe_run_terminal(status: AutomationRunStatus) {
+    #[cfg(feature = "hotpath")]
+    {
+        match status {
+            AutomationRunStatus::Succeeded => {
+                hotpath::gauge!("automation_runs_succeeded_total").inc(1_u64);
+            }
+            AutomationRunStatus::Failed => {
+                hotpath::gauge!("automation_runs_failed_total").inc(1_u64);
+            }
+            AutomationRunStatus::Skipped => {
+                hotpath::gauge!("automation_runs_skipped_total").inc(1_u64);
+            }
+            // Non-terminal statuses never reach terminal-record construction.
+            AutomationRunStatus::Queued | AutomationRunStatus::Running => {}
+        }
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = status;
+    }
+}
+
+/// Maps the open-ended skip-reason strings onto a bounded static counter
+/// family so gauge keys stay compile-time constants with fixed cardinality.
+#[cfg(feature = "hotpath")]
+fn count_skip_reason(reason: &str) {
+    match reason {
+        "scheduler_lock_active" => {
+            hotpath::gauge!("automation_skips_lock_total").inc(1_u64);
+        }
+        "scheduler_cooldown_active" => {
+            hotpath::gauge!("automation_skips_cooldown_total").inc(1_u64);
+        }
+        "scheduler_interval_not_elapsed"
+        | "scheduler_cron_not_due"
+        | "scheduler_idle_window_active"
+        | "scheduler_schedule_manual" => {
+            hotpath::gauge!("automation_skips_not_due_total").inc(1_u64);
+        }
+        "no_new_session_activity" => {
+            hotpath::gauge!("automation_skips_no_activity_total").inc(1_u64);
+        }
+        AUTOMATION_DISABLED
+        | "delegated_host_mode"
+        | "backend_disabled"
+        | "task_not_schedulable"
+        | "task_disabled"
+        | "memory_curator_disabled"
+        | "session_reflector_disabled"
+        | "skill_writer_disabled"
+        | "combined_review_disabled"
+        | "user_job_disabled" => {
+            hotpath::gauge!("automation_skips_disabled_total").inc(1_u64);
+        }
+        SESSION_EVIDENCE_BUDGET_SUPPRESSED
+        | BACKEND_IDENTITY_SUPPRESSED
+        | "scheduler_non_retryable_failure" => {
+            hotpath::gauge!("automation_skips_suppressed_total").inc(1_u64);
+        }
+        "scheduler_history_invalid" | "scheduler_schedule_invalid" => {
+            hotpath::gauge!("automation_skips_invalid_total").inc(1_u64);
+        }
+        _ => {
+            hotpath::gauge!("automation_skips_other_total").inc(1_u64);
+        }
+    }
+}
+
 #[inline(always)]
 pub(crate) fn observe_due() {
     #[cfg(feature = "hotpath")]
     {
+        hotpath::gauge!("automation_due_total").inc(1_u64);
         hotpath::val!("automation_schedule_state").set(&STATE_DUE);
         QUEUED.store(1, Ordering::Relaxed);
         COOLDOWN.store(0, Ordering::Relaxed);
@@ -136,6 +219,7 @@ pub(crate) fn observe_due() {
 pub(crate) fn observe_skip_reason(reason: &str) {
     #[cfg(feature = "hotpath")]
     {
+        count_skip_reason(reason);
         match reason {
             "scheduler_lock_active" => {
                 hotpath::val!("automation_schedule_state").set(&STATE_QUEUED);

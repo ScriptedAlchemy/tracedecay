@@ -108,6 +108,53 @@ pub(crate) fn record_counts(
     }
 }
 
+/// Records the size of one vector index, in vectors and in heap bytes.
+///
+/// Emitted wherever an index's coverage is inspected, so a build that
+/// silently covered nothing shows up as a zero rather than as an
+/// indistinguishable success.
+#[inline(always)]
+pub(crate) fn record_vector_index_size(vectors: usize, bytes: usize) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("graph_db.vector_index.vectors").set(vectors as f64);
+        hotpath::gauge!("graph_db.vector_index.bytes").set(bytes as f64);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    {
+        let _ = (vectors, bytes);
+    }
+}
+
+/// Records what an open found already indexed, before anything rebuilds.
+///
+/// The gauge that answers "did the reopen restore the index or is the
+/// daemon about to pay for it again": non-zero means the store came back
+/// with coverage, zero means every vector search is unavailable until a
+/// rebuild finishes. Hotpath-only like [`record_grafeo_memory`]: its sole
+/// caller takes the census behind the same feature gate.
+#[inline(always)]
+#[cfg(feature = "hotpath")]
+pub(crate) fn record_vector_index_restore(indexes: usize, vectors: usize, bytes: usize) {
+    hotpath::gauge!("graph_db.vector_index.restore.indexes").set(indexes as f64);
+    hotpath::gauge!("graph_db.vector_index.restore.vectors").set(vectors as f64);
+    hotpath::gauge!("graph_db.vector_index.restore.bytes").set(bytes as f64);
+}
+
+/// Records what a close is about to write out as index topology.
+///
+/// Paired with [`record_vector_index_restore`]: the bytes reported here
+/// are the bytes the next open should find, and a restore gauge well
+/// below the preceding persist gauge is the signal that durability is
+/// leaking somewhere between the two.
+#[inline(always)]
+#[cfg(feature = "hotpath")]
+pub(crate) fn record_vector_index_persist(indexes: usize, vectors: usize, bytes: usize) {
+    hotpath::gauge!("graph_db.vector_index.persist.indexes").set(indexes as f64);
+    hotpath::gauge!("graph_db.vector_index.persist.vectors").set(vectors as f64);
+    hotpath::gauge!("graph_db.vector_index.persist.bytes").set(bytes as f64);
+}
+
 #[inline(always)]
 pub(crate) fn record_hydration_source(source: HydrationSource) {
     #[cfg(any(test, feature = "test-helpers"))]

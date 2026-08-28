@@ -93,13 +93,20 @@ async fn admitted_graph_query(
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!("unregistered graph read operation: {operation_name}"),
             })?;
-    cg.open_verified_graph_query(
-        projection,
-        admission,
-        &operation,
-        request_id,
-        deadline,
-        cancellation,
+    // Admission wait is measured apart from handler execution: every
+    // graph-backed tool in the graph/info/analysis/git/health groups funnels
+    // through this one open, so a slow span here is admission contention or a
+    // stale generation, never handler work.
+    hotpath::future!(
+        cg.open_verified_graph_query(
+            projection,
+            admission,
+            &operation,
+            request_id,
+            deadline,
+            cancellation,
+        ),
+        label = "mcp.dispatch.graph_query_admission"
     )
     .await
 }
@@ -183,6 +190,9 @@ pub(crate) fn tool_dispatch_deadline_error(
     tool_name: &str,
     budget: std::time::Duration,
 ) -> TraceDecayError {
+    // A firing ceiling is a defect signal upstream; count every occurrence so
+    // profiling sees the refusals, not only the successful dispatches.
+    hotpath::gauge!("mcp.tool_call.dispatch_deadline_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,
@@ -938,9 +948,12 @@ fn dispatch_retained_application_tools_inner<'a>(
             message: error.to_string(),
         })?;
         let requested_format = normalized.requested_format;
-        let request = crate::application_surface::retained::decode_request(
-            retained_operation,
-            normalized.request,
+        let request = hotpath::measure_block!(
+            "mcp.retained.decode",
+            crate::application_surface::retained::decode_request(
+                retained_operation,
+                normalized.request,
+            )
         )
         .ok_or_else(|| TraceDecayError::Config {
             message: format!("invalid retained application request for {tool_name}"),
@@ -986,9 +999,11 @@ fn dispatch_retained_application_tools_inner<'a>(
                 } else {
                     InvocationCancellationPolicy::ReadOnly
                 };
-                match executor
-                    .invoke_controlled(invocation, deadline, cancellation, policy)
-                    .await
+                match hotpath::future!(
+                    executor.invoke_controlled(invocation, deadline, cancellation, policy),
+                    label = "mcp.retained.invoke"
+                )
+                .await
                 {
                     Ok(response)
                         if response.protocol
@@ -1028,12 +1043,15 @@ fn dispatch_retained_application_tools_inner<'a>(
                 )?),
             )?),
         };
-        application_surface::render_retained_result(
-            Some(cg.project_root()),
-            retained_operation,
-            binding.binding_id,
-            result,
-            requested_format,
+        hotpath::measure_block!(
+            "mcp.retained.render",
+            application_surface::render_retained_result(
+                Some(cg.project_root()),
+                retained_operation,
+                binding.binding_id,
+                result,
+                requested_format,
+            )
         )
     })
 }

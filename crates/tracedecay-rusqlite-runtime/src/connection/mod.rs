@@ -521,30 +521,40 @@ fn open_raw(
     path: &Path,
     mode: ConnectionMode,
 ) -> Result<(Connection, bool), ConnectionPolicyError> {
-    let fresh_writer = mode == ConnectionMode::Writer
-        && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
-    let flags = match mode {
-        ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ConnectionMode::Writer | ConnectionMode::Maintenance => OpenFlags::SQLITE_OPEN_READ_WRITE,
-    } | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-    let connection =
-        Connection::open_with_flags(path, flags).map_err(|source| policy("open", source))?;
+    hotpath::measure_block!("rusqlite.connection.open", {
+        let fresh_writer = mode == ConnectionMode::Writer
+            && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
+        let flags = match mode {
+            ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ConnectionMode::Writer | ConnectionMode::Maintenance => {
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+            }
+        } | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+        let connection =
+            Connection::open_with_flags(path, flags).map_err(|source| policy("open", source))?;
 
-    Ok((connection, fresh_writer))
+        Ok((connection, fresh_writer))
+    })
 }
 
+/// Configuration is measured apart from the raw open: `journal_mode = WAL`
+/// and the verification pragmas read and can write the database, so under a
+/// held write lock this phase — not the file open — is where a slow
+/// startup's time goes.
 fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
 ) -> Result<Connection, ConnectionPolicyError> {
-    apply_pragmas(&connection, mode, fresh_writer)?;
-    assert_compile_options(&connection)?;
-    apply_limits(&connection, mode)?;
-    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-    install_authorizer(&connection, mode)?;
-    Ok(connection)
+    hotpath::measure_block!("rusqlite.connection.configure", {
+        apply_pragmas(&connection, mode, fresh_writer)?;
+        assert_compile_options(&connection)?;
+        apply_limits(&connection, mode)?;
+        connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
+        install_authorizer(&connection, mode)?;
+        Ok(connection)
+    })
 }
 
 /// Opens an immutable, query-only connection for a foreign or health database.
@@ -555,19 +565,21 @@ fn finish_open(
 /// mandatory, or accept eventual main-file visibility for best-effort foreign
 /// ingestion.
 pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
-    let uri = immutable_health_uri(path)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_URI
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-    let connection =
-        Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-    apply_pragmas(&connection, ConnectionMode::Reader, false)?;
-    assert_compile_options(&connection)?;
-    apply_limits(&connection, ConnectionMode::Reader)?;
-    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-    install_authorizer(&connection, ConnectionMode::Reader)?;
-    Ok(connection)
+    hotpath::measure_block!("rusqlite.connection.open_immutable", {
+        let uri = immutable_health_uri(path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+        let connection =
+            Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
+        apply_pragmas(&connection, ConnectionMode::Reader, false)?;
+        assert_compile_options(&connection)?;
+        apply_limits(&connection, ConnectionMode::Reader)?;
+        connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
+        install_authorizer(&connection, ConnectionMode::Reader)?;
+        Ok(connection)
+    })
 }
 
 fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {

@@ -176,7 +176,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
         context: &'a RequestContext,
         input: &'a FeedbackEvaluationInputV1,
     ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>> {
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             let current = self
                 .document_identity
                 .resolve(self.project_root.clone(), None)
@@ -253,7 +253,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-timed-out"))
                 }
             }
-        })
+        }, label = "usecases.feedback.proximity_advisory"))
     }
 }
 
@@ -514,6 +514,7 @@ fn project_open_policy_context(
 /// Resolves branch and head commit from one bounded native read of the exact
 /// admitted checkout. Project-open consumers must reuse this authority rather
 /// than independently reconstructing feedback identity.
+#[hotpath::measure(label = "usecases.feedback.resolve_scope")]
 pub fn resolve_project_feedback_scope_v1(
     project_root: &Path,
     scope: &ResolvedScope,
@@ -796,7 +797,7 @@ fn production_lsp_input(
         let project_root = project_root.clone();
         let root_path = root_path.clone();
         let document_identity = Arc::clone(&document_identity);
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             if url::Url::parse(&request.root_uri)
                 .ok()
                 .and_then(|url| url.to_file_path().ok())
@@ -884,7 +885,7 @@ fn production_lsp_input(
             };
             FeedbackCycleInvocation::new(context, execution)
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
-        })
+        }, label = "usecases.feedback.lsp_cycle_input"))
     }))
 }
 

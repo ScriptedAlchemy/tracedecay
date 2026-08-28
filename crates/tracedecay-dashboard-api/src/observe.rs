@@ -68,6 +68,16 @@ pub(crate) fn observe_response(response: &Response) {
     let _ = response;
 }
 
+/// Strata is the largest structure payload (up to `STRATA_MAX_FILES` rows);
+/// its serialized size tracks this element count, which is free to observe.
+#[inline(always)]
+pub(crate) fn record_strata_files(len: usize) {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("dashboard_api.graph.strata_files").set(len as f64);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = len;
+}
+
 #[inline(always)]
 pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
     #[cfg(feature = "hotpath")]

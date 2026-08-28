@@ -98,9 +98,15 @@ where
         validate_page_size(page_size)?;
         let authority = super::work::work_authority(context)
             .map_err(WorkProjectionApplicationError::Admission)?;
-        self.port
+        let snapshot = self
+            .port
             .snapshot(&authority, page_size)
-            .map_err(Into::into)
+            .map_err(WorkProjectionApplicationError::from)?;
+        // Page fill, distinct from the surrounding read latency: a slow read
+        // of three rows and a fast read of a full page are different defects.
+        hotpath::gauge!("application.work.read.snapshot.rows")
+            .set(snapshot.projections().len() as u64);
+        Ok(snapshot)
     }
 
     #[hotpath::measure(label = "application.work.read.delta")]
@@ -113,9 +119,13 @@ where
         validate_page_size(page_size)?;
         let authority = super::work::work_authority(context)
             .map_err(WorkProjectionApplicationError::Admission)?;
-        self.port
+        let delta = self
+            .port
             .delta(&authority, cursor, page_size)
-            .map_err(Into::into)
+            .map_err(WorkProjectionApplicationError::from)?;
+        hotpath::gauge!("application.work.read.delta.rows")
+            .set((delta.changed().len() + delta.removed().len()) as u64);
+        Ok(delta)
     }
 }
 

@@ -33,9 +33,12 @@ impl TraceDecay {
         let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
         let (source, source_identity) = file.read_to_string(path)?;
 
-        let check_output = crate::external_tools::ast_grep_command()
-            .args(["--version"])
-            .output();
+        let check_output = hotpath::measure_block!(
+            "edits.ast_grep.probe",
+            crate::external_tools::ast_grep_command()
+                .args(["--version"])
+                .output()
+        );
 
         if check_output.is_err() {
             if can_use_literal_rewrite_fallback(pattern) {
@@ -109,12 +112,15 @@ impl TraceDecay {
         let mut ast_grep_args: Vec<&str> =
             vec!["run", "-p", pattern, "-r", rewrite, "--json=compact"];
         ast_grep_args.push(snapshot_path_arg.as_ref());
-        let output = crate::external_tools::ast_grep_command()
-            .args(&ast_grep_args)
-            .output()
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to run ast-grep: {e}"),
-            })?;
+        let output = hotpath::measure_block!(
+            "edits.ast_grep.match",
+            crate::external_tools::ast_grep_command()
+                .args(&ast_grep_args)
+                .output()
+        )
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to run ast-grep: {e}"),
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -186,6 +192,7 @@ struct AstGrepJsonOffsets {
     end: usize,
 }
 
+#[hotpath::measure(label = "edits.ast_grep.reconstruct")]
 fn reconstruct_ast_grep_rewrite(source: &str, output: &[u8]) -> Result<String> {
     let mut replacements: Vec<AstGrepJsonReplacement> = if output.is_empty() {
         Vec::new()

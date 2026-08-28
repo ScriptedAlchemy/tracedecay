@@ -431,13 +431,18 @@ async fn strata(
             {
                 (existing.clone(), "hit")
             } else {
+                // The futures lane also records the drop-on-timeout case, so
+                // budget-exceeded scans stay visible as cancelled work.
                 let scan = match tokio::time::timeout(
                     STRATA_SCAN_BUDGET,
-                    GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
-                        .build_file_adjacency_bounded(
-                            STRATA_MAX_FILES,
-                            STRATA_MAX_DEPENDENCY_EDGES,
-                        ),
+                    hotpath::future!(
+                        GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
+                            .build_file_adjacency_bounded(
+                                STRATA_MAX_FILES,
+                                STRATA_MAX_DEPENDENCY_EDGES,
+                            ),
+                        label = "dashboard_api.graph.strata_scan"
+                    ),
                 )
                 .await
                 {
@@ -457,53 +462,58 @@ async fn strata(
                         );
                     }
                 };
-                let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
-                let mut files = Vec::with_capacity(scan.adjacency.len());
-                for chain in &depth.chains {
-                    for path in &chain.scc_files {
-                        files.push(StrataFileV1 {
-                            path: path.clone(),
-                            depth: chain.depth,
-                            scc_size: chain.scc_files.len(),
-                            chain: chain.chain.clone(),
-                        });
-                    }
-                }
-                files.sort_by(|left, right| {
-                    right
-                        .depth
-                        .cmp(&left.depth)
-                        .then_with(|| left.path.cmp(&right.path))
-                });
-                let clusters = dsm_clusters(&scan.adjacency)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, cluster)| {
-                        let boundary_edges = cluster.boundary_edges();
-                        StrataClusterV1 {
-                            order: index,
-                            directory: cluster.directory,
-                            file_count: cluster.file_count,
-                            internal_edges: cluster.internal_edges,
-                            outgoing_edges: cluster.outgoing_edges,
-                            incoming_edges: cluster.incoming_edges,
-                            boundary_edges,
+                // SCC/longest-path/DSM aggregation is the CPU-bound half of a
+                // cache miss; keep it distinguishable from the bounded scan.
+                let computed = hotpath::measure_block!("dashboard_api.graph.strata_compute", {
+                    let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
+                    let mut files = Vec::with_capacity(scan.adjacency.len());
+                    for chain in &depth.chains {
+                        for path in &chain.scc_files {
+                            files.push(StrataFileV1 {
+                                path: path.clone(),
+                                depth: chain.depth,
+                                scc_size: chain.scc_files.len(),
+                                chain: chain.chain.clone(),
+                            });
                         }
+                    }
+                    files.sort_by(|left, right| {
+                        right
+                            .depth
+                            .cmp(&left.depth)
+                            .then_with(|| left.path.cmp(&right.path))
+                    });
+                    let clusters = dsm_clusters(&scan.adjacency)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, cluster)| {
+                            let boundary_edges = cluster.boundary_edges();
+                            StrataClusterV1 {
+                                order: index,
+                                directory: cluster.directory,
+                                file_count: cluster.file_count,
+                                internal_edges: cluster.internal_edges,
+                                outgoing_edges: cluster.outgoing_edges,
+                                incoming_edges: cluster.incoming_edges,
+                                boundary_edges,
+                            }
+                        })
+                        .collect();
+                    Arc::new(CachedStrataV1 {
+                        graph_generation: graph_generation.clone(),
+                        max_depth: depth.max_depth,
+                        ideal_depth: depth.ideal_depth,
+                        files,
+                        clusters,
+                        files_examined: scan.files_examined,
+                        dependency_edges_examined: scan.dependency_edges_examined,
                     })
-                    .collect();
-                let computed = Arc::new(CachedStrataV1 {
-                    graph_generation: graph_generation.clone(),
-                    max_depth: depth.max_depth,
-                    ideal_depth: depth.ideal_depth,
-                    files,
-                    clusters,
-                    files_examined: scan.files_examined,
-                    dependency_edges_examined: scan.dependency_edges_examined,
                 });
                 guard.insert(cache_key, computed.clone());
                 (computed, "miss")
             };
             drop(guard);
+            crate::observe::record_strata_files(snapshot.files.len());
 
             measured_response(
                 &state,
@@ -710,14 +720,18 @@ async fn node_tests(
                 );
             }
 
-            let callers = match graph.reader.impact(
-                std::slice::from_ref(&occurrence),
-                &[RelationEdgeKindV1::Calls],
-                TEST_CALLER_DEPTH as u32,
-                STRATA_MAX_FILES,
-                STRATA_MAX_DEPENDENCY_EDGES,
-                Arc::clone(&graph.cancellation),
-            ) {
+            // Depth-3 caller expansion dominates test-map cost and scales with
+            // fan-in, unlike the fixed-price phases around it.
+            let callers = match hotpath::measure_block!("dashboard_api.graph.test_map_impact", {
+                graph.reader.impact(
+                    std::slice::from_ref(&occurrence),
+                    &[RelationEdgeKindV1::Calls],
+                    TEST_CALLER_DEPTH as u32,
+                    STRATA_MAX_FILES,
+                    STRATA_MAX_DEPENDENCY_EDGES,
+                    Arc::clone(&graph.cancellation),
+                )
+            }) {
                 Ok(callers) => callers,
                 Err(error) => {
                     return graph_error_response::<TestMapMeasurementV1>(
@@ -961,25 +975,32 @@ async fn admitted_graph<T: Serialize>(
             },
         )
     })?;
-    let context = admission
-        .admit(crate::graph::CodeGraphReadAdmissionRequest::new(
+    // Admission and projection-open are the per-request store-open cost every
+    // structure route pays before any graph work; separate spans let a flat
+    // profile distinguish them from the traversal itself.
+    let context = hotpath::future!(
+        admission.admit(crate::graph::CodeGraphReadAdmissionRequest::new(
             &operation,
             control.request_id(),
             control.deadline(),
             control.cancellation(),
             control.observed_at(),
-        ))
-        .await
-        .map_err(|error| graph_error_response::<T>(state, error))?;
+        )),
+        label = "dashboard_api.graph.structure_admission"
+    )
+    .await
+    .map_err(|error| graph_error_response::<T>(state, error))?;
     let cancellation = crate::graph::application_graph_cancellation(control.cancellation());
-    let verified = projection
-        .open(crate::graph::CodeGraphReadRequest::new(
+    let verified = hotpath::future!(
+        projection.open(crate::graph::CodeGraphReadRequest::new(
             &context,
             control.observed_at(),
             Arc::clone(&cancellation),
-        ))
-        .await
-        .map_err(|error| graph_error_response::<T>(state, error))?;
+        )),
+        label = "dashboard_api.graph.structure_open"
+    )
+    .await
+    .map_err(|error| graph_error_response::<T>(state, error))?;
     let reader = verified
         .reader_with_cancellation(&context, control.observed_at(), Arc::clone(&cancellation))
         .map_err(|error| graph_error_response::<T>(state, error))?;

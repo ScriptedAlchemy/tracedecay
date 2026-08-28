@@ -22,8 +22,8 @@ zeroize = "1.9.0"
 [features]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
+hotpath = ["hotpath/hotpath", "tracedecay-domain/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = []

@@ -33,6 +33,7 @@ use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
 use crate::daemon::session_retrieval::SessionTemporalMetadataView;
 
+#[hotpath::measure(label = "daemon.retained.lcm.hydrate_temporal")]
 pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporalFieldsV1 {
     LcmTemporalFieldsV1 {
         anchors: value
@@ -343,6 +344,7 @@ pub(super) fn description(value: LcmDescribeResponse) -> LcmDescriptionV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.retained.lcm.hydrate_expansion")]
 pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
     LcmExpansionV1 {
         kind: value.kind,

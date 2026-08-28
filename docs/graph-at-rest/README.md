@@ -392,6 +392,78 @@ contract failures — a sealed generation reopened twice came back with its
 format marker gone — which is the same defect reached through TraceDecay's own
 lifecycle rather than the minimal probe.
 
+### The vector index is durable now — fork branch ready, pin not moved
+
+The claim above that the HNSW index "was never durable across a reopen
+anyway" was true, and it turned out to be a wiring gap rather than a
+missing format.
+
+**Where durability was lost.** grafeo has always *written* the index.
+`build_sections` emits a `SectionType::VectorStore` carrying each index's
+full HNSW topology — entry point, max level, per-node per-level neighbour
+lists — and `CatalogSection::collect_indexes` records every index's
+label, property, dimensions, metric, M and ef_construction beside it. The
+restore side dropped both:
+
+- `CatalogSection::deserialize` handed the loader its `property_indexes`
+  and nothing else. The `vector_indexes` it had just decoded were
+  discarded (`catalog_section.rs`).
+- `load_from_sections` guarded the topology restore on
+  `store.vector_index_entries()` being non-empty
+  (`database/mod.rs`, the `SectionType::VectorStore` block). A cold open
+  builds its `LpgStore` from nothing, so that map is empty at exactly the
+  moment the guard runs. The section bytes were read off disk and
+  dropped on the floor.
+
+So the index was durable on disk and absent in memory, and every reopen
+re-indexed the whole corpus.
+
+**Fork, not sidecar.** The section format round-trips HNSW faithfully
+already: topology is all it needs to carry, because the vectors live in
+LPG node properties (persisted anyway) and are read through a
+`VectorAccessor` at query time. Nothing was missing from the format, only
+the restore wiring — a tracedecay-side sidecar would have duplicated a
+working serializer to re-derive an artifact grafeo already had on disk,
+and left every other consumer broken.
+
+**Branch:** `tracedecay/0.5.42-vector-index-durable`, stacked on
+`tracedecay/0.5.42-close-and-overlay`, at
+`f38218653dfc69fda67f9c669371036fde1ed5fe`. Three commits:
+
+1. re-register catalog definitions as empty indexes and let the section
+   fill their topology. Two incomplete-restore cases are deliberately
+   left absent for rebuild rather than half-restored — a definition with
+   no section, and a definition the section carried no topology for —
+   because an index that exists and covers nothing reports
+   `has_vector_index() == true` and answers every search with nothing.
+   Quantized indexes are left to a rebuild too: their codebook lives
+   inside the index and the section carries only topology, so restoring
+   one would silently downgrade it to full precision. The catalog
+   snapshot is v2 to record the mode; v1 files still load.
+2. mark index creation, removal, and binding changes as unlogged state.
+   `close` may skip its flush when the WAL has not moved, and nothing
+   about an index reaches the WAL — so an index built after open never
+   reached the file, and the next open rebuilt it, and the next. Harmless
+   while indexes were always rebuilt; load-bearing the moment they are
+   restored.
+3. price it: 5,000 x 64-dim vectors, release profile — **8.7ms** to
+   restore the index as part of opening the whole database against
+   **359.6ms** to rebuild the index alone on a database already open.
+   ~41x, and identical neighbour sets across 24 probes.
+
+The branch also adds an opaque per-index **binding token** that rides the
+catalog section, so a caller can stamp the generation digest its index
+was built over and compare after a reopen instead of trusting that a
+restored topology still describes the rows.
+
+**The pin is deliberately unchanged.** Moving `[patch.crates-io]` onto
+this rev is the owner's call, and it changes every consumer's build. Until
+it moves, tracedecay builds against the unfixed rev and a reopen still
+finds no index — which is why the reopen tests in
+`tests/runtime_contract.rs` still assert `Missing`. Bumping the five
+`grafeo-*` revs together is what flips them, and what turns the
+`graph_db.vector_index.restore` gauge non-zero.
+
 ### `has_vector_index` — resolved, and worse than gap 3 described
 
 Gap 3 said `CompactStore` inherits the trait default `false`. The layered store

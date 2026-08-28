@@ -68,11 +68,26 @@ pub(super) fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMain
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                if owner.run_daemon_artifact_gc(now_unix).is_err() {
-                    log_daemon_event(
-                        "semantic_artifact_gc",
-                        &[("outcome", "retry_next_interval".to_owned())],
-                    );
+                // The task-lifetime future above measures the whole loop; this
+                // wall span is one GC sweep, the unit a hang or cost regression
+                // is diagnosed against.
+                let receipts = hotpath::measure_block!(
+                    "daemon.maintenance.semantic_artifact_gc_sweep",
+                    owner.run_daemon_artifact_gc(now_unix)
+                );
+                match receipts {
+                    Ok(receipts) => {
+                        hotpath::gauge!("daemon.maintenance.semantic_artifact_gc.receipts_total")
+                            .inc(receipts.len() as u64);
+                    }
+                    Err(_) => {
+                        hotpath::gauge!("daemon.maintenance.semantic_artifact_gc.failed_total")
+                            .inc(1_u64);
+                        log_daemon_event(
+                            "semantic_artifact_gc",
+                            &[("outcome", "retry_next_interval".to_owned())],
+                        );
+                    }
                 }
             }
         },

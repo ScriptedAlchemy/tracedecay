@@ -25,18 +25,34 @@ pub(crate) fn env_duration_ms(
     Ok(deadline)
 }
 
+/// Resolves the daemon handshake for the current client. One labeled
+/// boundary so a slow CLI invocation can attribute time to client identity
+/// resolution separately from the daemon round-trip itself.
+#[hotpath::measure(label = "cli.daemon.handshake")]
+fn client_handshake(
+    project_path: Option<&std::path::Path>,
+) -> tracedecay::errors::Result<tracedecay::daemon::DaemonHandshake> {
+    tracedecay::daemon::DaemonHandshake::for_current_client(
+        project_path.map(std::path::Path::to_path_buf),
+        None,
+        false,
+        false,
+    )
+}
+
 pub(crate) async fn daemon_tool_json(
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay::errors::Result<serde_json::Value> {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
-        project_path.map(std::path::Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
-    let result = tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("cli.daemon.tool").set(&tool_name);
+    let handshake = client_handshake(project_path)?;
+    let result = hotpath::future!(
+        tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments),
+        label = "cli.daemon.request"
+    )
+    .await?;
     recover_truncated_payload(&handshake, tool_name, result, None).await
 }
 
@@ -51,14 +67,17 @@ pub(crate) async fn daemon_tool_json_until(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay::errors::Result<serde_json::Value> {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
-        project_path.map(std::path::Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
-    let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
-        &handshake, tool_name, arguments, deadline,
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("cli.daemon.tool").set(&tool_name);
+    let handshake = client_handshake(project_path)?;
+    // Distinct from `cli.daemon.request`: this lifetime includes waiting out a
+    // cold project open, so aggregating the two would conflate daemon latency
+    // with deliberate open waits.
+    let result = hotpath::future!(
+        tracedecay::daemon::call_default_tool_awaiting_project_open(
+            &handshake, tool_name, arguments, deadline,
+        ),
+        label = "cli.daemon.request_open_wait"
     )
     .await?;
     recover_truncated_payload(&handshake, tool_name, result, Some(deadline)).await
@@ -89,17 +108,23 @@ async fn recover_truncated_payload(
     let arguments = serde_json::json!({ "handle": handle, "format": "json" });
     let retrieved = match deadline {
         Some(deadline) => {
-            tracedecay::daemon::call_default_tool_awaiting_project_open(
-                handshake,
-                "tracedecay_retrieve",
-                arguments,
-                deadline,
+            hotpath::future!(
+                tracedecay::daemon::call_default_tool_awaiting_project_open(
+                    handshake,
+                    "tracedecay_retrieve",
+                    arguments,
+                    deadline,
+                ),
+                label = "cli.daemon.recovery_fetch"
             )
             .await?
         }
         None => {
-            tracedecay::daemon::call_default_tool(handshake, "tracedecay_retrieve", arguments)
-                .await?
+            hotpath::future!(
+                tracedecay::daemon::call_default_tool(handshake, "tracedecay_retrieve", arguments),
+                label = "cli.daemon.recovery_fetch"
+            )
+            .await?
         }
     };
     let retrieved = tracedecay::daemon::tool_json_payload(&retrieved, "tracedecay_retrieve")?;

@@ -272,6 +272,7 @@ impl VerifiedGraphSnapshot {
         &self.head.head
     }
 
+    #[hotpath::measure(label = "graph_db.lease.entity", impl_type = "VerifiedGraphSnapshot")]
     pub fn entity(
         &self,
         reference: &GraphEntityRef,
@@ -298,6 +299,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    #[hotpath::measure(
+        label = "graph_db.lease.read_projection",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
     pub fn read_projection(
         &self,
         mut request: GraphProjectionReadRequest,
@@ -307,6 +312,10 @@ impl VerifiedGraphSnapshot {
         self.with_operation(|| self.database.read_projection(request))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.lease.projection_telemetry",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
     pub fn projection_telemetry(
         &self,
         mut request: GraphProjectionTelemetryRequest,
@@ -326,6 +335,10 @@ impl VerifiedGraphSnapshot {
         self.with_operation(|| self.database.traverse_generation(self, request))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.lease.vector_search",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
     pub fn vector_search(
         &self,
         mut request: VectorSearchRequest,
@@ -335,6 +348,10 @@ impl VerifiedGraphSnapshot {
         self.with_operation(|| self.database.vector_search(request))
     }
 
+    #[hotpath::measure(
+        label = "graph_db.lease.outgoing_relation_ids",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
     pub fn outgoing_relation_ids(
         &self,
         starts: &[GraphEntityId],
@@ -360,6 +377,10 @@ impl VerifiedGraphSnapshot {
     /// reachability) previously had no bulk form here — only
     /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
     /// SQL `edges` joins without dropping their budgets.
+    #[hotpath::measure(
+        label = "graph_db.lease.incoming_relation_ids",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
     pub fn incoming_relation_ids(
         &self,
         starts: &[GraphEntityId],

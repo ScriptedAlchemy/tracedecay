@@ -55,6 +55,9 @@ pub(super) fn log_scheduler_admission_conflict(
 }
 
 fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason: &'static str) {
+    // Not-due/disabled tasks never reach durable admission; without this
+    // counter a silent schedule skip is indistinguishable from a lost tick.
+    hotpath::gauge!("daemon.effect_admission.deferred_total").inc(1_u64);
     log_daemon_event(
         "scheduler_task",
         &[

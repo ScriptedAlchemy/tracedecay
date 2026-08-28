@@ -134,7 +134,7 @@ enum ReplayCompletion {
 
 /// Drain one host spool once. `admit` reauthorizes and admits a single
 /// envelope; production passes the daemon admission path, tests pass a fake.
-#[hotpath::measure(label = "daemon.authority.hook_v2.replay")]
+#[hotpath::measure(label = "daemon.hook_replay.host_drain", future = true)]
 pub(crate) async fn drain_host_spool_once<A, F>(
     data_root: &Path,
     host: HookHostV1,
@@ -161,6 +161,7 @@ where
             HookSpoolAckDispositionV1::TerminalTombstone,
             now,
         ) {
+            hotpath::gauge!("daemon.hook_replay.expired").inc(1.0);
             log_tombstone(host, &record, HookReplayTombstoneReasonV1::Expired);
             pass.tombstoned = pass.tombstoned.saturating_add(1);
         }
@@ -169,6 +170,7 @@ where
     let Some(binding) = current_binding(data_root, host, now) else {
         // Without a current binding nothing can be reauthorized. Records stay
         // durable and pending; a later pass retries.
+        hotpath::gauge!("daemon.hook_replay.binding_unavailable").inc(1.0);
         pass.binding_unavailable = true;
         return Some(pass);
     };
@@ -184,9 +186,11 @@ where
         };
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             let _ = spool.release_replay_claim(batch.claim_id);
+            hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(record_count));
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
+        hotpath::gauge!("daemon.hook_replay.batch_events").set(f64::from(record_count));
         replay_batches.push((batch.records, record_count));
     }
 
@@ -205,7 +209,11 @@ where
                 ));
                 continue;
             }
-            let outcome = admit(record.envelope.clone()).await;
+            let outcome = hotpath::future!(
+                admit(record.envelope.clone()),
+                label = "daemon.hook_replay.delivery"
+            )
+            .await;
             match outcome {
                 HookV2AdmissionOutcomeV1::Admitted { .. } => {
                     completions.push(ReplayCompletion::Committed(record));
@@ -248,6 +256,7 @@ where
         HookSpoolConfigV1::stock(host),
         now,
     ) else {
+        hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(retained_without_ack));
         pass.retained = pass.retained.saturating_add(retained_without_ack);
         return Some(pass);
     };
@@ -260,6 +269,7 @@ where
                     HookSpoolAckDispositionV1::Committed,
                     now,
                 ) {
+                    hotpath::gauge!("daemon.hook_replay.delivered").inc(1.0);
                     pass.committed = pass.committed.saturating_add(1);
                 }
             }
@@ -270,6 +280,7 @@ where
                     HookSpoolAckDispositionV1::Committed,
                     now,
                 ) {
+                    hotpath::gauge!("daemon.hook_replay.duplicate").inc(1.0);
                     pass.duplicates = pass.duplicates.saturating_add(1);
                 }
             }
@@ -280,11 +291,21 @@ where
                     HookSpoolAckDispositionV1::TerminalTombstone,
                     now,
                 ) {
+                    match reason {
+                        HookReplayTombstoneReasonV1::Expired => {
+                            hotpath::gauge!("daemon.hook_replay.expired").inc(1.0);
+                        }
+                        HookReplayTombstoneReasonV1::BindingStale
+                        | HookReplayTombstoneReasonV1::IdentityConflict => {
+                            hotpath::gauge!("daemon.hook_replay.refused").inc(1.0);
+                        }
+                    }
                     log_tombstone(host, &record, reason);
                     pass.tombstoned = pass.tombstoned.saturating_add(1);
                 }
             }
             ReplayCompletion::Retained(count) => {
+                hotpath::gauge!("daemon.hook_replay.retained").inc(f64::from(count));
                 pass.retained = pass.retained.saturating_add(count);
             }
         }
@@ -326,7 +347,7 @@ where
     admit(envelope, native_session_id).await
 }
 
-#[hotpath::measure(label = "daemon.authority.hook_v2.receipt_replay")]
+#[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: HookHostV1,
@@ -378,12 +399,30 @@ async fn drain_hook_delivery_receipts(
     }
 }
 
-#[hotpath::measure(label = "daemon.authority.hook_v2.drain")]
+/// The sweep gauge is RAII so the consumer task's `abort()` at project close
+/// cannot leave a phantom in-flight sweep behind.
+struct HookReplaySweepObservation;
+
+impl HookReplaySweepObservation {
+    fn begin() -> Self {
+        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(1.0);
+        Self
+    }
+}
+
+impl Drop for HookReplaySweepObservation {
+    fn drop(&mut self) {
+        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(-1.0);
+    }
+}
+
+#[hotpath::measure(label = "daemon.hook_replay.sweep", future = true)]
 async fn drain_all_hosts(
     graph: &crate::tracedecay::TraceDecay,
     data_root: &Path,
     delivery_settlements: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
 ) {
+    let _sweep = HookReplaySweepObservation::begin();
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
@@ -512,7 +551,13 @@ pub(crate) fn register_hook_v2_replay_consumer(
             drain_all_hosts(&graph_owner, &task_data_root, delivery_settlements.as_ref()).await;
             drop(graph_owner);
             drop(delivery_settlements);
-            tokio::time::sleep(REPLAY_INTERVAL).await;
+            // Retained records wait exactly this interval for their next
+            // delivery attempt; keep the pacing WAIT separate from sweep WORK.
+            hotpath::future!(
+                tokio::time::sleep(REPLAY_INTERVAL),
+                label = "daemon.hook_replay.interval_wait"
+            )
+            .await;
         }
         if let Ok(mut roots) = registered_replay_roots().lock()
             && roots
