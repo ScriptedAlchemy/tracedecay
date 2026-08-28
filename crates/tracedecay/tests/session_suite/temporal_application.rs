@@ -762,7 +762,12 @@ fn context_for_identity_with_controls(
 ) -> TestRequestContext {
     let actor = ActorId::new(actor_id).unwrap();
     let request_id = RequestId::new(request_id).unwrap();
-    let scope = identity.application_scope().unwrap();
+    // Session requests are admitted under `session_request_scope`, exactly as
+    // `daemon::session_retrieval::admitted` resolves them: it is total across
+    // both owners, whereas `application_scope` is deliberately project-only
+    // and fails closed with `ProfileIdentityWithoutProject` for a
+    // profile-owned identity rather than fabricating a project.
+    let scope = identity.session_request_scope().unwrap();
     let observed_at = application_observed_at();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.temporal.application.context").unwrap(),
