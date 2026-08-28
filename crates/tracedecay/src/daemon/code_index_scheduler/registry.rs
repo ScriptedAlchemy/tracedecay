@@ -72,6 +72,136 @@ const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(test) {
     Duration::from_mins(10)
 };
 
+/// How many bounded text-projection slices one pass may run to completion
+/// before the optional graph decode. The projection is finite in the sealed
+/// generation's document count, so this only bounds a non-progressing builder:
+/// reaching it defers graph seating to a later pass instead of spinning.
+const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
+
+/// Whether a reconcile pass may prepare the sealed generation for graph
+/// serving, and when it may not, why.
+///
+/// Graph seating used to demand a `Noop` outcome - tree quiescence - which a
+/// shared checkout with peers editing never offers: every pass published a new
+/// generation, so a complete sealed generation sat on disk with zero seat
+/// attempts and no log line, because a missing prepare is not a refusal. The
+/// gate is now the text owner, not the tree: a publication seats on its own
+/// pass once its lightweight text owner has reopened and finished, and an
+/// unchanged pass seats the retained owner's generation. Every skip names
+/// itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GraphSeatGateV1 {
+    /// Prepare, decode, activate, and swap this generation into serving.
+    Prepare,
+    /// Graph activation is off for this worktree by configuration.
+    Disabled,
+    /// This pass produced no terminal reconcile outcome to seat.
+    ReconcileUnfinished,
+    /// A retryable activation failure holds seating until its scheduled retry.
+    ActivationDeferred,
+    /// A publication whose replacement text owner did not reopen or finish.
+    PublishedTextOwnerUnavailable,
+    /// An unchanged pass whose retained text owner is still projecting.
+    RetainedTextOwnerWarming,
+}
+
+impl GraphSeatGateV1 {
+    pub(super) const fn decide(
+        activation_enabled: bool,
+        activation_deferred: bool,
+        reconcile_is_terminal: bool,
+        published_pass: bool,
+        retained_text_is_ready: bool,
+        published_text_is_ready: bool,
+    ) -> Self {
+        if !activation_enabled {
+            return Self::Disabled;
+        }
+        if !reconcile_is_terminal {
+            return Self::ReconcileUnfinished;
+        }
+        if activation_deferred {
+            return Self::ActivationDeferred;
+        }
+        if published_pass {
+            // The tree may have moved on already; what must hold is that this
+            // publication's own text owner reopened and finished, so exact and
+            // lexical serving never inherit graph activation latency.
+            if published_text_is_ready {
+                return Self::Prepare;
+            }
+            return Self::PublishedTextOwnerUnavailable;
+        }
+        if retained_text_is_ready {
+            return Self::Prepare;
+        }
+        Self::RetainedTextOwnerWarming
+    }
+
+    /// The typed reason this pass seated nothing, if it seated nothing.
+    ///
+    /// `Disabled` is not a skip: a worktree with graph activation off is not
+    /// waiting for a seat, and logging one per pass would be noise.
+    pub(super) const fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Prepare | Self::Disabled => None,
+            Self::ReconcileUnfinished => Some("reconcile_unfinished"),
+            Self::ActivationDeferred => Some("activation_deferred"),
+            Self::PublishedTextOwnerUnavailable => Some("published_text_owner_unavailable"),
+            Self::RetainedTextOwnerWarming => Some("retained_text_owner_warming"),
+        }
+    }
+}
+
+/// What the serving swap did with a reconciled generation.
+///
+/// The swap is the only writer of the serving slot, so every arm here is a
+/// distinct answer to "does a complete sealed generation serve now?" and each
+/// one is named in the log rather than collapsing into a bare success or a
+/// generic reconcile failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServingSwapOutcomeV1 {
+    /// The generation is the active durable publication and now serves.
+    Seated,
+    /// The durable pointer already names a successor, but nothing was serving:
+    /// a stale seat beats an empty route and the successor supersedes it.
+    SeatedStale,
+    /// The durable pointer already names a successor and a generation is
+    /// already serving, so the slot keeps what it has.
+    Superseded,
+    /// The generation already serves; only semantic admission was re-offered.
+    Offered,
+}
+
+impl ServingSwapOutcomeV1 {
+    /// Decide what the swap does with a generation that finished activating.
+    ///
+    /// Extracted from the swap so every arm is directly assertable: the stale
+    /// arm exists because activation of a large generation outlives the
+    /// checkout it sealed from, and refusing that seat left the graph route
+    /// serving nothing at all rather than serving something stale.
+    pub(super) const fn decide(
+        publication_matches: bool,
+        serving_is_seated: bool,
+        replace: bool,
+    ) -> Self {
+        if !publication_matches {
+            if serving_is_seated {
+                // Something already serves; a superseded generation must not
+                // move the slot backwards.
+                return Self::Superseded;
+            }
+            return Self::SeatedStale;
+        }
+        if replace { Self::Seated } else { Self::Offered }
+    }
+
+    /// Whether this outcome writes the serving slot.
+    pub(super) const fn installs(self) -> bool {
+        matches!(self, Self::Seated | Self::SeatedStale)
+    }
+}
+
 #[cfg(test)]
 struct ColdMountFinalCommitGateV1 {
     project_root: PathBuf,
@@ -2349,6 +2479,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // rebuild+reseal of an equivalent generation.
             let mut seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
             let mut next_seat_attempt_at: Option<Instant> = None;
+            // The generation this worker last offered to graph activation
+            // outside the replace gate. It bounds the recovery attempt for a
+            // generation that serves text without a native graph to one per
+            // generation, so a permanently unactivatable seal cannot spin.
+            let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
             // Bounded retry state for a reconcile whose blocking task unwound.
             // Arbitrary user source runs through the indexing pool, so a panic
             // there is an input fault, not a programmer-contract break: it
@@ -2555,22 +2690,141 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
                 .await;
                 // A publication must first reopen and finish its own
-                // lightweight text owner. Only a Noop proves that the retained
-                // Ready text owner and active durable pointer name the same
-                // generation. At that point source reconciliation is complete:
-                // release its public freshness guard before the optional
-                // O(store) full decode and native graph activation begin.
-                let prepare_graph = graph_activation_enabled
-                    && text_serving_ready
-                    && !graph_activation_deferred
-                    && matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_))));
+                // lightweight text owner: publication moved the durable
+                // pointer, so the prior owner is no longer authoritative even
+                // while the new lightweight handle is opening. Withdraw it
+                // first - a failed or delayed reopen must report warming, never
+                // keep serving the superseded generation indefinitely.
+                let published_pass = matches!(
+                    &source_result,
+                    Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
+                );
+                let mut graph_text = retained_text.clone();
+                if published_pass {
+                    *worker_text_generation
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    let text_scheduler = Arc::clone(&worker_scheduler);
+                    let published_text = tokio::task::spawn_blocking(move || {
+                        text_scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .servable_retained_text_generation()
+                    })
+                    .await;
+                    graph_text = if let Ok(Some(published_text)) = published_text {
+                        *worker_text_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(published_text.clone());
+                        Some(published_text)
+                    } else {
+                        None
+                    };
+                    // A successful open advances B's bounded projection; an
+                    // unavailable open retries the durable pointer without
+                    // resurrecting A.
+                    worker_wake.notify_one();
+                    // The replacement text owner finishes its bounded
+                    // projection here, before the optional O(store) graph
+                    // decode: exact and lexical serving must never inherit
+                    // graph activation latency. Yielding back to the loop
+                    // instead would hand the next pass a checkout that has
+                    // already moved, and on a shared repository that pass
+                    // publishes again - which is exactly how a sealed
+                    // generation stayed unseated forever.
+                    if graph_activation_enabled
+                        && !graph_activation_deferred
+                        && let Some(text) = graph_text.clone()
+                    {
+                        let mut advances = 0_usize;
+                        while text.text_serving_needs_work() {
+                            if worker_shutting_down.load(Ordering::Acquire) {
+                                return;
+                            }
+                            advances += 1;
+                            if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                                tracing::warn!(
+                                    event = "code_index_text_projection_advance_bound_reached",
+                                    advances = TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1,
+                                    "published text projection did not complete within its \
+                                     bounded advance budget; graph seating waits for a later pass"
+                                );
+                                break;
+                            }
+                            let advancing = text.clone();
+                            match hotpath::future!(
+                                tokio::task::spawn_blocking(move || advancing
+                                    .advance_text_serving(
+                                        TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
+                                    )),
+                                label = "daemon.code_index.text_projection"
+                            )
+                            .await
+                            {
+                                Ok(Ok(true)) => break,
+                                Ok(Ok(false)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        event = "code_index_text_projection_failed",
+                                        error = %error,
+                                        "published text projection failed before graph seating"
+                                    );
+                                    break;
+                                }
+                                Err(error) => {
+                                    text.mark_text_serving_failed();
+                                    tracing::warn!(
+                                        event = "code_index_text_projection_task_failed",
+                                        error = %error,
+                                        "published text projection task failed before graph seating"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Graph seating must not wait for the checkout to hold still.
+                // Requiring a `Noop` outcome made tree quiescence the seat
+                // condition, and a shared checkout with peers editing never
+                // offers that window: every pass published a new generation, so
+                // three full seals produced zero seat attempts and every exact
+                // graph read answered "not ready" while a complete sealed
+                // generation sat on disk. A publication now seats on its own
+                // pass, once its lightweight text owner has reopened and
+                // finished; it is stale by construction and superseded by the
+                // next publication. An unchanged pass still seats the retained
+                // Ready text owner's generation. Source reconciliation is
+                // complete either way: release its public freshness guard
+                // before the optional O(store) full decode and native graph
+                // activation begin.
+                let gate = GraphSeatGateV1::decide(
+                    graph_activation_enabled,
+                    graph_activation_deferred,
+                    matches!(&source_result, Ok(Ok(_))),
+                    published_pass,
+                    text_serving_ready,
+                    graph_text
+                        .as_ref()
+                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready),
+                );
+                let prepare_graph = gate == GraphSeatGateV1::Prepare;
+                if let Some(reason) = gate.skip_reason() {
+                    tracing::debug!(
+                        event = "code_index_graph_seat_skipped",
+                        reason,
+                        published_pass,
+                        "graph seating skipped this pass; the sealed generation stays unseated"
+                    );
+                }
                 if prepare_graph {
                     drop(_reconcile_pass);
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
-                        let graph_text = retained_text.clone();
+                        let graph_text = graph_text.clone();
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
                                 let decoder = graph_scheduler
@@ -2622,6 +2876,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         .await
                         {
                             Ok(Ok((latest, replay_binding))) => {
+                                if latest.is_none() {
+                                    tracing::warn!(
+                                        event = "code_index_graph_prepare_no_servable_generation",
+                                        published_pass,
+                                        "graph prepare produced no servable generation; \
+                                         the sealed generation cannot seat"
+                                    );
+                                }
                                 Ok((outcome, latest, replay_binding))
                             }
                             Ok(Err(error)) => {
@@ -2634,37 +2896,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok(outcome) => Ok((outcome, None, None)),
                     Err(error) => Err(error),
                 };
-                if matches!(
-                    &result,
-                    Ok((Ok(CodeIndexReconcileOutcomeV1::Published(_)), None, None))
-                ) {
-                    // Publication moved the durable pointer, so the prior text
-                    // owner is no longer authoritative even while the new
-                    // lightweight handle is opening. Withdraw it first: a
-                    // failed or delayed reopen must report warming, never keep
-                    // serving the superseded generation indefinitely.
-                    *worker_text_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                    let text_scheduler = Arc::clone(&worker_scheduler);
-                    let published_text = tokio::task::spawn_blocking(move || {
-                        text_scheduler
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .servable_retained_text_generation()
-                    })
-                    .await;
-                    if let Ok(Some(published_text)) = published_text {
-                        *worker_text_generation
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(published_text);
-                    }
-                    // A successful open advances B's bounded projection; an
-                    // unavailable open retries the durable pointer without
-                    // resurrecting A.
-                    worker_wake.notify_one();
-                }
                 let replace_serving_generation = match &result {
                     Ok((Ok(CodeIndexReconcileOutcomeV1::Noop(_)), Some(latest), Some(_))) => {
                         let serving = worker_serving_generation
@@ -2683,9 +2914,29 @@ impl CodeIndexSchedulerRegistryV1 {
                 // the persistent graph again, so daemon shutdown cancelled the
                 // duplicate projection and then conflicted while closing the
                 // still-running graph reconciliation owner.
-                if replace_serving_generation
+                //
+                // Identity alone is not that proof, though: a generation seated
+                // by the exact route, or one whose activation failed earlier,
+                // serves text under the very same id with no native graph at
+                // all. Leaving the replace gate as the only door left those
+                // generations answering "not ready" forever. A generation whose
+                // graph is still Pending - never Ready, never Refused - gets
+                // exactly one further attempt per worker, so nothing is
+                // replayed over a graph that already serves.
+                let activate_graph = match &result {
+                    Ok((Ok(_), Some(latest), Some(_))) => {
+                        replace_serving_generation
+                            || (latest.graph_activation_is_pending()
+                                && graph_seat_attempted.as_ref()
+                                    != Some(&latest.generation().manifest().generation_id))
+                    }
+                    _ => false,
+                };
+                if activate_graph
                     && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result
                 {
+                    graph_seat_attempted =
+                        Some(latest.generation().manifest().generation_id.clone());
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2722,12 +2973,28 @@ impl CodeIndexSchedulerRegistryV1 {
                                     tokio::time::sleep(retry_delay).await;
                                     retry_wake.notify_one();
                                 });
+                                tracing::warn!(
+                                    event = "code_index_graph_activation_retry_scheduled",
+                                    retry_delay_micros = retry_delay.as_micros() as u64,
+                                    error = %error,
+                                    "graph activation failed retryably; the sealed generation \
+                                     stays unseated until the scheduled retry"
+                                );
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);
+                                // The scheduled retry is the seat attempt, so it
+                                // must not be turned away as already attempted.
+                                graph_seat_attempted = None;
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                tracing::warn!(
+                                    event = "code_index_graph_activation_failed",
+                                    error = %error,
+                                    "graph activation failed; the sealed generation stays \
+                                     unseated until a new generation publishes"
+                                );
                             }
                             result = Ok((Err(error), None, None));
                         }
@@ -2745,16 +3012,24 @@ impl CodeIndexSchedulerRegistryV1 {
                         let scheduler = scheduler
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if !scheduler.active_publication_matches(&latest)? {
-                            return Err(CodeIndexSchedulerErrorV1::PublicationConflict(
-                                "the reconciled generation is no longer the active durable publication"
-                                    .to_owned(),
-                            ));
-                        }
-                        if replace_serving_generation {
-                            let mut serving = serving_generation
-                                .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // A generation that sealed while the checkout kept
+                        // moving is stale the moment it completes, and the
+                        // durable pointer may already name its successor.
+                        // Refusing the swap outright then left the route
+                        // serving nothing at all, so an empty serving slot
+                        // takes the stale seat and the next publication
+                        // supersedes it; a slot that already serves keeps what
+                        // it has rather than moving backwards.
+                        let publication_matches = scheduler.active_publication_matches(&latest)?;
+                        let mut serving = serving_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let outcome = ServingSwapOutcomeV1::decide(
+                            publication_matches,
+                            serving.is_some(),
+                            replace_serving_generation,
+                        );
+                        if outcome.installs() {
                             *serving = Some(latest.clone());
                             serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
                             *text_generation
@@ -2762,24 +3037,63 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(latest.text_generation_handle());
                         }
+                        drop(serving);
                         // Semantic admission is independently retryable. A
                         // prior attempt may have lost bounded queue capacity,
                         // so an unchanged reconcile must offer the already-
                         // serving generation again without reinstalling it.
                         let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
-                        Ok::<_, CodeIndexSchedulerErrorV1>(())
+                        Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
                         label = "daemon.code_index.serving_swap"
                     )
                     .await;
                     match serving_swap {
-                        Ok(Ok(())) => {
+                        Ok(Ok(outcome)) => {
+                            let generation_id = text_latest
+                                .generation()
+                                .manifest()
+                                .generation_id
+                                .as_str()
+                                .to_owned();
+                            match outcome {
+                                ServingSwapOutcomeV1::Seated => tracing::debug!(
+                                    event = "code_index_serving_generation_seated",
+                                    generation_id,
+                                    "the sealed generation now serves"
+                                ),
+                                ServingSwapOutcomeV1::SeatedStale => tracing::info!(
+                                    event = "code_index_serving_generation_seated_stale",
+                                    generation_id,
+                                    "the sealed generation seats stale: the durable pointer \
+                                     already names its successor"
+                                ),
+                                ServingSwapOutcomeV1::Superseded => tracing::warn!(
+                                    event = "code_index_serving_swap_superseded",
+                                    generation_id,
+                                    "the reconciled generation is no longer the active durable \
+                                     publication; the seated generation keeps serving"
+                                ),
+                                ServingSwapOutcomeV1::Offered => {}
+                            }
                             if text_latest.text_serving_needs_work() {
                                 worker_wake.notify_one();
                             }
                         }
-                        Ok(Err(error)) => result = Ok((Err(error), None, None)),
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                event = "code_index_serving_swap_failed",
+                                error = %error,
+                                "the serving swap refused the reconciled generation"
+                            );
+                            result = Ok((Err(error), None, None));
+                        }
                         Err(error) => {
+                            tracing::warn!(
+                                event = "code_index_serving_swap_task_failed",
+                                error = %error,
+                                "the serving-swap task failed; the sealed generation stays unseated"
+                            );
                             result = Ok((
                                 Err(CodeIndexSchedulerErrorV1::SemanticSchedule(format!(
                                     "serving-swap task failed: {error}"

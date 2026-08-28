@@ -391,13 +391,44 @@ impl DaemonSessionSyncService {
             cancellation,
             SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
         );
-        match self
+        let outcome = self
             .execute_request_admitted(request, Arc::clone(context), project_sessions.clone())
-            .await
-        {
+            .await;
+        Self::classify_startup_import_outcome(outcome)
+    }
+
+    /// Decide whether a startup-import outcome may fail the project mount.
+    ///
+    /// Only two answers exist: the import ran (or joined one that is running),
+    /// or the lane is configured off. Everything else is a genuine admission
+    /// failure and must roll the project's session context back.
+    ///
+    /// A configured-off ingest lane is a deliberate no-op, not a failure.
+    /// Reporting it as one retires the project's session context and fails the
+    /// whole project full-upgrade - and that same block owns code-index
+    /// scheduler admission, so the daemon then answers
+    /// `code_index_scheduler_unavailable` for every background refresh and can
+    /// neither seal nor seat a code generation.
+    /// `TRACEDECAY_SESSION_INGEST_DISABLED` is only meant to stop transcript
+    /// ingest, never to unmount indexing.
+    pub(super) fn classify_startup_import_outcome(
+        outcome: SessionSyncOutcomeV1,
+    ) -> crate::errors::Result<()> {
+        match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)
             | SessionSyncOutcomeV1::Complete(_) => Ok(()),
+            SessionSyncOutcomeV1::Unavailable { reason_code }
+                if reason_code == crate::daemon::SESSION_INGEST_DISABLED_REASON_V1 =>
+            {
+                tracing::info!(
+                    event = "session_sync_startup_import_skipped",
+                    reason_code,
+                    "session sync startup import skipped: transcript ingest is disabled by \
+                     configuration; the project mount continues"
+                );
+                Ok(())
+            }
             outcome => Err(contract_error(format!(
                 "session sync startup import was not admitted: {outcome:?}"
             ))),

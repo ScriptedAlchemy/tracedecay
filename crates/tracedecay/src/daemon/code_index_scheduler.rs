@@ -2926,6 +2926,24 @@ impl LatestCompleteCodeIndexV1 {
         }
     }
 
+    /// Whether this generation's native graph has neither activated nor been
+    /// refused.
+    ///
+    /// The activation state is shared by every handle bound to one sealed
+    /// generation, so this answers for the handle already seated in the serving
+    /// slot as much as for this one: a generation that reached serving through
+    /// the exact route, or whose activation failed earlier, reports pending
+    /// here while it serves text under the same generation id.
+    pub(super) fn graph_activation_is_pending(&self) -> bool {
+        matches!(
+            &*self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            CodeGraphActivationStateV1::Pending
+        )
+    }
+
     fn refuse_graph_activation(&self, reason: &'static str) {
         let mut state = self
             .graph_activation
