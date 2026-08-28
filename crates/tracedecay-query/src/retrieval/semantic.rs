@@ -284,17 +284,20 @@ where
         if record.vector_generation != request.vector_generation
             || record.projection_key != *request.projection.projection_key()
         {
+            observe_semantic_lane_failure("score_generation_projection", "incompatible_projection");
             return Err(RetrievalPortError::IncompatibleProjection);
         }
         if record.source_generation != request.code_generation
             || record.binding.occurrence.generation != request.code_generation
         {
+            observe_semantic_lane_failure("score_source_generation", "generation_mismatch");
             return Err(RetrievalPortError::GenerationMismatch);
         }
         if record.binding.occurrence.chunk.as_ref() != Some(&record.chunk_id)
             || record.binding.candidate_anchor != record.candidate.anchor_id
             || record.binding.source_occurrence != record.candidate.source_occurrence_id
         {
+            observe_semantic_lane_failure("score_candidate_binding", "contract");
             return Err(RetrievalPortError::Contract(
                 "semantic vector row does not bind its chunk and candidate occurrence".to_owned(),
             ));
@@ -302,6 +305,7 @@ where
         if record.candidate.retriever != RetrieverKind::Semantic
             || record.candidate.exact_admission_proof.is_some()
         {
+            observe_semantic_lane_failure("score_candidate_kind", "contract");
             return Err(RetrievalPortError::Contract(
                 "semantic vectors may emit only non-exact semantic candidates".to_owned(),
             ));
@@ -309,6 +313,7 @@ where
         if record.candidate.repository_id.as_ref() != Some(&request.base.scope.root.repository)
             || record.candidate.freshness.compatibility != FreshnessCompatibilityV1::Current
         {
+            observe_semantic_lane_failure("score_scope_freshness", "contract");
             return Err(RetrievalPortError::Contract(
                 "semantic candidate is outside the frozen repository or freshness scope".to_owned(),
             ));
@@ -317,12 +322,18 @@ where
             &record.values,
             request.projection.embedding_key().dimensions,
             "stored semantic vector",
-        )?;
+        )
+        .inspect_err(|error| {
+            observe_semantic_lane_failure("score_vector_validation", port_error_class(error));
+        })?;
         canonical_distance(
             request.projection.embedding_key().metric,
             &query.values,
             &record.values,
         )
+        .inspect_err(|error| {
+            observe_semantic_lane_failure("score_distance", port_error_class(error));
+        })
     }
 
     fn materialize_record(
@@ -393,6 +404,7 @@ where
         query: &EphemeralQueryEmbeddingV1,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
         if query.projection != *request.projection || query.query_digest != request.query_digest {
+            observe_semantic_lane_failure("query_embedding_identity", "incompatible_projection");
             return Err(RetrievalPortError::IncompatibleProjection);
         }
 
@@ -432,6 +444,7 @@ where
             .scan_exact_flat(scan_request, &mut examine, &mut |record| {
                 let distance = Self::score_record(request, record, query)?;
                 if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
+                    observe_semantic_lane_failure("scan_duplicate_occurrence", "contract");
                     return Err(RetrievalPortError::Contract(
                         "semantic vector generation contains duplicate source occurrences"
                             .to_owned(),
@@ -466,6 +479,7 @@ where
             )));
         }
         if summary.eligible != eligible_count as u64 {
+            observe_semantic_lane_failure("scan_eligible_coverage", "contract");
             return Err(RetrievalPortError::Contract(
                 "semantic vector scan coverage does not match the visited eligible rows".to_owned(),
             ));
@@ -475,9 +489,11 @@ where
             .checked_add(summary.excluded)
             .and_then(|count| count.checked_add(summary.unknown))
             .ok_or_else(|| {
+                observe_semantic_lane_failure("scan_coverage_overflow", "contract");
                 RetrievalPortError::Contract("semantic scan coverage overflowed".to_owned())
             })?;
         if summary.examined != accounted {
+            observe_semantic_lane_failure("scan_coverage_accounting", "contract");
             return Err(RetrievalPortError::Contract(
                 "semantic vector scan coverage is incomplete".to_owned(),
             ));
@@ -507,7 +523,10 @@ where
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
-        let checkpoint_digest = semantic_checkpoint_digest(request, &candidates)?;
+        let checkpoint_digest =
+            semantic_checkpoint_digest(request, &candidates).inspect_err(|error| {
+                observe_semantic_lane_failure("checkpoint_digest", port_error_class(error));
+            })?;
         let batch = RetrieverBatch {
             candidates,
             evidence_by_occurrence,
@@ -524,7 +543,12 @@ where
                 exhausted: truncated == 0,
             }),
         };
-        batch.validate().map_err(contract_error)?;
+        batch
+            .validate()
+            .map_err(contract_error)
+            .inspect_err(|error| {
+                observe_semantic_lane_failure("batch_validation", port_error_class(error));
+            })?;
         if self.control.is_cancelled() {
             return Ok(RetrieverOutcome::Cancelled);
         }
@@ -551,7 +575,9 @@ where
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
-        request.validate()?;
+        request.validate().inspect_err(|error| {
+            observe_semantic_lane_failure("request_validation", port_error_class(error));
+        })?;
         if self.control.is_cancelled() {
             hotpath::gauge!("query.cancel.count").inc(1u32);
             return Ok(RetrieverOutcome::Cancelled);
@@ -571,6 +597,7 @@ where
         }) {
             Ok(query) => query,
             Err(error) => {
+                observe_semantic_lane_failure("query_embedding", port_error_class(&error));
                 return port_error_outcome(error, budget_usage(request, 0, 0, self.control));
             }
         };
@@ -595,6 +622,105 @@ where
             &outcome,
         );
         Ok(outcome)
+    }
+}
+
+fn port_error_class(error: &RetrievalPortError) -> &'static str {
+    match error {
+        RetrievalPortError::CapabilityManifestRejected => "capability_manifest_rejected",
+        RetrievalPortError::GenerationMismatch => "generation_mismatch",
+        RetrievalPortError::AuthorityUnavailable(_) => "authority_unavailable",
+        RetrievalPortError::IncompatibleProjection => "incompatible_projection",
+        RetrievalPortError::StaleEvidence => "stale_evidence",
+        RetrievalPortError::Cancelled => "cancelled",
+        RetrievalPortError::BudgetExceeded => "budget_exceeded",
+        RetrievalPortError::Contract(_) => "contract",
+    }
+}
+
+fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str) {
+    match stage {
+        "request_validation" => {
+            hotpath::gauge!("query.lane.semantic.failure.request_validation").inc(1_u64);
+        }
+        "query_embedding" => {
+            hotpath::gauge!("query.lane.semantic.failure.query_embedding").inc(1_u64);
+        }
+        "query_embedding_identity" => {
+            hotpath::gauge!("query.lane.semantic.failure.query_embedding_identity").inc(1_u64);
+        }
+        "score_generation_projection" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_generation_projection").inc(1_u64);
+        }
+        "score_source_generation" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_source_generation").inc(1_u64);
+        }
+        "score_candidate_binding" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_candidate_binding").inc(1_u64);
+        }
+        "score_candidate_kind" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_candidate_kind").inc(1_u64);
+        }
+        "score_scope_freshness" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_scope_freshness").inc(1_u64);
+        }
+        "score_vector_validation" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_vector_validation").inc(1_u64);
+        }
+        "score_distance" => {
+            hotpath::gauge!("query.lane.semantic.failure.score_distance").inc(1_u64);
+        }
+        "scan_duplicate_occurrence" => {
+            hotpath::gauge!("query.lane.semantic.failure.scan_duplicate_occurrence").inc(1_u64);
+        }
+        "scan_eligible_coverage" => {
+            hotpath::gauge!("query.lane.semantic.failure.scan_eligible_coverage").inc(1_u64);
+        }
+        "scan_coverage_overflow" => {
+            hotpath::gauge!("query.lane.semantic.failure.scan_coverage_overflow").inc(1_u64);
+        }
+        "scan_coverage_accounting" => {
+            hotpath::gauge!("query.lane.semantic.failure.scan_coverage_accounting").inc(1_u64);
+        }
+        "checkpoint_digest" => {
+            hotpath::gauge!("query.lane.semantic.failure.checkpoint_digest").inc(1_u64);
+        }
+        "batch_validation" => {
+            hotpath::gauge!("query.lane.semantic.failure.batch_validation").inc(1_u64);
+        }
+        _ => {
+            hotpath::gauge!("query.lane.semantic.failure.unknown_stage").inc(1_u64);
+        }
+    }
+    match error_class {
+        "capability_manifest_rejected" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.capability_manifest_rejected")
+                .inc(1_u64);
+        }
+        "generation_mismatch" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.generation_mismatch").inc(1_u64);
+        }
+        "authority_unavailable" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.authority_unavailable").inc(1_u64);
+        }
+        "incompatible_projection" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.incompatible_projection").inc(1_u64);
+        }
+        "stale_evidence" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.stale_evidence").inc(1_u64);
+        }
+        "cancelled" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.cancelled").inc(1_u64);
+        }
+        "budget_exceeded" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.budget_exceeded").inc(1_u64);
+        }
+        "contract" => {
+            hotpath::gauge!("query.lane.semantic.failure.class.contract").inc(1_u64);
+        }
+        _ => {
+            hotpath::gauge!("query.lane.semantic.failure.class.unknown").inc(1_u64);
+        }
     }
 }
 
