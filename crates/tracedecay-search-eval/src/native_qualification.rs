@@ -376,9 +376,7 @@ pub fn encode_packaged_native_qualification(
     mut qualification_key: NativeQualificationKeyV1,
 ) -> Result<Vec<u8>, PackagedNativeQualificationErrorV1> {
     let (report, material) = evaluation.into_parts();
-    if material.profile.profile_id.as_str() != qualification_key.evaluated_profile_id {
-        return Err(PackagedNativeQualificationErrorV1::InvalidQualificationKey);
-    }
+    validate_evaluated_material_key(&material, &qualification_key.evaluated_profile_id)?;
     if qualification_key.evaluator != NativeQualificationEvaluatorKeyV1::from_report(&report) {
         return Err(PackagedNativeQualificationErrorV1::InvalidQualificationKey);
     }
@@ -397,6 +395,20 @@ pub fn encode_packaged_native_qualification(
     };
     validate_qualification(&qualification, &expectations)?;
     serde_json::to_vec(&qualification).map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)
+}
+
+fn validate_evaluated_material_key(
+    material: &DirectEvaluatedProfileMaterialV1,
+    evaluated_profile_id: &str,
+) -> Result<(), PackagedNativeQualificationErrorV1> {
+    let workload = crate::load_authoritative_default_workload_metadata()
+        .map_err(|_| PackagedNativeQualificationErrorV1::StaleWorkload)?;
+    let expected = direct_evaluated_profile_material(&workload, evaluated_profile_id)
+        .map_err(|_| PackagedNativeQualificationErrorV1::InvalidQualificationKey)?;
+    if material != &expected {
+        return Err(PackagedNativeQualificationErrorV1::InvalidQualificationKey);
+    }
+    Ok(())
 }
 
 fn redact_genuine_vector_generations(
@@ -894,6 +906,21 @@ fn canonical_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workload_profile_alias_matches_its_canonical_evaluated_material() {
+        let material = crate::load_default_evaluated_profile_material("hybrid-conservative")
+            .expect("checked-in evaluated profile material");
+
+        assert_eq!(
+            validate_evaluated_material_key(&material, "hybrid-conservative"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_evaluated_material_key(&material, "hybrid-reranked"),
+            Err(PackagedNativeQualificationErrorV1::InvalidQualificationKey)
+        );
+    }
 
     #[test]
     fn package_denies_activation_without_reviewed_native_evidence() {
