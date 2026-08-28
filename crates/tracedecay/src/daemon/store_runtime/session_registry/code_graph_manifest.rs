@@ -404,15 +404,15 @@ impl DecodedCodeGenerationOffersV1 {
         Ok(())
     }
 
-    /// Hand the matching offer to its one consumer and forget it.
+    /// The offer for this exact replay identity, if one is held.
     ///
-    /// Take-on-read, not read: the offer exists to spare exactly one decode of
-    /// bytes that are already durable on disk. Once that decode is handed over,
-    /// retaining a second reference buys nothing and holds a whole generation
-    /// resident forever. Every later reader — including a consumer that fails
-    /// its identity guards or is cancelled after taking the offer — falls
-    /// through to the canonical-then-pool read that was always the authority.
-    fn take_matching(
+    /// Deliberately not take-on-read. One activation has two legitimate
+    /// consumers of the same decode — the current-revision publication and the
+    /// interrupted-predecessor recovery that rebuilds a historical manifest at
+    /// its own projector revision — so consuming on first read would force the
+    /// second to re-read and re-parse exactly the bytes this offer exists to
+    /// spare. The lifetime bound is retirement, not first read.
+    fn matching(
         &self,
         project_shard: &StoreShardIdV1,
         generation: &tracedecay_domain::CodeGenerationId,
@@ -421,18 +421,35 @@ impl DecodedCodeGenerationOffersV1 {
         Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
         GraphDbError,
     > {
-        let mut offers = self.write()?;
+        let offers = self.offers.read().map_err(|_| {
+            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
+        })?;
         let Some(offer) = offers.get(project_shard) else {
             return Ok(None);
         };
         if offer.generation != *generation || offer.sealed_state_digest != *sealed_state_digest {
             return Ok(None);
         }
-        let taken = offers
+        Ok(Some(Arc::clone(&offer.decoded)))
+    }
+
+    /// Drop one shard's retained offer at retirement and report the census
+    /// bytes released.
+    ///
+    /// This is the primary retention fix. An offer is an activation-scoped
+    /// accelerator over bytes that stay durable on disk; once the runtime that
+    /// commissioned it retires, nothing can consume it again, so retaining a
+    /// whole decoded generation past that point is pure resident cost. Before
+    /// this, nothing removed an offer at all.
+    fn release_shard(&self, project_shard: &StoreShardIdV1) -> u64 {
+        let Ok(mut offers) = self.write() else {
+            return 0;
+        };
+        let released_bytes = offers
             .remove(project_shard)
-            .expect("offer was just matched under the same write guard");
+            .map_or(0, |offer| offer.source_total_bytes);
         Self::publish_retained_gauge(&offers);
-        Ok(Some(taken.decoded))
+        released_bytes
     }
 
     /// Drop every retained offer and report the census bytes released.
@@ -582,9 +599,10 @@ impl DaemonCodeGraphManifestProviderV1 {
     /// generation-and-digest match, and every miss falls through to the
     /// canonical-then-pool read that remains the authority.
     ///
-    /// The offer is consumed by its first exact match and dropped under memory
-    /// pressure, so a shard that is offered a decode nobody ever claims does
-    /// not retain a whole generation for the daemon's lifetime.
+    /// The offer is released when the runtime that commissioned it retires,
+    /// and dropped early under measured memory pressure, so a shard that is
+    /// offered a decode nobody ever claims does not retain a whole generation
+    /// for the daemon's lifetime.
     pub(super) fn offer_decoded_code_generation(
         &self,
         project_shard: StoreShardIdV1,
@@ -610,8 +628,7 @@ impl DaemonCodeGraphManifestProviderV1 {
     ///
     /// `None` is an abstention, never a verdict: it means "not already decoded
     /// here", and the caller must still resolve the seal from the canonical
-    /// root or the replay pool. A match is *taken*: the caller becomes the only
-    /// owner of that decode and the provider stops retaining it.
+    /// root or the replay pool.
     fn offered_decode(
         &self,
         owner: &GraphProjectionIdentityV1,
@@ -620,8 +637,17 @@ impl DaemonCodeGraphManifestProviderV1 {
         Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
         GraphDbError,
     > {
-        self.decoded
-            .take_matching(&owner.shard_id, &source.generation, &source.sealed_state_digest)
+        self.decoded.matching(
+            &owner.shard_id,
+            &source.generation,
+            &source.sealed_state_digest,
+        )
+    }
+
+    /// Release the decoded offer this shard's retiring runtime commissioned,
+    /// reporting the census bytes released.
+    pub(super) fn release_decoded_offer(&self, project_shard: &StoreShardIdV1) -> u64 {
+        self.decoded.release_shard(project_shard)
     }
 
     /// Drop every retained decoded offer, reporting the census bytes released.
