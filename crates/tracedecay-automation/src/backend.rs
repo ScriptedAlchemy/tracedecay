@@ -96,7 +96,7 @@ impl AgentTaskRequest {
         self
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "automation.backend.message")]
     pub fn backend_message(&self) -> Result<String> {
         serde_json::to_string_pretty(&serde_json::json!({
             "run_id": self.run_id,
@@ -493,7 +493,7 @@ pub async fn run_agent_task_with_retry(
     .await
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.backend.run_task", future = true)]
 pub async fn run_agent_task_with_retry_report(
     backend: &dyn AgentTaskBackend,
     request: &AgentTaskRequest,
@@ -507,7 +507,7 @@ pub async fn run_agent_task_with_retry_report(
     loop {
         // Per-attempt backend call only. Retry policy, scheduler ticks, and
         // run-ledger publication are measured by their owning crates.
-        match hotpath::measure_block!("automation_backend_invoke", backend.run_task(request)) {
+        match hotpath::measure_block!("automation.backend.invoke", backend.run_task(request)) {
             Ok(response) => {
                 report.attempts.push(AgentTaskRetryAttempt {
                     attempt,
@@ -557,13 +557,13 @@ pub struct AgentBackendAvailability {
     pub reason: Option<String>,
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.backend.extract_json_prefix")]
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     let candidate = strip_optional_json_fence(text)?;
     parse_json_object_prefix(candidate)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.backend.extract_json")]
 pub fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
     let mut schema_error = None;
     for (start, _) in text.char_indices().filter(|(_, ch)| *ch == '{') {
@@ -617,7 +617,7 @@ fn parse_json_object_prefix(candidate: &str) -> Result<Value> {
     Ok(value)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "automation.backend.validate_schema")]
 pub fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Result<()> {
     let Some(required) = contract
         .response_schema
