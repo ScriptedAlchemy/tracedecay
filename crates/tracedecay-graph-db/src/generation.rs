@@ -871,6 +871,32 @@ pub(crate) fn verify_recovered_generation(
 ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     #[cfg(test)]
     RECOVERED_GENERATION_ENUMERATIONS.with(|count| count.set(count.get() + 1));
+    verify_recovered_rows(database, identity, expected, check)
+}
+
+/// The same proof run over a **sealed per-generation copy** rather than the
+/// staging database (`crate::sealed_store`). Kept apart so the staging
+/// enumeration count the publication tests pin ("stream the proof exactly
+/// once") stays a statement about the authority's rows; the sealed copy pays
+/// its own proofs (pre-compact and post-reopen), counted separately.
+#[hotpath::measure(label = "graph_db.sealed_store.verify")]
+pub(crate) fn verify_sealed_copy_generation(
+    database: &GrafeoDB,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    #[cfg(test)]
+    SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
+    verify_recovered_rows(database, identity, expected, check)
+}
+
+fn verify_recovered_rows(
+    database: &GrafeoDB,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     check()?;
     let physical_namespace = identity.physical_namespace()?;
     let recovered_commit = latest_projection(
@@ -926,6 +952,8 @@ pub(crate) fn verify_recovered_generation(
 thread_local! {
     static RECOVERED_GENERATION_ENUMERATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static SEALED_COPY_PROOFS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
     static MANIFEST_CANONICALIZATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     static CANONICAL_BUFFER_ALLOCATION_GROWTHS: std::cell::Cell<usize> =
@@ -942,6 +970,18 @@ pub(crate) fn reset_recovered_generation_enumerations() {
 #[cfg(test)]
 pub(crate) fn recovered_generation_enumerations() -> usize {
     RECOVERED_GENERATION_ENUMERATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_sealed_copy_proofs() {
+    SEALED_COPY_PROOFS.with(|count| count.set(0));
+}
+
+/// Recovered-digest proofs run over sealed per-generation copies on this
+/// thread (build: pre-compact + post-reopen; adoption: post-reopen only).
+#[cfg(test)]
+pub(crate) fn sealed_copy_proofs() -> usize {
+    SEALED_COPY_PROOFS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1524,7 +1564,10 @@ mod manifest_digest_memo_tests {
         .unwrap()
     }
 
-    fn manifest(namespace: &str, dependencies: Vec<GraphGenerationDependency>) -> GraphGenerationManifest {
+    fn manifest(
+        namespace: &str,
+        dependencies: Vec<GraphGenerationDependency>,
+    ) -> GraphGenerationManifest {
         GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
                 GraphNamespace::new(namespace).unwrap(),
@@ -1573,7 +1616,10 @@ mod manifest_digest_memo_tests {
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
         let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         assert_eq!(sealed, replay.expected_recovered_digest);
-        assert_eq!(dependency_digest, replay.dependency_generation_closure_digest);
+        assert_eq!(
+            dependency_digest,
+            replay.dependency_generation_closure_digest
+        );
         assert_eq!(
             manifest_canonicalizations(),
             1,
@@ -1616,7 +1662,10 @@ mod manifest_digest_memo_tests {
         // Byte identity: a cold instance built from the same inputs computes
         // the exact digests the memoized reads served.
         let control = self::manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
-        assert_eq!(control.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
+        assert_eq!(
+            control.expected_recovered_digest(&|| Ok(())).unwrap(),
+            sealed
+        );
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
             dependency_digest

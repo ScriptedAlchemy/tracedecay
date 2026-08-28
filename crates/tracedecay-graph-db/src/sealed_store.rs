@@ -47,15 +47,14 @@ use serde::{Deserialize, Serialize};
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
-    physical_namespace_projection_map, recovered_entity_ref, verify_recovered_generation,
+    physical_namespace_projection_map, recovered_entity_ref, verify_sealed_copy_generation,
 };
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
 use crate::projection::graph_properties_live_bytes;
 use crate::state::{
-    load_entity, load_entity_by_node, load_relation_by_locator_cached,
+    EndpointIdentityCache, load_entity, load_entity_by_node, load_relation_by_locator_cached,
     projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
-    EndpointIdentityCache,
 };
 use crate::{
     GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity,
@@ -299,11 +298,7 @@ fn properties_carry_bytes(
 }
 
 fn entity_copy_live_bytes(entity: &GraphEntity) -> usize {
-    let labels: usize = entity
-        .labels
-        .iter()
-        .map(|label| label.as_str().len())
-        .sum();
+    let labels: usize = entity.labels.iter().map(|label| label.as_str().len()).sum();
     entity.identity.as_str().len()
         + labels
         + graph_properties_live_bytes(&entity.properties).unwrap_or(usize::MAX / 4)
@@ -326,9 +321,7 @@ impl GraphDb {
             Some(GraphDbError::SealedStoreImmutable {
                 message: format!(
                     "generation `{}/{}/{}` is sealed and compacted; its rows accept no further writes",
-                    locator.projection.namespace,
-                    locator.projection.projection,
-                    locator.generation
+                    locator.projection.namespace, locator.projection.projection, locator.generation
                 ),
             })
         } else {
@@ -455,11 +448,10 @@ impl GraphDb {
         locator: GenerationLocator,
         store: Arc<SealedGenerationStore>,
     ) -> Result<(), GraphDbError> {
-        let mut sealed = self
-            .inner
-            .sealed_generations
-            .write()
-            .map_err(|_| GraphDbError::unavailable("sealed generation store lock is poisoned"))?;
+        let mut sealed =
+            self.inner.sealed_generations.write().map_err(|_| {
+                GraphDbError::unavailable("sealed generation store lock is poisoned")
+            })?;
         if let Some(previous) = sealed.insert(locator, store) {
             // The replacement shares the artifact directory, so only the
             // superseded handle is closed; the files stay for the new reader.
@@ -544,9 +536,7 @@ impl GraphDb {
     /// proof. The at-rest probes time the open and then prove the reads
     /// themselves.
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn open_sealed_artifact_for_bench(
-        directory: &Path,
-    ) -> Result<Arc<GraphDb>, GraphDbError> {
+    pub fn open_sealed_artifact_for_bench(directory: &Path) -> Result<Arc<GraphDb>, GraphDbError> {
         GraphDb::open_with_store_state(
             sealed_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
             Some(PersistentGraphStoreState::Existing),
@@ -703,8 +693,8 @@ fn copy_compact_and_close(
                 if !copies.contains_key(&endpoint.identity) {
                     let entity = load_entity(database, dependency_namespace, &endpoint.identity)?
                         .ok_or_else(|| GraphDbError::Corrupt {
-                            message: "sealed copy dependency endpoint disappeared".to_owned(),
-                        })?;
+                        message: "sealed copy dependency endpoint disappeared".to_owned(),
+                    })?;
                     copies.insert(endpoint.identity.clone(), entity.entity);
                 }
             }
@@ -839,7 +829,7 @@ fn copy_compact_and_close(
     {
         let guard = sealed.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        verify_recovered_generation(database, identity, expected, check)
+        verify_sealed_copy_generation(database, identity, expected, check)
             .map_err(|error| sealed_store_failure("pre-compact verification failed", error))?;
     }
 
@@ -904,10 +894,13 @@ fn open_sealed_store(
     {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if let Err(error) = verify_recovered_generation(native, identity, expected, &|| Ok(())) {
+        if let Err(error) = verify_sealed_copy_generation(native, identity, expected, &|| Ok(())) {
             drop(guard);
             let _ = database.close();
-            return Err(sealed_store_failure("post-reopen verification failed", error));
+            return Err(sealed_store_failure(
+                "post-reopen verification failed",
+                error,
+            ));
         }
     }
     database.mark_sealed_read_only();
