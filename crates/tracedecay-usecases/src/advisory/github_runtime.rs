@@ -12,6 +12,7 @@ mod dto;
 mod gh_cli;
 mod network;
 mod owner;
+mod protocol;
 mod rate_gate;
 mod read_requests;
 mod releases;

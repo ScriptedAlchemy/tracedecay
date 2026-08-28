@@ -12,11 +12,13 @@ use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::now_micros;
 use tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1;
 use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros};
 use url::Url;
 
+use super::protocol::{
+    GitHubLinkPageScopeV1, link_next_page, rate_limit_checkpoint, retry_after_at,
+};
 use super::{
     GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
     GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
@@ -341,11 +343,14 @@ impl ProjectGitHubReleaseReadAuthorityV1 {
                     return ProjectGitHubReleaseReadOutcomeV1::Unavailable;
                 }
             }
-            let next_page = match next_release_page(
+            let next_page = match link_next_page(
                 response.headers(),
-                &self.config.rest_base_uri,
-                &endpoint,
-                page,
+                &GitHubLinkPageScopeV1 {
+                    rest_base_uri: &self.config.rest_base_uri,
+                    endpoint: &endpoint,
+                    current_page: page,
+                    page_size: GITHUB_RELEASE_PAGE_SIZE_V1,
+                },
             ) {
                 Ok(next_page) => next_page,
                 Err(()) => return ProjectGitHubReleaseReadOutcomeV1::Unavailable,
@@ -621,7 +626,7 @@ fn classify_status(
         200 => ReleaseHttpDispositionV1::Read,
         401 | 404 => ReleaseHttpDispositionV1::Denied,
         403 => {
-            let retry_at = retry_at(headers);
+            let retry_at = retry_after_at(headers);
             if checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.remaining == 0)
@@ -637,100 +642,10 @@ fn classify_status(
         }
         429 => ReleaseHttpDispositionV1::RateLimited {
             checkpoint,
-            retry_at: retry_at(headers),
+            retry_at: retry_after_at(headers),
         },
         _ => ReleaseHttpDispositionV1::Unavailable,
     }
-}
-
-fn next_release_page(
-    headers: &ureq::http::HeaderMap,
-    rest_base_uri: &str,
-    endpoint: &str,
-    current_page: u32,
-) -> Result<Option<u32>, ()> {
-    let Some(link) = header(headers, "link") else {
-        return Ok(None);
-    };
-    let mut next_entries = link
-        .split(',')
-        .filter(|entry| entry.contains("rel=\"next\""));
-    let Some(next) = next_entries.next() else {
-        return Ok(None);
-    };
-    if next_entries.next().is_some() {
-        return Err(());
-    }
-    let url = next
-        .split_once('<')
-        .and_then(|(_, value)| value.split_once('>'))
-        .map(|(value, _)| value)
-        .and_then(|value| Url::parse(value).ok())
-        .ok_or(())?;
-    let base = Url::parse(rest_base_uri).map_err(|_| ())?;
-    let expected = Url::parse(endpoint).map_err(|_| ())?;
-    if url.scheme() != "https"
-        || url.host_str() != base.host_str()
-        || url.port_or_known_default() != base.port_or_known_default()
-        || url.path() != expected.path()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(());
-    }
-    let mut page = None;
-    let mut has_page_size = false;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "page" if page.is_none() => page = value.parse::<u32>().ok(),
-            "per_page" if !has_page_size && value == GITHUB_RELEASE_PAGE_SIZE_V1.to_string() => {
-                has_page_size = true;
-            }
-            _ => return Err(()),
-        }
-    }
-    has_page_size
-        .then_some(page)
-        .flatten()
-        .filter(|page| Some(*page) == current_page.checked_add(1))
-        .map(Some)
-        .ok_or(())
-}
-
-fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
-) -> Option<GitHubReviewRateLimitCheckpointV1> {
-    let checkpoint = GitHubReviewRateLimitCheckpointV1 {
-        limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
-        remaining: header(headers, "x-ratelimit-remaining")?.parse().ok()?,
-        reset_at: UtcMicros(
-            header(headers, "x-ratelimit-reset")?
-                .parse::<i64>()
-                .ok()?
-                .checked_mul(1_000_000)?,
-        ),
-    };
-    checkpoint.validate().is_ok().then_some(checkpoint)
-}
-
-fn retry_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
-    let retry_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
-    if retry_seconds < 0 {
-        return None;
-    }
-    Some(UtcMicros(
-        now_micros()
-            .0
-            .checked_add(retry_seconds.checked_mul(1_000_000)?)?,
-    ))
-}
-
-fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn valid_http_config(config: &GitHubHttpReadConfigV1) -> bool {

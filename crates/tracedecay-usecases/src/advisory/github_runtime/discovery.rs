@@ -4,12 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tracedecay_application::now_micros;
 use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCheckpointV1};
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
 
 use super::dto::valid_full_git_oid;
+use super::protocol::{
+    GitHubLinkPageScopeV1, link_next_page, rate_limit_checkpoint, retry_after_at,
+};
 use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
@@ -256,7 +258,7 @@ fn scan_exact_commit_pull_request_v1(
             200 => {}
             401 => return GitHubExactCommitDiscoveryOutcomeV1::Denied,
             403 => {
-                let retry_at = retry_at(response.headers());
+                let retry_at = retry_after_at(response.headers());
                 if checkpoint
                     .as_ref()
                     .is_none_or(|checkpoint| checkpoint.remaining != 0)
@@ -271,7 +273,7 @@ fn scan_exact_commit_pull_request_v1(
             }
             429 => {
                 return GitHubExactCommitDiscoveryOutcomeV1::RateLimited {
-                    retry_at: retry_at(response.headers()),
+                    retry_at: retry_after_at(response.headers()),
                     checkpoint,
                 };
             }
@@ -279,11 +281,18 @@ fn scan_exact_commit_pull_request_v1(
             _ => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
         }
 
-        let mut next_page =
-            match next_page(response.headers(), &config.rest_base_uri, &endpoint, page) {
-                Ok(next_page) => next_page,
-                Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
-            };
+        let mut next_page = match link_next_page(
+            response.headers(),
+            &GitHubLinkPageScopeV1 {
+                rest_base_uri: &config.rest_base_uri,
+                endpoint: &endpoint,
+                current_page: page,
+                page_size: GITHUB_DISCOVERY_PAGE_SIZE_V1,
+            },
+        ) {
+            Ok(next_page) => next_page,
+            Err(()) => return GitHubExactCommitDiscoveryOutcomeV1::Unavailable,
+        };
         let Ok(body) = response
             .body_mut()
             .with_config()
@@ -365,84 +374,6 @@ fn exact_pull_request(
         base_commit_id,
         head_commit_id,
     })
-}
-
-fn next_page(
-    headers: &ureq::http::HeaderMap,
-    rest_base_uri: &str,
-    endpoint: &str,
-    current_page: u32,
-) -> Result<Option<u32>, ()> {
-    let Some(link) = header(headers, "link") else {
-        return Ok(None);
-    };
-    let Some(next) = link.split(',').find(|entry| entry.contains("rel=\"next\"")) else {
-        return Ok(None);
-    };
-    let url = next
-        .split_once('<')
-        .and_then(|(_, value)| value.split_once('>'))
-        .map(|(value, _)| value)
-        .and_then(|value| Url::parse(value).ok())
-        .ok_or(())?;
-    let base = Url::parse(rest_base_uri).map_err(|_| ())?;
-    let expected = Url::parse(endpoint).map_err(|_| ())?;
-    if url.scheme() != "https"
-        || url.host_str() != base.host_str()
-        || url.port_or_known_default() != base.port_or_known_default()
-        || url.path() != expected.path()
-    {
-        return Err(());
-    }
-    let mut page = None;
-    let mut has_page_size = false;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "page" if page.is_none() => page = value.parse::<u32>().ok(),
-            "per_page" if !has_page_size && value == GITHUB_DISCOVERY_PAGE_SIZE_V1.to_string() => {
-                has_page_size = true;
-            }
-            _ => return Err(()),
-        }
-    }
-    has_page_size
-        .then_some(page)
-        .flatten()
-        .filter(|page| *page > current_page)
-        .map(Some)
-        .ok_or(())
-}
-
-fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
-) -> Option<GitHubReviewRateLimitCheckpointV1> {
-    let checkpoint = GitHubReviewRateLimitCheckpointV1 {
-        limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
-        remaining: header(headers, "x-ratelimit-remaining")?.parse().ok()?,
-        reset_at: UtcMicros(
-            header(headers, "x-ratelimit-reset")?
-                .parse::<i64>()
-                .ok()?
-                .checked_mul(1_000_000)?,
-        ),
-    };
-    checkpoint.validate().is_ok().then_some(checkpoint)
-}
-
-fn retry_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
-    let retry_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
-    Some(UtcMicros(
-        now_micros()
-            .0
-            .checked_add(retry_seconds.checked_mul(1_000_000)?)?,
-    ))
-}
-
-fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn valid_rest_base_uri(value: &str) -> bool {
