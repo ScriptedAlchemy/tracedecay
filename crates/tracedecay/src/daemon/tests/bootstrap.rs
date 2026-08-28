@@ -3605,6 +3605,10 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
                 .patch(&project_settings_url)
                 .send_json(json!({
                     "expected_revision_id": initial_revision,
+                    // The patch contract requires one caller-stable
+                    // idempotency key per distinct mutation; the stale patch
+                    // below carries its own so it cannot replay this effect.
+                    "idempotency_key": "dashboard.production-composition.max-file-size",
                     "max_file_size": 2048
                 }))
                 .expect("PATCH project settings"),
@@ -3655,6 +3659,7 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
                 .patch(&project_settings_url)
                 .send_json(json!({
                     "expected_revision_id": initial_revision,
+                    "idempotency_key": "dashboard.production-composition.stale-track-call-sites",
                     "track_call_sites": false
                 }))
                 .expect("PATCH stale project settings"),
