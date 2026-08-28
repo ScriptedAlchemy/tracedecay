@@ -34,6 +34,7 @@ impl McpBackgroundTaskOwner {
         true
     }
 
+    #[hotpath::measure(label = "mcp.server.lifecycle.background_shutdown", future = true)]
     pub(crate) async fn shutdown(&self) -> Vec<String> {
         let mut retained = self.shutdown_tasks.lock().await;
         if retained.is_none() {
@@ -283,11 +284,13 @@ impl ProjectServerResponseLifecycle {
     /// Close response admission without invalidating an already-admitted reply.
     /// Tokio's write-preferring lock prevents later readers from overtaking the
     /// queued retirement writer, so cancellation is published at the cutover.
+    #[hotpath::measure(label = "mcp.server.lifecycle.revoke_drain", future = true)]
     pub(crate) async fn revoke_after_request_drain(&self) {
         let _guard = self.response_gate.write().await;
         self.response_revoked.cancel();
     }
 
+    #[hotpath::measure(label = "mcp.server.lifecycle.request_drain", future = true)]
     pub(crate) async fn wait_for_request_drain(&self) {
         let _guard = self.response_gate.write().await;
     }
@@ -359,6 +362,7 @@ impl McpServer {
         self.project_server_lifecycle.wait_for_request_drain().await;
     }
 
+    #[hotpath::measure(label = "mcp.server.lifecycle.abort_requests")]
     pub(crate) fn abort_project_server_requests(&self) {
         self.project_server_lifecycle.abort_requests();
         // Poison recovery matters most here: skipping this on a poisoned
@@ -373,6 +377,10 @@ impl McpServer {
     }
 
     /// Shutdown-side teardown of the startup index-sync phase.
+    #[hotpath::measure(
+        label = "mcp.server.lifecycle.startup_catch_up.shutdown",
+        future = true
+    )]
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
@@ -408,6 +416,7 @@ impl McpServer {
     /// hands back this request's single branch resolution, so the rest of the
     /// request reads the live branch from the memo instead of re-opening the
     /// repository. The memo is request-scoped and never retained.
+    #[hotpath::measure(label = "mcp.server.lifecycle.reopen_if_drifted", future = true)]
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
     ) -> (Arc<TraceDecay>, crate::branch::BranchMemo) {
@@ -438,47 +447,50 @@ impl McpServer {
         let reconcile = self.database_owner_reconciler.clone();
         // A drift observation is the only trigger for a retained reopen.
         let reason = "branch_drift";
-        let _admitted = self.background_tasks.spawn(async move {
-            let _completion = completion;
-            let _reopen_guard = reopen_guard;
-            let current = cg_cell.read().await.clone();
-            // Re-check against a *fresh snapshot*: a concurrent reopen may
-            // already have swapped the served instance onto this same live
-            // branch.
-            if !current.branch_drifted() {
-                return;
-            }
-            match current.reopen_for_current_branch().await {
-                Ok(fresh) => {
-                    let fresh = Arc::new(fresh);
-                    tracing::info!(
-                        branch = fresh.active_branch().unwrap_or("<detached>"),
-                        reason,
-                        "reopened index onto the live branch"
-                    );
-                    {
-                        let mut guard = cg_cell.write().await;
-                        *guard = Arc::clone(&fresh);
+        let _admitted = self.background_tasks.spawn(hotpath::future!(
+            async move {
+                let _completion = completion;
+                let _reopen_guard = reopen_guard;
+                let current = cg_cell.read().await.clone();
+                // Re-check against a *fresh snapshot*: a concurrent reopen may
+                // already have swapped the served instance onto this same live
+                // branch.
+                if !current.branch_drifted() {
+                    return;
+                }
+                match current.reopen_for_current_branch().await {
+                    Ok(fresh) => {
+                        let fresh = Arc::new(fresh);
+                        tracing::info!(
+                            branch = fresh.active_branch().unwrap_or("<detached>"),
+                            reason,
+                            "reopened index onto the live branch"
+                        );
+                        {
+                            let mut guard = cg_cell.write().await;
+                            *guard = Arc::clone(&fresh);
+                        }
+                        // The owner reconcile runs here, after the swap, rather
+                        // than inside the request that noticed the drift: it takes
+                        // the daemon's store writer lane, and a live `tools/call`
+                        // must never park on it. That call has already answered on
+                        // the snapshot it held.
+                        if let Some(reconcile) = &reconcile {
+                            reconcile(Arc::clone(&fresh)).await;
+                        }
                     }
-                    // The owner reconcile runs here, after the swap, rather
-                    // than inside the request that noticed the drift: it takes
-                    // the daemon's store writer lane, and a live `tools/call`
-                    // must never park on it. That call has already answered on
-                    // the snapshot it held.
-                    if let Some(reconcile) = &reconcile {
-                        reconcile(Arc::clone(&fresh)).await;
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            serving_branch = current.serving_branch().unwrap_or("<none>"),
+                            reason,
+                            "index reopen onto the live branch failed"
+                        );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        serving_branch = current.serving_branch().unwrap_or("<none>"),
-                        reason,
-                        "index reopen onto the live branch failed"
-                    );
-                }
-            }
-        });
+            },
+            label = "mcp.server.lifecycle.branch_reopen"
+        ));
     }
 
     /// Polls until at least one branch reopen has completed past `after`, or
@@ -487,6 +499,7 @@ impl McpServer {
     /// Reopens do not block requests, so tests (and any caller that genuinely
     /// needs the post-swap state rather than an answer) observe completion here.
     #[doc(hidden)]
+    #[hotpath::measure(label = "mcp.server.lifecycle.branch_reopen.wait", future = true)]
     pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
@@ -514,6 +527,7 @@ impl McpServer {
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
+    #[hotpath::measure(label = "mcp.server.lifecycle.startup_catch_up", future = true)]
     pub async fn run_startup_catch_up_sync(&self) {
         self.startup_catch_up.begin_sync();
 
@@ -552,6 +566,7 @@ impl McpServer {
     }
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
+    #[hotpath::measure(label = "mcp.server.lifecycle.startup_catch_up.wait", future = true)]
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
@@ -583,6 +598,7 @@ impl McpServer {
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
+    #[hotpath::measure(label = "mcp.server.lifecycle.sync_if_stale", future = true)]
     pub async fn maybe_sync_if_stale(&self) {
         let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()
@@ -645,6 +661,7 @@ impl McpServer {
     /// every read tool call. It takes the caller's request-scoped branch memo
     /// — the same resolution `reopen_if_branch_drifted` already made for this
     /// request — instead of re-opening the repository.
+    #[hotpath::measure(label = "mcp.server.lifecycle.read_refresh.admit")]
     pub(crate) fn maybe_spawn_read_refresh(
         &self,
         cg: &Arc<TraceDecay>,
@@ -704,28 +721,32 @@ impl McpServer {
             reconcile_sink: self.code_index_reconcile_sink.clone(),
             freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
-        let _admitted = self.background_tasks.spawn(async move {
-            let _running = running_guard;
-            match refresh(request).await {
-                Ok(Some(fresh)) => {
-                    if let Ok(mut guard) = token_map.lock() {
-                        *guard = fresh;
+        let _admitted = self.background_tasks.spawn(hotpath::future!(
+            async move {
+                let _running = running_guard;
+                match refresh(request).await {
+                    Ok(Some(fresh)) => {
+                        if let Ok(mut guard) = token_map.lock() {
+                            *guard = fresh;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "background read reconciliation was not admitted"
+                        );
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "background read reconciliation was not admitted"
-                    );
-                }
-            }
-            done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
-        });
+                done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
+            },
+            label = "mcp.server.lifecycle.read_refresh"
+        ));
     }
 
     /// Returns a version-update warning if a newer release is available.
     /// Results are cached for `VERSION_CHECK_INTERVAL` (15 minutes).
+    #[hotpath::measure(label = "mcp.server.lifecycle.version_check", future = true)]
     pub(crate) async fn check_version_update(&self) -> Option<String> {
         let current = env!("CARGO_PKG_VERSION");
 
@@ -748,10 +769,13 @@ impl McpServer {
         }
 
         // Cache miss or expired – fetch from GitHub (best-effort, 1 s timeout).
-        let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
-            .await
-            .ok()
-            .flatten();
+        let latest = hotpath::future!(
+            tokio::task::spawn_blocking(crate::cloud::fetch_latest_version),
+            label = "mcp.server.lifecycle.version_check.fetch"
+        )
+        .await
+        .ok()
+        .flatten();
 
         // Update cache regardless of fetch outcome so we don't retry immediately.
         if let Ok(mut cache) = self.version_cache.lock() {

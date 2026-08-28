@@ -96,15 +96,18 @@ impl McpShutdownCompletion {
                 );
             };
             let state = Arc::clone(&self.state);
-            let task = tokio::spawn(async move {
-                let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
-                let runner = tokio::spawn(work);
-                let status = match runner.await {
-                    Ok(status) => status,
-                    Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
-                };
-                state.finish(status);
-            });
+            let task = tokio::spawn(hotpath::future!(
+                async move {
+                    let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
+                    let runner = tokio::spawn(work);
+                    let status = match runner.await {
+                        Ok(status) => status,
+                        Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
+                    };
+                    state.finish(status);
+                },
+                label = "mcp.server.connection.shutdown"
+            ));
             *coordinator_task = Some(task);
             drop(coordinator_task);
             return self.wait_for_terminal_status_until(deadline).await;
@@ -276,10 +279,13 @@ impl McpServer {
         output: &str,
         response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
     ) -> std::io::Result<bool> {
-        let write = async {
-            transport.write_line(output).await?;
-            transport.flush().await
-        };
+        let write = hotpath::future!(
+            async {
+                transport.write_line(output).await?;
+                transport.flush().await
+            },
+            label = "mcp.server.connection.write"
+        );
         let Some(response_revoked) = response_revoked else {
             return write.await.map(|()| true);
         };
@@ -375,7 +381,10 @@ impl McpServer {
                     current_cancellation = None;
                 }
                 response = &mut handling => return Ok((response, false)),
-                incoming = transport.read_line() => {
+                incoming = hotpath::future!(
+                    transport.read_line(),
+                    label = "mcp.server.connection.read"
+                ) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -502,7 +511,10 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line() => {
+                incoming = hotpath::future!(
+                    transport.read_line(),
+                    label = "mcp.server.connection.read"
+                ) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -608,28 +620,45 @@ impl McpServer {
                     {
                         if let Some(sigterm) = sigterm.as_mut() {
                             tokio::select! {
-                                result = transport.read_line() => result,
+                                result = hotpath::future!(
+                                    transport.read_line(),
+                                    label = "mcp.server.connection.read"
+                                ) => result,
                                 _ = tokio::signal::ctrl_c() => break,
                                 _ = sigterm.recv() => break,
                             }
                         } else if let Some(lifecycle) = request_lifecycle {
                             tokio::select! {
-                                result = transport.read_line() => result,
+                                result = hotpath::future!(
+                                    transport.read_line(),
+                                    label = "mcp.server.connection.read"
+                                ) => result,
                                 () = lifecycle.wait_for_draining() => break,
                             }
                         } else {
-                            transport.read_line().await
+                            hotpath::future!(
+                                transport.read_line(),
+                                label = "mcp.server.connection.read"
+                            )
+                            .await
                         }
                     }
                     #[cfg(not(unix))]
                     {
                         if listen_for_process_signals {
                             tokio::select! {
-                                result = transport.read_line() => result,
+                                result = hotpath::future!(
+                                    transport.read_line(),
+                                    label = "mcp.server.connection.read"
+                                ) => result,
                                 _ = tokio::signal::ctrl_c() => break,
                             }
                         } else {
-                            transport.read_line().await
+                            hotpath::future!(
+                                transport.read_line(),
+                                label = "mcp.server.connection.read"
+                            )
+                            .await
                         }
                     }
                 };
@@ -638,7 +667,11 @@ impl McpServer {
                     Ok(None) => break,
                     Err(e) => {
                         if is_wire_oversized_io_error(&e) {
-                            let _ = write_wire_oversized_rejection(transport, &e).await;
+                            let _ = hotpath::future!(
+                                write_wire_oversized_rejection(transport, &e),
+                                label = "mcp.server.connection.write"
+                            )
+                            .await;
                             break;
                         }
                         self.shutdown_if(shutdown_on_exit).await;

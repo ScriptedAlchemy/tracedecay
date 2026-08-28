@@ -66,6 +66,7 @@ impl ConnectionRouteState {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.routing.observe_initialize", future = true)]
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
@@ -114,6 +115,7 @@ impl ConnectionRouteState {
     }
 }
 
+#[hotpath::measure(label = "mcp.server.routing.initialize_route", future = true)]
 async fn resolve_initialize_roots_project_route(
     params: Option<&Value>,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -141,6 +143,7 @@ async fn resolve_initialize_roots_project_route(
     }))
 }
 
+#[hotpath::measure(label = "mcp.server.routing.project_route", future = true)]
 pub(crate) async fn resolve_private_project_route(
     requested_path: &Path,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -249,6 +252,7 @@ async fn resolve_initialize_roots_project_path(
     None
 }
 
+#[hotpath::measure(label = "mcp.server.routing.initialize_root", future = true)]
 async fn resolve_initialize_root_project_path(
     root: &Path,
     registry_db: &RegisteredGlobalDb,
