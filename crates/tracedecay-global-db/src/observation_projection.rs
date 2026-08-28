@@ -18,4 +18,6 @@ pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
 pub(crate) use state::rearm_queued_projection_retries;
-pub(super) use state::verify_output_authority;
+pub(super) use state::{
+    ProjectionOutputAuthority, read_output_authorities, verify_resolved_output_authority,
+};

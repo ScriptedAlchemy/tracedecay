@@ -1,9 +1,9 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
-    ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    ObservationProjection, ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SessionMessageProjection, SessionMessageRecord, SessionRecord,
 };
@@ -740,78 +740,174 @@ pub(super) async fn verify_output_state(
     verify_rows(conn, &owner_projection).await
 }
 
-pub(in super::super) async fn verify_output_authority(
+/// Requested `(output_provider, output_message_id)` keys carried by one
+/// batched authority statement. A page of audited outputs is answered in a
+/// bounded number of round trips instead of two per projected message, while
+/// each statement stays far below the runtime's per-query row admission.
+const OUTPUT_AUTHORITY_BATCH_KEYS: usize = 256;
+
+/// The canonical projection owner one output resolved to.
+///
+/// `canonical_observation_id` is retained alongside the decoded observation so
+/// a caller that already derived that exact observation's projection can reuse
+/// its own derivation instead of re-deriving the identical result.
+#[derive(Debug)]
+pub(in super::super) struct ProjectionOutputAuthority {
+    pub(in super::super) canonical_observation_id: String,
+    pub(in super::super) canonical: DurableObservationV1,
+}
+
+/// The batched ownership resolution behind [`read_output_authorities`].
+///
+/// The grouped aggregate (`MAX(message_created)`, `COUNT(*)`) and the owner
+/// selection both reuse [`output_owner_lookup_sql`], the one definition of the
+/// projector's ordering, so the batched path cannot drift from the per-output
+/// and whole-cache spellings. A requested key whose group is absent, whose
+/// ownership aggregate is NULL or empty, or whose canonical owner has no
+/// `observations` row simply yields no row: the caller maps that absence to
+/// [`ProjectionStoreError::ProvenanceCollision`], exactly as the single-output
+/// reads did.
+fn output_authority_batch_sql() -> String {
+    let newest_id = output_owner_lookup_sql("provenance.observation_id", "DESC");
+    let oldest_id = output_owner_lookup_sql("provenance.observation_id", "ASC");
+    format!(
+        "WITH groups AS (
+            SELECT provenance.projector_version AS projector_version,
+                   provenance.output_provider AS output_provider,
+                   provenance.output_message_id AS output_message_id,
+                   MAX(provenance.message_created) AS projector_owned,
+                   COUNT(*) AS owner_count
+            FROM observation_projection_provenance AS provenance
+            JOIN json_each(?2) AS requested
+              ON provenance.output_provider =
+                   json_extract(requested.value, '$.provider')
+             AND provenance.output_message_id =
+                   json_extract(requested.value, '$.message_id')
+            WHERE provenance.projector_version = ?1
+            GROUP BY provenance.projector_version, provenance.output_provider,
+                     provenance.output_message_id
+         ),
+         owners AS (
+            SELECT groups.output_provider AS output_provider,
+                   groups.output_message_id AS output_message_id,
+                   CASE WHEN groups.projector_owned = 1 THEN {newest_id} ELSE {oldest_id} END
+                     AS canonical_observation_id
+            FROM groups
+            WHERE groups.projector_owned IS NOT NULL AND groups.owner_count > 0
+         )
+         SELECT owners.output_provider, owners.output_message_id,
+                observation.observation_id, observation.observation_json
+         FROM owners
+         JOIN observations AS observation
+           ON observation.observation_id = owners.canonical_observation_id"
+    )
+}
+
+/// Resolves the canonical projection owner for a whole set of outputs.
+///
+/// Keys are deduplicated by the caller's [`BTreeSet`], so one requested key
+/// never multiplies a group's `COUNT(*)` through the `json_each` join.
+#[cfg_attr(
+    feature = "hotpath",
+    hotpath::measure(label = "global_db.observation_state.batch.authority")
+)]
+pub(in super::super) async fn read_output_authorities(
     conn: &impl QueryExecutor,
+    outputs: &BTreeSet<(String, String)>,
+) -> ProjectionStoreResult<HashMap<(String, String), ProjectionOutputAuthority>> {
+    let mut resolved = HashMap::with_capacity(outputs.len());
+    if outputs.is_empty() {
+        return Ok(resolved);
+    }
+    let sql = output_authority_batch_sql();
+    let requested_keys = outputs.iter().collect::<Vec<_>>();
+    for chunk in requested_keys.chunks(OUTPUT_AUTHORITY_BATCH_KEYS) {
+        let requested = serde_json::to_string(
+            &chunk
+                .iter()
+                .map(|(provider, message_id)| {
+                    serde_json::json!({ "provider": provider, "message_id": message_id })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| storage("encode projection output authority request", error))?;
+        let mut rows = conn
+            .query(
+                &sql,
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
+            )
+            .await
+            .map_err(|error| storage("read projection output authority", error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("read projection output authority", error))?
+        {
+            let provider = row
+                .get::<String>(0)
+                .map_err(|error| storage("read projection output authority", error))?;
+            let message_id = row
+                .get::<String>(1)
+                .map_err(|error| storage("read projection output authority", error))?;
+            let canonical_observation_id = row
+                .get::<String>(2)
+                .map_err(|error| storage("read canonical projection output authority", error))?;
+            let observation_json = row
+                .get::<String>(3)
+                .map_err(|error| storage("read canonical projection output authority", error))?;
+            let canonical = serde_json::from_str(&observation_json)
+                .map_err(|error| storage("decode canonical projection output authority", error))?;
+            resolved.insert(
+                (provider, message_id),
+                ProjectionOutputAuthority {
+                    canonical_observation_id,
+                    canonical,
+                },
+            );
+        }
+    }
+    Ok(resolved)
+}
+
+/// Verifies one projected output against an already-resolved authority.
+///
+/// `derived` lets a caller that just derived some observation's projection hand
+/// it back: when that observation *is* the canonical owner, the owner
+/// projection is the same value [`message_projection`] would re-derive from the
+/// same connection, so it is reused instead of re-queried. Any other owner
+/// re-derives exactly as before.
+#[cfg_attr(
+    feature = "hotpath",
+    hotpath::measure(label = "global_db.observation_state.verify.resolved_authority")
+)]
+pub(in super::super) async fn verify_resolved_output_authority(
+    conn: &impl QueryExecutor,
+    authority: &ProjectionOutputAuthority,
+    derived: Option<(&str, &ObservationProjection)>,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let message = projection.message();
-    let mut rows = conn
-        .query(
-            "SELECT MAX(message_created), COUNT(*)
-             FROM observation_projection_provenance
-                  INDEXED BY idx_observation_projection_provenance_global_output
-             WHERE projector_version = ?1
-               AND output_provider = ?2 AND output_message_id = ?3",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                message.provider.as_str(),
-                message.message_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage("read projection output authority", error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection output authority", error))?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?;
-    let projector_owned = row
-        .get::<Option<i64>>(0)
-        .map_err(|error| storage("read projection output authority", error))?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?
-        != 0;
-    let owner_count = row
-        .get::<i64>(1)
-        .map_err(|error| storage("read projection output authority", error))?;
-    drop(rows);
-    if owner_count <= 0 {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
-
-    let ordering = if projector_owned { "DESC" } else { "ASC" };
-    let mut rows = conn
-        .query(
-            &format!(
-                "SELECT observation.observation_json
-                 FROM observation_projection_provenance AS provenance
-                      INDEXED BY idx_observation_projection_provenance_global_output
-                 JOIN observations AS observation
-                   ON observation.observation_id = provenance.observation_id
-                 WHERE provenance.projector_version = ?1
-                   AND provenance.output_provider = ?2
-                   AND provenance.output_message_id = ?3
-                 ORDER BY observation.sequence {ordering}, provenance.observation_id {ordering}
-                 LIMIT 1"
-            ),
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                message.provider.as_str(),
-                message.message_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage("read canonical projection output authority", error))?;
-    let observation_json = rows
-        .next()
-        .await
-        .map_err(|error| storage("read canonical projection output authority", error))?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?
-        .get::<String>(0)
-        .map_err(|error| storage("read canonical projection output authority", error))?;
-    let observation = serde_json::from_str(&observation_json)
-        .map_err(|error| storage("decode canonical projection output authority", error))?;
-    let owner_projection =
-        message_projection(conn, &observation, &message.provider, &message.message_id).await?;
+    let owner_projection = match derived {
+        Some((observation_id, effect)) if observation_id == authority.canonical_observation_id => {
+            effect
+                .messages()
+                .find(|candidate| {
+                    candidate.message().provider == message.provider
+                        && candidate.message().message_id == message.message_id
+                })
+                .cloned()
+                .ok_or(ProjectionStoreError::ProvenanceCollision)?
+        }
+        _ => {
+            message_projection(
+                conn,
+                &authority.canonical,
+                &message.provider,
+                &message.message_id,
+            )
+            .await?
+        }
+    };
     verify_provenance(conn, &owner_projection).await?;
     verify_rows(conn, &owner_projection).await
 }
