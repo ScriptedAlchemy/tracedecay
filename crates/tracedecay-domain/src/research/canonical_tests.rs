@@ -60,6 +60,35 @@ fn streaming_digest_matches_digest_of_canonical_bytes() {
     assert_eq!(combined_digest.as_str(), expected);
 }
 
+/// Sealed seating remints this digest once per chunk. Reusing the 64 KiB
+/// sink buffer must stay byte-identical to hashing the canonical bytes, both
+/// on the first call (cold buffer) and after the thread-local has been
+/// warmed by the same corpus.
+#[test]
+fn reusable_sink_preserves_canonical_digest_across_repeated_hashes() {
+    let value = json!({
+        "unicode": ["雪", "😀", "é"],
+        "nested": {"z": null, "a": [true, "line\nfeed", 42]},
+        "escaped": "quote: \" slash: \\ newline:\n tab:\t control:\u{0001}",
+        "authority": [
+            "tracedecay.exact-extraction-authority.v1",
+            {"id": "chunk.v1.fixture", "text": "pub fn reused_sink() -> u32 { 1 }\n"}
+        ],
+    });
+    let bytes = canonical_json_bytes(&value).unwrap();
+    let expected_from_bytes =
+        crate::canonical_text::encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
+    let first = canonical_sha256(&value).unwrap();
+    assert_eq!(first.as_str(), expected_from_bytes);
+    for _ in 0..64 {
+        assert_eq!(
+            canonical_sha256(&value).unwrap().as_str(),
+            first.as_str(),
+            "reused sink must not change the digest"
+        );
+    }
+}
+
 /// The streamed string writer must stay byte-identical to the allocating
 /// `serde_json::to_string` rendering it replaced, for every escape class.
 #[test]

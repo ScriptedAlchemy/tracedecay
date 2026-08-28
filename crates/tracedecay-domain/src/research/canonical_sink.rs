@@ -21,10 +21,18 @@ pub(super) struct BufferedSink<S: CanonicalSink> {
 
 impl<S: CanonicalSink> BufferedSink<S> {
     pub(super) fn new(inner: S) -> Self {
-        Self {
-            inner,
-            buffer: String::with_capacity(SINK_BUFFER_CAPACITY),
+        Self::with_buffer(inner, String::with_capacity(SINK_BUFFER_CAPACITY))
+    }
+
+    /// Wrap `inner` using an already-allocated buffer, keeping the 64 KiB
+    /// capacity contract. The seating remint path hashes hundreds of thousands
+    /// of chunks; reallocating this buffer per call was the dominant traffic.
+    pub(super) fn with_buffer(inner: S, mut buffer: String) -> Self {
+        buffer.clear();
+        if buffer.capacity() < SINK_BUFFER_CAPACITY {
+            buffer.reserve(SINK_BUFFER_CAPACITY);
         }
+        Self { inner, buffer }
     }
 
     fn flush(&mut self) {
@@ -35,9 +43,14 @@ impl<S: CanonicalSink> BufferedSink<S> {
     }
 
     /// Flush every buffered byte and return the wrapped sink.
-    pub(super) fn finish(mut self) -> S {
+    pub(super) fn finish(self) -> S {
+        self.finish_reuse().0
+    }
+
+    /// Flush every buffered byte and recover the reusable buffer.
+    pub(super) fn finish_reuse(mut self) -> (S, String) {
         self.flush();
-        self.inner
+        (self.inner, self.buffer)
     }
 }
 
