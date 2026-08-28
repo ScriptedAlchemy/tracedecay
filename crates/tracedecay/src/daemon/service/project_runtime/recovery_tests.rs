@@ -364,7 +364,9 @@ async fn a_retried_shutdown_cannot_readmit_a_cancelled_recovery_owner() {
     assert!(probe.is_cancelled());
     assert!(registry.shut_down_all().await);
     assert_eq!(
-        registry.publish(project, RecoveryCancelProbe::default()).await,
+        registry
+            .publish(project, RecoveryCancelProbe::default())
+            .await,
         Err(ProjectRuntimeRegistryError::Closed),
         "shutdown admission never reopens"
     );
