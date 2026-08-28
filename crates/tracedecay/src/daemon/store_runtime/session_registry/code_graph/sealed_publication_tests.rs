@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
@@ -769,4 +769,184 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     provider
         .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
         .expect_err("a foreign sealed digest must never be served from the offer");
+}
+
+/// The per-shard publication gate is one shared cell across retained runtime
+/// instances: the seat pass and the background reconcile publishing the same
+/// sealed generation serialize instead of racing the graph database into a
+/// Conflict, and the loser resumes the winner's exact verified head through
+/// the idempotent recovery arm. A request cancelled while another instance
+/// holds the gate answers typed cancellation without mutating the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn concurrent_publication_value() -> usize { 43 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(&project_root, &["commit", "-qm", "concurrent publication fixture"]);
+    let project_id = ProjectId::new("project.concurrent-code-publication").expect("project id");
+    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+    // Seal one real generation through the production worktree scheduler.
+    let store_root = root.join("code-index-store");
+    let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal the generation");
+    let latest = scheduler.latest_complete().expect("complete generation");
+    let repository_id = latest.generation().snapshot().repository.clone();
+    let reference = latest.generation().snapshot().reference.clone();
+    let worktree_id = scheduler.identity().worktree_id().clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    drop(scheduler);
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+    let replay_binding = || CodeGraphReplayBindingV1 {
+        generations_root: scoped_store.join("code-generations-v1"),
+        sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+            pointer.state_digest.clone(),
+        )
+        .expect("sealed state digest"),
+    };
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 47, "concurrent code publication")
+            .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+
+    let seat = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            repository_id.clone(),
+            worktree_id.clone(),
+            reference.clone(),
+            generation_id.clone(),
+            Arc::clone(&project_database),
+            replay_binding(),
+            None,
+        )
+        .await
+        .expect("retain the seat-pass code graph runtime");
+    let reconcile = registry
+        .retain_code_graph_runtime(
+            project_id,
+            repository_id,
+            worktree_id,
+            reference,
+            generation_id,
+            project_database,
+            replay_binding(),
+            None,
+        )
+        .await
+        .expect("retain the reconcile code graph runtime");
+    // Cross-instance exclusivity is one registry-owned gate cell per code
+    // shard; a per-instance gate would silently reintroduce the publication
+    // race this gate exists to prevent.
+    assert!(Arc::ptr_eq(
+        &seat.publication_gate,
+        &reconcile.publication_gate
+    ));
+
+    // A publisher cancelled while another instance holds the gate answers
+    // typed cancellation and leaves the publication journal untouched,
+    // whether the cancellation lands during the pre-gate projection or in the
+    // post-wait interruption check.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let held = seat
+        .publication_gate
+        .lock()
+        .expect("hold the publication gate");
+    let outcome = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            reconcile.publish_verified_snapshot(latest.generation(), Arc::clone(&cancelled))
+        });
+        cancelled.store(true, Ordering::Release);
+        drop(held);
+        worker.join().expect("join the cancelled publisher")
+    });
+    assert!(matches!(outcome, Err(GraphDbError::Cancelled)));
+    assert_unverified_publication_state(&reconcile, latest.generation(), false);
+
+    // The seat pass and the background reconcile publish the same sealed
+    // generation concurrently: the loser waits out the winner, then resumes
+    // the winner's exact publication instead of conflicting.
+    let (seat_outcome, reconcile_outcome) = std::thread::scope(|scope| {
+        let seat_worker = scope.spawn(|| {
+            seat.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        });
+        let reconcile_worker = scope.spawn(|| {
+            reconcile
+                .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        });
+        (
+            seat_worker.join().expect("join the seat publisher"),
+            reconcile_worker.join().expect("join the reconcile publisher"),
+        )
+    });
+    let seat_snapshot = seat_outcome.expect("seat publication");
+    let reconcile_snapshot = reconcile_outcome.expect("reconcile publication");
+    assert_eq!(seat_snapshot.generation(), reconcile_snapshot.generation());
+    assert_eq!(
+        seat_snapshot.verified_head(),
+        reconcile_snapshot.verified_head()
+    );
+
+    // The verified head advanced exactly once and the journal retains exactly
+    // the winner's active replay: the loser recovered the published head
+    // rather than appending a duplicate or double-advancing the head.
+    let (projection, key, _) = publication_replay(&seat, latest.generation());
+    with_publication_context("inspect-converged-publication", |context| {
+        let mut storage = seat
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        let head = storage
+            .verified_head(&projection, context)
+            .expect("verified graph head")
+            .expect("converged verified head");
+        assert_eq!(&head, seat_snapshot.verified_head());
+        assert!(matches!(
+            storage.replay(&key, context).expect("publication replay"),
+            GraphPublicationReplayLookupV1::Active(_)
+        ));
+    });
 }
