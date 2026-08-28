@@ -1600,16 +1600,16 @@ mod historical_publication_reuse_tests {
             1,
             "first publication must stream the recovered-digest proof exactly once"
         );
-        // The sealed per-generation copy pays its own two proofs (pre-compact
-        // and post-reopen) and never re-streams the staging rows.
+        // The sealed per-generation copy is proved after durable reopen,
+        // before it can be installed or answer a read.
         assert_eq!(
             sealed_copy_proofs(),
             if cfg!(feature = "graph-sealed-store") {
-                2
+                1
             } else {
                 0
             },
-            "a first seal proves the sealed copy before compaction and after reopen"
+            "a first seal proves the exact durable artifact before installation"
         );
         let head = first.head.clone();
         assert_eq!(first.snapshot.generation(), &manifest.generation);
