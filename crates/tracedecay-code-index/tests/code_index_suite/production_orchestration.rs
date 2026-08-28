@@ -1395,9 +1395,24 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
             "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
         ));
     }
+    // This test is about paging and cancellation resume, not about the parse
+    // budget, so the fixture must parse completely every time. A 1.5 MB file
+    // sits close enough to the 250ms default budget that a busy machine can
+    // time it out, publish a typed unsupported document, and fail this test
+    // for a reason it does not test. Pin a generous budget the same way the
+    // sibling budget test pins a 1ns one — deterministic in both directions.
+    let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
+        document: ParseLimits {
+            max_parse_time: Duration::from_secs(60),
+            ..ParseLimits::default()
+        },
+        ..RetainedParsePoolLimits::default()
+    })
+    .expect("retained parse pool");
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+        .expect("production owner")
+        .with_retained_parse_pool(pool);
     let generation = owner
         .build_and_publish(
             request_with_source(
