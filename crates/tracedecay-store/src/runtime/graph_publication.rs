@@ -98,6 +98,7 @@ sha256_digest!(
 );
 
 impl GraphCanonicalReplaySourceDigestV1 {
+    #[hotpath::measure(label = "store.graph_publication.replay_source_digest")]
     pub fn for_source(source: &[u8]) -> Self {
         Self(
             tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
@@ -212,6 +213,7 @@ impl GraphPublicationReplayV1 {
         Ok(replay)
     }
 
+    #[hotpath::measure(label = "store.graph_publication.validate_replay")]
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_graph_publication_shard(
             &self.key.projection.shard_id,

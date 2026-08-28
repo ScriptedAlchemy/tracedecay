@@ -33,6 +33,7 @@ pub struct SessionTemporalProjectionBatchV1 {
 }
 
 impl SessionTemporalProjectionBatchV1 {
+    #[hotpath::measure(label = "store.session.build_projection_batch")]
     pub fn new(
         session_id: SessionId,
         generation: SessionProjectionGenerationV1,
@@ -255,6 +256,7 @@ impl SessionTemporalProjectionBatchReceiptV1 {
                 });
             }
         }
+        crate::hotpath_observe::record_session_projection_batch_disposition(disposition);
         Ok(Self {
             session_id: batch.session_id().clone(),
             generation: batch.generation(),

@@ -3,7 +3,17 @@ use super::*;
 /// Applies one source commit against the caller's previously read state. The
 /// caller is responsible for placing this operation inside its authoritative
 /// database transaction.
+#[hotpath::measure(label = "store.external_source.apply_commit")]
 pub fn apply_source_commit(
+    current: Option<&SourceStoreStateV1>,
+    commit: SourceCommitV1,
+) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
+    let outcome = reduce_source_commit(current, commit);
+    crate::hotpath_observe::record_source_commit_outcome(&outcome);
+    outcome
+}
+
+fn reduce_source_commit(
     current: Option<&SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {

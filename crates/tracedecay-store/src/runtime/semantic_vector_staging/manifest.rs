@@ -111,6 +111,7 @@ impl Default for SemanticVectorChunkManifestAccumulator {
     }
 }
 
+#[hotpath::measure(label = "store.semantic_vector.manifest_digest")]
 pub fn semantic_vector_chunk_manifest_digest(
     sorted_members: &[SemanticVectorChunkManifestMember],
 ) -> Result<SemanticVectorChunkManifestDigest, StorageRuntimeContractErrorV1> {

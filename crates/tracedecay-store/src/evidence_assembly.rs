@@ -1289,6 +1289,7 @@ pub struct EvidenceAssemblyWriteV1 {
 }
 
 impl EvidenceAssemblyWriteV1 {
+    #[hotpath::measure(label = "store.evidence_assembly.validate_write")]
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
         validate_member_count(self.occurrences.len())?;
@@ -1548,7 +1549,10 @@ fn canonical_identity_digest<T: Serialize>(
     domain: &'static str,
     projection: &T,
 ) -> EvidenceAssemblyStoreResult<ManifestDigest> {
-    canonical_sha256(&(domain, projection)).map_err(invalid)
+    hotpath::measure_block!(
+        "store.evidence_assembly.identity_digest",
+        canonical_sha256(&(domain, projection)).map_err(invalid)
+    )
 }
 
 fn keyed_canonical_digest<T: Serialize>(

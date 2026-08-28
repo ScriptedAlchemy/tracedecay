@@ -1325,6 +1325,7 @@ impl SourceAuthorityPublicationApplyOutcomeV1 {
 ///
 /// This function is pure. Publishing the returned transition is a separate
 /// compare-and-set operation through [`apply_source_projection`].
+#[hotpath::measure(label = "store.external_source.build_projection")]
 pub fn build_source_projection(
     pending: &SourcePendingProjectionV1,
     projector: ComponentVersion,
@@ -1380,7 +1381,18 @@ pub fn build_source_projection(
 
 /// Publishes one deterministic projection transition with exact source and
 /// prior-projection compare-and-set semantics.
+#[hotpath::measure(label = "store.external_source.apply_projection")]
 pub fn apply_source_projection(
+    current: &SourceStoreStateV1,
+    pending: &SourcePendingProjectionV1,
+    projection: SourceProjectionCommitV1,
+) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
+    let outcome = reduce_source_projection(current, pending, projection);
+    crate::hotpath_observe::record_source_projection_outcome(&outcome);
+    outcome
+}
+
+fn reduce_source_projection(
     current: &SourceStoreStateV1,
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
