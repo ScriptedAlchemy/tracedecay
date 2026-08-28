@@ -405,6 +405,16 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    /// Whether this snapshot's head generation currently serves from its
+    /// sealed per-generation compact store (test observability).
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[must_use]
+    pub fn serves_from_sealed_store(&self) -> bool {
+        self.database
+            .sealed_generation_reader(&self.head.locator)
+            .is_some()
+    }
+
     pub(crate) fn lease_for_projection(
         &self,
         projection: &GraphProjectionIdentity,

@@ -34,6 +34,9 @@ use tracedecay_store::{
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]
 mod replay_decode;
+#[cfg(feature = "graph-sealed-store")]
+#[path = "verified_generation_contract/sealed_store.rs"]
+mod sealed_store;
 mod support;
 
 use support::{RegisteredGraph, TestCancellation, owner_registration, registration};
