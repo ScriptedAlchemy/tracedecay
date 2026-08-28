@@ -275,9 +275,16 @@ pub async fn run_foreground(
                 move || semantic_artifact_gc_cancel.cancel(),
                 move |_| async move { semantic_artifact_gc_join.shutdown().await },
             ),
-            shutdown_coordination::ShutdownOwner::new("maintenance", || {}, async move {
-                maintenance_join.shutdown().await;
-            }),
+            shutdown_coordination::ShutdownOwner::new(
+                "maintenance",
+                {
+                    let maintenance_cancel = maintenance.clone();
+                    move || maintenance_cancel.cancel()
+                },
+                async move {
+                    maintenance_join.shutdown().await;
+                },
+            ),
             shutdown_coordination::ShutdownOwner::with_deadline_result(
                 "http_application",
                 || {},
@@ -313,7 +320,10 @@ pub async fn run_foreground(
         // running past shutdown.
         vec![shutdown_coordination::ShutdownOwner::new(
             "invocation",
-            || {},
+            {
+                let invocation_cancel = invocation.clone();
+                move || invocation_cancel.cancel_admissions()
+            },
             async move {
                 invocation_join.shutdown().await;
             },
@@ -375,9 +385,14 @@ pub async fn run_foreground(
         &lifecycle,
         shutdown_deadline,
         async move {
-            shutdown_orchestration::DaemonShutdownPlan::new(clients, owner_phases, async move {
-                shutdown_project_servers(shutdown_deadline, &server_store_administration).await
-            })
+            shutdown_orchestration::DaemonShutdownPlan::new(
+                clients,
+                owner_phases,
+                move |project_server_deadline| async move {
+                    shutdown_project_servers(project_server_deadline, &server_store_administration)
+                        .await
+                },
+            )
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
@@ -760,7 +775,9 @@ async fn run_foreground_unix(
             shutdown_orchestration::DaemonShutdownPlan::new(
                 client_tasks,
                 owner_phases,
-                async move { server_engine.shutdown_servers(shutdown_deadline).await },
+                move |project_server_deadline| async move {
+                    server_engine.shutdown_servers(project_server_deadline).await
+                },
             )
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },

@@ -1192,7 +1192,7 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
             super::super::shutdown_orchestration::DaemonShutdownPlan::new(
                 clients,
                 Vec::new(),
-                async { super::super::store_shutdown::ShutdownTaskReceipt::default() },
+                |_| async { super::super::store_shutdown::ShutdownTaskReceipt::default() },
             )
         },
     )

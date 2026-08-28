@@ -1064,9 +1064,22 @@ impl MaintenanceCoordinator {
         self.wake.notify_one();
     }
 
-    pub(super) async fn shutdown(&self) {
+    /// Stop the maintenance loop from starting another pass, synchronously.
+    ///
+    /// This is the half of `shutdown` that must run at shutdown *prepare*
+    /// time rather than when this owner's join is finally polled: the
+    /// maintenance owner sits in an early phase, but when an earlier phase
+    /// overruns and the coordinator aborts the drain runner, an un-cancelled
+    /// loop keeps ticking (retention passes were still logging after the
+    /// terminal shutdown receipt). Cancelling here is idempotent, so the
+    /// join below stays correct whether or not it already ran.
+    pub(super) fn cancel(&self) {
         self.cancellation.cancel();
         self.wake.notify_waiters();
+    }
+
+    pub(super) async fn shutdown(&self) {
+        self.cancel();
         if let Some(task) = self.task.lock().await.take() {
             let _ = task.await;
         }

@@ -3,9 +3,17 @@
 //! `shutdown_owner_phases` names every retained background owner and hands it
 //! to the shutdown coordinator as (cancel, join) pairs in dependency order:
 //! producers first, then the invocation registry that admits provider work,
-//! then the store-settling reapers. Owners whose shutdown entry point already
-//! cancels internally get a no-op cancel side; the phase deadline still bounds
-//! their join and reports a typed timeout under the owner's name.
+//! then the store-settling reapers. The phase deadline bounds every join and
+//! reports a typed timeout under the owner's name.
+//!
+//! The `cancel` side is not decoration. `prepare_shutdown_owner_phases` runs
+//! every phase's `cancel` synchronously before the *first* join is polled, so
+//! an owner that only cancels inside its join future is not actually told to
+//! stop until its phase is reached — and if the coordinator aborts the drain
+//! runner first, it is never told at all and keeps running past the terminal
+//! receipt. Owners with a cheap synchronous stop (`invocation`, `maintenance`,
+//! `git_watcher`) therefore supply a real `cancel`; a `|| {}` cancel side is
+//! only correct where no synchronous stop exists.
 
 use std::sync::Arc;
 
@@ -50,7 +58,10 @@ impl DaemonEngine {
         vec![
             vec![ShutdownOwner::with_deadline_status(
                 "invocation",
-                || {},
+                {
+                    let invocation_cancel = self.invocation.clone();
+                    move || invocation_cancel.cancel_admissions()
+                },
                 move |_| async move {
                     if invocation_join.shutdown().await {
                         ShutdownStatus::Clean
@@ -82,9 +93,16 @@ impl DaemonEngine {
                 ShutdownOwner::new("host_admission_replay", || {}, async move {
                     replay_join.shutdown_host_admission_replay().await;
                 }),
-                ShutdownOwner::new("maintenance", || {}, async move {
-                    maintenance_join.shutdown().await;
-                }),
+                ShutdownOwner::new(
+                    "maintenance",
+                    {
+                        let maintenance_cancel = self.maintenance_coordinator.clone();
+                        move || maintenance_cancel.cancel()
+                    },
+                    async move {
+                        maintenance_join.shutdown().await;
+                    },
+                ),
                 ShutdownOwner::with_deadline_status(
                     "git_watcher",
                     move || watcher_cancel.cancel(),
@@ -245,7 +263,9 @@ impl DaemonEngine {
             DaemonShutdownPlan::new(
                 tokio::task::JoinSet::<crate::errors::Result<()>>::new(),
                 owner_phases,
-                async move { server_engine.shutdown_servers(deadline).await },
+                move |project_server_deadline| async move {
+                    server_engine.shutdown_servers(project_server_deadline).await
+                },
             )
             .with_terminal_owner_phases(vec![vec![terminal_owner]])
         })
