@@ -18,6 +18,17 @@ use crate::{
 
 const MAX_PROJECTION_PAGE_ITEMS: usize = 100_000;
 
+/// The label pair and identity property that name one ordered identity domain:
+/// the projection-scoped owner label, the record label that separates entities
+/// from relations within it, and the property each record files its identity
+/// under.
+#[derive(Clone, Copy)]
+pub(crate) struct IdentityScope<'a> {
+    pub(crate) owner_label: &'a str,
+    pub(crate) record_label: &'a str,
+    pub(crate) identity_property: &'a str,
+}
+
 #[derive(Clone)]
 pub struct GraphProjectionReadRequest {
     pub namespace: GraphNamespace,
@@ -140,24 +151,14 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(namespace, projection)?;
         let owner_label = entity_projection_domain_label(namespace, projection, label);
-        let total_entities = count_labeled_nodes(
-            self,
-            database,
-            &owner_label,
-            ENTITY_LABEL,
-            ENTITY_ID_PROPERTY,
-            cancellation.as_ref(),
-        )?;
-        let identities = query_identity_page(
-            self,
-            database,
-            &owner_label,
-            ENTITY_LABEL,
-            ENTITY_ID_PROPERTY,
-            None,
-            limit,
-            cancellation.as_ref(),
-        )?;
+        let scope = IdentityScope {
+            owner_label: &owner_label,
+            record_label: ENTITY_LABEL,
+            identity_property: ENTITY_ID_PROPERTY,
+        };
+        let total_entities = count_labeled_nodes(self, database, scope, cancellation.as_ref())?;
+        let identities =
+            query_identity_page(self, database, scope, None, limit, cancellation.as_ref())?;
         let mut entities = Vec::with_capacity(identities.len());
         for identity in identities {
             let identity = GraphEntityId::new(identity)
@@ -223,17 +224,21 @@ fn projection_telemetry(
     let entity_count = count_labeled_nodes(
         handle,
         database,
-        &entity_projection_label(&request.namespace, &request.projection),
-        ENTITY_LABEL,
-        ENTITY_ID_PROPERTY,
+        IdentityScope {
+            owner_label: &entity_projection_label(&request.namespace, &request.projection),
+            record_label: ENTITY_LABEL,
+            identity_property: ENTITY_ID_PROPERTY,
+        },
         request.cancellation.as_ref(),
     )?;
     let relation_count = count_labeled_nodes(
         handle,
         database,
-        &relation_projection_label(&request.namespace, &request.projection),
-        RELATION_LABEL,
-        RELATION_ID_PROPERTY,
+        IdentityScope {
+            owner_label: &relation_projection_label(&request.namespace, &request.projection),
+            record_label: RELATION_LABEL,
+            identity_property: RELATION_ID_PROPERTY,
+        },
         request.cancellation.as_ref(),
     )?;
     check_cancelled(request.cancellation.as_ref())?;
@@ -286,9 +291,11 @@ fn read_entity_page(
     let identities = query_identity_page(
         handle,
         database,
-        &owner_label,
-        ENTITY_LABEL,
-        ENTITY_ID_PROPERTY,
+        IdentityScope {
+            owner_label: &owner_label,
+            record_label: ENTITY_LABEL,
+            identity_property: ENTITY_ID_PROPERTY,
+        },
         request.after_entity.as_ref().map(GraphEntityId::as_str),
         request.max_entities.saturating_add(1),
         request.cancellation.as_ref(),
@@ -330,9 +337,11 @@ fn read_relation_page(
     let identities = query_identity_page(
         handle,
         database,
-        &owner_label,
-        RELATION_LABEL,
-        RELATION_ID_PROPERTY,
+        IdentityScope {
+            owner_label: &owner_label,
+            record_label: RELATION_LABEL,
+            identity_property: RELATION_ID_PROPERTY,
+        },
         request.after_relation.as_ref().map(GraphRelationId::as_str),
         request.max_relations.saturating_add(1),
         request.cancellation.as_ref(),
@@ -414,9 +423,7 @@ fn authenticate_relation_cursor(
 fn query_identity_page(
     handle: &GraphDb,
     database: &GrafeoDB,
-    owner_label: &str,
-    record_label: &str,
-    identity_property: &str,
+    scope: IdentityScope<'_>,
     after: Option<&str>,
     limit: usize,
     cancellation: &dyn GraphCancellation,
@@ -425,24 +432,15 @@ fn query_identity_page(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let page = match handle.inner.identity_indexes.ordered_identities(
-        database,
-        owner_label,
-        record_label,
-        identity_property,
-        cancellation,
-    )? {
-        Some(index) => index.page(after, limit),
-        None => streaming_identity_page(
-            database,
-            owner_label,
-            record_label,
-            identity_property,
-            after,
-            limit,
-            cancellation,
-        )?,
-    };
+    let page =
+        match handle
+            .inner
+            .identity_indexes
+            .ordered_identities(database, scope, cancellation)?
+        {
+            Some(index) => index.page(after, limit),
+            None => streaming_identity_page(database, scope, after, limit, cancellation)?,
+        };
     check_cancelled(cancellation)?;
     Ok(page)
 }
@@ -452,13 +450,16 @@ fn query_identity_page(
 /// projection's size.
 fn streaming_identity_page(
     database: &GrafeoDB,
-    owner_label: &str,
-    record_label: &str,
-    identity_property: &str,
+    scope: IdentityScope<'_>,
     after: Option<&str>,
     limit: usize,
     cancellation: &dyn GraphCancellation,
 ) -> Result<Vec<String>, GraphDbError> {
+    let IdentityScope {
+        owner_label,
+        record_label,
+        identity_property,
+    } = scope;
     let nodes = labeled_projection_nodes(database, owner_label, record_label)?;
     let store = database.graph_store();
     let mut page: BTreeSet<String> = BTreeSet::new();
@@ -497,22 +498,21 @@ fn streaming_identity_page(
 fn count_labeled_nodes(
     handle: &GraphDb,
     database: &GrafeoDB,
-    owner_label: &str,
-    record_label: &str,
-    identity_property: &str,
+    scope: IdentityScope<'_>,
     cancellation: &dyn GraphCancellation,
 ) -> Result<u64, GraphDbError> {
     check_cancelled(cancellation)?;
-    let count = match handle.inner.identity_indexes.ordered_identities(
-        database,
-        owner_label,
-        record_label,
-        identity_property,
-        cancellation,
-    )? {
-        Some(index) => index.node_count(),
-        None => labeled_projection_nodes(database, owner_label, record_label)?.len(),
-    };
+    let count =
+        match handle
+            .inner
+            .identity_indexes
+            .ordered_identities(database, scope, cancellation)?
+        {
+            Some(index) => index.node_count(),
+            None => {
+                labeled_projection_nodes(database, scope.owner_label, scope.record_label)?.len()
+            }
+        };
     let count = u64::try_from(count).map_err(|_| GraphDbError::Corrupt {
         message: "projection count query returned a negative cardinality".to_owned(),
     })?;
@@ -562,7 +562,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{query_identity_page, streaming_identity_page};
+    use super::{IdentityScope, query_identity_page, streaming_identity_page};
     use crate::schema::{ENTITY_ID_PROPERTY, ENTITY_LABEL, entity_projection_label};
     use crate::{
         GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -571,6 +571,14 @@ mod tests {
     };
 
     const PAGE: usize = 1_024;
+
+    fn scope(owner_label: &str) -> IdentityScope<'_> {
+        IdentityScope {
+            owner_label,
+            record_label: ENTITY_LABEL,
+            identity_property: ENTITY_ID_PROPERTY,
+        }
+    }
 
     fn memory_db() -> GraphDbLeaseV1 {
         GraphDbOwner::open(GraphDbOpenOptions {
@@ -635,9 +643,7 @@ mod tests {
                 query_identity_page(
                     db,
                     database,
-                    &owner_label,
-                    ENTITY_LABEL,
-                    ENTITY_ID_PROPERTY,
+                    scope(&owner_label),
                     after.as_deref(),
                     PAGE,
                     &cancellation,
@@ -646,9 +652,7 @@ mod tests {
             } else {
                 streaming_identity_page(
                     database,
-                    &owner_label,
-                    ENTITY_LABEL,
-                    ENTITY_ID_PROPERTY,
+                    scope(&owner_label),
                     after.as_deref(),
                     PAGE,
                     &cancellation,
@@ -686,14 +690,17 @@ mod tests {
         );
         let cancellation = NeverCancelled;
 
-        for after in [None, Some("chunk-000000000"), Some("chunk-000000123"), Some("zzz")] {
+        for after in [
+            None,
+            Some("chunk-000000000"),
+            Some("chunk-000000123"),
+            Some("zzz"),
+        ] {
             for limit in [1usize, 7, 64, 1_000] {
                 let indexed = query_identity_page(
                     &db,
                     database,
-                    &owner_label,
-                    ENTITY_LABEL,
-                    ENTITY_ID_PROPERTY,
+                    scope(&owner_label),
                     after,
                     limit,
                     &cancellation,
@@ -701,9 +708,7 @@ mod tests {
                 .unwrap();
                 let streamed = streaming_identity_page(
                     database,
-                    &owner_label,
-                    ENTITY_LABEL,
-                    ENTITY_ID_PROPERTY,
+                    scope(&owner_label),
                     after,
                     limit,
                     &cancellation,
@@ -727,12 +732,10 @@ mod tests {
             query_identity_page(
                 &db,
                 database,
-                &entity_projection_label(
+                scope(&entity_projection_label(
                     &GraphNamespace::new("project").unwrap(),
                     &GraphProjectionId::new("invalidate").unwrap(),
-                ),
-                ENTITY_LABEL,
-                ENTITY_ID_PROPERTY,
+                )),
                 None,
                 100,
                 &NeverCancelled,
@@ -748,12 +751,10 @@ mod tests {
         let after = query_identity_page(
             &db,
             database,
-            &entity_projection_label(
+            scope(&entity_projection_label(
                 &GraphNamespace::new("project").unwrap(),
                 &GraphProjectionId::new("invalidate").unwrap(),
-            ),
-            ENTITY_LABEL,
-            ENTITY_ID_PROPERTY,
+            )),
             None,
             100,
             &NeverCancelled,

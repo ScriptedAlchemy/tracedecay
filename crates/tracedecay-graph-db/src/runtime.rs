@@ -138,8 +138,7 @@ impl GraphDb {
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(quarantined_projections),
-                identity_indexes:
-                    crate::projection_identity_index::IdentityIndexCache::default(),
+                identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),

@@ -33,6 +33,7 @@ use std::sync::{Arc, RwLock};
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection_read::IdentityScope;
 use crate::schema::{has_native_label, nodes_with_label, nodes_with_label_count};
 use crate::{GraphCancellation, GraphDbError};
 
@@ -121,31 +122,23 @@ impl IdentityIndexCache {
     pub(crate) fn ordered_identities(
         &self,
         database: &GrafeoDB,
-        owner_label: &str,
-        record_label: &str,
-        identity_property: &str,
+        scope: IdentityScope<'_>,
         cancellation: &dyn GraphCancellation,
     ) -> Result<Option<Arc<ProjectionIdentityIndex>>, GraphDbError> {
         let epoch = self.epoch.load(Ordering::Acquire);
-        let owner_node_count = nodes_with_label_count(database.graph_store().as_ref(), owner_label);
+        let owner_node_count =
+            nodes_with_label_count(database.graph_store().as_ref(), scope.owner_label);
         let key = IdentityIndexKey {
-            owner_label: owner_label.to_owned(),
-            record_label: record_label.to_owned(),
-            identity_property: identity_property.to_owned(),
+            owner_label: scope.owner_label.to_owned(),
+            record_label: scope.record_label.to_owned(),
+            identity_property: scope.identity_property.to_owned(),
         };
 
         if let Some(index) = self.cached(&key, epoch, owner_node_count)? {
             return Ok(Some(index));
         }
 
-        let Some(index) = build_identity_index(
-            database,
-            owner_label,
-            record_label,
-            identity_property,
-            owner_node_count,
-            cancellation,
-        )?
+        let Some(index) = build_identity_index(database, scope, owner_node_count, cancellation)?
         else {
             return Ok(None);
         };
@@ -193,13 +186,16 @@ impl IdentityIndexCache {
 #[hotpath::measure(label = "graph_db.projection.identity_index.build")]
 fn build_identity_index(
     database: &GrafeoDB,
-    owner_label: &str,
-    record_label: &str,
-    identity_property: &str,
+    scope: IdentityScope<'_>,
     owner_node_count: usize,
     cancellation: &dyn GraphCancellation,
 ) -> Result<Option<ProjectionIdentityIndex>, GraphDbError> {
     check_cancelled(cancellation)?;
+    let IdentityScope {
+        owner_label,
+        record_label,
+        identity_property,
+    } = scope;
     let store = database.graph_store();
     let mut identities: Vec<Box<str>> = Vec::new();
     let mut identity_bytes = 0usize;
@@ -282,7 +278,10 @@ mod tests {
             vec!["b".to_owned(), "c".to_owned()]
         );
         // A cursor that is not itself an identity still bounds the page.
-        assert_eq!(index.page(Some("aa"), 10), vec!["b".to_owned(), "c".to_owned()]);
+        assert_eq!(
+            index.page(Some("aa"), 10),
+            vec!["b".to_owned(), "c".to_owned()]
+        );
         assert!(index.page(Some("c"), 10).is_empty());
         assert!(index.page(Some("z"), 10).is_empty());
     }
