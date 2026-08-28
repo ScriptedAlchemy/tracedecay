@@ -660,6 +660,7 @@ impl Worker {
                     checkpoint.hard_drain_required(),
                 ));
                 if matches!(wake, WorkerWake::CheckpointRetry) {
+                    crate::hotpath_observe::record_checkpoint_hard_retry_wake();
                     self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
                 } else {
                     apply_wake(

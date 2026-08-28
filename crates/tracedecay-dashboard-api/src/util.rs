@@ -54,13 +54,23 @@ pub async fn collect_rows(
 /// Runs a query and collects all rows as JSON objects. On SQL errors returns
 /// the error message so handlers can surface it in the payload's `error`
 /// field (mirroring the Python APIs, which never 500 on a bad/missing DB).
+///
+/// One static hotpath bucket per helper: direct rusqlite has no SQL adapter,
+/// so these seams are where per-request store-read demand (and N+1 call
+/// storms) become visible without leaking query text into labels.
 pub async fn query_rows(
     conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<Vec<Value>, String> {
-    let rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
-    collect_rows(rows).await.map_err(|e| e.to_string())
+    hotpath::future!(
+        async move {
+            let rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
+            collect_rows(rows).await.map_err(|e| e.to_string())
+        },
+        label = "dashboard_api.store.query_rows"
+    )
+    .await
 }
 
 /// Runs a scalar `SELECT COUNT(*)`-style query; errors and missing rows
@@ -70,13 +80,19 @@ pub async fn query_i64(
     sql: &str,
     params: impl IntoParams,
 ) -> i64 {
-    let Ok(mut rows) = conn.query(sql, params).await else {
-        return 0;
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
-        _ => 0,
-    }
+    hotpath::future!(
+        async move {
+            let Ok(mut rows) = conn.query(sql, params).await else {
+                return 0;
+            };
+            match rows.next().await {
+                Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
+                _ => 0,
+            }
+        },
+        label = "dashboard_api.store.query_scalar"
+    )
+    .await
 }
 
 /// Runs a scalar integer query while preserving SQL, row-iteration, empty-row,
@@ -86,13 +102,19 @@ pub async fn query_i64_result(
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<i64, String> {
-    let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "scalar query returned no rows".to_string())?;
-    row.get::<i64>(0).map_err(|e| e.to_string())
+    hotpath::future!(
+        async move {
+            let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "scalar query returned no rows".to_string())?;
+            row.get::<i64>(0).map_err(|e| e.to_string())
+        },
+        label = "dashboard_api.store.query_scalar_result"
+    )
+    .await
 }
 
 /// Clamps a user-supplied limit (mirrors `_coerce_limit` in the Python APIs).

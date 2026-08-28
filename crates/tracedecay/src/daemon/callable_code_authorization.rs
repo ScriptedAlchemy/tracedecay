@@ -12,6 +12,7 @@ use tracedecay_domain::{ComponentVersion, UtcMicros};
 
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{ConfigurationControlStore, ProjectConfigurationRuntime};
+use tracedecay_usecases::graph::CodeGraphReadError;
 
 type CurrentAccessFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
@@ -115,6 +116,36 @@ impl DaemonCodeGraphReadAdmission {
             authorization,
         }
     }
+
+    async fn admit_graph_read(
+        &self,
+        request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'_>,
+    ) -> Result<RequestContext, CodeGraphReadError> {
+        let access = self
+            .authorization
+            .current(request.observed_at)
+            .await
+            .map_err(map_graph_admission_problem)?;
+        if access.scope != self.scope {
+            return Err(CodeGraphReadError::Denied);
+        }
+        let context = crate::daemon::service::invocation::callable_code_request_context(
+            &self.scope,
+            &access,
+            request.request_id.as_str(),
+            request.operation,
+            request.observed_at,
+            request.deadline,
+            request.cancellation.context(),
+        )
+        .map_err(map_graph_admission_problem)?;
+        self.authorization
+            .authorize(access)
+            .admit(&context, request.operation, request.observed_at)
+            .await
+            .map_err(map_graph_admission_problem)?;
+        Ok(context)
+    }
 }
 
 impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for DaemonCodeGraphReadAdmission {
@@ -123,41 +154,58 @@ impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for DaemonCodeGraphR
         request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'a>,
     ) -> tracedecay_usecases::graph::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
-            hotpath::measure_block!("daemon.authority.callable_code.admit", {
-                let access = self
-                    .authorization
-                    .current(request.observed_at)
-                    .await
-                    .map_err(map_graph_admission_problem)?;
-                if access.scope != self.scope {
-                    return Err(tracedecay_usecases::graph::CodeGraphReadError::Denied);
-                }
-                let context = crate::daemon::service::invocation::callable_code_request_context(
-                    &self.scope,
-                    &access,
-                    request.request_id.as_str(),
-                    request.operation,
-                    request.observed_at,
-                    request.deadline,
-                    request.cancellation.context(),
-                )
-                .map_err(map_graph_admission_problem)?;
-                self.authorization
-                    .authorize(access)
-                    .admit(&context, request.operation, request.observed_at)
-                    .await
-                    .map_err(map_graph_admission_problem)?;
-                Ok(context)
-            })
+            let admission = hotpath::measure_block!(
+                "daemon.authority.callable_code.admit",
+                self.admit_graph_read(request).await
+            );
+            record_graph_read_admission(&admission);
+            admission
         })
     }
 }
 
-fn map_graph_admission_problem(
-    problem: ApplicationProblem,
-) -> tracedecay_usecases::graph::CodeGraphReadError {
-    use tracedecay_usecases::graph::CodeGraphReadError;
+/// Tallies one graph-read admission decision against its exact typed outcome.
+/// The reason set is the closed [`CodeGraphReadError`] enum, so every gauge
+/// key stays compile-time static.
+fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
+    match admission {
+        Ok(_) => {
+            hotpath::gauge!("daemon.code_authorization.admit.admitted").inc(1.0);
+        }
+        Err(CodeGraphReadError::MissingRegistry) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.missing_registry").inc(1.0);
+        }
+        Err(CodeGraphReadError::Unavailable { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.unavailable").inc(1.0);
+        }
+        Err(CodeGraphReadError::ResetRequired { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.reset_required").inc(1.0);
+        }
+        Err(CodeGraphReadError::Stale { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.stale").inc(1.0);
+        }
+        Err(CodeGraphReadError::Cancelled) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.cancelled").inc(1.0);
+        }
+        Err(CodeGraphReadError::TimedOut) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.timed_out").inc(1.0);
+        }
+        Err(CodeGraphReadError::BudgetExhausted { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.budget_exhausted").inc(1.0);
+        }
+        Err(CodeGraphReadError::Denied) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.denied").inc(1.0);
+        }
+        Err(CodeGraphReadError::InvalidRequest { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.invalid_request").inc(1.0);
+        }
+        Err(CodeGraphReadError::Corrupt { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.corrupt").inc(1.0);
+        }
+    }
+}
 
+fn map_graph_admission_problem(problem: ApplicationProblem) -> CodeGraphReadError {
     match problem.kind() {
         ApplicationProblemKind::InvalidRequest => CodeGraphReadError::InvalidRequest {
             detail: "the code-graph read admission request is invalid".to_owned(),
@@ -189,8 +237,28 @@ pub(super) struct DaemonCallableCodeAuthorization {
 }
 
 impl DaemonCallableCodeAuthorization {
-    #[hotpath::measure(label = "daemon.authority.callable_code.authorize", future = true)]
     async fn route_receipt(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let receipt = self
+            .route_receipt_checked(context, operation, observed_at)
+            .await;
+        match &receipt {
+            Ok(_) => {
+                hotpath::gauge!("daemon.code_authorization.authorize.granted").inc(1.0);
+            }
+            Err(_) => {
+                hotpath::gauge!("daemon.code_authorization.authorize.refused").inc(1.0);
+            }
+        }
+        receipt
+    }
+
+    #[hotpath::measure(label = "daemon.authority.callable_code.authorize", future = true)]
+    async fn route_receipt_checked(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
@@ -242,23 +310,46 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            hotpath::measure_block!("daemon.authority.callable_code.recheck", {
-                let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
-                    return Err(concealed());
-                };
-                let current = self.route_receipt(context, operation, observed_at).await?;
-                if admission.grant_id != current.grant_id
-                    || admission.grant_revision != current.grant_revision
-                    || admission.grant_digest != current.grant_digest
-                    || admission.authorized_scope_digest != current.authorized_scope_digest
-                    || admission.disclosure != current.disclosure
-                    || admission.policy != current.policy
-                {
-                    return Err(concealed());
+            let receipt = hotpath::measure_block!(
+                "daemon.authority.callable_code.recheck",
+                self.recheck_route(context, operation, admission, observed_at)
+                    .await
+            );
+            match &receipt {
+                Ok(_) => {
+                    hotpath::gauge!("daemon.code_authorization.recheck.granted").inc(1.0);
                 }
-                Ok(current)
-            })
+                Err(_) => {
+                    hotpath::gauge!("daemon.code_authorization.recheck.refused").inc(1.0);
+                }
+            }
+            receipt
         })
+    }
+}
+
+impl DaemonCallableCodeAuthorization {
+    async fn recheck_route(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        admission: &CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
+            return Err(concealed());
+        };
+        let current = self.route_receipt(context, operation, observed_at).await?;
+        if admission.grant_id != current.grant_id
+            || admission.grant_revision != current.grant_revision
+            || admission.grant_digest != current.grant_digest
+            || admission.authorized_scope_digest != current.authorized_scope_digest
+            || admission.disclosure != current.disclosure
+            || admission.policy != current.policy
+        {
+            return Err(concealed());
+        }
+        Ok(current)
     }
 }
 

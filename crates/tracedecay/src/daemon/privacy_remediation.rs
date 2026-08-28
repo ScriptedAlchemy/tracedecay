@@ -29,6 +29,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
         let project = graph.project_root().display().to_string();
         match run_project_memory_privacy_remediation(&graph).await {
             Ok(receipt) => {
+                hotpath::gauge!("daemon.privacy.remediation.memory_completed_total").inc(1_u64);
                 tracing::info!(
                     event = "project_memory_privacy_remediation",
                     project = %project,
@@ -42,6 +43,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
                 );
             }
             Err(error) => {
+                hotpath::gauge!("daemon.privacy.remediation.memory_failed_total").inc(1_u64);
                 tracing::warn!(
                     event = "project_memory_privacy_remediation_failed",
                     project = %project,
@@ -50,8 +52,11 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
             }
         }
         match session_db.lcm_privacy_rescan_raw_messages().await {
-            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent) => {}
+            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent) => {
+                hotpath::gauge!("daemon.privacy.remediation.lcm_current_total").inc(1_u64);
+            }
             Ok(LcmPrivacyRescanOutcomeV1::Completed(receipt)) => {
+                hotpath::gauge!("daemon.privacy.remediation.lcm_completed_total").inc(1_u64);
                 tracing::info!(
                     event = "lcm_privacy_remediation",
                     project = %project,
@@ -64,6 +69,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
                 );
             }
             Err(error) => {
+                hotpath::gauge!("daemon.privacy.remediation.lcm_failed_total").inc(1_u64);
                 tracing::warn!(
                     event = "lcm_privacy_remediation_failed",
                     project = %project,

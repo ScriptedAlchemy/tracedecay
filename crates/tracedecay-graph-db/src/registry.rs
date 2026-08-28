@@ -234,7 +234,7 @@ struct RegistryState {
 
 enum RegistryEntry {
     Opening {
-        authority_attachment: Box<dyn RetainedGraphStoreOwnerAttachmentV1>,
+        authority: OpeningAuthority,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -274,6 +274,52 @@ enum RegistryEntry {
         owner: Option<GraphDbOwner>,
         error: GraphDbError,
     },
+}
+
+/// Store map-owner authority held by an `Opening` slot.
+///
+/// The `Opening` slot stays in the entry map for the entire native open, so
+/// the singleflight for one store identity lives under this registry's own
+/// lock: a concurrent same-identity owner attacher observes a typed
+/// `Conflict` instead of mounting a second native open, ordinary lease
+/// registrations wait for the one in-flight open, and capacity accounting
+/// keeps the materializing runtime occupied.
+enum OpeningAuthority {
+    /// Attachment parked before the native open starts (the capacity
+    /// eviction settles while the slot is already claimed).
+    Parked(Box<dyn RetainedGraphStoreOwnerAttachmentV1>),
+    /// The attachment moved into the in-flight native open of the mounting
+    /// call; the slot is settled or released when that open returns.
+    NativeOpenInFlight,
+}
+
+/// Releases an in-flight `Opening` slot when its mounting call exits without
+/// writing terminal truth — plain open failures and unwinds. Terminal
+/// settlements (`Ready`/`Faulted`) overwrite the slot first, which makes this
+/// guard a no-op: `remove_opening` verifies identity and only ever removes
+/// `Opening` entries.
+struct OpeningMountGuard<'registry> {
+    registry: &'registry GraphDbRegistry,
+    shard_id: StoreShardIdV1,
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    path: PathBuf,
+    expected_format: GraphFormatVersion,
+}
+
+impl Drop for OpeningMountGuard<'_> {
+    fn drop(&mut self) {
+        // Best-effort by design: `Drop` cannot surface errors, and a poisoned
+        // registry lock already fails every registry operation, so an
+        // `Opening` slot leaked behind it is unreachable anyway.
+        let _ = self.registry.remove_opening(
+            &self.shard_id,
+            &self.binding,
+            &self.verified_locator,
+            &self.path,
+            self.expected_format,
+        );
+    }
 }
 
 struct Eviction {
@@ -807,6 +853,15 @@ impl GraphDbRegistry {
     /// This is deliberately the only entry-creation path. Ordinary
     /// [`GraphDbRegistration`] values can resolve an already mounted entry,
     /// but cannot turn an operation lease into map ownership.
+    ///
+    /// The `Opening` slot is checked and held under this registry's own lock
+    /// for the entire native open (one singleflight per store identity): a
+    /// concurrent same-identity attacher observes a typed
+    /// [`GraphDbError::Conflict`] instead of running a second identical open,
+    /// ordinary lease registrations wait for the one in-flight open, and
+    /// capacity accounting keeps the materializing runtime occupied. A plain
+    /// open failure releases the slot for remount; `ResetRequired`,
+    /// `Corrupt`, and `DurabilityUncertain` retain a terminal `Faulted` slot.
     #[hotpath::measure(label = "graph_db.registry.attach", impl_type = "GraphDbRegistry")]
     pub fn resolve_owner_attachment(
         &self,
@@ -890,6 +945,10 @@ impl GraphDbRegistry {
                             ),
                             (&binding, &verified_locator, &path, expected_format),
                         )?;
+                        // Same-identity attach against a mounted (or still
+                        // materializing) runtime: no native open runs, so a
+                        // profile can separate these hits from full opens.
+                        hotpath::gauge!("graph_db.registry.attach.already_mounted").inc(1.0);
                         return Err(GraphDbError::Conflict);
                     }
                     Some(RegistryEntry::Faulted {
@@ -918,7 +977,7 @@ impl GraphDbRegistry {
             state.entries.insert(
                 shard_id.clone(),
                 RegistryEntry::Opening {
-                    authority_attachment,
+                    authority: OpeningAuthority::Parked(authority_attachment),
                     binding: binding.clone(),
                     verified_locator: verified_locator.clone(),
                     path: path.clone(),
@@ -940,31 +999,75 @@ impl GraphDbRegistry {
             }
         }
 
-        let (authority_attachment, binding, verified_locator, path, expected_format) = {
+        // Move the parked Store attachment into the native open while the
+        // `Opening` slot itself stays mounted: the in-flight open must remain
+        // visible under this registry's own lock so same-identity attachers
+        // conflict, lease waiters wait, and capacity stays claimed.
+        let authority_attachment = {
             let mut state = self.state_lock()?;
-            let Some(RegistryEntry::Opening {
-                authority_attachment,
-                binding,
-                verified_locator,
-                path,
-                expected_format,
-            }) = state.entries.remove(&shard_id)
+            let Some(RegistryEntry::Opening { authority, .. }) = state.entries.get_mut(&shard_id)
             else {
                 return Err(GraphDbError::unavailable(
                     "graph owner attachment mount disappeared before completion",
                 ));
             };
-            (
-                authority_attachment,
-                binding,
-                verified_locator,
-                path,
-                expected_format,
-            )
+            match std::mem::replace(authority, OpeningAuthority::NativeOpenInFlight) {
+                OpeningAuthority::Parked(authority_attachment) => authority_attachment,
+                OpeningAuthority::NativeOpenInFlight => {
+                    return Err(GraphDbError::unavailable(
+                        "graph owner attachment mount is already opening natively",
+                    ));
+                }
+            }
+        };
+        hotpath::gauge!("graph_db.registry.attach.full_open").inc(1.0);
+        // Dropped on every exit below: releases the in-flight slot after a
+        // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
+        // has overwritten it.
+        let _opening_slot_guard = OpeningMountGuard {
+            registry: self,
+            shard_id: shard_id.clone(),
+            binding: binding.clone(),
+            verified_locator: verified_locator.clone(),
+            path: path.clone(),
+            expected_format,
         };
         let opened =
             open_registered_graph(&path, expected_format, &operation, authority_attachment);
         let mut state = self.state_lock()?;
+        let slot_is_this_mount = state.entries.get(&shard_id).is_some_and(|entry| {
+            matches!(
+                entry,
+                RegistryEntry::Opening {
+                    authority: OpeningAuthority::NativeOpenInFlight,
+                    ..
+                }
+            ) && require_binding(
+                identity::binding(entry),
+                (&binding, &verified_locator, &path, expected_format),
+            )
+            .is_ok()
+        });
+        if !slot_is_this_mount {
+            drop(state);
+            let vanished = GraphDbError::unavailable(
+                "graph owner attachment mount disappeared before completion",
+            );
+            return match opened {
+                // The freshly opened native handle has no registry slot left
+                // to publish into; close it instead of leaking the exclusive
+                // native lock until process exit.
+                Ok(owner) => match owner.close() {
+                    Ok(()) => Err(vanished),
+                    Err(close_error) => Err(crate::error::rollback_failure(
+                        "close unpublishable graph owner mount",
+                        vanished,
+                        close_error,
+                    )),
+                },
+                Err(_) => Err(vanished),
+            };
+        }
         match opened {
             Ok(owner) => {
                 let attachment = match owner.issue_owner_attachment(
@@ -974,7 +1077,8 @@ impl GraphDbRegistry {
                 ) {
                     Ok(attachment) => attachment,
                     Err(error) => {
-                        self.inner.changed.notify_all();
+                        // The slot guard removes the in-flight `Opening`
+                        // entry and wakes waiters once `state` unlocks.
                         return Err(error);
                     }
                 };
@@ -1008,7 +1112,8 @@ impl GraphDbRegistry {
                     self.inner.changed.notify_all();
                     Err(error)
                 } else {
-                    self.inner.changed.notify_all();
+                    // The slot guard releases the `Opening` entry for remount
+                    // and wakes waiters once `state` unlocks.
                     Err(error)
                 }
             }
@@ -2077,8 +2182,8 @@ fn entry_is_capacity_evictable(entry: &RegistryEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2320,6 +2425,230 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             true
         }
+    }
+
+    struct FlagCancellation(Arc<AtomicBool>);
+
+    impl GraphCancellation for FlagCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    struct NativeOpenGate {
+        released: Mutex<bool>,
+        changed: Condvar,
+        cancel_on_release: bool,
+    }
+
+    impl NativeOpenGate {
+        fn new(cancel_on_release: bool) -> Arc<Self> {
+            Arc::new(Self {
+                released: Mutex::new(false),
+                changed: Condvar::new(),
+                cancel_on_release,
+            })
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// Blocks the mounting call inside `open_registered_graph` until the test
+    /// releases the gate: the second cancellation poll runs after the
+    /// `Opening` slot switched to its in-flight native open, so concurrent
+    /// attachers and lease waiters deterministically observe the held slot.
+    struct NativeOpenGateCancellation {
+        polls: AtomicUsize,
+        entered: mpsc::Sender<()>,
+        gate: Arc<NativeOpenGate>,
+    }
+
+    impl NativeOpenGateCancellation {
+        fn new(entered: mpsc::Sender<()>, gate: Arc<NativeOpenGate>) -> Self {
+            Self {
+                polls: AtomicUsize::new(0),
+                entered,
+                gate,
+            }
+        }
+    }
+
+    impl GraphCancellation for NativeOpenGateCancellation {
+        fn is_cancelled(&self) -> bool {
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            if poll == 2 {
+                self.entered.send(()).unwrap();
+                let mut released = self.gate.released.lock().unwrap();
+                while !*released {
+                    released = self.gate.changed.wait(released).unwrap();
+                }
+            }
+            if poll >= 2 {
+                return self.gate.cancel_on_release;
+            }
+            false
+        }
+    }
+
+    #[test]
+    fn concurrent_same_identity_owner_attachments_share_one_native_open() {
+        let root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let (entered, entered_probe) = mpsc::channel();
+        let gate = NativeOpenGate::new(false);
+        let mut winner_operation = registration_for(root.path(), "project.shared-open");
+        winner_operation.cancellation =
+            Arc::new(NativeOpenGateCancellation::new(entered, Arc::clone(&gate)));
+        let winner_registration = owner_registration(winner_operation);
+        let winner_registry = registry.clone();
+        let winner =
+            thread::spawn(move || winner_registry.resolve_owner_attachment(winner_registration));
+        entered_probe
+            .recv_timeout(Duration::from_secs(10))
+            .expect("winner must reach its native open");
+
+        // The winner is inside its native open. A same-identity attacher must
+        // observe the held Opening slot as a typed Conflict instead of
+        // running a second identical open over the same store.
+        assert_eq!(
+            registry
+                .resolve_owner_attachment(owner_registration(registration_for(
+                    root.path(),
+                    "project.shared-open",
+                )))
+                .unwrap_err(),
+            GraphDbError::Conflict
+        );
+
+        gate.release();
+        let attachment = winner.join().unwrap().unwrap();
+        let lease = registry
+            .resolve(registration_for(root.path(), "project.shared-open"))
+            .unwrap();
+        drop(lease);
+        drop(attachment);
+        assert_eq!(registry.capacity().unwrap().occupied, 1);
+    }
+
+    #[test]
+    fn distinct_identity_owner_attachments_open_while_another_identity_is_in_flight() {
+        let first_root = TempDir::new().unwrap();
+        let second_root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+        let (entered, entered_probe) = mpsc::channel();
+        let gate = NativeOpenGate::new(false);
+        let mut first_operation = registration_for(first_root.path(), "project.first-shard");
+        first_operation.cancellation =
+            Arc::new(NativeOpenGateCancellation::new(entered, Arc::clone(&gate)));
+        let first_registration = owner_registration(first_operation);
+        let first_registry = registry.clone();
+        let first =
+            thread::spawn(move || first_registry.resolve_owner_attachment(first_registration));
+        entered_probe
+            .recv_timeout(Duration::from_secs(10))
+            .expect("first attacher must reach its native open");
+
+        // The in-flight open holds its capacity slot while it materializes.
+        assert_eq!(registry.capacity().unwrap().occupied, 1);
+        // A distinct store identity is not serialized behind that open.
+        let second = registry
+            .resolve_owner_attachment(owner_registration(registration_for(
+                second_root.path(),
+                "project.second-shard",
+            )))
+            .unwrap();
+
+        gate.release();
+        let first = first.join().unwrap().unwrap();
+        assert!(first_root.path().join("graph.grafeo").exists());
+        assert!(second_root.path().join("graph.grafeo").exists());
+        drop(first);
+        drop(second);
+        assert_eq!(registry.capacity().unwrap().occupied, 2);
+    }
+
+    #[test]
+    fn lease_waiter_cancellation_during_a_shared_open_is_a_typed_cancellation() {
+        let root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let (entered, entered_probe) = mpsc::channel();
+        let gate = NativeOpenGate::new(false);
+        let mut winner_operation = registration_for(root.path(), "project.waited-open");
+        winner_operation.cancellation =
+            Arc::new(NativeOpenGateCancellation::new(entered, Arc::clone(&gate)));
+        let winner_registration = owner_registration(winner_operation);
+        let winner_registry = registry.clone();
+        let winner =
+            thread::spawn(move || winner_registry.resolve_owner_attachment(winner_registration));
+        entered_probe
+            .recv_timeout(Duration::from_secs(10))
+            .expect("winner must reach its native open");
+
+        let waiter_cancelled = Arc::new(AtomicBool::new(false));
+        let mut waiter_registration = registration_for(root.path(), "project.waited-open");
+        waiter_registration.cancellation =
+            Arc::new(FlagCancellation(Arc::clone(&waiter_cancelled)));
+        let waiter_registry = registry.clone();
+        let waiter = thread::spawn(move || waiter_registry.resolve(waiter_registration));
+
+        // Let the waiter observe the in-flight Opening slot, then cancel it
+        // while the winner's native open is still gated: the waiter must fail
+        // with its own typed cancellation — not a reconstructed registration
+        // and not an unmounted-runtime error.
+        thread::sleep(Duration::from_millis(100));
+        waiter_cancelled.store(true, Ordering::Release);
+        assert_eq!(waiter.join().unwrap().unwrap_err(), GraphDbError::Cancelled);
+
+        // The one shared open is unaffected by the waiter's cancellation, and
+        // later lease registrations resolve the mounted runtime.
+        gate.release();
+        let attachment = winner.join().unwrap().unwrap();
+        let lease = registry
+            .resolve(registration_for(root.path(), "project.waited-open"))
+            .unwrap();
+        drop(lease);
+        drop(attachment);
+    }
+
+    #[test]
+    fn cancelled_shared_open_releases_the_opening_slot_for_remount() {
+        let root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let (entered, entered_probe) = mpsc::channel();
+        let gate = NativeOpenGate::new(true);
+        let mut cancelled_operation = registration_for(root.path(), "project.cancelled-open");
+        cancelled_operation.cancellation =
+            Arc::new(NativeOpenGateCancellation::new(entered, Arc::clone(&gate)));
+        let cancelled_registration = owner_registration(cancelled_operation);
+        let cancelled_registry = registry.clone();
+        let mounting = thread::spawn(move || {
+            cancelled_registry.resolve_owner_attachment(cancelled_registration)
+        });
+        entered_probe
+            .recv_timeout(Duration::from_secs(10))
+            .expect("mount must reach its native open");
+
+        // While the open is in flight its slot stays held...
+        assert_eq!(registry.capacity().unwrap().occupied, 1);
+        gate.release();
+        assert_eq!(
+            mounting.join().unwrap().unwrap_err(),
+            GraphDbError::Cancelled
+        );
+
+        // ...and a cancelled open releases it: the same identity remounts
+        // instead of conflicting against a leaked in-flight slot.
+        assert_eq!(registry.capacity().unwrap().occupied, 0);
+        let attachment = registry
+            .resolve_owner_attachment(owner_registration(registration_for(
+                root.path(),
+                "project.cancelled-open",
+            )))
+            .unwrap();
+        drop(attachment);
     }
 
     fn poison_registry_state_before_terminal_completion(registry: &GraphDbRegistry) {

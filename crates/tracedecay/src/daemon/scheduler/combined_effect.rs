@@ -365,7 +365,7 @@ pub(super) async fn run_combined_scheduler_effect(
     options: CombinedReviewAutomationOptions,
     first_error: &mut Option<crate::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
-    match admission {
+    let outcome = match admission {
         CombinedEffectAdmission::Conflict => {
             super::log_scheduler_admission_conflict(
                 project_path,
@@ -500,7 +500,19 @@ pub(super) async fn run_combined_scheduler_effect(
             )
             .await
         }
+    };
+    match outcome {
+        CombinedEffectOutcome::Completed => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.completed_total").inc(1_u64);
+        }
+        CombinedEffectOutcome::Handled => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.handled_total").inc(1_u64);
+        }
+        CombinedEffectOutcome::Deferred => {
+            hotpath::gauge!("daemon.scheduler.combined_effect.deferred_total").inc(1_u64);
+        }
     }
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]

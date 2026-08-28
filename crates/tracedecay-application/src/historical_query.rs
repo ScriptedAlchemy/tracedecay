@@ -340,6 +340,14 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
             }
         }
 
+        // Scan-shape evidence beside the outer wall span: coverage separates
+        // "few large blobs" from "many commits × paths" when the query is slow,
+        // and truncated/capped scans report the exact prefix they observed.
+        hotpath::gauge!("application.historical.query.commits_scanned")
+            .set(u64::from(coverage.commits_scanned));
+        hotpath::gauge!("application.historical.query.blobs_scanned")
+            .set(u64::from(coverage.blobs_scanned));
+        hotpath::gauge!("application.historical.query.bytes_scanned").set(coverage.bytes_scanned);
         Ok(HistoricalQueryResultV1 {
             scope: self.scope.clone(),
             evidence,
@@ -347,6 +355,9 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
         })
     }
 
+    /// One bounded Git object read; measured separately so blob I/O is
+    /// distinguishable from term scanning inside the outer query span.
+    #[hotpath::measure(label = "application.historical.query.blob_read")]
     fn read_blob(
         &self,
         commit: &GitOidV1,

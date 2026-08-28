@@ -1086,6 +1086,9 @@ where
         return Ok((Vec::new(), 0));
     }
     if progress.cancelled() {
+        // Cancelled groups otherwise vanish from the profile: they return a
+        // plain string error before any adapter-level failure classifier runs.
+        hotpath::gauge!("semantic_embed_cancelled_groups").inc(1u32);
         return Err("semantic projection cancelled".to_owned());
     }
     if session.authority().projection().embedding_key() != key {
@@ -1254,24 +1257,31 @@ where
                     .par_iter()
                     .zip(self.sessions.par_iter_mut())
                     .map(|(stripe, session)| {
-                        tracedecay_code_index::parallelism::with_background_cpu_permits(
-                            intra_threads,
-                            || {
-                                let mut encoded = Vec::with_capacity(stripe.len());
-                                let mut units = 0u64;
-                                for group in stripe.iter() {
-                                    let (vectors, group_units) = encode_group_with_session(
-                                        session,
-                                        key,
-                                        group,
-                                        progress.as_ref(),
-                                    )?;
-                                    units = units.saturating_add(group_units);
-                                    encoded.push(vectors);
-                                }
-                                Ok((encoded, units))
-                            },
-                        )
+                        // Per-worker service demand for one stripe, including
+                        // its CPU-permit wait. `semantic.embed.encode_stripes`
+                        // above stays the only wall-time authority; these
+                        // per-stripe totals overlap and must never be summed
+                        // into a wall figure.
+                        hotpath::measure_block!("semantic.embed.stripe", {
+                            tracedecay_code_index::parallelism::with_background_cpu_permits(
+                                intra_threads,
+                                || {
+                                    let mut encoded = Vec::with_capacity(stripe.len());
+                                    let mut units = 0u64;
+                                    for group in stripe.iter() {
+                                        let (vectors, group_units) = encode_group_with_session(
+                                            session,
+                                            key,
+                                            group,
+                                            progress.as_ref(),
+                                        )?;
+                                        units = units.saturating_add(group_units);
+                                        encoded.push(vectors);
+                                    }
+                                    Ok((encoded, units))
+                                },
+                            )
+                        })
                     })
                     .collect()
             })?;

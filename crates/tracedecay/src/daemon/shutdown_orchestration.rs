@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use super::shutdown_coordination::{
-    ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
+    DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
 };
 use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt};
@@ -139,6 +139,9 @@ pub(super) struct DaemonShutdownReceipt {
 
 impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
+        // Coordinator-level failures never reach the per-phase counters, so
+        // they are recorded here or the waste is invisible to profiling.
+        hotpath::gauge!("daemon.shutdown.coordinator.failed_total").inc(1_u64);
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -148,6 +151,7 @@ impl DaemonShutdownReceipt {
     }
 
     fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
+        hotpath::gauge!("daemon.shutdown.coordinator.timed_out_total").inc(1_u64);
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
@@ -368,6 +372,7 @@ async fn run_daemon_shutdown(
     // single number against DAEMON_CLIENT_DRAIN_DEADLINE /
     // DAEMON_TASK_ABORT_DEADLINE instead of only surfacing as a bare timeout.
     let (in_flight, clients) = hotpath::measure_block!("daemon.shutdown.client_drain", {
+        let _draining = DrainingGauge::arm("daemon.shutdown.draining.clients");
         let in_flight = loop {
             tokio::select! {
                 receipt = &mut background_shutdown, if background_receipt.is_none() => {
@@ -398,11 +403,20 @@ async fn run_daemon_shutdown(
         };
         (in_flight, clients)
     });
+    // Forced vs graceful: graceful means in-flight client work idled out
+    // cooperatively before the drain deadline; forced means the deadline
+    // expired and the abort/join path did the draining.
+    if in_flight.is_clean() {
+        hotpath::gauge!("daemon.shutdown.client_drain.graceful_total").inc(1_u64);
+    } else {
+        hotpath::gauge!("daemon.shutdown.client_drain.forced_total").inc(1_u64);
+    }
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (semantic artifact GC, maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
     // span only measures the residual wait when it was not.
     let mut background = hotpath::measure_block!("daemon.shutdown.background_drain", {
+        let _draining = DrainingGauge::arm("daemon.shutdown.draining.background");
         match background_receipt {
             Some(receipt) => receipt,
             None => background_shutdown.await,
@@ -414,6 +428,7 @@ async fn run_daemon_shutdown(
     // dropped its leases.
     let project_server_deadline = budget.project_servers();
     let project_servers = hotpath::measure_block!("daemon.shutdown.project_servers", {
+        let _draining = DrainingGauge::arm("daemon.shutdown.draining.project_servers");
         // The drain gets its phase deadline, so it reaches its own bounded
         // join and reports one outcome *per named server*. The outer sleep is
         // only the backstop for a drain that ignores its deadline; it fires
@@ -433,6 +448,7 @@ async fn run_daemon_shutdown(
     // and graph_db.registry.close_retained measure the work underneath it.
     let store_close_deadline = budget.store_close();
     let terminal = hotpath::measure_block!("daemon.shutdown.store_close", {
+        let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
         if project_servers.timed_out_count() == 0 {
             prepare_shutdown_owner_phases(plan.terminal_owner_phases)
                 .join(store_close_deadline)
@@ -442,12 +458,25 @@ async fn run_daemon_shutdown(
         }
     });
     background.extend(terminal);
-    DaemonShutdownReceipt {
+    let receipt = DaemonShutdownReceipt {
         in_flight,
         clients,
         background,
         project_servers,
+    };
+    // Graceful means every lane drained cooperatively inside its budget;
+    // anything else — a timed-out owner, a forced client abort, a failed or
+    // timed-out project server — makes this attempt a forced shutdown.
+    if receipt.in_flight.is_clean()
+        && receipt.clients.is_clean()
+        && receipt.background.unfinished().is_empty()
+        && receipt.project_servers.is_clean()
+    {
+        hotpath::gauge!("daemon.shutdown.outcome.graceful_total").inc(1_u64);
+    } else {
+        hotpath::gauge!("daemon.shutdown.outcome.forced_total").inc(1_u64);
     }
+    receipt
 }
 
 #[hotpath::measure(label = "daemon.shutdown.join_aborted_clients", future = true)]

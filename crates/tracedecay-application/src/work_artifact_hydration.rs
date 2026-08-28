@@ -154,7 +154,14 @@ where
             ));
         }
         let authority = work_authority(context)?;
-        let binding = match topology(&authority)? {
+        // Two distinct resources hide inside one hydration: the topology
+        // resolution against the graph publication mount and the evidence
+        // page read against attempt storage. Phase spans keep them apart.
+        let topology_state = hotpath::measure_block!(
+            "application.work.artifact.hydrate.topology",
+            topology(&authority)
+        )?;
+        let binding = match topology_state {
             WorkAttemptTopologyStateV1::Absent => {
                 return if request.cursor.is_some() {
                     // The snapshot the cursor was minted under no longer
@@ -171,14 +178,29 @@ where
         {
             return Err(stale_cursor_problem());
         }
-        let page = self
-            .attempts
-            .evidence_page(
+        let page = hotpath::measure_block!(
+            "application.work.artifact.hydrate.page_read",
+            self.attempts.evidence_page(
                 &authority,
                 request.cursor.as_ref().map(|cursor| &cursor.start_after),
                 request.page_size,
             )
-            .map_err(storage_problem)?;
+        )
+        .map_err(storage_problem)?;
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("application.work.artifact.hydrate.rows").set(page.rows.len() as u64);
+            // Declared artifact bytes on the page, from the durable
+            // references. This read never materializes payloads, so declared
+            // bytes are the only truthful byte figure it can report.
+            let declared_bytes = page
+                .rows
+                .iter()
+                .flat_map(|row| &row.artifacts)
+                .map(WorkArtifactRefV1::byte_length)
+                .fold(0u64, u64::saturating_add);
+            hotpath::gauge!("application.work.artifact.hydrate.declared_bytes").set(declared_bytes);
+        }
         let returned = u32::try_from(page.rows.len())
             .ok()
             .filter(|returned| *returned <= request.page_size && *returned <= page.remaining)

@@ -14,9 +14,14 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay::errors::R
     let body = read_request(&invocation.request_file)?;
     let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
-    let mut response =
-        tracedecay::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body)
-            .await?;
+    // The application round-trip timed apart from `cli.work.invoke` so daemon
+    // latency is separable from request parsing, render, and delivery
+    // settlement.
+    let mut response = hotpath::future!(
+        tracedecay::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
+        label = "cli.work.request"
+    )
+    .await?;
     let rendered = if invocation.json {
         work_json_line(&response.outcome)?
     } else {

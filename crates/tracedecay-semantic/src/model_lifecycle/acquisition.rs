@@ -103,37 +103,44 @@ fn run_acquisition_inner(
     fs::create_dir_all(&staging).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
 
     let mut bytes_received = 0_u64;
-    for member in model.members.values() {
-        if epoch.ensure_active().is_err() {
-            cleanup_cancelled_path(root, &staging, epoch)?;
-            return Err(ModelLifecycleErrorV1::Cancelled);
-        }
-        let destination = staging.join(&member.path);
-        let fetch = source.fetch_member(&model, &member.upstream_path, &destination);
-        if epoch.ensure_active().is_err() {
-            cleanup_cancelled_path(root, &staging, epoch)?;
-            return Err(ModelLifecycleErrorV1::Cancelled);
-        }
-        if let Err(error) = fetch {
-            return fail_state(root, inner, &model, &digest, &error.to_string(), true);
-        }
-        bytes_received = bytes_received.saturating_add(member.length);
-        let progress = epoch.while_active(|| {
-            let mut guard = inner.writer();
-            guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
-                model_id: model.model_id.clone(),
-                revision: model.source.revision.clone(),
-                artifact_digest: digest.clone(),
-                bytes_received,
-                bytes_total,
+    hotpath::gauge!("semantic_acquire_bytes_total").set(bytes_total);
+    hotpath::gauge!("semantic_acquire_bytes_received").set(bytes_received);
+    // Network + staging-copy phase. Early cancellation/failure returns drop
+    // the span guard, so aborted downloads still record their duration.
+    hotpath::measure_block!("semantic.acquire.download", {
+        for member in model.members.values() {
+            if epoch.ensure_active().is_err() {
+                cleanup_cancelled_path(root, &staging, epoch)?;
+                return Err(ModelLifecycleErrorV1::Cancelled);
+            }
+            let destination = staging.join(&member.path);
+            let fetch = source.fetch_member(&model, &member.upstream_path, &destination);
+            if epoch.ensure_active().is_err() {
+                cleanup_cancelled_path(root, &staging, epoch)?;
+                return Err(ModelLifecycleErrorV1::Cancelled);
+            }
+            if let Err(error) = fetch {
+                return fail_state(root, inner, &model, &digest, &error.to_string(), true);
+            }
+            bytes_received = bytes_received.saturating_add(member.length);
+            hotpath::gauge!("semantic_acquire_bytes_received").set(bytes_received);
+            let progress = epoch.while_active(|| {
+                let mut guard = inner.writer();
+                guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
+                    model_id: model.model_id.clone(),
+                    revision: model.source.revision.clone(),
+                    artifact_digest: digest.clone(),
+                    bytes_received,
+                    bytes_total,
+                });
+                persist_durable(root, &guard.durable)
             });
-            persist_durable(root, &guard.durable)
-        });
-        if matches!(&progress, Err(ModelLifecycleErrorV1::Cancelled)) {
-            cleanup_cancelled_path(root, &staging, epoch)?;
+            if matches!(&progress, Err(ModelLifecycleErrorV1::Cancelled)) {
+                cleanup_cancelled_path(root, &staging, epoch)?;
+            }
+            progress?;
         }
-        progress?;
-    }
+    });
 
     if epoch.ensure_active().is_err() {
         cleanup_cancelled_path(root, &staging, epoch)?;
@@ -154,55 +161,64 @@ fn run_acquisition_inner(
     verifying?;
     crate::hotpath_observe::record_model_state("verifying");
 
-    for member in model.members.values() {
-        let path = staging.join(&member.path);
-        if !verify_member_file(&path, member.length, &member.sha256) {
-            fs::remove_dir_all(&staging).map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-            return fail_state(
-                root,
-                inner,
-                &model,
-                &digest,
-                "member length or sha256 mismatch",
-                true,
-            );
+    // Disk read + SHA-256 digest verification of every staged member,
+    // separate from the download above and the install rename below.
+    hotpath::measure_block!("semantic.acquire.verify", {
+        for member in model.members.values() {
+            let path = staging.join(&member.path);
+            if !verify_member_file(&path, member.length, &member.sha256) {
+                fs::remove_dir_all(&staging)
+                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+                return fail_state(
+                    root,
+                    inner,
+                    &model,
+                    &digest,
+                    "member length or sha256 mismatch",
+                    true,
+                );
+            }
+            if epoch.ensure_active().is_err() {
+                cleanup_cancelled_path(root, &staging, epoch)?;
+                return Err(ModelLifecycleErrorV1::Cancelled);
+            }
         }
-        if epoch.ensure_active().is_err() {
-            cleanup_cancelled_path(root, &staging, epoch)?;
-            return Err(ModelLifecycleErrorV1::Cancelled);
-        }
-    }
+    });
 
     if epoch.ensure_active().is_err() {
         cleanup_cancelled_path(root, &staging, epoch)?;
         return Err(ModelLifecycleErrorV1::Cancelled);
     }
     let install_path = install_path_for(root, &model.model_id, &model.source.revision, &digest);
-    if let Some(parent) = install_path.parent() {
-        fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
-    }
-    if install_path.exists() {
-        fs::remove_dir_all(&install_path).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
-    }
-    // Atomic publish: rename fully verified staging directory into place.
-    fs::rename(&staging, &install_path).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
-    if epoch.ensure_active().is_err() {
-        cleanup_cancelled_path(root, &install_path, epoch)?;
-        return Err(ModelLifecycleErrorV1::Cancelled);
-    }
-    let meta = InstallMetaV1 {
-        schema: INSTALL_META_SCHEMA_V1.to_owned(),
-        model_id: model.model_id.clone(),
-        revision: model.source.revision.clone(),
-        artifact_digest: digest.clone(),
-    };
-    let metadata = write_json_atomic(&install_path.join("install.json"), &meta)
-        .map_err(|_| ModelLifecycleErrorV1::InstallFailed);
-    if epoch.ensure_active().is_err() {
-        cleanup_cancelled_path(root, &install_path, epoch)?;
-        return Err(ModelLifecycleErrorV1::Cancelled);
-    }
-    metadata?;
+    // Install-publication disk phase: prior-install removal, atomic rename,
+    // and the durable install.json write.
+    hotpath::measure_block!("semantic.acquire.install", {
+        if let Some(parent) = install_path.parent() {
+            fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
+        }
+        if install_path.exists() {
+            fs::remove_dir_all(&install_path).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
+        }
+        // Atomic publish: rename fully verified staging directory into place.
+        fs::rename(&staging, &install_path).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
+        if epoch.ensure_active().is_err() {
+            cleanup_cancelled_path(root, &install_path, epoch)?;
+            return Err(ModelLifecycleErrorV1::Cancelled);
+        }
+        let meta = InstallMetaV1 {
+            schema: INSTALL_META_SCHEMA_V1.to_owned(),
+            model_id: model.model_id.clone(),
+            revision: model.source.revision.clone(),
+            artifact_digest: digest.clone(),
+        };
+        let metadata = write_json_atomic(&install_path.join("install.json"), &meta)
+            .map_err(|_| ModelLifecycleErrorV1::InstallFailed);
+        if epoch.ensure_active().is_err() {
+            cleanup_cancelled_path(root, &install_path, epoch)?;
+            return Err(ModelLifecycleErrorV1::Cancelled);
+        }
+        metadata?;
+    });
 
     let publication = epoch.while_active(|| {
         let mut guard = inner.writer();

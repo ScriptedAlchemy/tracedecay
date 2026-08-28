@@ -110,6 +110,7 @@ impl VerifiedGraphQuery {
     /// generation ends. `max_symbols_examined` bounds unrelated symbols that
     /// may occur between requested files; exhausting it is a typed budget
     /// refusal rather than a false end-of-page result.
+    #[hotpath::measure(label = "graph.query.file_symbols_page")]
     pub(crate) fn symbols_in_logical_files_page(
         &self,
         logical_paths: &HashSet<String>,
@@ -225,6 +226,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    #[hotpath::measure(label = "graph.query.callers")]
     pub(crate) fn callers(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -236,6 +238,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    #[hotpath::measure(label = "graph.query.callees")]
     pub(crate) fn callees(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -263,6 +266,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    #[hotpath::measure(label = "graph.query.impact")]
     pub(crate) fn impact(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -285,6 +289,7 @@ impl VerifiedGraphQuery {
 
     /// Finds files containing functions targeted by canonical annotation
     /// edges whose source is a recognized test annotation marker.
+    #[hotpath::measure(label = "graph.query.test_annotated_files")]
     pub(crate) fn test_annotated_logical_files(
         &self,
         logical_paths: Option<&HashSet<String>>,

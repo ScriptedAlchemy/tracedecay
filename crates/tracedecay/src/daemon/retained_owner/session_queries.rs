@@ -61,9 +61,11 @@ pub(crate) async fn sessions_for(
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
     let index_health = correlation.correlation_index_health().await.ok();
-    let results = match correlation
-        .sessions_for_with_relation(&query, relation)
-        .await
+    let results = match hotpath::future!(
+        correlation.sessions_for_with_relation(&query, relation),
+        label = "daemon.retained.session.sessions_for.query"
+    )
+    .await
     {
         Ok(results) => results,
         Err(GitCorrelationError::Unavailable(message)) => {
@@ -78,9 +80,11 @@ pub(crate) async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        match correlation
-            .sessions_for_with_relation(&query, CommitRelationFilter::Observed)
-            .await
+        match hotpath::future!(
+            correlation.sessions_for_with_relation(&query, CommitRelationFilter::Observed),
+            label = "daemon.retained.session.sessions_for.observed_fallback"
+        )
+        .await
         {
             Ok(observed) if !observed.is_empty() => Some(observed),
             Ok(_) | Err(GitCorrelationError::Unavailable(_)) => None,
@@ -185,15 +189,17 @@ pub(crate) async fn workflows(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        match port
-            .runs(WorkflowRunListRequest {
+        match hotpath::future!(
+            port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::Session {
                     session_id: session_id.to_owned(),
                 },
                 limit,
-            })
-            .await
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
+            }),
+            label = "daemon.retained.session.workflows.list"
+        )
+        .await
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
         {
             WorkflowRunListOutcome::Runs(runs) => workflow_list(
                 WorkflowQueryModeV1::Session,
@@ -210,17 +216,19 @@ pub(crate) async fn workflows(
             request.commit.as_deref(),
         )
         .map_err(map_git_error)?;
-        match port
-            .runs(WorkflowRunListRequest {
+        match hotpath::future!(
+            port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::GitScope(WorkflowGitScope {
                     branch: filter.branch.clone(),
                     worktree: filter.worktree.clone(),
                     commit: filter.commit.clone(),
                 }),
                 limit,
-            })
-            .await
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
+            }),
+            label = "daemon.retained.session.workflows.list"
+        )
+        .await
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
         {
             WorkflowRunListOutcome::Runs(runs) => workflow_list(
                 WorkflowQueryModeV1::GitScope,
@@ -359,14 +367,21 @@ async fn workflow_run_query(
 ) -> Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1> {
     let outcome = match agent_label {
         Some(label) if !label.trim().is_empty() => {
-            port.agent(run_id.to_owned(), label.to_owned()).await
+            hotpath::future!(
+                port.agent(run_id.to_owned(), label.to_owned()),
+                label = "daemon.retained.session.workflows.detail"
+            )
+            .await
         }
         Some(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         None => {
-            port.run(WorkflowRunDetailRequest {
-                run_id: run_id.to_owned(),
-                limit,
-            })
+            hotpath::future!(
+                port.run(WorkflowRunDetailRequest {
+                    run_id: run_id.to_owned(),
+                    limit,
+                }),
+                label = "daemon.retained.session.workflows.detail"
+            )
             .await
         }
     }

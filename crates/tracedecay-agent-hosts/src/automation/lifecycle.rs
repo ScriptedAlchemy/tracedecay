@@ -595,7 +595,12 @@ async fn task_run_gate_with_lock_retention(
                 None
             };
             match enablement_skip.or_else(|| task_skip_reason(config, task)) {
-                Some(reason) => SchedulerGate::Skip(reason),
+                Some(reason) => {
+                    // The scheduler gate above already reported "due"; the
+                    // enablement refusal is the decision that actually stands.
+                    super::scheduler_metrics::observe_skip_reason(reason);
+                    SchedulerGate::Skip(reason)
+                }
                 None => SchedulerGate::Proceed(lock),
             }
         }
@@ -1141,6 +1146,7 @@ impl<'a> AgentRunFinalizer<'a> {
         outcome: RunRecordOutcome,
         completed_at_micros: i64,
     ) -> AutomationRunLedgerRecord {
+        super::scheduler_metrics::observe_run_terminal(outcome.status);
         let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = (outcome.status == AutomationRunStatus::Failed)
             .then(|| {

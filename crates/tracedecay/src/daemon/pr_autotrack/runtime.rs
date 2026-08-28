@@ -183,7 +183,16 @@ async fn poll_project(
     })
     .await
     {
-        Ok(Ok(discovery)) => discovery,
+        Ok(Ok(discovery)) => {
+            // Sweep volume: every PR head this poll examined, including the
+            // fork heads it refused to track.
+            hotpath::gauge!("daemon.pr_autotrack.prs_examined").inc(discovery
+                .open
+                .len()
+                .saturating_add(discovery.skipped_forks.len())
+                as f64);
+            discovery
+        }
         Ok(Err(reason)) => {
             log_daemon_event(
                 "pr_autotrack",

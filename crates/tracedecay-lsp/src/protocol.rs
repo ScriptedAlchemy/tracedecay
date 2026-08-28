@@ -201,7 +201,10 @@ where
                 closed: false,
             };
         }
-        let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        let Ok(value) = hotpath::measure_block!(
+            "lsp.rpc.payload_json_parse",
+            serde_json::from_slice::<Value>(payload)
+        ) else {
             self.enqueue_value(error_response(
                 Value::Null,
                 RpcFailure {
@@ -224,6 +227,7 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
+        self.observe_outbound_queue();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -325,6 +329,7 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
+        self.observe_outbound_queue();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(

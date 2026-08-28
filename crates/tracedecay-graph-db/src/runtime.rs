@@ -68,6 +68,10 @@ pub(crate) struct Inner {
     /// backing this database, so an open re-checks them instead of re-deriving
     /// them. See `crate::verified_marker` for the integrity boundary.
     pub(crate) markers: GenerationMarkers,
+    /// Ordered identity access path for projection pagination. Rebuilt lazily
+    /// after every database write claim; see
+    /// [`crate::projection_identity_index`].
+    pub(crate) identity_indexes: crate::projection_identity_index::IdentityIndexCache,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
@@ -131,10 +135,23 @@ impl GraphDb {
             }
             None => GenerationMarkers::detached(),
         };
-        let database = GrafeoDB::with_config(validated.config.clone())
-            .map_err(|error| map_open_error(error, validated.preexisting_store))?;
+        // The engine call is where a persistent open pays for corpus size:
+        // grafeo replays the whole serialized LPG block log through the live
+        // mutation path, rebuilds every catalog-listed property index with a
+        // full node scan each, and replays any sidecar WAL an unclean
+        // shutdown left behind. The phases after it are O(labels), not
+        // O(rows), so this span is what a slow open decomposes into first.
+        let database = hotpath::measure_block!(
+            "graph_db.generation.open.engine",
+            GrafeoDB::with_config(validated.config.clone())
+                .map_err(|error| map_open_error(error, validated.preexisting_store))
+        )?;
+        crate::recovery::record_open_corpus_gauges(&database);
         validate_or_initialize_format(&database, &validated)?;
-        let state = FormatState::load(&database)?;
+        let state = hotpath::measure_block!(
+            "graph_db.generation.open.state",
+            FormatState::load(&database)
+        )?;
         let quarantined_projections = load_quarantined_projections(&database)?;
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
@@ -150,11 +167,13 @@ impl GraphDb {
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(quarantined_projections),
                 markers,
+                identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
         });
         graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
+        graph.record_vector_index_census(VectorIndexCensusPhase::Restore);
         Ok(graph)
     }
 
@@ -590,13 +609,7 @@ impl GraphDb {
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let label = vector::native_vector_label(&request.namespace, &request.projection);
         let property = vector_property_key(&request.property, request.dimension, request.metric);
-        Ok(
-            if database.graph_store().has_vector_index(&label, &property) {
-                GraphVectorIndexStatus::Available
-            } else {
-                GraphVectorIndexStatus::Missing
-            },
-        )
+        Ok(vector::classify_vector_index(database, &label, &property))
     }
 
     /// Rebuilds one missing exact-projection HNSW index outside admission.
@@ -615,23 +628,44 @@ impl GraphDb {
         }
         let label = vector::native_vector_label(&request.namespace, &request.projection);
         let property = vector_property_key(&request.property, request.dimension, request.metric);
-        if !database.graph_store().has_vector_index(&label, &property) {
-            database
-                .create_vector_index(
-                    &label,
-                    &property,
-                    Some(request.dimension),
-                    Some(request.metric.engine_name()),
-                    None,
-                    None,
-                    None,
-                )
-                .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        match vector::classify_vector_index(database, &label, &property) {
+            GraphVectorIndexStatus::Available => {
+                if request.cancellation.is_cancelled() {
+                    return Err(GraphDbError::Cancelled);
+                }
+                return Ok(GraphVectorIndexStatus::Available);
+            }
+            GraphVectorIndexStatus::Stale => {
+                // A registered index covering nothing answers every
+                // search with no matches while reporting that it exists,
+                // so leaving it in place would be worse than having
+                // none. Drop it and build again, and say so: a rebuild
+                // that happens silently every open is the shape of this
+                // bug, and the log line is what makes it visible.
+                tracing::warn!(
+                    projection = %request.projection,
+                    dimension = request.dimension,
+                    "vector index exists but covers no vectors; rebuilding"
+                );
+                database.drop_vector_index(&label, &property);
+            }
+            GraphVectorIndexStatus::Missing => {}
         }
+        database
+            .create_vector_index(
+                &label,
+                &property,
+                Some(request.dimension),
+                Some(request.metric.engine_name()),
+                None,
+                None,
+                None,
+            )
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         if request.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        Ok(GraphVectorIndexStatus::Available)
+        Ok(vector::classify_vector_index(database, &label, &property))
     }
 
     /// Physically close the underlying graph database.
@@ -651,6 +685,9 @@ impl GraphDb {
     /// dirty-section state that makes the skip safe is private to grafeo.
     #[hotpath::measure(label = "graph_db.runtime.close", impl_type = "GraphDb")]
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
+        // Before the write lock, while a read guard is still available:
+        // the census needs the database, and `close` is about to take it.
+        self.record_vector_index_census(VectorIndexCensusPhase::Persist);
         let _snapshot_gate = self.wait_snapshot_gate_write();
         let mut guard = match crate::hotpath_observe::wait_lock(
             crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
@@ -667,6 +704,7 @@ impl GraphDb {
                 });
             }
         };
+        self.inner.identity_indexes.invalidate();
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return if was_uncertain {
@@ -682,7 +720,9 @@ impl GraphDb {
                     .to_owned(),
             });
         };
-        if let Err(error) = database.close() {
+        if let Err(error) =
+            hotpath::measure_block!("graph_db.runtime.close.engine", database.close())
+        {
             self.inner.poisoned.store(true, Ordering::Release);
             return Err(GraphDbError::DurabilityUncertain {
                 message: error.to_string(),
@@ -941,6 +981,53 @@ impl GraphDb {
         Ok(guard)
     }
 
+    /// Reports how much vector index the store is holding right now.
+    ///
+    /// Taken twice per database lifetime, at open and just before close,
+    /// because the pair is what makes a durability leak legible: bytes
+    /// reported at `persist` that do not come back at the next `restore`
+    /// are bytes the daemon is about to spend re-indexing, and a
+    /// `restore` of zero on a store that had an index means vector
+    /// search is unavailable until a rebuild finishes.
+    ///
+    /// Like [`Self::record_memory_checkpoint`], the census walks internal
+    /// store structures and feeds gauges that are feature-off no-ops, so it
+    /// runs only in opt-in Hotpath builds: a production open or close must
+    /// not pay for a full memory walk it then discards.
+    #[inline(always)]
+    pub(crate) fn record_vector_index_census(&self, phase: VectorIndexCensusPhase) {
+        #[cfg(feature = "hotpath")]
+        {
+            let Ok(guard) = self.read_guard() else {
+                return;
+            };
+            let Some(database) = guard.as_ref() else {
+                return;
+            };
+            let indexes = database.memory_usage().indexes.vector_indexes;
+            let vectors = indexes.iter().map(|entry| entry.item_count).sum();
+            let bytes = indexes.iter().map(|entry| entry.bytes).sum();
+            match phase {
+                VectorIndexCensusPhase::Restore => {
+                    crate::hotpath_observe::record_vector_index_restore(
+                        indexes.len(),
+                        vectors,
+                        bytes,
+                    );
+                }
+                VectorIndexCensusPhase::Persist => {
+                    crate::hotpath_observe::record_vector_index_persist(
+                        indexes.len(),
+                        vectors,
+                        bytes,
+                    );
+                }
+            }
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = phase;
+    }
+
     /// Best-effort profiler observation that cannot change graph authority or
     /// operation outcomes. A closed or poisoned database simply has no
     /// trustworthy memory census to report.
@@ -972,6 +1059,9 @@ impl GraphDb {
             || self.inner.database.write(),
         )
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        // Anything holding this guard may rewrite the rows a cached ordered
+        // identity index was built from, so the index is stale from here on.
+        self.inner.identity_indexes.invalidate();
         self.ensure_available()?;
         Ok(guard)
     }
@@ -1069,6 +1159,15 @@ impl GraphDb {
         }
         Ok(())
     }
+}
+
+/// Which side of a database lifetime a vector index census describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VectorIndexCensusPhase {
+    /// Taken at open: what came back from the file.
+    Restore,
+    /// Taken before close: what is about to be written out.
+    Persist,
 }
 
 fn ensure_initial_vector_indexes(

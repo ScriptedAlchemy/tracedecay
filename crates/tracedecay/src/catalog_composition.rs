@@ -105,8 +105,13 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
 #[hotpath::measure(label = "catalog_composition.assemble")]
 fn assemble_application_catalog()
 -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
-    let mut contributions = application_catalog_contributions()?;
-    let handlers = application_handler_descriptors()?;
+    let (mut contributions, handlers) =
+        hotpath::measure_block!("catalog_composition.contributions", {
+            (
+                application_catalog_contributions()?,
+                application_handler_descriptors()?,
+            )
+        });
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
     hotpath::measure_block!(
         "catalog_composition.validate",

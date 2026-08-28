@@ -25,6 +25,7 @@ pub(super) fn contains_cjk(value: &str) -> bool {
     })
 }
 
+#[hotpath::measure(label = "sessions.lcm.grep", future = true)]
 pub async fn grep(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmGrepRequest,
@@ -90,6 +91,10 @@ pub async fn grep(
     sort_hits(&mut hits, request.sort);
     let capped_sessions = rerank_grep_hits(&mut hits, request.sort, request.scope);
     hits.truncate(limit);
+    crate::runtime::pipeline_metrics::record_lcm_grep(
+        hits.len(),
+        query_plan.requires_like_fallback,
+    );
     Ok(LcmGrepOutcome {
         hits,
         capped_sessions,
@@ -194,6 +199,10 @@ fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
     is_inventory_text(&hit.snippet)
 }
 
+// Raw vs summary evaluation are separate labels because they run different
+// FTS tables and joins; the LIKE fallbacks stay inclusive children of the
+// same label (the `like_fallback` gauge attributes pages to that plan).
+#[hotpath::measure(label = "sessions.lcm.grep.raw", future = true)]
 pub(super) async fn raw_grep_hits(
     conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,
@@ -258,6 +267,7 @@ pub(super) async fn raw_grep_hits(
     Ok(dedupe_related_raw_hits(candidates))
 }
 
+#[hotpath::measure(label = "sessions.lcm.grep.summary", future = true)]
 pub(super) async fn summary_grep_hits(
     conn: &(impl QueryExecutor + ?Sized),
     request: &LcmGrepRequest,

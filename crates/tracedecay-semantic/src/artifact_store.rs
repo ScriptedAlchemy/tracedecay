@@ -325,6 +325,9 @@ struct AdmittedArtifactSourceV1 {
 }
 
 impl AdmittedArtifactSourceV1 {
+    /// Runtime read path feeding model load: full member read plus the
+    /// length/SHA-256 recheck against the signed pin.
+    #[hotpath::measure(label = "semantic.artifact.member_read")]
     fn read_member_bytes(
         &self,
         member: &ArtifactPackageMemberV1,
@@ -357,6 +360,7 @@ impl AdmittedArtifactSourceV1 {
         if bytes.len() != declared_length || Sha256DigestHex::of_bytes(&bytes) != member.digest {
             return Err(AdmittedArtifactReadErrorV1::Corrupt);
         }
+        hotpath::gauge!("semantic_artifact_member_read_bytes").inc(bytes.len() as u64);
         Ok(bytes)
     }
 }

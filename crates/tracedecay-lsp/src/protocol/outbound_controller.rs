@@ -406,6 +406,14 @@ where
         self.diagnostics.published.remove(uri);
     }
 
+    /// Samples the outbound queue after one dispatch/flush cycle. The queue
+    /// is session-local and mutated at many sites; a per-cycle sample is the
+    /// truthful depth at each pump boundary, not a per-mutation ledger.
+    pub(super) fn observe_outbound_queue(&self) {
+        hotpath::gauge!("lsp.outbound.queue_depth").set(self.outbound.queue.len());
+        hotpath::gauge!("lsp.outbound.queue_bytes").set(self.outbound.queued_bytes);
+    }
+
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {
         self.outbound.queue.len() < MAX_ORDINARY_OUTBOUND_MESSAGES
             && self.outbound.queued_bytes.saturating_add(reserve_bytes)

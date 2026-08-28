@@ -50,14 +50,17 @@ pub(super) async fn handle_workflow(
             }
             (operation, request_id, controls)
         });
-    let response = crate::application_surface::invoke_workflow_operation(
-        executor,
-        WorkflowHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        },
+    let response = hotpath::future!(
+        crate::application_surface::invoke_workflow_operation(
+            executor,
+            WorkflowHttpRequest {
+                operation,
+                request_id,
+                controls,
+                body,
+            },
+        ),
+        label = "mcp.workflow.invoke"
     )
     .await;
     let body = to_bytes(response.into_body(), usize::MAX)

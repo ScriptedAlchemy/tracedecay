@@ -614,6 +614,7 @@ impl GraphDb {
                 || self.inner.database.write(),
             )
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            self.inner.identity_indexes.invalidate();
             self.ensure_available()?;
             check()?;
             let mut state_guard = self.state_write_guard()?;
@@ -712,6 +713,7 @@ impl GraphDb {
                 || self.inner.database.write(),
             )
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            self.inner.identity_indexes.invalidate();
             let mut state_guard = self.state_write_guard()?;
             let mut quarantined_guard = self
                 .inner
@@ -776,6 +778,7 @@ impl GraphDb {
                     || self.inner.database.write(),
                 )
                 .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+                self.inner.identity_indexes.invalidate();
                 let mut state_guard = self.state_write_guard()?;
                 let mut quarantined_guard =
                     self.inner.quarantined_projections.write().map_err(|_| {
@@ -1196,6 +1199,7 @@ impl GraphDb {
             || self.inner.database.write(),
         )
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        self.inner.identity_indexes.invalidate();
         let mut format_state = self.state_write_guard()?;
         let mut projection_quarantine = self
             .inner

@@ -91,7 +91,7 @@ pub struct ConcreteRepositoryWriteExecutor {
 }
 
 impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "rusqlite.repository.execute_write")]
     fn execute(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -166,7 +166,7 @@ pub struct ConcreteRepositoryReadExecutor {
 }
 
 impl ConcreteRepositoryReadExecutor {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "rusqlite.repository.execute_read")]
     pub fn execute(
         &mut self,
         snapshot: &Transaction<'_>,
