@@ -131,19 +131,14 @@ pub(crate) fn record_vector_index_size(vectors: usize, bytes: usize) {
 /// The gauge that answers "did the reopen restore the index or is the
 /// daemon about to pay for it again": non-zero means the store came back
 /// with coverage, zero means every vector search is unavailable until a
-/// rebuild finishes.
+/// rebuild finishes. Hotpath-only like [`record_grafeo_memory`]: its sole
+/// caller takes the census behind the same feature gate.
 #[inline(always)]
+#[cfg(feature = "hotpath")]
 pub(crate) fn record_vector_index_restore(indexes: usize, vectors: usize, bytes: usize) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("graph_db.vector_index.restore.indexes").set(indexes as f64);
-        hotpath::gauge!("graph_db.vector_index.restore.vectors").set(vectors as f64);
-        hotpath::gauge!("graph_db.vector_index.restore.bytes").set(bytes as f64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = (indexes, vectors, bytes);
-    }
+    hotpath::gauge!("graph_db.vector_index.restore.indexes").set(indexes as f64);
+    hotpath::gauge!("graph_db.vector_index.restore.vectors").set(vectors as f64);
+    hotpath::gauge!("graph_db.vector_index.restore.bytes").set(bytes as f64);
 }
 
 /// Records what a close is about to write out as index topology.
@@ -153,17 +148,11 @@ pub(crate) fn record_vector_index_restore(indexes: usize, vectors: usize, bytes:
 /// below the preceding persist gauge is the signal that durability is
 /// leaking somewhere between the two.
 #[inline(always)]
+#[cfg(feature = "hotpath")]
 pub(crate) fn record_vector_index_persist(indexes: usize, vectors: usize, bytes: usize) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("graph_db.vector_index.persist.indexes").set(indexes as f64);
-        hotpath::gauge!("graph_db.vector_index.persist.vectors").set(vectors as f64);
-        hotpath::gauge!("graph_db.vector_index.persist.bytes").set(bytes as f64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = (indexes, vectors, bytes);
-    }
+    hotpath::gauge!("graph_db.vector_index.persist.indexes").set(indexes as f64);
+    hotpath::gauge!("graph_db.vector_index.persist.vectors").set(vectors as f64);
+    hotpath::gauge!("graph_db.vector_index.persist.bytes").set(bytes as f64);
 }
 
 #[inline(always)]

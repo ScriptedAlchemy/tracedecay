@@ -956,10 +956,6 @@ impl GraphDb {
         Ok(guard)
     }
 
-    /// Best-effort profiler observation that cannot change graph authority or
-    /// operation outcomes. A closed or poisoned database simply has no
-    /// trustworthy memory census to report.
-    #[inline(always)]
     /// Reports how much vector index the store is holding right now.
     ///
     /// Taken twice per database lifetime, at open and just before close,
@@ -968,26 +964,49 @@ impl GraphDb {
     /// are bytes the daemon is about to spend re-indexing, and a
     /// `restore` of zero on a store that had an index means vector
     /// search is unavailable until a rebuild finishes.
+    ///
+    /// Like [`Self::record_memory_checkpoint`], the census walks internal
+    /// store structures and feeds gauges that are feature-off no-ops, so it
+    /// runs only in opt-in Hotpath builds: a production open or close must
+    /// not pay for a full memory walk it then discards.
+    #[inline(always)]
     pub(crate) fn record_vector_index_census(&self, phase: VectorIndexCensusPhase) {
-        let Ok(guard) = self.read_guard() else {
-            return;
-        };
-        let Some(database) = guard.as_ref() else {
-            return;
-        };
-        let indexes = database.memory_usage().indexes.vector_indexes;
-        let vectors = indexes.iter().map(|entry| entry.item_count).sum();
-        let bytes = indexes.iter().map(|entry| entry.bytes).sum();
-        match phase {
-            VectorIndexCensusPhase::Restore => {
-                crate::hotpath_observe::record_vector_index_restore(indexes.len(), vectors, bytes);
-            }
-            VectorIndexCensusPhase::Persist => {
-                crate::hotpath_observe::record_vector_index_persist(indexes.len(), vectors, bytes);
+        #[cfg(feature = "hotpath")]
+        {
+            let Ok(guard) = self.read_guard() else {
+                return;
+            };
+            let Some(database) = guard.as_ref() else {
+                return;
+            };
+            let indexes = database.memory_usage().indexes.vector_indexes;
+            let vectors = indexes.iter().map(|entry| entry.item_count).sum();
+            let bytes = indexes.iter().map(|entry| entry.bytes).sum();
+            match phase {
+                VectorIndexCensusPhase::Restore => {
+                    crate::hotpath_observe::record_vector_index_restore(
+                        indexes.len(),
+                        vectors,
+                        bytes,
+                    );
+                }
+                VectorIndexCensusPhase::Persist => {
+                    crate::hotpath_observe::record_vector_index_persist(
+                        indexes.len(),
+                        vectors,
+                        bytes,
+                    );
+                }
             }
         }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = phase;
     }
 
+    /// Best-effort profiler observation that cannot change graph authority or
+    /// operation outcomes. A closed or poisoned database simply has no
+    /// trustworthy memory census to report.
+    #[inline(always)]
     pub(crate) fn record_memory_checkpoint(
         &self,
         phase: crate::hotpath_observe::GrafeoMemoryPhase,
