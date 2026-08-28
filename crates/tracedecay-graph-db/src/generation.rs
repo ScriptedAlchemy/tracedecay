@@ -782,6 +782,32 @@ pub(crate) fn canonical_buffer_allocation_growths() -> usize {
     CANONICAL_BUFFER_ALLOCATION_GROWTHS.with(std::cell::Cell::get)
 }
 
+/// Digest of the generation identity frames alone, in the exact byte layout
+/// the recovered-generation proof hashes before its entity and relation
+/// frames. This is the binding digest for derived read artifacts (the sealed
+/// read bundle): it reuses [`write_generation_identity_frames`] so there is
+/// exactly one canonical encoding of a generation's identity, never a
+/// parallel authority.
+pub(crate) fn generation_identity_frames_digest(
+    identity: &GraphGenerationManifestIdentity,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<String, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_generation_identity_frames(
+        &mut writer,
+        &mut canonical,
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
+    )?;
+    writer.finish()?;
+    Ok(encode_lowercase_hex(&digest.finalize()))
+}
+
 fn physical_namespace_projection_map(
     identity: &GraphGenerationManifestIdentity,
 ) -> Result<BTreeMap<GraphNamespace, GraphProjectionIdentity>, GraphDbError> {
