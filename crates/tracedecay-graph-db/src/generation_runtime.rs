@@ -276,6 +276,7 @@ impl GraphDb {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "graph_db.generation.page_apply", impl_type = "GraphDb")]
     fn apply_generation_stage_page_with_context(
         &self,
         manifest: &GraphGenerationManifest,
@@ -287,6 +288,7 @@ impl GraphDb {
         adopt_legacy_partial: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
+        hotpath::gauge!("graph_db.generation.page_apply.bytes").set(page.live_bytes() as f64);
         let (idempotency_key, input_digest) =
             generation_stage_page_receipt(identity, expected, page)?;
         self.run_gated_batch(
@@ -406,6 +408,7 @@ impl GraphDb {
     /// Binds the dependency metadata in one empty batch, after every page
     /// receipt is durable. Reads only the identity, so the staged rows are
     /// already released by the time this runs.
+    #[hotpath::measure(label = "graph_db.generation.finalize", impl_type = "GraphDb")]
     fn finalize_staged_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,

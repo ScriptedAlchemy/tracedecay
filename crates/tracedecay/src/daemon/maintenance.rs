@@ -1107,6 +1107,11 @@ impl MaintenanceCoordinator {
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
     ) -> MaintenanceTickOutcome {
+        // Piggybacks on the retention tick's existing cadence instead of a
+        // dedicated timer thread: this is the daemon's only always-running
+        // periodic loop, so it is where a slow RSS climb toward the
+        // admission limit becomes visible between full telemetry snapshots.
+        record_process_resident_memory_gauge();
         let session_databases = if continuation.is_none() {
             administration.mounted_registered_session_databases().await
         } else {
@@ -1363,6 +1368,33 @@ impl MaintenanceCoordinator {
         );
         outcome
     }
+}
+
+/// Samples this process's current resident set size and republishes it as a
+/// Hotpath gauge. A 20G RSS overrun past the admission limit was visible only
+/// to `ps` during a 2026-08 incident; this closes that gap using the
+/// retention tick's existing cadence rather than a new background timer.
+#[cfg(target_os = "linux")]
+fn record_process_resident_memory_gauge() {
+    if let Some(bytes) = read_linux_process_resident_bytes() {
+        hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn record_process_resident_memory_gauge() {}
+
+#[cfg(target_os = "linux")]
+fn read_linux_process_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1_024)
 }
 
 #[derive(Debug)]

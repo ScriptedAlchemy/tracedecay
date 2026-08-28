@@ -142,7 +142,12 @@ impl DaemonSessionSyncService {
         }
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
-        match context.registry.read_session_sync_journal(&key).await {
+        match hotpath::future!(
+            context.registry.read_session_sync_journal(&key),
+            label = "daemon.session_sync.journal.read"
+        )
+        .await
+        {
             Ok(Some(encoded)) => {
                 return match decode_matching_journal(&encoded, &request) {
                     Ok(journal) => {
@@ -277,10 +282,13 @@ impl DaemonSessionSyncService {
                     };
                 }
             };
-            match context
-                .registry
-                .insert_session_sync_journal(&key, &encoded)
-                .await
+            match hotpath::future!(
+                context
+                    .registry
+                    .insert_session_sync_journal(&key, &encoded),
+                label = "daemon.session_sync.journal.write"
+            )
+            .await
             {
                 Ok(true) => {}
                 Ok(false) => {
@@ -334,10 +342,13 @@ impl DaemonSessionSyncService {
                 };
             }
         };
-        match context
-            .registry
-            .insert_session_sync_journal(&key, &encoded)
-            .await
+        match hotpath::future!(
+            context
+                .registry
+                .insert_session_sync_journal(&key, &encoded),
+            label = "daemon.session_sync.journal.write"
+        )
+        .await
         {
             Ok(true) => {}
             Ok(false) => {
@@ -515,20 +526,24 @@ impl DaemonSessionSyncService {
         };
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
-                context
-                    .import_transcripts(
+                hotpath::future!(
+                    context.import_transcripts(
                         self,
                         &key,
                         running.admission.accepted_at,
                         &request,
                         project_sessions.clone(),
-                    )
-                    .await
+                    ),
+                    label = "daemon.session_sync.import_transcripts"
+                )
+                .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
-                context
-                    .synchronize_git(self, &request, options, project_sessions.clone())
-                    .await
+                hotpath::future!(
+                    context.synchronize_git(self, &request, options, project_sessions.clone()),
+                    label = "daemon.session_sync.synchronize_git"
+                )
+                .await
             }
         };
         drop(permit);
@@ -662,14 +677,15 @@ impl DaemonSessionSyncService {
         mut update: impl FnMut(&mut SessionSyncJournalV1),
     ) -> crate::errors::Result<SessionSyncJournalV1> {
         loop {
-            let current = context
-                .registry
-                .read_session_sync_journal(key)
-                .await
-                .map_err(store_error)?
-                .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                    message: "session sync journal disappeared".to_owned(),
-                })?;
+            let current = hotpath::future!(
+                context.registry.read_session_sync_journal(key),
+                label = "daemon.session_sync.journal.read"
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "session sync journal disappeared".to_owned(),
+            })?;
             let mut journal: SessionSyncJournalV1 =
                 serde_json::from_str(&current).map_err(journal_decode_error)?;
             update(&mut journal);
@@ -677,11 +693,14 @@ impl DaemonSessionSyncService {
             if replacement == current {
                 return Ok(journal);
             }
-            if context
-                .registry
-                .compare_and_swap_session_sync_journal(key, &current, &replacement)
-                .await
-                .map_err(store_error)?
+            if hotpath::future!(
+                context
+                    .registry
+                    .compare_and_swap_session_sync_journal(key, &current, &replacement),
+                label = "daemon.session_sync.journal.write"
+            )
+            .await
+            .map_err(store_error)?
             {
                 self.journal_changed.notify_waiters();
                 return Ok(journal);

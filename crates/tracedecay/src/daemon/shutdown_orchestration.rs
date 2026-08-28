@@ -215,11 +215,16 @@ where
                 };
                 coordinator_failures.record(&receipt);
                 coordinator_failures.apply(&mut receipt);
-                coordinator_lifecycle.finish_shutdown_attempt(
-                    &coordinator_attempt,
-                    Arc::new(receipt),
-                    coordinator_failures,
-                );
+                // Publishing the terminal receipt is the shutdown checkpoint:
+                // once it lands, every concurrent waiter observes this
+                // outcome instead of racing a duplicate shutdown attempt.
+                hotpath::measure_block!("daemon.shutdown.checkpoint", {
+                    coordinator_lifecycle.finish_shutdown_attempt(
+                        &coordinator_attempt,
+                        Arc::new(receipt),
+                        coordinator_failures,
+                    );
+                });
                 // A timed-out runner may be inside synchronous third-party or
                 // filesystem work that cannot observe abort immediately. Keep
                 // the coordinator task owned until that runner actually exits;
@@ -285,56 +290,78 @@ async fn run_daemon_shutdown(
     );
     let in_flight = tokio::time::timeout_at(client_drain_deadline, lifecycle.wait_for_idle());
     tokio::pin!(in_flight);
-    let in_flight = loop {
-        tokio::select! {
-            receipt = &mut background_shutdown, if background_receipt.is_none() => {
-                background_receipt = Some(receipt);
+    // Client drain: wait for in-flight client work to idle out cooperatively,
+    // then abort and join whatever remains. One span covers both the
+    // cooperative wait and the forced abort/join so its duration reads as a
+    // single number against DAEMON_CLIENT_DRAIN_DEADLINE /
+    // DAEMON_TASK_ABORT_DEADLINE instead of only surfacing as a bare timeout.
+    let (in_flight, clients) = hotpath::measure_block!("daemon.shutdown.client_drain", {
+        let in_flight = loop {
+            tokio::select! {
+                receipt = &mut background_shutdown, if background_receipt.is_none() => {
+                    background_receipt = Some(receipt);
+                }
+                drained = &mut in_flight => {
+                    break match drained {
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(_) => ShutdownStatus::TimedOut,
+                    };
+                }
             }
-            drained = &mut in_flight => {
-                break match drained {
-                    Ok(()) => ShutdownStatus::Clean,
-                    Err(_) => ShutdownStatus::TimedOut,
-                };
-            }
-        }
-    };
+        };
 
-    plan.clients.abort_all();
-    let client_join_deadline = std::cmp::min(
-        tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE,
-        shutdown_deadline,
-    );
-    let clients = join_aborted_clients_until(&mut plan.clients, client_join_deadline).await;
-    let clients = if tokio::time::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
-        .await
-        .is_err()
-    {
-        ShutdownStatus::TimedOut
-    } else {
-        clients
-    };
-    let mut background = match background_receipt {
-        Some(receipt) => receipt,
-        None => background_shutdown.await,
-    };
+        plan.clients.abort_all();
+        let client_join_deadline = std::cmp::min(
+            tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE,
+            shutdown_deadline,
+        );
+        let clients = join_aborted_clients_until(&mut plan.clients, client_join_deadline).await;
+        let clients = if tokio::time::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
+            .await
+            .is_err()
+        {
+            ShutdownStatus::TimedOut
+        } else {
+            clients
+        };
+        (in_flight, clients)
+    });
+    // Background-task drain: resolve the non-terminal ShutdownOwner phases
+    // (semantic artifact GC, maintenance, session sync, invocation, ...).
+    // Often already resolved inside the client-drain select loop above; this
+    // span only measures the residual wait when it was not.
+    let mut background = hotpath::measure_block!("daemon.shutdown.background_drain", {
+        match background_receipt {
+            Some(receipt) => receipt,
+            None => background_shutdown.await,
+        }
+    });
     // Project servers hold session-database leases whose graph clients keep
     // the session relation graph owners leased. The terminal owner drains and
     // closes those graph runtimes, so it must run only after every server has
     // dropped its leases.
-    let project_servers = tokio::select! {
-        biased;
-        receipt = &mut plan.project_server_shutdown => receipt,
-        () = tokio::time::sleep_until(shutdown_deadline) => {
-            ShutdownTaskReceipt::timed_out("project_server_shutdown")
+    let project_servers = hotpath::measure_block!("daemon.shutdown.project_servers", {
+        tokio::select! {
+            biased;
+            receipt = &mut plan.project_server_shutdown => receipt,
+            () = tokio::time::sleep_until(shutdown_deadline) => {
+                ShutdownTaskReceipt::timed_out("project_server_shutdown")
+            }
         }
-    };
-    let terminal = if project_servers.timed_out_count() == 0 {
-        prepare_shutdown_owner_phases(plan.terminal_owner_phases)
-            .join(shutdown_deadline)
-            .await
-    } else {
-        ShutdownReceipt::timed_out(shutdown_deadline, "memory_graph_reconciliation")
-    };
+    });
+    // Store close: the terminal owner phase (memory_graph_reconciliation)
+    // drains retained graph owners and closes their Grafeo runtimes. This is
+    // the outer view of the close; daemon.branch_admin.close_graph_runtimes
+    // and graph_db.registry.close_retained measure the work underneath it.
+    let terminal = hotpath::measure_block!("daemon.shutdown.store_close", {
+        if project_servers.timed_out_count() == 0 {
+            prepare_shutdown_owner_phases(plan.terminal_owner_phases)
+                .join(shutdown_deadline)
+                .await
+        } else {
+            ShutdownReceipt::timed_out(shutdown_deadline, "memory_graph_reconciliation")
+        }
+    });
     background.extend(terminal);
     DaemonShutdownReceipt {
         in_flight,
