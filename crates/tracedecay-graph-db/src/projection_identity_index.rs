@@ -64,6 +64,10 @@ pub(crate) struct ProjectionIdentityIndex {
     /// projection were to repeat an identity.
     node_count: usize,
     /// Owner-label cardinality this index was built from.
+    /// Owner-label cardinality this index was built from. Retained for
+    /// diagnostics: the epoch authorizes cache hits, so this is no longer
+    /// re-checked per read.
+    #[allow(dead_code)]
     owner_node_count: usize,
 }
 

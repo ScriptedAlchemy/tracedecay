@@ -20,7 +20,7 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{
-    metadata_manifest_from_replay, validate_supplied_manifest_binding, verify_recovered_generation,
+    metadata_manifest_from_replay, validate_supplied_manifest_binding,
 };
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
@@ -1131,8 +1131,6 @@ impl GraphDbRegistry {
             }
             Err(error) => return Err(error),
         }
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         // `require_head_replay` pinned this head to its journaled replay, and
         // the manifest was proven to bind that replay's digests when it was
         // decoded above, so the stored rows verify directly against the head
@@ -1142,7 +1140,6 @@ impl GraphDbRegistry {
         // by stat instead of re-streaming every row, and either outcome is
         // recorded. Corruption still fails here exactly as the full proof
         // would - `expected` comes from the relational head, never a marker.
-        drop(guard);
         match database.verify_activated_generation(&identity, &head.recovered_digest, &check) {
             Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
