@@ -337,7 +337,10 @@ impl GraphDbRegistry {
         }
         require_unpublished_stage(authority, context, &record)?;
         database.reserve_staged_generation_retirement(&record.plan)?;
-        let outcome = match authority.cancel_stage(stage, &record.plan.writer_fence, context) {
+        let outcome = match hotpath::measure_block!(
+            "graph_db.generation.stage.cancel.authority",
+            authority.cancel_stage(stage, &record.plan.writer_fence, context)
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 match authority.stage(stage, context) {
@@ -553,16 +556,18 @@ impl GraphDbRegistry {
         }
         let checkpoint = record.checkpoint_digest.clone();
         let check = || check_all(&registration, context);
-        let replay =
-            database.prepare_publication_from_staged_native(&record.plan, &checkpoint, &check)?;
+        let replay = hotpath::measure_block!("graph_db.generation.stage.prepare.native", {
+            database.prepare_publication_from_staged_native(&record.plan, &checkpoint, &check)
+        })?;
         let request =
             SemanticVectorStagePublicationPrepareRequest::new(stage.clone(), replay, checkpoint)
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         require_authority_binding(&registration, authority)?;
-        match authority
-            .prepare_stage_publication(&request, &record.plan.writer_fence, context)
-            .map_err(map_staging_error)?
-        {
+        match hotpath::measure_block!("graph_db.generation.stage.prepare.authority", {
+            authority
+                .prepare_stage_publication(&request, &record.plan.writer_fence, context)
+                .map_err(map_staging_error)
+        })? {
             outcome @ (tracedecay_store::SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(
                 _,
             )
