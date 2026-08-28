@@ -9985,7 +9985,11 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         .await
         .expect("writable project database");
     let native_graph_path = project_database.database_path().with_extension("grafeo");
-    let native_graph_before = std::fs::read(&native_graph_path).expect("baseline native graph");
+    // The memory-graph owner opens (and creates) the native graph file on a
+    // background hook, so the baseline may legitimately not exist yet. An
+    // empty baseline keeps the contract falsifiable: activation below must
+    // still write the file, and the post-activation read fails loudly if not.
+    let native_graph_before = std::fs::read(&native_graph_path).unwrap_or_default();
 
     let graph_activation = super::graph_activation::CodeGraphActivationAuthorityV1::Persistent {
         runtime: Arc::clone(&graph_runtime),
