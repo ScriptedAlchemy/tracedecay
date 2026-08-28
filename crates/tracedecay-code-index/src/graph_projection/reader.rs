@@ -76,6 +76,7 @@ impl CodeGraphEvidenceReader {
         &self.freshness
     }
 
+    #[hotpath::measure(label = "code_graph.traverse")]
     pub fn traverse(
         &self,
         generation: &CodeGenerationId,
@@ -138,6 +139,7 @@ impl CodeGraphEvidenceReader {
         })
     }
 
+    #[hotpath::measure(label = "code_graph.traverse.adjacency")]
     fn adjacency(
         &self,
         seed: &SymbolOccurrenceId,
@@ -202,6 +204,7 @@ impl CodeGraphEvidenceReader {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "code_graph.traverse.walk")]
     fn traverse_seed(
         &self,
         seed: &SymbolOccurrenceId,
