@@ -54,7 +54,7 @@ pub(crate) fn language_family(language: &str) -> &'static str {
         "Java" | "java" | "Kotlin" | "kotlin" | "Scala" | "scala" => "jvm",
         "C#" | "c#" | "csharp" | "c_sharp" | "F#" | "f#" | "fsharp" | "VB.NET" | "vb.net"
         | "vbnet" => "dotnet",
-        "Astro" | "astro" | "JavaScript" | "javascript" | "jsx" | "JSX" | "Svelte" | "svelte"
+        "Astro" | "astro" | "JavaScript" | "javascript" | "jsx" | "Svelte" | "svelte"
         | "TypeScript" | "typescript" | "tsx" | "TSX" => "web",
         "Python" | "python" => "python",
         "Go" | "go" => "go",
@@ -272,6 +272,7 @@ mod tests {
         assert_eq!(language_family("TypeScript"), "web");
         assert_eq!(language_family("tsx"), "web");
         assert_eq!(language_family("TSX"), "web");
+        assert_eq!(language_family("JavaScript"), "web");
         assert_eq!(language_family("c_sharp"), "dotnet");
         assert_eq!(language_family("Objective-C"), "systems");
         assert_eq!(language_family("unknown-lang"), "other");

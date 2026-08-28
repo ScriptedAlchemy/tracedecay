@@ -36,10 +36,6 @@ impl SvelteExtractor {
     /// tree and every extracted coordinate remain valid for the original
     /// `.svelte` source.
     fn mask_non_script(source: &str) -> String {
-        crate::hotpath_observe::measure_language(|| Self::mask_non_script_unmeasured(source))
-    }
-
-    fn mask_non_script_unmeasured(source: &str) -> String {
         let ranges = Self::script_content_line_ranges(source);
         let mut masked = String::with_capacity(source.len());
         let mut line = 0;
@@ -120,7 +116,7 @@ impl LanguageExtractor for SvelteExtractor {
     }
 
     fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
-        Cow::Owned(Self::mask_non_script(source))
+        crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_script(source)))
     }
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {

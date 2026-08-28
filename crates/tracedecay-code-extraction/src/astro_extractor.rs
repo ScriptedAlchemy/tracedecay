@@ -39,10 +39,6 @@ impl AstroExtractor {
     /// tree and every extracted coordinate remain valid for the original
     /// `.astro` source.
     fn mask_non_frontmatter(source: &str) -> String {
-        crate::hotpath_observe::measure_language(|| Self::mask_non_frontmatter_unmeasured(source))
-    }
-
-    fn mask_non_frontmatter_unmeasured(source: &str) -> String {
         let lines: Vec<&str> = source.lines().collect();
 
         // Frontmatter requires the very first line to be `---`.
@@ -87,7 +83,7 @@ impl LanguageExtractor for AstroExtractor {
     }
 
     fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
-        Cow::Owned(Self::mask_non_frontmatter(source))
+        crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_frontmatter(source)))
     }
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
