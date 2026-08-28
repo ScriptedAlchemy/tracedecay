@@ -42,7 +42,7 @@ pub(crate) struct AutomationEffectRecoveryReport {
     pub(crate) deferred: usize,
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
 pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     memory: &crate::tracedecay::TraceDecay,
     dashboard_root: &Path,
@@ -194,6 +194,7 @@ enum EntryRecoveryOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.automation.effect.retire.reconcile", future = true)]
 async fn reconcile_indexed_retirement_transition(
     dashboard_root: &Path,
     owner: &tracedecay_domain::FactOwnerV1,
@@ -507,6 +508,7 @@ async fn reconcile_indexed_automation_effect(
     .await
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.persist_recovery", future = true)]
 async fn persist_reserved_recovery(
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
@@ -909,6 +911,7 @@ fn remove_pending_after_transition_with_writer(
     }
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.retire.finish")]
 pub(super) fn finish_retirement_transition_blocking(
     dashboard_root: &Path,
     journal_path: &Path,

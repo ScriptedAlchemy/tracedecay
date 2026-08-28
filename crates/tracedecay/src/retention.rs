@@ -243,6 +243,7 @@ where
 }
 
 /// Applies global-database retention in one registered write transaction.
+#[hotpath::measure(label = "retention.prune.global", future = true)]
 pub async fn prune_global_retention(
     database: &crate::global_db::RegisteredGlobalDb,
     config: &RetentionConfig,

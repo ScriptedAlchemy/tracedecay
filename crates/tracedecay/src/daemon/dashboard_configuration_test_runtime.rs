@@ -55,7 +55,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
         &self,
         active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        let http = crate::application_surface::http_application_router_with_executor(
+        let http = crate::application_surface::assemble_http_application_router(
             Arc::new(self.clone()),
             tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
             active_project_id,

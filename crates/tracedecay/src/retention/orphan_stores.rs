@@ -760,6 +760,7 @@ pub(crate) async fn execute_registered_collection(
         .await
 }
 
+#[hotpath::measure(label = "retention.orphan.collect.registered", future = true)]
 pub(crate) async fn execute_registered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &CollectionPlan,
@@ -1737,6 +1738,7 @@ pub(crate) fn dir_size_bytes_controlled(
 /// Build the on-disk store census from the registry. Reads manifests and sizes
 /// directories but never mutates. Only profile-sharded stores are considered;
 /// other storage modes are not laid out under the profile root here.
+#[hotpath::measure(label = "retention.orphan.census", future = true)]
 pub(crate) async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -1755,6 +1757,7 @@ pub(crate) struct StoreCensusPageV1 {
     pub(crate) next_cursor: Option<String>,
 }
 
+#[hotpath::measure(label = "retention.orphan.census_page", future = true)]
 pub(crate) async fn build_store_census_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -2204,6 +2207,7 @@ pub(crate) async fn execute_unregistered_collection(
     .await
 }
 
+#[hotpath::measure(label = "retention.orphan.collect.unregistered", future = true)]
 pub(crate) async fn execute_unregistered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
@@ -2610,6 +2614,7 @@ fn collect_sqlite_candidates(
 /// [`sweep_unregistered_store_page`] directly so it can persist the returned
 /// cursor across maintenance cadences; Doctor deliberately receives one
 /// bounded preview rather than a hidden full-profile traversal.
+#[hotpath::measure(label = "retention.orphan.sweep_unregistered", future = true)]
 pub(crate) async fn sweep_unregistered_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,

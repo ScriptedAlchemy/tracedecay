@@ -19,6 +19,7 @@ enum HostReceiptReviewProgress {
     Idle,
 }
 
+#[hotpath::measure(label = "daemon.scheduler.host_receipt_review", future = true)]
 pub(super) async fn run_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,

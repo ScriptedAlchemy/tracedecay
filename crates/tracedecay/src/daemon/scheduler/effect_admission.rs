@@ -93,7 +93,7 @@ async fn fixed_task_schedule_decision(
     )
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.scheduler.automation_effect", future = true)]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
     memory: &crate::tracedecay::TraceDecay,
@@ -274,7 +274,7 @@ pub(super) async fn abandon_reused_scheduler_skip(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.scheduler.tick", future = true)]
 pub(in crate::daemon) async fn run_automation_scheduler_tick(
     project_path: &Path,
     cg: &TraceDecay,

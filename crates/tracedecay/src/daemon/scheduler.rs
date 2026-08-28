@@ -653,7 +653,7 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
     pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -748,7 +748,7 @@ impl DaemonEngine {
         };
         let task = tokio::spawn(hotpath::future!(
             scheduler_loop,
-            label = "daemon.automation.scheduler_loop"
+            label = "daemon.scheduler.loop"
         ));
         schedulers.insert(
             key,
@@ -1020,7 +1020,6 @@ fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,

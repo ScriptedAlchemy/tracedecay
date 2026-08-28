@@ -17,6 +17,7 @@ use super::{MaintenanceContinuation, MaintenanceTickOutcome, StoreTelemetrySampl
 /// ordered journey, including independent compaction; a later semantic
 /// continuation returns after its owning phase so its short cadence cannot
 /// re-run unrelated generation-maintenance work.
+#[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
 pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
     code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,

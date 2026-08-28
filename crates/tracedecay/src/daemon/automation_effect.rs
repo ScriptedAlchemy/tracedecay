@@ -1320,7 +1320,7 @@ impl AutomationEffectAuthority {
         let index_path = journal_path.clone();
         let indexed = admission.clone();
         let reservation = tokio::task::spawn_blocking(move || {
-            hotpath::measure_block!("automation.effect.reserve", {
+            hotpath::measure_block!("daemon.automation.effect.reserve", {
                 reserve_or_replay_indexed_blocking(
                     &reserve_path,
                     requested,
@@ -1994,7 +1994,7 @@ fn settle_bound_owner(
     settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 
-#[hotpath::measure(label = "automation.effect.settle")]
+#[hotpath::measure(label = "daemon.automation.effect.settle")]
 fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
@@ -2107,7 +2107,7 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
         .publication
         .as_ref()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
-    let published = hotpath::measure_block!("automation.effect.publish", {
+    let published = hotpath::measure_block!("daemon.automation.effect.publish", {
         tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact_blocking(
             &state.authority.dashboard_root,
             state.authority.admission.request.run_id.as_str(),

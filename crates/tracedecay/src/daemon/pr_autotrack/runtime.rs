@@ -88,6 +88,7 @@ async fn run(
     }
 }
 
+#[hotpath::measure(label = "daemon.pr_autotrack.tick", future = true)]
 async fn tick(
     database: &crate::global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
@@ -160,6 +161,7 @@ async fn retained_project_graph(
         .find(|graph| graph.project_root() == canonical)
 }
 
+#[hotpath::measure(label = "daemon.pr_autotrack.poll", future = true)]
 async fn poll_project(
     repo_root: PathBuf,
     administration: &StoreAdministration,
@@ -221,6 +223,7 @@ async fn poll_project(
 
 /// Tears down all managed PR state for a project whose `auto_track_pr_branches`
 /// is now disabled.
+#[hotpath::measure(label = "daemon.pr_autotrack.teardown", future = true)]
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,

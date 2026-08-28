@@ -97,6 +97,7 @@ pub(super) fn classify(
     }
 }
 
+#[hotpath::measure(label = "daemon.automation_retirement.classify", future = true)]
 pub(super) async fn classify_for_task(
     task: AutomationTaskV1,
     dashboard_root: &Path,
@@ -137,6 +138,7 @@ pub(super) fn verify_plan_matches_binding(
 /// Completes only after the caller has durably persisted the main typed
 /// zero-effect `AutomationRun` terminal that contains this binding in
 /// its admitted input digest.
+#[hotpath::measure(label = "daemon.automation_retirement.finalize")]
 pub(super) fn finalize_after_terminal(
     dashboard_root: &Path,
     binding: &RetirementBinding,
@@ -254,6 +256,7 @@ fn finalize_after_terminal_impl(
     })
 }
 
+#[hotpath::measure(label = "daemon.automation_retirement.complete")]
 pub(super) fn complete_after_pending_removal(closure: &RetirementClosure) -> Result<()> {
     complete_after_pending_removal_with(closure, |_| Ok(()))
 }

@@ -360,6 +360,7 @@ pub(super) fn reserve_or_replay_blocking(
     reserve_or_replay_with_index(path, requested, || Ok(()), || Ok(()))
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.reserve_or_replay")]
 pub(super) fn reserve_or_replay_indexed_blocking(
     path: &Path,
     requested: DurableAutomationAdmission,
@@ -574,6 +575,7 @@ pub(super) fn unbound_reserved_cleanup_is_safe_blocking(
 /// Persists the terminal produced by canonical receipt reconciliation for a
 /// reservation owned by a prior process. This is the only path allowed to
 /// close a foreign reservation, and it retains the original admission bytes.
+#[hotpath::measure(label = "daemon.automation.effect.persist_recovered")]
 pub(super) fn persist_recovered_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -639,6 +641,7 @@ pub(super) fn persist_recovered_terminal_blocking(
     })
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.persist_prepared")]
 pub(super) fn persist_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -748,6 +751,7 @@ pub(super) fn replay_exact_binding_after_error_blocking(
     })
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.promote_prepared")]
 pub(super) fn promote_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -855,6 +859,7 @@ fn promote_prepared_terminal_with_writers(
     })
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.persist_terminal")]
 pub(super) fn persist_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -925,6 +930,7 @@ pub(super) fn persist_terminal_blocking(
     })
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.abandon")]
 pub(super) fn abandon_reservation_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,

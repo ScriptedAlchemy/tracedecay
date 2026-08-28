@@ -196,6 +196,7 @@ fn interrupted_remove_error() -> std::io::Error {
 /// Atomically moves `data_root` to a unique sibling, persists a prepared
 /// journal, then proves its exact content inventory. The caller performs the
 /// short registry transaction only after this potentially expensive hashing.
+#[hotpath::measure(label = "retention.orphan.quarantine.apply")]
 pub(super) fn quarantine_store_for_verified_collection_controlled(
     profile_root: &Path,
     data_root: &Path,

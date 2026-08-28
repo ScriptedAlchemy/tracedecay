@@ -155,6 +155,7 @@ pub fn select_branch_db_candidates(
 /// Runs bounded incremental-vacuum compaction over every candidate whose
 /// free-page ratio crosses `config`'s threshold. Each file is handled
 /// independently: one busy or failing file never blocks the rest.
+#[hotpath::measure(label = "retention.branch.compact")]
 pub fn compact_branch_databases(
     candidates: &[BranchDbCandidate],
     config: &CompactionThresholdConfig,

@@ -1096,6 +1096,7 @@ impl MaintenanceCoordinator {
         .await;
     }
 
+    #[hotpath::measure(label = "daemon.maintenance.tick", future = true)]
     async fn run_tick(
         &self,
         profile_root: &Path,
@@ -1383,6 +1384,7 @@ impl Default for ColdStorePageMetrics {
     }
 }
 
+#[hotpath::measure(label = "daemon.maintenance.cold_store_page", future = true)]
 async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &crate::global_db::RegisteredGlobalDb,

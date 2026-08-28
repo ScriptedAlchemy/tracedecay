@@ -348,6 +348,7 @@ where
     }
 }
 
+#[hotpath::measure(label = "daemon.dashboard.automation.execute", future = true)]
 async fn execute_dashboard_automation_run(
     cg: &TraceDecay,
     profile_root: PathBuf,
@@ -471,6 +472,7 @@ async fn execute_dashboard_automation_run(
     Ok(run)
 }
 
+#[hotpath::measure(label = "daemon.dashboard.automation.skill", future = true)]
 async fn execute_dashboard_managed_skill_command(
     profile_root: &Path,
     project_root: &Path,
