@@ -15,6 +15,24 @@ pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Per-phase shutdown budgets.
+///
+/// A single global deadline shared by every phase lets one stuck phase spend
+/// the whole budget, so the phases behind it never run at all and their
+/// receipts degrade to an anonymous `shutdown_coordinator` timeout. These
+/// caps bound each phase *individually*; they do not shorten the total.
+/// Unspent budget still flows forward, because each phase deadline is
+/// recomputed from the clock at that phase's start (see
+/// `DaemonShutdownBudget`), so a phase that drains quickly donates the
+/// remainder to the phases after it.
+///
+/// The store-close reserve is the load-bearing one: closing the graph
+/// runtimes is the only phase whose completion is a *durability* obligation,
+/// so it is guaranteed a slice that no earlier phase can consume.
+pub(crate) const DAEMON_BACKGROUND_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+pub(crate) const DAEMON_PROJECT_SERVER_DRAIN_DEADLINE: Duration = Duration::from_secs(12);
+pub(crate) const DAEMON_STORE_CLOSE_RESERVE: Duration = Duration::from_secs(12);
+
 #[derive(Clone)]
 pub(crate) struct DaemonLifecycle {
     inner: Arc<DaemonLifecycleInner>,

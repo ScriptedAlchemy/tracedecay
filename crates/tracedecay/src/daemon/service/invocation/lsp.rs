@@ -53,11 +53,22 @@ pub(super) async fn runtime_lsp_actor(
 }
 
 impl DaemonInvocationService {
-    pub(crate) async fn begin_shutdown(&self) {
-        *self.lsp_admission_open.lock().await = false;
+    /// The synchronous half of `begin_shutdown`: close every admission gate
+    /// that does not need an await to close.
+    ///
+    /// Kept separate so the daemon shutdown coordinator can run it during
+    /// `prepare_shutdown_owner_phases` — before *any* owner join is polled —
+    /// instead of only when the invocation owner's own phase is reached.
+    /// Every call here is idempotent.
+    pub(crate) fn cancel_admissions(&self) {
         self.code_index_schedulers.cancel();
         self.project_runtimes.begin_shutdown();
         self.work_attempt_processes.begin_shutdown();
+    }
+
+    pub(crate) async fn begin_shutdown(&self) {
+        *self.lsp_admission_open.lock().await = false;
+        self.cancel_admissions();
     }
 
     pub(super) async fn install_lsp_owner(

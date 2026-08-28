@@ -935,6 +935,21 @@ impl DaemonInvocationState {
         }
     }
 
+    /// Close every invocation admission gate that can be closed without
+    /// awaiting, so no new provider, code-index, or project-runtime work is
+    /// admitted once shutdown has been *requested* — not merely once this
+    /// owner's drain phase is reached.
+    ///
+    /// The invocation owner sits behind the producer phase in the daemon
+    /// shutdown plan, so its join is not polled until those producers settle.
+    /// Wiring this into the owner's synchronous `cancel` side closes the gates
+    /// at prepare time and, critically, keeps them closed even if the
+    /// coordinator later aborts the drain runner. Idempotent.
+    pub(super) fn cancel_admissions(&self) {
+        self.service.cancel_admissions();
+        self.github_credential_lifecycle.shutdown();
+    }
+
     pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();

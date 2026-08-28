@@ -45,6 +45,24 @@ static SERVICE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // platform default of 256 descriptors is too small for multi-worktree use.
 const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 
+/// `TimeoutStopSec` for the generated unit, derived from the daemon's own
+/// shutdown budget.
+///
+/// The unit previously declared no stop timeout at all, so the daemon's 45s
+/// self-imposed budget raced whatever `DefaultTimeoutStopSec` the host was
+/// configured with. When the supervisor's bound is the tighter one, systemd
+/// SIGKILLs the cgroup mid-drain: the typed shutdown receipts that name the
+/// stuck owner are exactly the thing that never gets written, and on
+/// `Restart=on-failure` the kill can catch the replacement instance too.
+///
+/// Stating the bound explicitly, strictly above `DAEMON_SHUTDOWN_DEADLINE`,
+/// makes the daemon's deadline the one that fires first — so a slow shutdown
+/// ends in a named timeout receipt instead of an anonymous SIGKILL. This is
+/// not extra grace for slow work: the daemon still self-limits at 45s.
+const DAEMON_STOP_TIMEOUT_SECS: u64 =
+    super::DAEMON_SHUTDOWN_DEADLINE.as_secs() + DAEMON_STOP_TIMEOUT_MARGIN_SECS;
+const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
     pub tracedecay_bin: PathBuf,
@@ -280,6 +298,7 @@ impl DaemonServiceSpec {
              ExecStart={} daemon run --socket {}{}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
+             TimeoutStopSec={}\n\
              LimitNOFILE={}\n\
              \n\
              [Install]\n\
@@ -288,6 +307,7 @@ impl DaemonServiceSpec {
             self.tracedecay_bin.display(),
             self.socket_path.display(),
             remote_arguments,
+            DAEMON_STOP_TIMEOUT_SECS,
             DAEMON_OPEN_FILE_LIMIT,
         ))
     }

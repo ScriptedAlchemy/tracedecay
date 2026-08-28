@@ -1,0 +1,28 @@
+--- a/crates/grafeo-engine/src/database/mod.rs
++++ b/crates/grafeo-engine/src/database/mod.rs
+@@ -2266,7 +2266,14 @@
+             if let Some(ref wal) = self.wal {
+                 wal.sync()?;
+             }
+-            let flush_result = self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?;
++            // Close is a checkpoint, not an explicit CHECKPOINT command:
++            // serialize the sections that are actually dirty. `Explicit`
++            // re-serializes *every* section unconditionally, so closing an
++            // unchanged database rebuilt the entire store — for a large graph
++            // that faults the whole working set back in and writes many
++            // gigabytes that are already durable on disk. The retry below is
++            // the safety valve if dirty tracking under-reports.
++            let flush_result = self.checkpoint_to_file(fm, flush::FlushReason::Checkpoint)?;
+ 
+             // Safety check: if WAL has records but the checkpoint was a no-op
+             // (zero sections written), the container file may not contain the
+--- a/crates/grafeo-engine/src/database/flush.rs
++++ b/crates/grafeo-engine/src/database/flush.rs
+@@ -22,7 +22,6 @@
+ #[non_exhaustive]
+ pub enum FlushReason {
+     /// Periodic checkpoint (timer-driven) or database close.
+-    #[allow(dead_code)] // Used by async_ops (async-storage feature)
+     Checkpoint,
+     /// User-initiated `CHECKPOINT` command or `wal_checkpoint()` API.
+     Explicit,
