@@ -933,7 +933,11 @@ async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_wr
 #[tokio::test]
 async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal_receipt() {
     const WORK_LIMIT: usize = 4_096;
-    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 74;
+    // Sync point, not a performance budget: one less than the successful
+    // completion's checkpoint count so cancellation fires on the pre-commit
+    // checkpoint after activation and the terminal receipt. The measured
+    // count includes identity-index cancellation polls during relation load.
+    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 80;
 
     let (_successful_tmp, successful_runtime, successful_request, _) =
         ready_single_observation_completion("session.projector.completion-meter").await;
