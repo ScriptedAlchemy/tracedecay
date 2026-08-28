@@ -273,6 +273,7 @@ impl CapabilityRoutingEvaluatorV1 {
 }
 
 impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
+    #[hotpath::measure(label = "policy.routing.evaluate")]
     fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1 {
         let mut declared = BTreeSet::new();
         if !request.requested_use_case_id.is_valid()

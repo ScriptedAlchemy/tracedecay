@@ -99,6 +99,7 @@ fn curation_apply_evaluator_digest() -> Result<ManifestDigest, DomainError> {
 }
 
 /// Evaluates whether a sealed curation output may be automatically applied.
+#[hotpath::measure(label = "policy.curation.evaluate")]
 pub fn evaluate_curation_apply(
     input: &CurationApplyPolicyInputV1,
 ) -> Result<CurationApplyDecisionV1, DomainError> {

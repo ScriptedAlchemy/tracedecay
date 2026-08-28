@@ -331,6 +331,7 @@ impl SourceAuthorizationEvaluator for SourceAuthorizationEvaluatorV1 {
         &self.version
     }
 
+    #[hotpath::measure(label = "policy.authorization.evaluate")]
     fn evaluate(&self, input: &SourceAuthorizationInputV1) -> SourceAuthorizationDecisionV1 {
         if !input.is_structurally_valid() || !self.version.is_valid() {
             return self.non_authorizing(

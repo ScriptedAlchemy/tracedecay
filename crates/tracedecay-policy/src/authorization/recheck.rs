@@ -95,6 +95,7 @@ impl SinkRecheckDecisionV1 {
 /// Issue a source proof from a current, fully allowing decision. Indeterminate
 /// availability, partial input, denied access, and policy exclusion cannot
 /// transition into a proof.
+#[hotpath::measure(label = "policy.authorization.issue_proof")]
 pub fn issue_source_authorization_proof(
     evaluator: &impl SourceAuthorizationEvaluator,
     input: &SourceAuthorizationInputV1,
@@ -127,6 +128,7 @@ pub fn issue_source_authorization_proof(
 
 /// Re-run authorization against current immutable facts immediately before an
 /// application sink. No proof survives a revision or privacy drift.
+#[hotpath::measure(label = "policy.authorization.recheck")]
 pub fn recheck_sink_admission(
     evaluator: &impl SourceAuthorizationEvaluator,
     proof: &SourceAuthorizationProofV1,
