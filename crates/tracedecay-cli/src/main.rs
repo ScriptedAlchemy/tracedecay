@@ -1187,10 +1187,15 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 remote_tls_cert.map(PathBuf::from),
                 remote_tls_key.map(PathBuf::from),
             )?;
-            hotpath::future!(
+            // Boxed on purpose: `run_foreground` is the daemon's entire
+            // bootstrap state machine, and `hotpath::future!` wraps by value -
+            // unboxed, the whole machine inlines into this dispatch future and
+            // overflows the main thread's stack at startup (measured tonight;
+            // same class as the 37MB serve_broker_socket_client machine).
+            Box::pin(hotpath::future!(
                 tracedecay::daemon::run_foreground(socket_path, remote_tls),
                 label = "cli.daemon.run"
-            )
+            ))
             .await?;
         }
         DaemonAction::InstallService {

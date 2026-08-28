@@ -137,7 +137,7 @@ impl DaemonSessionSyncService {
                 "session sync refused: TRACEDECAY_SESSION_INGEST_DISABLED is set"
             );
             return SessionSyncOutcomeV1::Unavailable {
-                reason_code: "session_ingest_disabled_by_env",
+                reason_code: crate::daemon::SESSION_INGEST_DISABLED_REASON_V1,
             };
         }
         let observed_at = now_micros();

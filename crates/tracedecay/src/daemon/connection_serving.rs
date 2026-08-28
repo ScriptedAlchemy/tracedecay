@@ -606,14 +606,22 @@ fn serve_broker_socket_client_inner(
     // Erase the deeply nested broker connection future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let mut transport = BrokerStreamTransport::new(stream);
+        let Some((
+            mut transport,
+            engine,
+            mut handshake,
+            first_request_line,
+            setup_activity,
+            _per_client_permit,
+        )) = Box::pin(async move {
+            let mut transport = BrokerStreamTransport::new(stream);
         if let Some(expected_token) = auth_token.as_deref() {
             let preface_line = tokio::select! {
                 result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(()),
+                () = engine.lifecycle.wait_for_draining() => return Ok(None),
             };
             let Some(preface_line) = preface_line else {
-                return Ok(());
+                return Ok(None);
             };
             let preface = DaemonAuthPreface::from_line(&preface_line).map_err(|_| {
                 TraceDecayError::Config {
@@ -628,29 +636,29 @@ fn serve_broker_socket_client_inner(
         }
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
-            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
         };
         let Some(line) = line else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(setup_activity) = engine.lifecycle.try_enter() else {
-            return Ok(());
+            return Ok(None);
         };
         let mut handshake = DaemonHandshake::from_line(&line)?;
         let peer_full_close = transport.peer_fully_closed_after_eof();
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
             result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
-            () = &mut peer_full_close => return Ok(()),
+            () = &mut peer_full_close => return Ok(None),
         };
         let mut engine = engine;
         engine.store_administration = store_administration;
         let first_request_line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
-            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
         };
         let Some(first_request_line) = first_request_line else {
-            return Ok(());
+            return Ok(None);
         };
         let reserved_control_request = is_reserved_control_request(&first_request_line);
         if admission_class == DaemonClientAdmissionClass::ReservedControl
@@ -663,7 +671,7 @@ fn serve_broker_socket_client_inner(
                 MAX_CONCURRENT_DAEMON_CLIENTS,
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
             match engine
@@ -674,12 +682,36 @@ fn serve_broker_socket_client_inner(
                 Err(response) => {
                     drop(setup_activity);
                     reject_admitted_request(&mut transport, &first_request_line, response).await?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         } else {
             None
         };
+            Ok::<_, TraceDecayError>(Some((
+                transport,
+                engine,
+                handshake,
+                first_request_line,
+                setup_activity,
+                _per_client_permit,
+            )))
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+
+        Box::pin(async move {
+        let Some((
+            mut transport,
+            engine,
+            handshake,
+            first_request_line,
+            setup_activity,
+            _per_client_permit,
+            initialize_route,
+        )) = Box::pin(async move {
         if let Some(cancellation) =
             crate::daemon_contract::parse_daemon_invocation_cancellation_request(
                 &first_request_line,
@@ -689,41 +721,41 @@ fn serve_broker_socket_client_inner(
                 crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
             });
             drop(setup_activity);
-            return Ok(());
+            return Ok(None);
         }
         let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
             Some(
-                engine
-                    .git_watcher_health(handshake.project_path.as_deref())
-                    .await,
+                Box::pin(engine.git_watcher_health(handshake.project_path.as_deref())).await,
             )
         } else {
             None
         };
-        let Some(setup_activity) = serve_core_doctor_runtime_request(
+        let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &engine.store_administration,
             setup_activity,
             &first_request_line,
             git_watcher_health,
-            || async {
-                Ok(engine
-                    .cached_project_server(&handshake)
-                    .await?
-                    .is_some_and(|server| server.doctor_report_ready()))
+            || {
+                Box::pin(async {
+                    Ok(engine
+                        .cached_project_server(&handshake)
+                        .await?
+                        .is_some_and(|server| server.doctor_report_ready()))
+                })
             },
-        )
+        ))
         .await?
         else {
-            return Ok(());
+            return Ok(None);
         };
-        engine.log_client_version_skew(&handshake).await;
+        Box::pin(engine.log_client_version_skew(&handshake)).await;
         report_profile_host_admission_bootstrap_status(
-            schedule_user_profile_host_admission_replay_for_identity(
+            Box::pin(schedule_user_profile_host_admission_replay_for_identity(
                 &engine.store_administration,
                 &handshake.client_identity,
-            )
+            ))
             .await,
         );
         // Resolve initialize roots only after authentication and inside daemon
@@ -732,36 +764,56 @@ fn serve_broker_socket_client_inner(
         // are answered as typed responses: dropping the connection here would
         // surface as a hard host failure and leave the client without the
         // retryable state the deferral carries.
-        let initialize_route = match apply_daemon_initialize_route(
+        let initialize_route = match Box::pin(apply_daemon_initialize_route(
             &mut handshake,
             &first_request_line,
             &engine.store_administration,
-        )
+        ))
         .await
         {
             Ok(route) => route,
             Err(error) => {
                 drop(setup_activity);
-                write_project_open_error(
+                Box::pin(write_project_open_error(
                     &mut transport,
                     &first_request_line,
                     &handshake.client_instance_id,
                     &error,
-                )
+                ))
                 .await?;
-                return Ok(());
+                return Ok(None);
             }
         };
+            Ok::<_, TraceDecayError>(Some((
+                transport,
+                engine,
+                handshake,
+                first_request_line,
+                setup_activity,
+                _per_client_permit,
+                initialize_route,
+            )))
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+
+        Box::pin(async move {
         if let Some(request) = parse_branch_admin_request(&first_request_line) {
+            return Box::pin(async move {
             let result = match request.action.clone() {
                 Ok(action) => engine.execute_branch_admin(&handshake, action).await,
                 Err(message) => Err(TraceDecayError::Config { message }),
             };
             drop(setup_activity);
             write_branch_admin_response(&mut transport, request, result).await?;
-            return Ok(());
+            Ok(())
+            })
+            .await;
         }
         if let Some(request) = parse_branch_add_request(&first_request_line) {
+            return Box::pin(async move {
             let response = match await_project_owner_or_disconnect(
                 &mut transport,
                 engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
@@ -786,13 +838,21 @@ fn serve_broker_socket_client_inner(
             };
             drop(setup_activity);
             write_json_rpc_response(&mut transport, &response).await?;
-            return Ok(());
+            Ok(())
+            })
+            .await;
         }
         if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
+            return Box::pin(async move {
             let mut invocation = invocation;
             let mut owned_lsp_sessions = HashMap::new();
             let mut pending_line = None;
-            let result = async {
+            // Keep the retained invocation loop out of the broker connection
+            // future's inline state. With Hotpath enabled the surrounding
+            // transport wrapper is polled on Tokio's ordinary worker stack;
+            // embedding this loop there makes construction alone exceed that
+            // stack before the first request can be served.
+            let result = Box::pin(async {
                 loop {
                     let delivery = invocation.as_ref().ok().and_then(|request| {
                         DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
@@ -987,11 +1047,14 @@ fn serve_broker_socket_client_inner(
                     };
                     invocation = next_invocation;
                 }
-            }
+            })
             .await;
             cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
-            return result;
+            result
+            })
+            .await;
         }
+        let bootstrap_handled = Box::pin(async {
         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
             let initialized_project_server_ready =
                 matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
@@ -1068,16 +1131,23 @@ fn serve_broker_socket_client_inner(
                     engine.release_catalog_refresh(key).await;
                     return Err(error);
                 }
-                drop(setup_activity);
                 if let Some(response) = response {
                     write_json_rpc_response(&mut transport, &response).await?;
                 }
-                return Ok(());
+                return Ok::<_, TraceDecayError>(true);
             }
         }
+        Ok(false)
+        })
+        .await?;
+        if bootstrap_handled {
+            drop(setup_activity);
+            return Ok(());
+        }
+
         let user_session_request = projectless_user_session_request(&first_request_line);
-        let mut pending_project_open_lines = VecDeque::new();
-        let server = if handshake.project_path.is_some() && !user_session_request {
+        let project_owner = Box::pin(async {
+        if handshake.project_path.is_some() && !user_session_request {
             match await_project_owner_or_disconnect(
                 &mut transport,
                 engine.project_server_for_request(
@@ -1087,16 +1157,9 @@ fn serve_broker_socket_client_inner(
             )
             .await
             {
-                Ok(Some((server, pending_lines))) => {
-                    pending_project_open_lines = pending_lines;
-                    Some(server)
-                }
-                Ok(None) => {
-                    drop(setup_activity);
-                    return Ok(());
-                }
+                Ok(Some((server, pending_lines))) => Ok(Some((Some(server), pending_lines))),
+                Ok(None) => Ok(None),
                 Err(error) => {
-                    drop(setup_activity);
                     write_project_open_error(
                         &mut transport,
                         &first_request_line,
@@ -1104,13 +1167,18 @@ fn serve_broker_socket_client_inner(
                         &error,
                     )
                     .await?;
-                    return Ok(());
+                    Ok(None)
                 }
             }
         } else {
-            None
-        };
+            Ok::<_, TraceDecayError>(Some((None, VecDeque::new())))
+        }
+        })
+        .await?;
         drop(setup_activity);
+        let Some((server, pending_project_open_lines)) = project_owner else {
+            return Ok(());
+        };
         if !engine.lifecycle.accepting() {
             return Ok(());
         }
@@ -1132,7 +1200,7 @@ fn serve_broker_socket_client_inner(
                     &handshake.client_instance_id,
                     tests::ObservedMcpRoute::Rmcp,
                 );
-                serve_routed_rmcp_connection(
+                Box::pin(serve_routed_rmcp_connection(
                     server,
                     transport,
                     first_request_line,
@@ -1140,7 +1208,7 @@ fn serve_broker_socket_client_inner(
                     initialize_route,
                     handshake.timings,
                     &engine.lifecycle,
-                )
+                ))
                 .await?;
             } else {
                 #[cfg(test)]
@@ -1166,15 +1234,19 @@ fn serve_broker_socket_client_inner(
             for line in pending_project_open_lines {
                 transport.push_replay(line)?;
             }
-            serve_projectless_client(
+            Box::pin(serve_projectless_client(
                 &mut transport,
                 &handshake.client_identity,
                 &engine.lifecycle,
                 &engine.store_administration,
-            )
+            ))
             .await?;
         }
         Ok(())
+        })
+        .await
+        })
+        .await
     })
 }
 

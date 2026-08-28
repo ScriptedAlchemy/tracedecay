@@ -93,6 +93,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
             .map(|(record, _)| record))
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.native_integration.query.cleanup_pending"
+    )]
     pub async fn pending_worktree_cleanups(
         &self,
         repository_id: &tracedecay_domain::RepositoryId,
@@ -119,6 +123,8 @@ impl GlobalDbNativeIntegrationStore<'_> {
             let payload = text(&row, 0, "pending cleanup transaction payload")?;
             pending.push(decode(&payload)?);
         }
+        hotpath::gauge!("global_db.native_integration.cleanup.pending_rows")
+            .inc(pending.len() as u64);
         if pending.len()
             > usize::try_from(limit).map_err(|_| NativeIntegrationStoreError::Unavailable)?
         {

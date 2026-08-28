@@ -354,6 +354,13 @@ pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) fn session_ingest_disabled() -> bool {
     std::env::var("TRACEDECAY_SESSION_INGEST_DISABLED").is_ok_and(|v| !v.is_empty() && v != "0")
 }
+
+/// The typed unavailable reason a configured-off ingest lane reports.
+///
+/// Named because callers must distinguish a deliberate no-op from a genuine
+/// admission failure: treating it as a failure retires the project's session
+/// context and fails the whole project mount.
+pub(crate) const SESSION_INGEST_DISABLED_REASON_V1: &str = "session_ingest_disabled_by_env";
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;

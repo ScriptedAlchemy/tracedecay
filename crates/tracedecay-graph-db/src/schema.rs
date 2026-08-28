@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use grafeo_common::types::{EdgeId, Value};
+use grafeo_common::types::{EdgeId, NodeId, Value};
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::{Edge, Node};
 
 use crate::limits::{
@@ -35,8 +36,11 @@ pub(crate) const RELATION_KIND_PROPERTY: &str = "__tracedecay_graph_db_relation_
 pub(crate) const RELATION_EDGE_PROPERTY: &str = "__tracedecay_graph_db_relation_edge";
 pub(crate) const ENTITY_KEY_PROPERTY: &str = "__tracedecay_graph_db_entity_key";
 pub(crate) const RELATION_KEY_PROPERTY: &str = "__tracedecay_graph_db_relation_key";
+/// Written on projection-state nodes only, so a projection lookup resolves to
+/// one node instead of scanning every entity and relation that projection owns.
 pub(crate) const PROJECTION_KEY_PROPERTY: &str = "__tracedecay_graph_db_projection_key";
 pub(crate) const PUBLICATION_KEY_PROPERTY: &str = "__tracedecay_graph_db_publication_key";
+pub(crate) const QUARANTINE_KEY_PROPERTY: &str = "__tracedecay_graph_db_recovery_quarantine_key";
 pub(crate) const SOURCE_GENERATION_PROPERTY: &str = "__tracedecay_graph_db_source_generation";
 pub(crate) const WATERMARK_PROPERTY: &str = "__tracedecay_graph_db_watermark";
 pub(crate) const DIGEST_PROPERTY: &str = "__tracedecay_graph_db_digest";
@@ -51,22 +55,24 @@ pub(crate) const COMMIT_SEQUENCE_PROPERTY: &str = "__tracedecay_graph_db_commit_
 const DOMAIN_LABEL_PREFIX: &str = "__tracedecay_graph_db_label_";
 const OWNER_LABEL_PREFIX: &str = "__tracedecay_graph_db_owner_";
 const OWNER_DOMAIN_LABEL_PREFIX: &str = "__tracedecay_graph_db_owner_label_";
-const ENTITY_KEY_LABEL_PREFIX: &str = "__tracedecay_graph_db_entity_key_";
-const RELATION_KEY_LABEL_PREFIX: &str = "__tracedecay_graph_db_relation_key_";
-const RELATION_EDGE_LABEL_PREFIX: &str = "__tracedecay_graph_db_relation_edge_";
 const RELATION_OWNER_LABEL_PREFIX: &str = "__tracedecay_graph_db_relation_owner_";
-const PROJECTION_STATE_LABEL_PREFIX: &str = "__tracedecay_graph_db_projection_state_";
-const PUBLICATION_KEY_LABEL_PREFIX: &str = "__tracedecay_graph_db_publication_key_";
 const RELATION_TYPE_PREFIX: &str = "__tracedecay_graph_db_relation_";
 const PROPERTY_PREFIX: &str = "__tracedecay_graph_db_property_";
 const VECTOR_PREFIX: &str = "__tracedecay_graph_db_vector_";
 
-pub(crate) const INDEXED_PROPERTIES: [&str; 5] = [
+/// The unique-key indexes every native lookup resolves through.
+///
+/// Each one addresses exactly one record kind, so a hit is a point read rather
+/// than a scan the caller has to filter. They replaced a synthetic key *label*
+/// per record: labels become columnar node tables, and one table per entity
+/// exhausts grafeo's `u16` table id (32,767) on any real repository graph.
+pub(crate) const INDEXED_PROPERTIES: [&str; 6] = [
     ENTITY_KEY_PROPERTY,
     RELATION_KEY_PROPERTY,
     RELATION_EDGE_PROPERTY,
     PROJECTION_KEY_PROPERTY,
     PUBLICATION_KEY_PROPERTY,
+    QUARANTINE_KEY_PROPERTY,
 ];
 
 pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
@@ -89,22 +95,32 @@ fn key_label(prefix: &str, key: &str) -> String {
     format!("{prefix}{}", hex::encode(key.as_bytes()))
 }
 
-pub(crate) fn entity_key_label(namespace: &GraphNamespace, identity: &GraphEntityId) -> String {
-    key_label(
-        ENTITY_KEY_LABEL_PREFIX,
-        &stable_key(namespace, identity.as_str()),
-    )
+/// The indexed unique-key value for one entity.
+///
+/// Entity identity resolves through [`ENTITY_KEY_PROPERTY`], never through a
+/// synthetic per-entity label. A label index would mint one native label — and
+/// therefore one columnar node table — per entity, which caps out at grafeo's
+/// `u16` table id long before a real repository graph is loaded.
+pub(crate) fn entity_key_value(namespace: &GraphNamespace, identity: &GraphEntityId) -> Value {
+    Value::from(stable_key(namespace, identity.as_str()))
 }
 
-pub(crate) fn relation_key_label(namespace: &GraphNamespace, identity: &GraphRelationId) -> String {
-    key_label(
-        RELATION_KEY_LABEL_PREFIX,
-        &stable_key(namespace, identity.as_str()),
-    )
+/// The indexed unique-key value for one relation locator. See
+/// [`entity_key_value`] for why this is a property rather than a label.
+pub(crate) fn relation_key_value(namespace: &GraphNamespace, identity: &GraphRelationId) -> Value {
+    Value::from(stable_key(namespace, identity.as_str()))
 }
 
-pub(crate) fn relation_edge_label(edge: EdgeId) -> String {
-    format!("{RELATION_EDGE_LABEL_PREFIX}{}", edge.as_u64())
+/// The indexed unique-key value for a relation locator's native edge.
+///
+/// Stored as the same `i64` scalar [`relation_properties`] writes, so the
+/// lookup and the persisted row cannot drift.
+pub(crate) fn relation_edge_value(edge: EdgeId) -> Result<Value, GraphDbError> {
+    i64::try_from(edge.as_u64())
+        .map(Value::from)
+        .map_err(|_| GraphDbError::Corrupt {
+            message: "Grafeo edge identity exceeds the persisted scalar range".to_owned(),
+        })
 }
 
 pub(crate) fn relation_projection_label(
@@ -117,24 +133,23 @@ pub(crate) fn relation_projection_label(
     )
 }
 
-pub(crate) fn projection_state_label(
+/// The indexed unique-key value for one projection-state node.
+///
+/// [`PROJECTION_KEY_PROPERTY`] is written on projection-state nodes only, so
+/// this resolves to at most one node without scanning the projection's rows.
+pub(crate) fn projection_state_key_value(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
-) -> String {
-    key_label(
-        PROJECTION_STATE_LABEL_PREFIX,
-        &projection_key(namespace, projection),
-    )
+) -> Value {
+    Value::from(projection_key(namespace, projection))
 }
 
-pub(crate) fn publication_key_label(
+/// The indexed unique-key value for one publication receipt.
+pub(crate) fn publication_key_value(
     namespace: &GraphNamespace,
     identity: &GraphIdempotencyKey,
-) -> String {
-    key_label(
-        PUBLICATION_KEY_LABEL_PREFIX,
-        &stable_key(namespace, identity.as_str()),
-    )
+) -> Value {
+    Value::from(stable_key(namespace, identity.as_str()))
 }
 
 pub(crate) fn entity_projection_label(
@@ -203,13 +218,9 @@ pub(crate) fn entity_labels(
 pub(crate) fn relation_locator_labels(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
-    relation: &GraphRelation,
-    edge: EdgeId,
 ) -> Vec<String> {
     vec![
         RELATION_LABEL.to_owned(),
-        relation_key_label(namespace, &relation.identity),
-        relation_edge_label(edge),
         relation_projection_label(namespace, projection),
     ]
 }
@@ -265,13 +276,6 @@ pub(crate) fn entity_properties(
             )),
         ),
         (
-            PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                projection.as_str(),
-            )),
-        ),
-        (
             NAMESPACE_PROPERTY.to_owned(),
             Value::from(namespace.as_str()),
         ),
@@ -309,13 +313,6 @@ pub(crate) fn relation_properties(
             Value::from(stable_key_from_encoded(
                 &encoded_namespace,
                 relation.identity.as_str(),
-            )),
-        ),
-        (
-            PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                projection.as_str(),
             )),
         ),
         (
@@ -365,13 +362,6 @@ pub(crate) fn edge_properties(
             Value::from(stable_key_from_encoded(
                 &encoded_namespace,
                 relation.identity.as_str(),
-            )),
-        ),
-        (
-            PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                projection.as_str(),
             )),
         ),
         (
@@ -506,7 +496,7 @@ pub(crate) fn decode_entity(node: &Node) -> Result<GraphEntity, GraphDbError> {
     .map_err(|error| persisted_validation_error("entity identity", error))?;
     let entity = GraphEntity::new(
         identity,
-        decode_entity_labels(node.labels.iter())?,
+        decode_entity_labels(native_labels(node))?,
         decode_graph_properties(
             node.properties
                 .iter()
@@ -748,8 +738,80 @@ fn require_decoded_property_budget(
     Ok(())
 }
 
+/// Separates the labels grafeo's columnar builder fuses into one composite key.
+///
+/// TraceDecay's own labels are ASCII prefixes over hex, so this byte never
+/// occurs inside one and the split is unambiguous.
+const COMPACT_LABEL_SEPARATOR: char = '|';
+
+/// Every native label `node` carries, whichever store it came from.
+///
+/// A `CompactStore` files a multi-label node under a *composite* label — the
+/// node's label set sorted and joined with `|`
+/// (`grafeo-core/src/graph/compact/builder.rs:1129`) — and its `get_node`
+/// restores that composite as the node's single label
+/// (`compact/graph_store_impl.rs:31`). An entity carries a record label plus
+/// owner and domain labels, so reading `node.labels` directly sees one fused
+/// string on a compacted generation and none of the labels that were fused
+/// into it. Flattening here is what lets one decode path serve both the live
+/// `LpgStore` and a compacted base.
+pub(crate) fn native_labels(node: &Node) -> impl Iterator<Item = &str> {
+    node.labels
+        .iter()
+        .flat_map(|label| label.as_str().split(COMPACT_LABEL_SEPARATOR))
+}
+
+/// Whether `node` carries `label`, reading through a compacted composite key.
+pub(crate) fn has_native_label(node: &Node, label: &str) -> bool {
+    native_labels(node).any(|stored| stored == label)
+}
+
+/// Every label key under which `store` files nodes carrying `label`.
+///
+/// `nodes_by_label` is an exact-string lookup into the store's label table, so
+/// on a compacted base it only answers for the fused composite key, never for
+/// one of the labels inside it. Expanding through `all_labels` gives `label`
+/// itself on a live `LpgStore`, the composites that fuse it on a compacted
+/// base, and both on a layered store whose overlay has taken new writes.
+///
+/// Falls back to `label` when nothing matches so a caller that feeds this to a
+/// `ProjectionSpec` still filters: an empty label set there means *no filter*,
+/// which would silently widen the projection to the whole store.
+pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
+    let keys: Vec<String> = store
+        .all_labels()
+        .into_iter()
+        .filter(|key| key.split(COMPACT_LABEL_SEPARATOR).any(|part| part == label))
+        .collect();
+    if keys.is_empty() {
+        return vec![label.to_owned()];
+    }
+    keys
+}
+
+/// Every node carrying `label`, across whichever key the store files it under.
+///
+/// Each node belongs to exactly one label table, so the union needs no dedupe.
+pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeId> {
+    let keys = label_keys(store, label);
+    if let [only] = keys.as_slice() {
+        return store.nodes_by_label(only);
+    }
+    keys.iter()
+        .flat_map(|key| store.nodes_by_label(key))
+        .collect()
+}
+
+/// How many nodes carry `label`. See [`nodes_with_label`].
+pub(crate) fn nodes_with_label_count(store: &dyn GraphStore, label: &str) -> usize {
+    label_keys(store, label)
+        .iter()
+        .map(|key| store.nodes_by_label_count(key))
+        .sum()
+}
+
 fn require_label(node: &Node, label: &str, description: &str) -> Result<(), GraphDbError> {
-    if !node.has_label(label) {
+    if !has_native_label(node, label) {
         return Err(GraphDbError::Corrupt {
             message: format!("native {description} has the wrong label"),
         });

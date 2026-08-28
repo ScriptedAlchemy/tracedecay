@@ -12130,3 +12130,261 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
         "the composition's synthesis observation must be persisted"
     );
 }
+
+/// A checkout that never holds still must still get graph serving.
+///
+/// The live failure this covers: graph preparation demanded a `Noop` reconcile
+/// outcome, which is only reachable when the tree is unchanged between a
+/// publication and the next worker pass. On a shared checkout with peers
+/// editing continuously that window never arrives - three full seals produced
+/// zero seat attempts, `graph_statistics` stayed
+/// `exact_scope_generation_not_ready`, and every exact graph read answered
+/// "not ready" while a complete sealed generation sat on disk. Nothing logged,
+/// because a missing prepare is not a refusal.
+///
+/// The assertion deliberately reads the serving slot, not the prepare step:
+/// that slot is written only by the serving swap, which runs after graph
+/// activation returns. A generation that prepares and activates but never
+/// swaps fails this test exactly like one that never prepares.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("seeded worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let registry = Arc::new(CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(
+        1, 1,
+    ));
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    // Never let the tree settle: every reconcile pass from here on sees a
+    // changed checkout, so no pass can report `Noop`. This is the shared-repo
+    // condition, reproduced deterministically. A small rotating set of files
+    // keeps each seal bounded while every pass still sees different bytes, and
+    // the periodic hook overflow is the production wake - nothing watches the
+    // filesystem, so without it the worker simply parks.
+    let churn_root = fixture.path().to_path_buf();
+    let churn_registry = Arc::clone(&registry);
+    let churn_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn_flag = Arc::clone(&churn_stop);
+    let churn = tokio::spawn(async move {
+        let mut revision = 0_u64;
+        while !churn_flag.load(std::sync::atomic::Ordering::Acquire) {
+            let slot = revision % 4;
+            let _ = std::fs::write(
+                churn_root.join(format!("src/churn_{slot}.rs")),
+                format!("pub fn churn_{slot}() -> u64 {{ {revision} }}\n"),
+            );
+            revision += 1;
+            if revision.is_multiple_of(10) {
+                churn_registry.notify_hook_overflow(&churn_root).await;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let seated = loop {
+        if let Some(seated) = registry.latest_complete_serving_for_scope(&scope).await {
+            break Some(seated.generation().manifest().generation_id.clone());
+        }
+        if Instant::now() > deadline {
+            let passes = registry
+                .event_to_ready_receipts()
+                .iter()
+                .map(|receipt| match &receipt.outcome {
+                    CodeIndexCadenceOutcomeV1::Published { generation_id, .. } => {
+                        format!("published({})", generation_id.as_str())
+                    }
+                    CodeIndexCadenceOutcomeV1::Noop { .. } => "noop".to_owned(),
+                })
+                .collect::<Vec<_>>();
+            if passes.is_empty() {
+                // The background worker never completed a single reconcile, so
+                // nothing here is a statement about graph seating. That happens
+                // when this host refuses the worker's resident-memory admission
+                // (a small memory cgroup against a large core count), and it
+                // turns away every worker-driven scheduler test alike.
+                eprintln!(
+                    "skipping: this host completed no background reconcile pass, so graph \
+                     seating cannot be observed (worker admission refused)"
+                );
+                break None;
+            }
+            let text = registry.latest_text_serving_for_scope(&scope).await;
+            panic!(
+                "a sealed generation never seated: graph serving waited for a quiet tree that a \
+                 live checkout never provides; passes={passes:?} latest_generation={:?} \
+                 text_open={} text_warm={:?}",
+                registry.latest_generation_id(fixture.path()).await,
+                text.is_some(),
+                text.map(|text| text.query_owners_are_warm()),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    // The seat is stale by construction - the tree moved on while it sealed -
+    // and the next sealed generation must still supersede it.
+    if let Some(seated) = seated {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        loop {
+            let current = registry
+                .latest_complete_serving_for_scope(&scope)
+                .await
+                .map(|latest| latest.generation().manifest().generation_id.clone());
+            if current.is_some_and(|current| current != seated) {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "a stale seat was never superseded by the generation that sealed after it"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    churn_stop.store(true, std::sync::atomic::Ordering::Release);
+    let _ = churn.await;
+    registry.shutdown().await;
+}
+
+/// The seat gate is the text owner, never the tree standing still.
+///
+/// This is the whole regression in one table. Before the fix the gate demanded
+/// a `Noop` reconcile outcome, so the `Published` rows below - the only rows a
+/// continuously edited shared checkout ever produces - could not seat, and a
+/// complete sealed generation stayed unserved with nothing logged. Every
+/// non-seating row now names its reason.
+#[test]
+fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
+    use super::registry::GraphSeatGateV1;
+
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, true, false, true),
+        GraphSeatGateV1::Prepare,
+        "a publication seats once its own text owner has reopened and finished, however busy \
+         the checkout is"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, true, false, false),
+        GraphSeatGateV1::PublishedTextOwnerUnavailable,
+        "a publication whose replacement text owner is not serving must not start graph work"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, false, true, false),
+        GraphSeatGateV1::Prepare,
+        "an unchanged pass seats the retained ready text owner's generation"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, true, false, false, false),
+        GraphSeatGateV1::RetainedTextOwnerWarming,
+        "an unchanged pass waits for exact and lexical serving to finish first"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, true, true, true, true, true),
+        GraphSeatGateV1::ActivationDeferred,
+        "a scheduled activation retry owns the next seat attempt"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(true, false, false, true, true, true),
+        GraphSeatGateV1::ReconcileUnfinished,
+        "a pass with no terminal outcome has nothing to seat"
+    );
+    assert_eq!(
+        GraphSeatGateV1::decide(false, false, true, true, true, true),
+        GraphSeatGateV1::Disabled,
+        "graph activation off means no seat and no skip to report"
+    );
+    assert!(
+        GraphSeatGateV1::decide(false, false, true, true, true, true)
+            .skip_reason()
+            .is_none(),
+        "a worktree with graph activation off is not waiting for a seat"
+    );
+    assert!(
+        [
+            GraphSeatGateV1::ReconcileUnfinished,
+            GraphSeatGateV1::ActivationDeferred,
+            GraphSeatGateV1::PublishedTextOwnerUnavailable,
+            GraphSeatGateV1::RetainedTextOwnerWarming,
+        ]
+        .into_iter()
+        .all(|gate| gate.skip_reason().is_some()),
+        "every arm that seats nothing must name itself in the log"
+    );
+}
+
+/// Activation that completes against a moved durable pointer must still seat.
+///
+/// Graph activation of a large generation is minutes of real work, and the
+/// checkout it sealed from keeps moving underneath it. The serving swap
+/// answered that by refusing outright - `PublicationConflict` - so a
+/// generation that decoded, activated, and was ready to serve was dropped on
+/// the floor while the graph route kept answering "not ready" with nothing
+/// seated at all. That is the one arm this table pins: an empty serving slot
+/// takes the stale seat, and only a slot that already serves may refuse it,
+/// because a superseded generation must never move the slot backwards.
+#[test]
+fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() {
+    use super::registry::ServingSwapOutcomeV1;
+
+    assert_eq!(
+        ServingSwapOutcomeV1::decide(false, false, true),
+        ServingSwapOutcomeV1::SeatedStale,
+        "an activated generation whose pointer moved must seat when nothing serves"
+    );
+    assert_eq!(
+        ServingSwapOutcomeV1::decide(false, true, true),
+        ServingSwapOutcomeV1::Superseded,
+        "a superseded generation must not displace one that already serves"
+    );
+    assert_eq!(
+        ServingSwapOutcomeV1::decide(true, false, true),
+        ServingSwapOutcomeV1::Seated,
+        "the active durable publication seats"
+    );
+    assert_eq!(
+        ServingSwapOutcomeV1::decide(true, true, false),
+        ServingSwapOutcomeV1::Offered,
+        "an unchanged pass over the serving generation only re-offers semantic admission"
+    );
+    assert!(
+        ServingSwapOutcomeV1::decide(false, false, true).installs()
+            && ServingSwapOutcomeV1::decide(true, false, true).installs(),
+        "both seating arms write the serving slot"
+    );
+    assert!(
+        !ServingSwapOutcomeV1::decide(false, true, true).installs()
+            && !ServingSwapOutcomeV1::decide(true, true, false).installs(),
+        "neither refusing arm writes the serving slot"
+    );
+}

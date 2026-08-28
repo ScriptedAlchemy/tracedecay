@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_domain_label, entity_projection_label, relation_projection_label,
 };
-use crate::state::{latest_projection, load_entity, load_relation};
+use crate::state::{labeled_projection_nodes, latest_projection, load_entity, load_relation};
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
     GraphLabel, GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
@@ -378,6 +378,18 @@ fn authenticate_relation_cursor(
     }
 }
 
+/// The `limit` smallest identities after `after`, in ascending order.
+///
+/// This reads the store directly rather than issuing
+/// `MATCH (n:owner:record) ... ORDER BY ... LIMIT`. GQL resolves each label in
+/// that pattern by exact name, and a compacted generation files a multi-label
+/// node under one fused composite key, so the pattern matches nothing there and
+/// the page would come back silently empty. [`labeled_projection_nodes`] reads
+/// through the composite instead.
+///
+/// The bounded `BTreeSet` keeps the page's own `limit` rows rather than every
+/// identity in the projection, so paging a large projection stays O(limit) in
+/// memory while preserving the ordering, cursor, and limit the query had.
 fn query_identity_page(
     database: &GrafeoDB,
     owner_label: &str,
@@ -388,43 +400,43 @@ fn query_identity_page(
     cancellation: &dyn GraphCancellation,
 ) -> Result<Vec<String>, GraphDbError> {
     check_cancelled(cancellation)?;
-    let mut params = HashMap::from([(
-        "limit".to_owned(),
-        Value::from(i64::try_from(limit).map_err(|_| {
-            GraphDbError::budget_exhausted_count(GraphBudgetKind::Read, MAX_PROJECTION_PAGE_ITEMS)
-        })?),
-    )]);
-    let predicate = if let Some(after) = after {
-        params.insert("after".to_owned(), Value::from(after));
-        format!(" WHERE n.{identity_property} > $after")
-    } else {
-        String::new()
-    };
-    let query = format!(
-        "MATCH (n:{owner_label}:{record_label}){predicate} \
-         RETURN n.{identity_property} ORDER BY n.{identity_property} LIMIT $limit"
-    );
-    let result = database
-        .execute_with_params(&query, params)
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let identities = result
-        .rows()
-        .iter()
-        .map(|row| {
-            row.first()
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: format!(
-                        "projection query returned a non-string `{identity_property}`"
-                    ),
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let nodes = labeled_projection_nodes(database, owner_label, record_label)?;
+    let store = database.graph_store();
+    let mut page: BTreeSet<String> = BTreeSet::new();
+    for node in nodes {
+        check_cancelled(cancellation)?;
+        let Some(record) = store.get_node(node) else {
+            continue;
+        };
+        let identity = record
+            .get_property(identity_property)
+            .and_then(Value::as_str)
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: format!("projection query returned a non-string `{identity_property}`"),
+            })?;
+        if after.is_some_and(|after| identity <= after) {
+            continue;
+        }
+        if page.len() == limit {
+            if page
+                .last()
+                .is_some_and(|widest| identity >= widest.as_str())
+            {
+                continue;
+            }
+            page.pop_last();
+        }
+        page.insert(identity.to_owned());
+    }
     check_cancelled(cancellation)?;
-    Ok(identities)
+    Ok(page.into_iter().collect())
 }
 
+/// How many nodes carry both `owner_label` and `record_label`. Reads the store
+/// for the same reason [`query_identity_page`] does.
 fn count_labeled_nodes(
     database: &GrafeoDB,
     owner_label: &str,
@@ -432,18 +444,7 @@ fn count_labeled_nodes(
     cancellation: &dyn GraphCancellation,
 ) -> Result<u64, GraphDbError> {
     check_cancelled(cancellation)?;
-    let query = format!("MATCH (n:{owner_label}:{record_label}) RETURN count(n)");
-    let result = database
-        .execute(&query)
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let count = result
-        .rows()
-        .first()
-        .and_then(|row| row.first())
-        .and_then(Value::as_int64)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "projection count query returned no integer cardinality".to_owned(),
-        })?;
+    let count = labeled_projection_nodes(database, owner_label, record_label)?.len();
     let count = u64::try_from(count).map_err(|_| GraphDbError::Corrupt {
         message: "projection count query returned a negative cardinality".to_owned(),
     })?;

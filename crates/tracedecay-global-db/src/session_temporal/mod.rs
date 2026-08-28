@@ -775,6 +775,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         parse_lcm_source_cursor_offset(binding, &sort_key)
     }
 
+    #[hotpath::measure(future = true, label = "global_db.session_temporal.query.freeze")]
     async fn freeze(
         &self,
         request: &AuthorizedTemporalExecutionRequest,

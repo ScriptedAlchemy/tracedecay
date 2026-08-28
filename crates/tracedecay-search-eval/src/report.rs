@@ -658,16 +658,26 @@ impl DirectEvaluationReportV1 {
                         ));
                     }
                 }
-                resident_bytes = resident_bytes.max(
-                    sample
-                        .peak_rss_bytes
-                        .filter(|bytes| *bytes != 0)
-                        .ok_or_else(|| {
-                            SearchEvalError::Contract(
-                                "activation resource sample lacks peak RSS".to_owned(),
-                            )
-                        })?,
-                );
+                // VmHWM remains useful whole-process diagnostic evidence, but
+                // it includes every daemon service plus evaluator-only 10x
+                // projection scratch. Activation owns only the warmed model
+                // sessions and the retained vector/index read authority.
+                // Binding the accepted semantic profile to process-lifetime
+                // VmHWM makes unrelated prior work permanently inflate its
+                // requirement and can reject an otherwise admissible runtime.
+                let sample_resident_bytes = semantic_activation_resident_bytes(
+                    sample.model_bytes,
+                    sample.tokenizer_bytes,
+                    sample.vector_bytes,
+                    sample.index_bytes,
+                    sample.cache_bytes,
+                )
+                .ok_or_else(|| {
+                    SearchEvalError::Contract(
+                        "activation semantic resident evidence overflowed".to_owned(),
+                    )
+                })?;
+                resident_bytes = resident_bytes.max(sample_resident_bytes);
             }
         }
         let (
@@ -707,6 +717,46 @@ impl DirectEvaluationReportV1 {
             sequence_length,
             load_deadline_ms,
         })
+    }
+}
+
+fn semantic_activation_resident_bytes(
+    model_bytes: Option<u64>,
+    tokenizer_bytes: Option<u64>,
+    vector_bytes: Option<u64>,
+    index_bytes: Option<u64>,
+    cache_bytes: Option<u64>,
+) -> Option<u64> {
+    let model_bytes = model_bytes?;
+    let tokenizer_bytes = tokenizer_bytes?;
+    let vector_bytes = vector_bytes?;
+    let index_bytes = index_bytes?;
+    let cache_bytes = cache_bytes?;
+    cache_bytes
+        .max(model_bytes)
+        .max(tokenizer_bytes)
+        .checked_add(vector_bytes)?
+        .checked_add(index_bytes)
+}
+
+#[cfg(test)]
+mod activation_resource_tests {
+    use super::semantic_activation_resident_bytes;
+
+    #[test]
+    fn semantic_activation_resident_bytes_exclude_process_lifetime_peak() {
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(600), Some(20), Some(100), Some(10), Some(750),),
+            Some(860)
+        );
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(600), Some(20), Some(100), Some(0), Some(0),),
+            Some(700)
+        );
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(u64::MAX), Some(1), Some(1), Some(0), Some(0),),
+            None
+        );
     }
 }
 

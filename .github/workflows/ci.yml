@@ -63,6 +63,22 @@ jobs:
           shared-key: ci-pr-dogfood
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build checked-out TraceDecay CLI
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -221,6 +237,22 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       # Every `crates/tracedecay` integration target declares
       # `required-features = ["test-helpers"]`, because the fixture surface it
       # gates is used by `tests/common/mod.rs`. Those targets are selected here
@@ -305,6 +337,22 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
@@ -459,6 +507,22 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -491,6 +555,22 @@ jobs:
           cache-workspace-crates: "false"
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1
 
@@ -586,6 +666,22 @@ jobs:
           shared-key: ci-dashboard-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Run dashboard integration tests
         run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
 
@@ -619,6 +715,22 @@ jobs:
           shared-key: ci-hermes-integration-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -675,6 +787,22 @@ jobs:
           shared-key: ci-host-stock-integration-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 

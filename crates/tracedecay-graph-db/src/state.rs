@@ -11,15 +11,17 @@ use crate::limits::{
     MAX_VERIFIED_GENERATION_RELATIONS, require_generation_capacity,
 };
 use crate::schema::{
-    COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_LABEL, FORMAT_LABEL,
-    GENERATION_DEPENDENCY_DIGEST_PROPERTY, IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY,
-    PROJECTION_LABEL, PROJECTION_PROPERTY, PUBLICATION_DIGEST_PROPERTY,
-    PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_LABEL, RELATION_EDGE_PROPERTY,
-    RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY, RELATION_LABEL, RELATION_TO_PROPERTY,
-    SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
-    decode_relation, encoded_namespace_key, entity_key_label, entity_projection_label,
-    projection_state_label, publication_key_label, relation_edge_label, relation_key_label,
-    relation_projection_label, required_i64, required_string, stable_key_from_encoded,
+    COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY,
+    ENTITY_LABEL, FORMAT_LABEL, GENERATION_DEPENDENCY_DIGEST_PROPERTY, IDEMPOTENCY_KEY_PROPERTY,
+    NAMESPACE_PROPERTY, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL, PROJECTION_PROPERTY,
+    PUBLICATION_DIGEST_PROPERTY, PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_KEY_PROPERTY,
+    PUBLICATION_LABEL, RELATION_EDGE_PROPERTY, RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY,
+    RELATION_KEY_PROPERTY, RELATION_LABEL, RELATION_TO_PROPERTY, SEQUENCE_PROPERTY,
+    SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity, decode_relation,
+    encoded_namespace_key, entity_key_value, entity_projection_label, has_native_label,
+    nodes_with_label, nodes_with_label_count, projection_state_key_value, publication_key_value,
+    relation_edge_value, relation_key_value, relation_projection_label, required_i64,
+    required_string, stable_key_from_encoded,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -125,7 +127,7 @@ pub(crate) struct FormatState {
 impl FormatState {
     pub(crate) fn load(database: &GrafeoDB) -> Result<Self, GraphDbError> {
         let store = database.graph_store();
-        let markers = store.nodes_by_label(FORMAT_LABEL);
+        let markers = nodes_with_label(store.as_ref(), FORMAT_LABEL);
         if markers.len() != 1 {
             return Err(GraphDbError::Corrupt {
                 message: "live store lost its exact format marker".to_owned(),
@@ -209,9 +211,10 @@ fn load_indexed_entity_node(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<(NodeId, Node, GraphNamespace, GraphProjectionId)>, GraphDbError> {
-    let Some(node_id) = unique_labeled_node(
+    let Some(node_id) = unique_property_node(
         database,
-        &entity_key_label(namespace, identity),
+        ENTITY_KEY_PROPERTY,
+        &entity_key_value(namespace, identity),
         ENTITY_LABEL,
         "entity identity",
     )?
@@ -379,9 +382,10 @@ pub(crate) fn load_relation_by_edge_cached(
     edge_id: EdgeId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    let Some(locator) = unique_labeled_node(
+    let Some(locator) = unique_property_node(
         database,
-        &relation_edge_label(edge_id),
+        RELATION_EDGE_PROPERTY,
+        &relation_edge_value(edge_id)?,
         RELATION_LABEL,
         "relation edge identity",
     )?
@@ -397,9 +401,10 @@ fn load_relation_by_key(
     identity: &GraphRelationId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    let Some(locator) = unique_labeled_node(
+    let Some(locator) = unique_property_node(
         database,
-        &relation_key_label(namespace, identity),
+        RELATION_KEY_PROPERTY,
+        &relation_key_value(namespace, identity),
         RELATION_LABEL,
         "relation identity",
     )?
@@ -537,9 +542,10 @@ fn load_relation_reference_by_edge(
     database: &GrafeoDB,
     edge_id: EdgeId,
 ) -> Result<Option<RelationReference>, GraphDbError> {
-    let Some(locator_id) = unique_labeled_node(
+    let Some(locator_id) = unique_property_node(
         database,
-        &relation_edge_label(edge_id),
+        RELATION_EDGE_PROPERTY,
+        &relation_edge_value(edge_id)?,
         RELATION_LABEL,
         "relation edge identity",
     )?
@@ -842,8 +848,14 @@ pub(crate) fn projection_node_counts(
     projection: &GraphProjectionId,
 ) -> Result<(usize, usize), GraphDbError> {
     let store = database.graph_store();
-    let entities = store.nodes_by_label_count(&entity_projection_label(namespace, projection));
-    let relations = store.nodes_by_label_count(&relation_projection_label(namespace, projection));
+    let entities = nodes_with_label_count(
+        store.as_ref(),
+        &entity_projection_label(namespace, projection),
+    );
+    let relations = nodes_with_label_count(
+        store.as_ref(),
+        &relation_projection_label(namespace, projection),
+    );
     require_generation_capacity("entities", entities, 0, MAX_VERIFIED_GENERATION_ENTITIES)?;
     require_generation_capacity("relations", relations, 0, MAX_VERIFIED_GENERATION_RELATIONS)?;
     Ok((entities, relations))
@@ -854,9 +866,10 @@ pub(crate) fn latest_projection(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
 ) -> Result<Option<ProjectionState>, GraphDbError> {
-    let Some(node) = unique_labeled_node(
+    let Some(node) = unique_property_node(
         database,
-        &projection_state_label(namespace, projection),
+        PROJECTION_KEY_PROPERTY,
+        &projection_state_key_value(namespace, projection),
         PROJECTION_LABEL,
         "projection identity",
     )?
@@ -871,9 +884,10 @@ pub(crate) fn publication(
     namespace: &GraphNamespace,
     key: &GraphIdempotencyKey,
 ) -> Result<Option<StoredPublication>, GraphDbError> {
-    let Some(node) = unique_labeled_node(
+    let Some(node) = unique_property_node(
         database,
-        &publication_key_label(namespace, key),
+        PUBLICATION_KEY_PROPERTY,
+        &publication_key_value(namespace, key),
         PUBLICATION_LABEL,
         "publication identity",
     )?
@@ -910,19 +924,18 @@ pub(crate) fn publication(
     }))
 }
 
-fn labeled_projection_nodes(
+pub(crate) fn labeled_projection_nodes(
     database: &GrafeoDB,
     owner_label: &str,
     label: &str,
 ) -> Result<Vec<NodeId>, GraphDbError> {
     let store = database.graph_store();
-    Ok(store
-        .nodes_by_label(owner_label)
+    Ok(nodes_with_label(store.as_ref(), owner_label)
         .into_iter()
         .filter(|node| {
             store
                 .get_node(*node)
-                .is_some_and(|record| record.has_label(label))
+                .is_some_and(|record| has_native_label(&record, label))
         })
         .collect())
 }
@@ -942,11 +955,11 @@ fn labeled_projection_nodes_checked(
         } else {
             "relations"
         },
-        store.nodes_by_label_count(owner_label),
+        nodes_with_label_count(store.as_ref(), owner_label),
         0,
         maximum,
     )?;
-    let candidates = store.nodes_by_label(owner_label);
+    let candidates = nodes_with_label(store.as_ref(), owner_label);
     check()?;
     require_generation_capacity(
         if label == ENTITY_LABEL {
@@ -966,7 +979,7 @@ fn labeled_projection_nodes_checked(
         check()?;
         if store
             .get_node(node)
-            .is_some_and(|record| record.has_label(label))
+            .is_some_and(|record| has_native_label(&record, label))
         {
             nodes.push(node);
         }
@@ -1070,18 +1083,53 @@ fn parse_namespace(
     .map_err(|error| persisted_validation_error(&format!("{description} namespace"), error))
 }
 
-fn unique_labeled_node(
+/// Every node currently carrying `value` in the unique-key index `property`
+/// and bearing `label`.
+///
+/// The `label` filter is load-bearing and not a redundant sanity check.
+/// grafeo's `delete_node` clears the label index and drops the node's
+/// properties, but never calls `update_property_index_on_remove`, so a
+/// property index keeps returning the `NodeId` of a deleted node
+/// (`grafeo-core/src/graph/lpg/store/node_ops.rs:528`). Re-reading each
+/// candidate discards those tombstones: a deleted node reads back as `None`,
+/// and one that somehow survives no longer carries its record label. This is
+/// what preserves the absence and duplicate semantics the synthetic key-label
+/// lookup had, where the label index *was* maintained on delete.
+pub(crate) fn indexed_nodes(
+    store: &dyn grafeo_core::graph::GraphStore,
+    property: &str,
+    value: &Value,
+    label: &str,
+) -> Vec<NodeId> {
+    store
+        .find_nodes_by_property(property, value)
+        .into_iter()
+        .filter(|node| {
+            store
+                .get_node(*node)
+                .is_some_and(|record| has_native_label(&record, label))
+        })
+        .collect()
+}
+
+/// Resolves the one node that carries `value` in the unique-key index
+/// `property` and bears `label`.
+///
+/// Absence is `Ok(None)` and a duplicate is `Corrupt`, exactly as the synthetic
+/// key-label lookup this replaced. The index is a *property* and not a label
+/// because grafeo files one columnar node table per distinct label: a key label
+/// per entity mints one table per entity and exhausts the `u16` table id at
+/// 32,767 rows, long before a real repository graph is loaded.
+#[hotpath::measure(label = "graph_db.read.index_lookup")]
+fn unique_property_node(
     database: &GrafeoDB,
-    key_label: &str,
+    property: &str,
+    value: &Value,
     label: &str,
     description: &str,
 ) -> Result<Option<NodeId>, GraphDbError> {
-    let store = database.graph_store();
-    let mut nodes = store.nodes_by_label(key_label).into_iter().filter(|node| {
-        store
-            .get_node(*node)
-            .is_some_and(|record| record.has_label(label))
-    });
+    let mut nodes =
+        indexed_nodes(database.graph_store().as_ref(), property, value, label).into_iter();
     let first = nodes.next();
     if nodes.next().is_some() {
         return Err(GraphDbError::Corrupt {
