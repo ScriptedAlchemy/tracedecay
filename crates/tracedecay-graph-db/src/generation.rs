@@ -682,13 +682,22 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
 /// re-canonicalizes the manifest itself, and reads no manifest row: the
 /// expected rows come from the database, so the caller may already have
 /// released the bulk `entities`/`relations` vectors.
+///
+/// This is the *full* proof, and it costs a whole generation's row decode and
+/// canonicalization every time it runs. Callers on an activation path should
+/// reach it through [`crate::runtime::GraphDb::verify_activated_generation`],
+/// which consults a verified-generation marker first and only falls through to
+/// here when the container's bytes are not the ones already proven. See
+/// `crate::verified_marker` for what that marker does and does not assert.
+///
+/// Returns the proven digest and the number of canonical bytes it hashed.
 #[hotpath::measure(label = "graph_db.generation.recover.verify")]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+) -> Result<(GraphRecoveredGenerationDigestV1, u64), GraphDbError> {
     #[cfg(test)]
     RECOVERED_GENERATION_ENUMERATIONS.with(|count| count.set(count.get() + 1));
     check()?;
@@ -720,7 +729,8 @@ pub(crate) fn verify_recovered_generation(
                     .to_owned(),
         });
     }
-    let digest = recovered_generation_digest_from_database(database, identity, check)?;
+    let (digest, canonical_bytes) =
+        recovered_generation_digest_from_database(database, identity, check)?;
     let actual =
         GraphRecoveredGenerationDigestV1::new(format!("sha256:{digest}")).map_err(|error| {
             GraphDbError::Corrupt {
@@ -739,7 +749,7 @@ pub(crate) fn verify_recovered_generation(
             ),
         });
     }
-    Ok(actual)
+    Ok((actual, canonical_bytes))
 }
 
 #[cfg(test)]
@@ -979,6 +989,10 @@ fn write_digest_bytes(
 struct CheckedDigestWriter<'a> {
     digest: &'a mut Sha256,
     bytes_since_check: u64,
+    /// Every byte fed to the digest, for the verify byte gauge. Counted here
+    /// rather than derived from row counts so the gauge reports the work the
+    /// proof actually did.
+    total_bytes: u64,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
     failure: Option<GraphDbError>,
 }
@@ -988,6 +1002,7 @@ impl<'a> CheckedDigestWriter<'a> {
         Self {
             digest,
             bytes_since_check: 0,
+            total_bytes: 0,
             check,
             failure: None,
         }
@@ -998,6 +1013,11 @@ impl<'a> CheckedDigestWriter<'a> {
             return Err(error);
         }
         (self.check)()
+    }
+
+    /// The byte count so far. Read before `finish` consumes the writer.
+    fn total_bytes(&self) -> u64 {
+        self.total_bytes
     }
 
     fn take_failure(&mut self) -> Option<GraphDbError> {
@@ -1013,6 +1033,7 @@ impl Write for CheckedDigestWriter<'_> {
             .bytes_since_check
             .checked_add(length)
             .ok_or_else(|| io::Error::other("digest check interval overflow"))?;
+        self.total_bytes = self.total_bytes.saturating_add(length);
         if self.bytes_since_check >= DIGEST_CHECK_INTERVAL_BYTES {
             self.bytes_since_check = 0;
             if let Err(error) = (self.check)() {

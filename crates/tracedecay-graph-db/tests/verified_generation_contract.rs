@@ -34,6 +34,8 @@ use tracedecay_store::{
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]
 mod replay_decode;
+#[path = "verified_generation_contract/verify_once.rs"]
+mod verify_once;
 mod support;
 
 use support::{RegisteredGraph, TestCancellation, owner_registration, registration};

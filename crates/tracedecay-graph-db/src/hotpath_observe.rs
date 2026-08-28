@@ -108,6 +108,42 @@ pub(crate) fn record_counts(
     }
 }
 
+/// Records how one sealed generation's recovered digest was established.
+///
+/// `canonical_bytes` is the size of the canonical row stream the full proof
+/// hashes. A marker hit reports the byte count the earlier proof recorded, so
+/// the two gauges are directly comparable: `marker_hit` bytes are the bytes
+/// *not* re-hashed on this open.
+#[inline(always)]
+pub(crate) fn record_generation_verification(
+    outcome: crate::verified_marker::GenerationVerification,
+    canonical_bytes: u64,
+) {
+    #[cfg(any(test, feature = "test-helpers"))]
+    counters::record_verification(outcome, canonical_bytes);
+    #[cfg(feature = "hotpath")]
+    {
+        use crate::verified_marker::GenerationVerification;
+        match outcome {
+            GenerationVerification::VerifiedFresh => {
+                hotpath::gauge!("graph_db.generation.verify.marker_hit").inc(1);
+                hotpath::gauge!("graph_db.generation.verify.marker_hit_bytes")
+                    .set(canonical_bytes as f64);
+            }
+            GenerationVerification::Reverified => {
+                hotpath::gauge!("graph_db.generation.verify.full").inc(1);
+                hotpath::gauge!("graph_db.generation.verify.full_bytes")
+                    .set(canonical_bytes as f64);
+            }
+        }
+        hotpath::val!("graph_db.generation.verify.outcome").set(&outcome.as_str());
+    }
+    #[cfg(not(any(feature = "hotpath", test, feature = "test-helpers")))]
+    {
+        let _ = (outcome, canonical_bytes);
+    }
+}
+
 #[inline(always)]
 pub(crate) fn record_hydration_source(source: HydrationSource) {
     #[cfg(any(test, feature = "test-helpers"))]
@@ -153,6 +189,32 @@ mod counters {
     static REPLAY_ROWS: AtomicU64 = AtomicU64::new(0);
     static GENERATION_BYTES: AtomicU64 = AtomicU64::new(0);
     static LAST_SOURCE: AtomicU8 = AtomicU8::new(0);
+    static MARKER_HITS: AtomicU64 = AtomicU64::new(0);
+    static MARKER_HIT_BYTES: AtomicU64 = AtomicU64::new(0);
+    static FULL_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
+    static FULL_VERIFICATION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record_verification(
+        outcome: crate::verified_marker::GenerationVerification,
+        canonical_bytes: u64,
+    ) {
+        use crate::verified_marker::GenerationVerification;
+        let (count, bytes) = match outcome {
+            GenerationVerification::VerifiedFresh => (&MARKER_HITS, &MARKER_HIT_BYTES),
+            GenerationVerification::Reverified => (&FULL_VERIFICATIONS, &FULL_VERIFICATION_BYTES),
+        };
+        count.fetch_add(1, Ordering::Relaxed);
+        bytes.fetch_add(canonical_bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_verification() -> crate::GraphDbVerificationCounters {
+        crate::GraphDbVerificationCounters {
+            marker_hits: MARKER_HITS.swap(0, Ordering::Relaxed),
+            marker_hit_bytes: MARKER_HIT_BYTES.swap(0, Ordering::Relaxed),
+            full_verifications: FULL_VERIFICATIONS.swap(0, Ordering::Relaxed),
+            full_verification_bytes: FULL_VERIFICATION_BYTES.swap(0, Ordering::Relaxed),
+        }
+    }
 
     fn source_code(source: HydrationSource) -> u8 {
         match source {
@@ -210,4 +272,9 @@ mod counters {
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn take_hydration_counters() -> crate::GraphDbHydrationCounters {
     counters::take()
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn take_verification_counters() -> crate::GraphDbVerificationCounters {
+    counters::take_verification()
 }

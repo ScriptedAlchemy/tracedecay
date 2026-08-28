@@ -18,9 +18,7 @@ use super::publication_support::{
     retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
-use crate::generation::{
-    metadata_manifest_from_replay, validate_supplied_manifest_binding, verify_recovered_generation,
-};
+use crate::generation::{metadata_manifest_from_replay, validate_supplied_manifest_binding};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
@@ -1065,22 +1063,25 @@ impl GraphDbRegistry {
             }
             Err(error) => return Err(error),
         }
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         // `require_head_replay` pinned this head to its journaled replay, and
         // the manifest was proven to bind that replay's digests when it was
         // decoded above, so the stored rows verify directly against the head
         // digest without canonicalizing the full manifest a second time.
-        match verify_recovered_generation(native, &identity, &head.recovered_digest, &check) {
+        //
+        // This is the activation path -- the one a daemon restart walks for
+        // every head and every dependency in its closure -- so it goes through
+        // the verify-once boundary rather than straight to the full proof. The
+        // expected digest is still `head.recovered_digest` from the relational
+        // authority; a marker can only answer whether that exact digest has
+        // already been proven against these exact container bytes.
+        match database.verify_activated_generation(&identity, &head.recovered_digest, &check) {
             Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
-                drop(guard);
                 database.quarantine_generation(&identity)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
         }
-        drop(guard);
         let lease = generation_lease(&identity, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);

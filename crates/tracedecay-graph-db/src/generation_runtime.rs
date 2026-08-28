@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use grafeo_core::graph::Direction;
-use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard as ParkingRwLockWriteGuard};
+use parking_lot::RwLockWriteGuard as ParkingRwLockWriteGuard;
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::verify_recovered_generation;
@@ -23,6 +23,7 @@ use crate::recovery::{
     set_projection_quarantine,
 };
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
+use crate::verified_marker::GenerationVerification;
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
@@ -111,6 +112,67 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         verify_recovered_generation(database, &identity, &expected, check)
+            .map(|(verified, _)| verified)
+    }
+
+    /// Establishes `expected` for an already-stored generation on an
+    /// **activation** path, re-hashing only when it has to.
+    ///
+    /// This is the verify-once boundary. A verified-generation marker that was
+    /// written against the exact container backing this open, and that records
+    /// this exact expected digest, means the full proof has already run over
+    /// these bytes and does not run again. Every other case -- no marker, a
+    /// marker for other bytes, a marker that does not name this generation, a
+    /// digest that differs by one character, or a container this process has
+    /// since written to -- falls through to the full row-streaming proof.
+    ///
+    /// `expected` always comes from the relational authority, never from the
+    /// marker, so a marker can only ever assert freshness. It cannot name
+    /// which generation is served and it cannot make a wrong digest pass.
+    /// Corruption remains a typed failure from the full proof: this returns
+    /// `Err` exactly where the full proof would have.
+    pub(crate) fn verify_activated_generation(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+        check()?;
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {
+            // Carry the inherited proof into this open's published set, so a
+            // daemon that only ever serves reads does not drop it at close.
+            self.inner.markers.record_fresh(&locator);
+            crate::hotpath_observe::record_generation_verification(
+                GenerationVerification::VerifiedFresh,
+                canonical_bytes,
+            );
+            return Ok(expected.clone());
+        }
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let (verified, canonical_bytes) =
+            verify_recovered_generation(database, identity, expected, check)?;
+        drop(guard);
+        self.inner
+            .markers
+            .record_proven(&locator, verified.as_str(), canonical_bytes);
+        crate::hotpath_observe::record_generation_verification(
+            GenerationVerification::Reverified,
+            canonical_bytes,
+        );
+        Ok(verified)
+    }
+
+    /// Discards every marker admitted at open, so the next activation of each
+    /// generation re-derives its digest from the stored rows.
+    ///
+    /// The explicit full re-verify hook. File identity standing in for content
+    /// is an OS-integrity assumption, and this is how an operator or a
+    /// scheduled audit drops it.
+    pub(crate) fn forget_verified_markers(&self) {
+        self.inner.markers.forget_admitted();
     }
 
     pub(crate) fn verify_existing_generation(
@@ -134,8 +196,32 @@ impl GraphDb {
             )
         })?
         .commit;
-        let recovered = verify_recovered_generation(database, identity, expected, check)?;
+        let (recovered, canonical_bytes) =
+            verify_recovered_generation(database, identity, expected, check)?;
+        drop(guard);
+        // First-publication verification is untouched -- it still streams every
+        // row. Recording the proof it just established is what lets the *next*
+        // open skip it.
+        self.record_proven_generation(identity, &recovered, canonical_bytes);
         Ok((commit, recovered))
+    }
+
+    /// Files a completed full proof against the container's marker set.
+    fn record_proven_generation(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        verified: &GraphRecoveredGenerationDigestV1,
+        canonical_bytes: u64,
+    ) {
+        self.inner.markers.record_proven(
+            &GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
+            verified.as_str(),
+            canonical_bytes,
+        );
+        crate::hotpath_observe::record_generation_verification(
+            GenerationVerification::Reverified,
+            canonical_bytes,
+        );
     }
 
     /// Stages one generation in bounded, durably receipted native pages.
@@ -587,7 +673,10 @@ impl GraphDb {
             let guard = self.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
             match verify_recovered_generation(database, identity, expected, check) {
-                Ok(verified) => verified,
+                Ok((verified, canonical_bytes)) => {
+                    self.record_proven_generation(identity, &verified, canonical_bytes);
+                    verified
+                }
                 Err(error @ GraphDbError::GenerationMismatch { .. }) => {
                     drop(guard);
                     drop(snapshot_gate);
@@ -616,10 +705,7 @@ impl GraphDb {
         // database file). The re-verification afterwards is read-only again,
         // so the gate downgrades back to upgradable and snapshot readers are
         // admitted while the repaired rows stream through the proof.
-        let write_gate = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
-            || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
-        );
+        let write_gate = self.wait_snapshot_gate_upgrade(snapshot_gate);
         {
             let mut database_guard = crate::hotpath_observe::wait_lock(
                 crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
@@ -672,7 +758,8 @@ impl GraphDb {
             verify_recovered_generation(database, identity, expected, check)
         };
         match verify_result {
-            Ok(verified) => {
+            Ok((verified, canonical_bytes)) => {
+                self.record_proven_generation(identity, &verified, canonical_bytes);
                 let (entities, relations) = row_counts;
                 crate::hotpath_observe::record_counts(entities, relations, 0, 0);
                 crate::hotpath_observe::record_hydration_source(
@@ -683,10 +770,7 @@ impl GraphDb {
             Err(error) => {
                 // Restoring the durable quarantine marker rewrites the file,
                 // so the failure path re-takes the exclusive claim.
-                let _write_gate = crate::hotpath_observe::wait_lock(
-                    crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
-                    || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
-                );
+                let _write_gate = self.wait_snapshot_gate_upgrade(snapshot_gate);
                 let mut database_guard = crate::hotpath_observe::wait_lock(
                     crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
                     || self.inner.database.write(),

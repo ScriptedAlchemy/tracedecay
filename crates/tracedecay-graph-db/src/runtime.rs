@@ -12,6 +12,7 @@ use parking_lot::{
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
+use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::recovery::{
     load_quarantined_projections, map_open_error, projection_mismatch,
     validate_or_initialize_format,
@@ -63,6 +64,10 @@ pub(crate) struct Inner {
     pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
     pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
     pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
+    /// Proofs of sealed generations already established against the container
+    /// backing this database, so an open re-checks them instead of re-deriving
+    /// them. See `crate::verified_marker` for the integrity boundary.
+    pub(crate) markers: GenerationMarkers,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
@@ -116,6 +121,16 @@ impl GraphDb {
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(persistent_store_state)?;
+        // The container's identity has to be read *before* grafeo opens it: an
+        // open may replay and checkpoint the WAL, which moves the modification
+        // time and length before any later caller could observe the identity
+        // the marker was written against.
+        let markers = match validated.config.path.as_deref() {
+            Some(container) => {
+                GenerationMarkers::open(container, ContainerIdentity::read(container))
+            }
+            None => GenerationMarkers::detached(),
+        };
         let database = GrafeoDB::with_config(validated.config.clone())
             .map_err(|error| map_open_error(error, validated.preexisting_store))?;
         validate_or_initialize_format(&database, &validated)?;
@@ -134,6 +149,7 @@ impl GraphDb {
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(quarantined_projections),
+                markers,
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -672,6 +688,18 @@ impl GraphDb {
                 message: error.to_string(),
             });
         }
+        // The container is closed and synced, so its identity is now the one
+        // the next open will observe. Publishing the marker here -- and only
+        // here -- is what makes the record bind the final bytes rather than
+        // some intermediate state a later write would have invalidated.
+        //
+        // A failure to publish is not a failure to close. The marker is a
+        // cache of completed proofs; losing it costs the next open a full
+        // re-derivation and nothing else, so it must never turn a durable
+        // close into a reported durability fault.
+        if !was_uncertain && let Err(error) = self.inner.markers.publish() {
+            let _ = error;
+        }
         if was_uncertain {
             Err(durability_uncertain())
         } else {
@@ -706,10 +734,7 @@ impl GraphDb {
         let (commit, payload, _snapshot_gate) = match plan {
             GraphBatchPlan::Settled(commit, payload) => (commit, payload, snapshot_gate),
             GraphBatchPlan::Apply(prepared, payload) => {
-                let write_gate = crate::hotpath_observe::wait_lock(
-                    crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
-                    || RwLockUpgradableReadGuard::upgrade(snapshot_gate),
-                );
+                let write_gate = self.wait_snapshot_gate_upgrade(snapshot_gate);
                 let commit = {
                     let guard = self.write_guard()?;
                     let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -988,10 +1013,33 @@ impl GraphDb {
         .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
     }
 
+    /// Takes the exclusive claim, which is this crate's gate for every write
+    /// that rewrites the container.
+    ///
+    /// Taking it retires the marker set admitted at open: from here on the
+    /// in-RAM store may no longer be a pure function of the bytes those proofs
+    /// were established against, so a later activation re-derives instead of
+    /// trusting the marker. Proofs this process established itself survive,
+    /// because they were established against rows that a write to a *different*
+    /// physical namespace cannot touch.
     pub(crate) fn wait_snapshot_gate_write(&self) -> ParkingRwLockWriteGuard<'_, ()> {
+        self.inner.markers.mark_container_mutated();
         crate::hotpath_observe::wait_lock(
             crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_WRITE,
             || self.inner.snapshot_gate.write(),
+        )
+    }
+
+    /// Upgrades an upgradable claim to the exclusive one, with the same marker
+    /// consequence as taking it outright.
+    pub(crate) fn wait_snapshot_gate_upgrade<'a>(
+        &self,
+        gate: RwLockUpgradableReadGuard<'a, ()>,
+    ) -> ParkingRwLockWriteGuard<'a, ()> {
+        self.inner.markers.mark_container_mutated();
+        crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_UPGRADE,
+            || RwLockUpgradableReadGuard::upgrade(gate),
         )
     }
 

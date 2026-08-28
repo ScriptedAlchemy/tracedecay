@@ -300,6 +300,7 @@ impl GraphDb {
                         &manifest.identity(),
                         check
                     )?
+                    .0
                 ))
                 .map_err(|error| GraphDbError::Corrupt {
                     message: error.to_string(),
