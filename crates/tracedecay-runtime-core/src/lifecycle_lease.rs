@@ -322,7 +322,7 @@ fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> 
     acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "runtime_core.lifecycle.acquire_exclusive")]
 fn acquire_exclusive_at_with_timeout(
     path: &Path,
     operation: &str,
@@ -346,7 +346,7 @@ fn acquire_exclusive_at_with_timeout(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "runtime_core.lifecycle.acquire_shared")]
 fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_shared(&file) {

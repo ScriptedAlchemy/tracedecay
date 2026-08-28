@@ -299,7 +299,7 @@ impl Connection {
         self.runtime.reader_pool_occupancy()
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.snapshot.read")]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
@@ -323,6 +323,7 @@ impl Connection {
             .await
     }
 
+    #[hotpath::measure(label = "runtime_core.db.transaction.begin")]
     pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
@@ -359,6 +360,7 @@ impl Connection {
     /// the ordinary per-statement deadline; all other operations retain
     /// ordinary bounds, and idleness, shutdown, and authority revocation still
     /// cancel.
+    #[hotpath::measure(label = "runtime_core.db.txn.long_lease")]
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_authorized_long_lease_immediate())

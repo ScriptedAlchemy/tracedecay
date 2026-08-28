@@ -6,9 +6,10 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 use crate::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
 };
+use crate::profiled_lock::ProfiledMutex;
 
 pub struct SnapshotConnection {
-    pub(super) connection: Arc<Mutex<Connection>>,
+    pub(super) connection: Arc<ProfiledMutex<Connection>>,
     #[cfg_attr(not(test), allow(dead_code))]
     interrupt: rusqlite::InterruptHandle,
 }
@@ -19,7 +20,10 @@ impl SnapshotConnection {
             .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
         let interrupt = connection.get_interrupt_handle();
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(hotpath::mutex!(
+                Mutex::new(connection),
+                label = "runtime_core.db.snapshot.connection"
+            )),
             interrupt,
         })
     }

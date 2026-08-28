@@ -380,7 +380,7 @@ pub struct StoreRuntimeRetirementReservation {
 impl StoreRuntimeRegistry {
     /// Preflights every target beneath one registry lock and transitions the
     /// whole batch to `Retiring` only if every exact target is clear.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.retirement_reserve")]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<StoreRuntimeRetirementTarget>,
@@ -861,7 +861,7 @@ impl StoreRuntimeRetirementReservation {
     ///
     /// Once [`Self::commit`] crosses the owner-attachment fence, terminal
     /// outcomes—not reusable targets—describe the physical-close result.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.retirement_cancel")]
     pub fn cancel(
         &mut self,
     ) -> Result<Vec<StoreRuntimeRetirementTarget>, StoreRuntimeRegistryFailure> {
@@ -880,7 +880,7 @@ impl StoreRuntimeRetirementReservation {
     /// Irreversibly commits the reservation before any physical close begins.
     /// All post-reservation failures are retained as typed terminal states;
     /// they are never restored to `Ready`.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.retirement_commit")]
     pub fn commit(&mut self) -> Result<StoreRuntimeRetirementCommit, StoreRuntimeRegistryFailure> {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
@@ -1267,7 +1267,10 @@ mod tests {
             )
             .unwrap(),
             database_authority: Some(authority),
-            database_attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            database_attachments: hotpath::mutex!(
+                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                label = "runtime_core.store_runtime.database_attachments"
+            ),
             next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
             next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
             next_database_attachment_reservation_id: std::sync::atomic::AtomicU64::new(1),

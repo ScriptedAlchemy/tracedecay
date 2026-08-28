@@ -363,7 +363,7 @@ impl StoreRuntimeRegistry {
         StoreRuntimeOpenBegin::Started(join)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.open")]
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
         loop {
             if let Some(path) = request
@@ -626,8 +626,9 @@ impl OpenAttemptGuard {
                             locator,
                             opened_file_identity,
                             database_authority,
-                            database_attachments: std::sync::Mutex::new(
-                                std::collections::BTreeMap::new(),
+                            database_attachments: hotpath::mutex!(
+                                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                                label = "runtime_core.store_runtime.database_attachments"
                             ),
                             next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
                             next_database_owner_id: std::sync::atomic::AtomicU64::new(1),

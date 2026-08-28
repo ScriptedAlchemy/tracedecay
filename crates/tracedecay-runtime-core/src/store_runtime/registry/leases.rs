@@ -191,7 +191,7 @@ pub enum ProfileAuthorityPinResult {
 }
 
 impl StoreRuntimeRegistry {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.registry.lease_acquire")]
     pub fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
         if let Err(error) = lease.validate() {
             return StoreRuntimeLeaseAcquireResult::Rejected(

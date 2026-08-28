@@ -106,7 +106,7 @@ impl SnapshotDatabase {
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.snapshot.backup")]
     pub async fn backup_to(&self, destination: &Path) -> io::Result<()> {
         let source = Arc::clone(&self.connection.connection);
         let destination = destination.to_path_buf();
@@ -226,7 +226,7 @@ impl SnapshotSet {
         Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "runtime_core.db.snapshot.capture")]
     async fn capture_with_policy(
         paths: &[PathBuf],
         root: &Path,
@@ -504,7 +504,10 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
         }
         hash.update(label);
         hash.update(bytes.to_be_bytes());
-        let mut file = fs::File::open(&member)?;
+        let mut file = hotpath::io!(
+            fs::File::open(&member)?,
+            label = "runtime_core.db.snapshot.fingerprint"
+        );
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             let read = file.read(&mut buffer)?;
