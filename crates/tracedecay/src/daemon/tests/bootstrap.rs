@@ -3283,6 +3283,59 @@ fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
     result["content"][0]["text"].as_str().expect("tool text")
 }
 
+/// Read one tool response as JSON under the production truncation contract.
+///
+/// A response over `mcp::tools::MAX_RESPONSE_CHARS` is replaced by a preview
+/// envelope carrying a `tracedecay_retrieve` handle, so a caller that needs the
+/// whole payload must redeem that handle exactly as a real client does. A
+/// `tracedecay_search` result sits close enough to the cap that whether it
+/// truncates is not a property the test should depend on.
+async fn production_composition_tool_json(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &std::path::Path,
+    response: &JsonRpcResponse,
+) -> serde_json::Value {
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(response)).expect("tool json");
+    let Some(handle) = payload["handle"].as_str().map(str::to_owned) else {
+        return payload;
+    };
+    assert_eq!(
+        payload["truncated"],
+        json!(true),
+        "only a truncation envelope may carry a response handle: {payload}"
+    );
+    let retrieved = harness
+        .call_tool(
+            project,
+            "tracedecay_retrieve",
+            json!({"handle": handle, "format": "json"}),
+        )
+        .await
+        .expect("retrieve truncated production response");
+    let retrieved: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&retrieved))
+            .expect("retrieved envelope json");
+    let content = retrieved["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("retrieved envelope must carry the stored body: {retrieved}"));
+    serde_json::from_str(content).expect("retrieved payload json")
+}
+
+fn production_composition_probe_candidate(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    payload["results"].as_array().and_then(|matches| {
+        matches
+            .iter()
+            .find(|candidate| candidate["display"]["name"] == json!("production_composition_probe"))
+    })
+}
+
+fn production_composition_probe_node_id(payload: &serde_json::Value) -> Option<&str> {
+    production_composition_probe_candidate(payload).and_then(|candidate| {
+        candidate["node_id"].as_str()
+    })
+}
+
 fn commit_production_composition_project(project: &std::path::Path) {
     let run_git = |arguments: &[&str]| {
         let status = std::process::Command::new("git")
@@ -3336,10 +3389,16 @@ async fn production_composition_mounts_core_query_without_optional_stage_evaluat
                 )
                 .await
                 .expect("production search");
-            let payload: serde_json::Value =
-                serde_json::from_str(production_composition_tool_text(&response))
-                    .expect("search json");
-            if payload["code_generation"].as_str().is_some() {
+            let payload =
+                production_composition_tool_json(&harness, &project, &response).await;
+            // Graph seating is deliberately detached from text freshness, so
+            // the code generation publishes before the verified graph read is
+            // servable and `node_id` is absent until then. A follow-up that
+            // consumes the graph identity must wait for the graph lane, not
+            // merely for the code generation.
+            if payload["code_generation"].as_str().is_some()
+                && production_composition_probe_node_id(&payload).is_some()
+            {
                 break payload;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -3347,16 +3406,9 @@ async fn production_composition_mounts_core_query_without_optional_stage_evaluat
     })
     .await
     .expect("core query authority did not become ready");
-    let candidate = payload["results"]
-        .as_array()
-        .and_then(|matches| {
-            matches.iter().find(|candidate| {
-                candidate["display"]["name"] == json!("production_composition_probe")
-            })
-        })
-        .unwrap_or_else(|| {
-            panic!("core query authority did not return the indexed symbol: {payload}")
-        });
+    let candidate = production_composition_probe_candidate(&payload).unwrap_or_else(|| {
+        panic!("core query authority did not return the indexed symbol: {payload}")
+    });
     let node_id = candidate["node_id"]
         .as_str()
         .unwrap_or_else(|| panic!("search result must address graph follow-up tools: {candidate}"));
@@ -3368,8 +3420,7 @@ async fn production_composition_mounts_core_query_without_optional_stage_evaluat
         )
         .await
         .expect("production impact");
-    let impact_payload: serde_json::Value =
-        serde_json::from_str(production_composition_tool_text(&impact)).expect("impact json");
+    let impact_payload = production_composition_tool_json(&harness, &project, &impact).await;
     assert!(
         impact_payload["node_count"]
             .as_u64()
@@ -3407,16 +3458,20 @@ async fn production_composition_harness_wires_cross_project_resolver() {
     )
     .await
     .expect("production composition");
-    let canonical_second = second_project
-        .canonicalize()
-        .expect("canonical second project");
+    // A top-level `project_path` is not a registered-project selector; the
+    // registered identity of the second mount is the only accepted cross-
+    // project route.
+    let second_project_id = harness
+        .project_id(&second_project)
+        .await
+        .expect("second project identity");
     let response = harness
         .call_tool(
             &first_project,
             "tracedecay_grep",
             json!({
                 "pattern": "second_project_probe",
-                "project_path": canonical_second,
+                "project_selector": {"project_id": second_project_id},
                 "format": "json"
             }),
         )

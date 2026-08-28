@@ -504,6 +504,27 @@ impl ProductionProjectCompositionHarnessV1 {
             .clone())
     }
 
+    /// The mounted project's registered identity, which is the only accepted
+    /// cross-project selector: tools reject a top-level `project_path`, so a
+    /// caller routing to a second mounted project must pass
+    /// `project_selector.project_id`.
+    pub async fn project_id(&self, project_root: impl AsRef<Path>) -> Result<String> {
+        let project_root = project_root.as_ref().to_path_buf();
+        self.server(&project_root)?
+            .cg()
+            .await
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "production-composition project '{}' has no registered project identity",
+                    project_root.display()
+                ),
+            })
+    }
+
     #[hotpath::measure(label = "daemon.harness.track_worktree_branch", future = true)]
     pub async fn track_worktree_branch(
         &self,
