@@ -333,13 +333,9 @@ fn daemon_semantic_evaluation_candidate(
             )
         })?;
     let vector_generation_id = vector.generation_id().clone();
+    let calibration_profile_id = evaluated_semantic_calibration_profile_id(&material)?;
     let calibration = SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
-            .map_err(|_| {
-                SemanticActivationCoordinationErrorV1::RejectedDetail(
-                    "semantic evaluation calibration profile identity is invalid".to_owned(),
-                )
-            })?,
+        calibration_profile_id,
         cohort_digest: canonical_sha256(&(
             "tracedecay.semantic.evaluation-calibration-cohort.v1",
             code.manifest().generation_id.clone(),
@@ -418,6 +414,21 @@ fn daemon_semantic_evaluation_candidate(
             rerank: None,
         },
     })
+}
+
+fn evaluated_semantic_calibration_profile_id(
+    material: &crate::search_eval::DirectEvaluatedProfileMaterialV1,
+) -> Result<CalibrationProfileId, SemanticActivationCoordinationErrorV1> {
+    material
+        .profile
+        .calibrations
+        .get(&tracedecay_domain::RetrieverKind::Semantic)
+        .cloned()
+        .ok_or_else(|| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "semantic evaluation profile has no semantic calibration identity".to_owned(),
+            )
+        })
 }
 
 struct SemanticEvaluationWorkerV1 {
@@ -1426,6 +1437,24 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn packaged_candidate_uses_its_evaluated_semantic_calibration() {
+        let material =
+            crate::search_eval::load_default_evaluated_profile_material("hybrid-conservative")
+                .expect("packaged semantic profile");
+        let evaluated = material
+            .profile
+            .calibrations
+            .get(&tracedecay_domain::RetrieverKind::Semantic)
+            .expect("semantic calibration");
+
+        assert_eq!(
+            evaluated_semantic_calibration_profile_id(&material)
+                .expect("candidate semantic calibration"),
+            evaluated.clone()
+        );
+    }
 
     #[tokio::test]
     async fn shutdown_cancels_and_joins_evaluation_prepare() {

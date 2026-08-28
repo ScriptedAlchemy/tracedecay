@@ -273,8 +273,8 @@ fn dirty_set_coalesces_and_takes_once() {
     assert!(!set.take());
 }
 
-#[test]
-fn shared_ref_event_marks_repository_reconciliation() {
+#[tokio::test]
+async fn shared_ref_event_marks_repository_reconciliation() {
     let state = Arc::new(WatchState::new(
         PathBuf::from("/repo/.git"),
         PathBuf::from("/repo"),
@@ -288,7 +288,7 @@ fn shared_ref_event_marks_repository_reconciliation() {
     };
     classify_and_mark(&state, &create);
 
-    let dirty = state.dirty.blocking_lock();
+    let dirty = state.dirty.lock().await;
     assert!(dirty.dirty);
     assert!(
         dirty.reconcile_metadata,
