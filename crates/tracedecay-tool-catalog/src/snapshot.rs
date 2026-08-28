@@ -209,6 +209,7 @@ impl CatalogSnapshotBuilderV1 {
         self
     }
 
+    #[hotpath::measure(label = "tool_catalog.snapshot.build")]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
         validate_catalog(&self.contributions, &self.profiles, &self.handlers)?;
 

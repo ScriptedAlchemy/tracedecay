@@ -155,6 +155,7 @@ pub enum CatalogValidationError {
     },
 }
 
+#[hotpath::measure(label = "tool_catalog.validate")]
 pub(crate) fn validate_catalog(
     contributions: &[CatalogContributionV1],
     profiles: &[ProfileDefinition],
