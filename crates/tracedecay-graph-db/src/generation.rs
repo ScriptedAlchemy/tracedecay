@@ -1524,7 +1524,10 @@ mod manifest_digest_memo_tests {
         .unwrap()
     }
 
-    fn manifest(namespace: &str, dependencies: Vec<GraphGenerationDependency>) -> GraphGenerationManifest {
+    fn manifest_fixture(
+        namespace: &str,
+        dependencies: Vec<GraphGenerationDependency>,
+    ) -> GraphGenerationManifest {
         GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
                 GraphNamespace::new(namespace).unwrap(),
@@ -1554,7 +1557,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn produce_and_hydrate_flow_canonicalizes_each_digest_once_per_instance() {
-        let manifest = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        let manifest = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
         reset_manifest_canonicalizations();
         reset_dependency_closure_canonicalizations();
 
@@ -1573,7 +1576,10 @@ mod manifest_digest_memo_tests {
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
         let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         assert_eq!(sealed, replay.expected_recovered_digest);
-        assert_eq!(dependency_digest, replay.dependency_generation_closure_digest);
+        assert_eq!(
+            dependency_digest,
+            replay.dependency_generation_closure_digest
+        );
         assert_eq!(
             manifest_canonicalizations(),
             1,
@@ -1615,8 +1621,11 @@ mod manifest_digest_memo_tests {
 
         // Byte identity: a cold instance built from the same inputs computes
         // the exact digests the memoized reads served.
-        let control = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
-        assert_eq!(control.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
+        let control = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        assert_eq!(
+            control.expected_recovered_digest(&|| Ok(())).unwrap(),
+            sealed
+        );
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
             dependency_digest
@@ -1633,7 +1642,7 @@ mod manifest_digest_memo_tests {
         })
         .unwrap();
         let database = owner.issue_lease().unwrap();
-        let manifest = Arc::new(manifest("digest-memo-verify", vec![]));
+        let manifest = Arc::new(manifest_fixture("digest-memo-verify", vec![]));
         database
             .apply_generation_unverified(Arc::clone(&manifest), &|| Ok(()))
             .unwrap();
@@ -1667,7 +1676,8 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn mutation_after_a_digest_read_recomputes_instead_of_serving_the_memo() {
-        let mut manifest = manifest("digest-memo-mutation", vec![dependency(1), dependency(2)]);
+        let mut manifest =
+            manifest_fixture("digest-memo-mutation", vec![dependency(1), dependency(2)]);
         let dependency_before = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let recovered_before = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
 
@@ -1717,7 +1727,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn identity_mutation_recomputes_the_propagated_digest() {
-        let manifest = manifest("digest-memo-identity", vec![dependency(1), dependency(2)]);
+        let manifest = manifest_fixture("digest-memo-identity", vec![dependency(1), dependency(2)]);
         let seeded = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let mut identity = manifest.identity();
         identity.dependencies.pop();
@@ -1730,7 +1740,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn a_clone_starts_with_a_cold_memo() {
-        let manifest = manifest("digest-memo-clone", vec![dependency(1)]);
+        let manifest = manifest_fixture("digest-memo-clone", vec![dependency(1)]);
         let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
 
