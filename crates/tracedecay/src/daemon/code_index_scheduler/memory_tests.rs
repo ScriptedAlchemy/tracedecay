@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    process_resident_memory_limit_for_system_v1,
+    ResidentMemoryPressureV1, process_resident_memory_limit_for_system_v1,
 };
 
 use super::{
@@ -320,4 +320,80 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     assert_eq!(stats.reconciling_worktrees, 0);
     assert!(stats.retained_generation_encoded_bytes > 0);
     registry.shutdown().await;
+}
+
+/// Measured RSS, not the reservation ledger, decides worker admission once a
+/// sample says the process is over budget — and the refusal names the observed
+/// and configured bytes so it is never a silent stall.
+#[test]
+fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let project_id = ProjectId::new("project.code-index-rss-pressure").expect("valid project");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id,
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+
+    // A limit with ample room for the worker plan, so the only thing that can
+    // refuse admission below is the injected measurement.
+    let limit =
+        NonZeroU64::new(worker_reservation_bytes().saturating_mul(4)).expect("positive test limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    )));
+
+    // Nothing sampled yet: admission falls back to the reservation ceiling.
+    drop(
+        scheduler
+            .reserve_worker_memory()
+            .expect("an unobserved process admits on the reservation ceiling alone"),
+    );
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    let failure = scheduler
+        .reserve_worker_memory()
+        .expect_err("measured RSS over the high watermark refuses new worker admission");
+    let super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = &failure else {
+        panic!("expected a worker resident-memory admission failure, got {failure:?}");
+    };
+    assert!(
+        admission.is_observed_over_budget(),
+        "the refusal must name measured pressure, not a full reservation ledger"
+    );
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&(pressure.high_watermark_bytes() + 1).to_string()),
+        "the refusal names observed bytes: {rendered}"
+    );
+    assert!(
+        rendered.contains(&limit.get().to_string()),
+        "the refusal names configured bytes: {rendered}"
+    );
+    assert!(
+        failure.is_transient_capacity_failure(),
+        "an over-budget refusal is retryable as pressure falls"
+    );
+
+    // Hysteresis: between the watermarks the refusal stands rather than flapping.
+    let between = (pressure.low_watermark_bytes() + pressure.high_watermark_bytes()) / 2;
+    for _ in 0..3 {
+        pressure.publish_observed_resident_bytes(between);
+        assert!(
+            scheduler.reserve_worker_memory().is_err(),
+            "admission must not flap between the watermarks"
+        );
+    }
+
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    drop(
+        scheduler
+            .reserve_worker_memory()
+            .expect("admission is retryable once measured pressure falls to the low watermark"),
+    );
 }

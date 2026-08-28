@@ -929,17 +929,16 @@ mod tests {
         let mut first_project_servers =
             ShutdownTaskReceipt::failed("failed_server", "typed server failure");
         first_project_servers.extend(ShutdownTaskReceipt::timed_out("timed_out_server"));
-        let first =
-            coordinate_daemon_shutdown(
-                &lifecycle,
-                tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
-                async move {
-                    DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| async move {
-                        first_project_servers
-                    })
-                },
-            )
-            .await;
+        let first = coordinate_daemon_shutdown(
+            &lifecycle,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            async move {
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| async move {
+                    first_project_servers
+                })
+            },
+        )
+        .await;
 
         assert!(first.is_retryable());
         let retry = coordinate_daemon_shutdown(
@@ -1121,14 +1120,12 @@ mod tests {
         let mut first = tokio::spawn(async move {
             coordinate_daemon_shutdown(&first_lifecycle, first_deadline, async move {
                 first_prepares.fetch_add(1, Ordering::AcqRel);
-                DaemonShutdownPlan::new(
-                    JoinSet::new(),
-                    Vec::new(),
-                    move |_| BlockingProjectServers {
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| {
+                    BlockingProjectServers {
                         entered: Some(entered_tx),
                         release: first_release,
-                    },
-                )
+                    }
+                })
             })
             .await
         });

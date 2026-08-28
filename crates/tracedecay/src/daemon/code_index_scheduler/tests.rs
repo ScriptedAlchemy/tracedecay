@@ -12172,9 +12172,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
         .expect("resolved scope")
     };
 
-    let registry = Arc::new(CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(
-        1, 1,
-    ));
+    let registry = Arc::new(CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1));
     registry
         .mount_worktree(
             test_project_id(),

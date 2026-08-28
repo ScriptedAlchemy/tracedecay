@@ -248,6 +248,31 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     publication_gate: Arc<std::sync::Mutex<()>>,
 }
 
+/// Retirement releases the decoded-generation offer this runtime commissioned.
+///
+/// The offer exists to spare the activation window a second decode of bytes
+/// that stay durable on disk. Once this runtime retires, no consumer can reach
+/// that window again, so continuing to retain a whole decoded generation is
+/// pure resident cost — and before this nothing removed an offer at all, which
+/// is one of the holders that let a 16GiB admission limit sit inside a 42GiB
+/// process. Dropping it never loses truth: the canonical seal read remains the
+/// authority and reconstructs the same payload.
+impl Drop for RetainedCodeGraphRuntimeV1 {
+    fn drop(&mut self) {
+        let released_bytes = self
+            .graph_manifest_provider
+            .release_decoded_offer(&self.authority.binding().shard_id);
+        if released_bytes > 0 {
+            tracing::debug!(
+                event = "code_graph_decoded_offer_released",
+                released_bytes,
+                generation = %self.generation_id.as_str(),
+                "released the retiring runtime's decoded generation offer"
+            );
+        }
+    }
+}
+
 /// Memory-shard publication runtime for immutable non-code graph journeys.
 ///
 /// Code and journey projections share the daemon's sole `GraphDbRegistry` and

@@ -129,8 +129,7 @@ impl ReconcilePanicGuardV1 {
                 self.next_attempt_at = None;
                 return false;
             }
-            hotpath::gauge!("daemon.code_index.reconcile.panic.suppressed_wakes_total")
-                .inc(1_u64);
+            hotpath::gauge!("daemon.code_index.reconcile.panic.suppressed_wakes_total").inc(1_u64);
             return true;
         }
         let suppressed = self.next_attempt_at.is_some_and(|at| now < at);
@@ -401,7 +400,7 @@ impl ReconcileFaultInjectionV1 {
             // the process budget is already spoken for by another holder.
             ReconcileFaultKindV1::TransientCapacity => {
                 Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
-                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1 {
+                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
                         used_bytes: 900,
                         requested_bytes: 200,
                         limit_bytes: 1_000,
@@ -411,7 +410,7 @@ impl ReconcileFaultInjectionV1 {
             // Same variant, but the request alone exceeds the whole limit.
             ReconcileFaultKindV1::OversizedCapacity => {
                 Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
-                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1 {
+                    tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
                         used_bytes: 0,
                         requested_bytes: 4_000,
                         limit_bytes: 1_000,
