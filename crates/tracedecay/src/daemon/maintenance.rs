@@ -724,11 +724,19 @@ impl MaintenanceTickOutcome {
     }
 }
 
+/// The maintenance loop parks on `tokio::time::sleep_until`, so every deadline
+/// it derives must be measured on the same clock the timer wheel uses.
+/// `tokio::time::Instant` is the process monotonic clock in production and the
+/// runtime's virtual clock under a paused test runtime; mixing it with
+/// `std::time::Instant` would leave the due check permanently in the past
+/// relative to a fired timer.
+type CadenceInstant = tokio::time::Instant;
+
 #[derive(Debug)]
 pub(super) struct MaintenanceCadence {
     interval: Duration,
     retry_delay: Duration,
-    not_before: Option<Instant>,
+    not_before: Option<CadenceInstant>,
     in_flight: bool,
 }
 
@@ -742,7 +750,7 @@ impl MaintenanceCadence {
         }
     }
 
-    pub(super) fn reserve(&mut self, now: Instant) -> bool {
+    pub(super) fn reserve(&mut self, now: CadenceInstant) -> bool {
         if self.in_flight || self.not_before.is_some_and(|not_before| now < not_before) {
             return false;
         }
@@ -750,7 +758,7 @@ impl MaintenanceCadence {
         true
     }
 
-    fn finish(&mut self, now: Instant, outcome: MaintenanceTickOutcome) -> Instant {
+    fn finish(&mut self, now: CadenceInstant, outcome: MaintenanceTickOutcome) -> CadenceInstant {
         self.in_flight = false;
         let delay = match outcome {
             MaintenanceTickOutcome::Complete => self.interval,
@@ -847,7 +855,7 @@ async fn run_maintenance_loop<F, Fut>(
 {
     let _lifecycle = MaintenanceLifecycleInstrumentation::new();
     let mut cadence = MaintenanceCadence::new(interval);
-    let mut deadline = Instant::now() + cadence.retry_delay;
+    let mut deadline = CadenceInstant::now() + cadence.retry_delay;
     let mut continuation = None;
     loop {
         tokio::select! {
@@ -857,13 +865,13 @@ async fn run_maintenance_loop<F, Fut>(
                 break;
             }
             () = wake.notified() => {}
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+            () = tokio::time::sleep_until(deadline) => {}
         }
         if cancellation.is_cancelled() {
             _lifecycle.record_cancellation();
             break;
         }
-        let now = Instant::now();
+        let now = CadenceInstant::now();
         if now < deadline || !cadence.reserve(now) {
             continue;
         }
@@ -875,7 +883,7 @@ async fn run_maintenance_loop<F, Fut>(
         }
         _lifecycle.record_outcome(outcome);
         continuation = outcome.continuation();
-        deadline = cadence.finish(Instant::now(), outcome);
+        deadline = cadence.finish(CadenceInstant::now(), outcome);
     }
 }
 
@@ -1615,7 +1623,7 @@ pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::sync::Notify;
     use tracedecay_application::storage::{
@@ -1624,7 +1632,7 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE, MAINTENANCE_STORE_PAGE_LIMIT,
+        CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE, MAINTENANCE_STORE_PAGE_LIMIT,
         MaintenanceCadence, MaintenanceContinuation, MaintenanceStoreOutcomeV1,
         MaintenanceTickOutcome, SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
         TableGrowthObservation, checkpoint_path, classify_cold_store_state, compare_table_growth,
@@ -1685,7 +1693,7 @@ mod tests {
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
-        let started = Instant::now();
+        let started = CadenceInstant::now();
         let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
@@ -1720,8 +1728,15 @@ mod tests {
         );
     }
 
+    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide gauge, so a test that
+    /// observes absolute readings must not overlap another test that runs a
+    /// maintenance loop. Every test that starts `run_maintenance_loop` holds
+    /// this lock for the whole lifetime of its loop.
+    static MAINTENANCE_LOOP_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test(start_paused = true)]
     async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
+        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
         let cancellation = tracedecay_usecases::context::CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1780,6 +1795,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn progress_continuation_reenters_only_the_owning_phase() {
+        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
         let cancellation = tracedecay_usecases::context::CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
