@@ -415,6 +415,40 @@ indexes in its replay form. Both halves were implemented against the seal-time
 compaction and reverted with it; neither is reachable while nothing calls
 `compact()` outside the bench lane.
 
+### Why "never write after compact" is not a guarantee TraceDecay can make
+
+The obvious containment for blocker 2 is to promise the store is never mutated
+after it is compacted, and enforce it with a typed refusal. That promise cannot
+be kept, because the two scopes do not line up: **immutability is per
+generation, `compact()` is per database.**
+
+A `GraphDb` holds one `GrafeoDB` (`runtime.rs`, `Inner::database`), and
+generations live inside it separated by physical namespace, not by file. Sealing
+generation N and compacting freezes the same store that generation N+1 stages
+into — and staging the next generation is the daemon's whole job. The recovery
+path also writes: `set_projection_quarantine` creates and clears markers on a
+store that may already be compacted.
+
+That is not a deduction, it is what the wiring did. With `compact()` called at
+the end of `finalize_staged_generation`, five contract tests failed:
+`later_generation_page_creates_its_first_native_vector_index`, which writes a
+later page after an earlier seal, and four recovered-generation tests where a
+sealed generation reopened a second time came back with its format marker gone.
+
+A refusal that actually held would make the graph read-only after its first
+seal. Per-generation compaction would need per-generation stores, which is a
+different design from the one this document scoped.
+
+### The fork's mmap open needs no wiring here
+
+`extract_compact_base` is called from `GrafeoDB::with_config`'s own open path
+(`grafeo-engine/src/database/mod.rs:419,477`), and that is the constructor both
+`runtime.rs` and `recovery.rs` already call. Nothing in TraceDecay names the
+section, the mmap, or the base. So when the pin moves to the fork branch whose
+`extract_compact_base` prefers `fm.mmap_section`, the mmap-backed open arrives
+without a line of wiring in this crate — the open numbers in the table above are
+the heap-copy path and are a floor, not a ceiling.
+
 ### Revised wiring plan
 
 - **Phase 1 — property index. Done.** Also fixed on the way: the property
@@ -423,8 +457,10 @@ compaction and reverted with it; neither is reachable while nothing calls
   resolved through the intrinsic label index, and cost 23.7s for 64 point reads
   at 500k once it did not.
 - **Phase 2 — seal implies compact. Blocked** on blockers 1 and 2. Blocker 2 is
-  a correctness stop; blocker 1 is an economics question that should be settled
-  before anyone pays for a fork fix.
+  a correctness stop and cannot be contained inside TraceDecay, because
+  `compact()` freezes the whole database while only a generation is immutable.
+  Blocker 1 is an economics question that should be settled before anyone pays
+  for a fork fix.
 - **Phase 3 — vector planning.** Specified above, blocked behind phase 2.
 - **Phase 4 — streaming section writer, mmap container open.** Unchanged, and
   now clearly behind a property index for the columnar base in priority.
