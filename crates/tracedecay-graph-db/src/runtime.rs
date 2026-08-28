@@ -936,6 +936,34 @@ impl GraphDb {
         Ok(guard)
     }
 
+    /// Bench-lane only: freeze the live LPG store into a columnar
+    /// `CompactStore` base plus a fresh mutable overlay.
+    ///
+    /// This exists to *measure* an at-rest form for a sealed generation and is
+    /// deliberately unreachable from any production path: it is gated on
+    /// `test-helpers` so it cannot compile into a shipped binary, and nothing
+    /// in this crate calls it. See `tests/at_rest_snapshot.rs` and
+    /// `docs/graph-at-rest/README.md`.
+    ///
+    /// After this returns, `GrafeoDB::build_sections` emits a
+    /// `SectionType::CompactStore` section on close instead of serializing the
+    /// whole LPG block log, and the next open reconstructs the layered store
+    /// from that section rather than replaying every mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphDbError::Closed`] when the database is already closed and
+    /// [`GraphDbError::Unavailable`] when grafeo refuses the conversion (for
+    /// example more than 32,767 distinct labels or edge types).
+    #[cfg(all(feature = "test-helpers", feature = "graph-disk-tier"))]
+    pub fn compact_snapshot_for_bench(&self) -> Result<(), GraphDbError> {
+        let mut guard = self.write_guard()?;
+        let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
+        database
+            .compact()
+            .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
+    }
+
     pub(crate) fn state_write_guard(
         &self,
     ) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
