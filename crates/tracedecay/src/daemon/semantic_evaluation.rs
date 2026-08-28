@@ -1271,14 +1271,15 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
         '_,
         Result<SemanticEvaluationPublicationSnapshotV1, SemanticActivationCoordinationErrorV1>,
     > {
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             self.control.checkpoint()?;
             let code = self
                 .control
-                .interruptible(
+                .interruptible(hotpath::future!(
                     self.scheduler
                         .semantic_evaluation_snapshot_for_scope(&self.scope),
-                )
+                    label = "daemon.semantic.evaluation.snapshot.code"
+                ))
                 .await?
                 .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
             let (
@@ -1301,7 +1302,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     let capability_manifest_digest = code.capability_manifest_digest.clone();
                     let cancellation = Arc::clone(&self.control)
                         as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
-                    let mut verification = tokio::spawn(async move {
+                    let mut verification = tokio::spawn(hotpath::future!(async move {
                         runtime
                             .inspect_verified_evaluation_target_snapshot(
                                 &candidate,
@@ -1312,7 +1313,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                             )
                             .await
                             .map_err(coordination_error_from_runtime)
-                    });
+                    }, label = "daemon.semantic.evaluation.snapshot.verify_target"));
                     let receipt = await_semantic_task(&self.control, &mut verification).await?;
                     (
                         Some(code.source_generation.clone()),
@@ -1325,8 +1326,11 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                 }
                 None => (None, None, None, None, None, None),
             };
-            let evaluated = crate::search_eval::load_default_evaluated_profile_material(
-                &self.candidate.evaluated_profile_id,
+            let evaluated = hotpath::measure_block!(
+                "daemon.semantic.evaluation.snapshot.profile_material",
+                crate::search_eval::load_default_evaluated_profile_material(
+                    &self.candidate.evaluated_profile_id,
+                )
             )
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
             self.control.checkpoint()?;
@@ -1350,7 +1354,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     rerank_ceiling: evaluated.rerank,
                 },
             })
-        })
+        }, label = "daemon.semantic.evaluation.snapshot.current"))
     }
 
     fn evaluate_default_candidate<'a>(
@@ -1419,7 +1423,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
         expected: &'a SemanticEvaluationPublicationSnapshotV1,
         publication: SemanticEvaluationAuthorityPublicationV1,
     ) -> SemanticRuntimeFuture<'a, Result<(), SemanticActivationCoordinationErrorV1>> {
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             self.snapshot.control.checkpoint()?;
             let expected_code = super::code_index_scheduler::SemanticEvaluationCodeSnapshotV1 {
                 source_generation: expected.code_generation.clone(),
@@ -1430,14 +1434,15 @@ impl SemanticEvaluationPublicationSnapshotPortV1
             let _code_lease = self
                 .snapshot
                 .control
-                .interruptible(
+                .interruptible(hotpath::future!(
                     self.snapshot
                         .scheduler
                         .acquire_semantic_evaluation_publication_lease(
                             &self.snapshot.scope,
                             &expected_code,
                         ),
-                )
+                    label = "daemon.semantic.evaluation.publish.code_lease"
+                ))
                 .await?
                 .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
             let semantic_lifecycle_verification = expected.semantic_lifecycle_verification.clone();
@@ -1464,9 +1469,10 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                 Some((runtime, _, revision, generation)) => Some(
                     self.snapshot
                         .control
-                        .interruptible(
+                        .interruptible(hotpath::future!(
                             runtime.acquire_vector_publication_lease(*revision, generation),
-                        )
+                            label = "daemon.semantic.evaluation.publish.vector_lease"
+                        ))
                         .await?
                         .map_err(|_| SemanticActivationCoordinationErrorV1::Conflict)?,
                 ),
@@ -1477,7 +1483,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                 let verification = verification.clone();
                 let cancellation = Arc::clone(&self.snapshot.control)
                     as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
-                let mut acquisition = tokio::spawn(async move {
+                let mut acquisition = tokio::spawn(hotpath::future!(async move {
                     runtime
                         .acquire_verified_evaluation_target_publication_lease(
                             &verification,
@@ -1485,16 +1491,20 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                         )
                         .await
                         .map_err(coordination_error_from_runtime)
-                });
+                }, label = "daemon.semantic.evaluation.publish.lifecycle_lease"));
                 Some(await_semantic_task(&self.snapshot.control, &mut acquisition).await?)
             } else {
                 None
             };
             self.snapshot.control.try_begin_commit()?;
-            let result = publication.commit(expected).await;
+            let result = hotpath::future!(
+                publication.commit(expected),
+                label = "daemon.semantic.evaluation.publish.commit"
+            )
+            .await;
             self.snapshot.control.checkpoint()?;
             result
-        })
+        }, label = "daemon.semantic.evaluation.publish.total"))
     }
 }
 
