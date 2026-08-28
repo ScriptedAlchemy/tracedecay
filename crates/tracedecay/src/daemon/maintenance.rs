@@ -1383,14 +1383,39 @@ impl MaintenanceCoordinator {
     }
 }
 
-/// Samples this process's current resident set size and republishes it as a
-/// Hotpath gauge. A 20G RSS overrun past the admission limit was visible only
-/// to `ps` during a 2026-08 incident; this closes that gap using the
-/// retention tick's existing cadence rather than a new background timer.
+/// Samples this process's current resident set size, republishes it as a
+/// Hotpath gauge, and feeds it to the resident-memory admission authority.
+///
+/// A 20G RSS overrun past the admission limit was visible only to `ps` during
+/// a 2026-08 incident; this closes that gap using the retention tick's
+/// existing cadence rather than a new background timer. Publishing the same
+/// sample to
+/// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
+/// closes the loop: admission stops trusting its reservation model once the
+/// measurement says the process is over budget. There is exactly one reader
+/// here — the gauge and the admission cell consume the same sample.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge() {
     if let Some(bytes) = read_linux_process_resident_bytes() {
         hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
+        let state =
+            tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1()
+                .publish_observed_resident_bytes(bytes);
+        if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
+            observed_bytes,
+            limit_bytes,
+            high_watermark_bytes,
+            ..
+        } = state
+        {
+            tracing::warn!(
+                event = "daemon_resident_memory_over_budget",
+                observed_bytes,
+                limit_bytes,
+                high_watermark_bytes,
+                "measured process RSS is over the admission high watermark; refusing new growth and releasing reclaimable retained state"
+            );
+        }
     }
 }
 

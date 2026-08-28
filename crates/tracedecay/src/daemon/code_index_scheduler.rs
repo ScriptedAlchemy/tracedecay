@@ -3902,10 +3902,16 @@ impl CodeIndexSchedulerErrorV1 {
     /// likewise reproduce over the same input or already have an owner that
     /// re-drives them; self-scheduling those is precisely the unbounded-retry
     /// failure this module exists to stop.
+    /// A measured over-budget refusal is transient by construction too, and for
+    /// a stronger reason than a full reservation ledger: nothing about this
+    /// input caused it, and the watermark that produced it clears on its own as
+    /// real RSS falls back to the low watermark. Retrying is the only way the
+    /// pass ever runs, because falling pressure emits no wake either.
     pub(super) fn is_transient_capacity_failure(&self) -> bool {
         match self {
             Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
-                failure.requested_bytes <= failure.limit_bytes
+                failure.is_observed_over_budget()
+                    || failure.requested_bytes() <= failure.limit_bytes()
             }
             Self::SnapshotMemoryCapacityUnavailable => true,
             Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
