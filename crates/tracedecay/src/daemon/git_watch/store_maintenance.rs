@@ -214,8 +214,11 @@ pub(super) async fn run_semantic_vector_generation_retention(
                         | tracedecay_graph_db::SemanticVectorRetentionAction::Finalized(_)
                         | tracedecay_graph_db::SemanticVectorRetentionAction::CancelledRemoved(_)
                 );
-            if !observations.record_semantic_vector_retention_census(root, &census) {
-                log_semantic_vector_retention_degraded("census_count_overflow");
+            if let Some(failure) = observations
+                .record_semantic_vector_retention_census(root, &census)
+                .as_failure_label()
+            {
+                log_semantic_vector_retention_degraded(failure);
                 return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
             }
             if !matches!(
