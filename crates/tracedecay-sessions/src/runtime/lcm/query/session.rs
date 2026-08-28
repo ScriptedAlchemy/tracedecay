@@ -1,6 +1,10 @@
 use super::super::util;
 use super::*;
 
+// Future lifetime so suspension inside the query executor (writer lease /
+// queue wait) is charged here rather than vanishing between poll times. The
+// decode share of this span is the nested `sessions.lcm.raw.verify_row`.
+#[hotpath::measure(label = "sessions.lcm.load_session", future = true)]
 pub async fn load_session(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmLoadSessionRequest,
@@ -39,13 +43,28 @@ pub async fn load_session(
          ORDER BY store_id
          LIMIT ?"
     );
-    let mut rows = conn.query(&sql, values).await?;
-
-    let mut messages = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let raw = raw::verified_raw_message_from_row(&row)?;
-        messages.push(load_message_from_raw(raw, request.content_slice));
-    }
+    let fetched = hotpath::future!(
+        async {
+            let mut rows = conn.query(&sql, values).await?;
+            let mut fetched = Vec::new();
+            while let Some(row) = rows.next().await? {
+                fetched.push(row);
+            }
+            Ok::<_, LcmError>(fetched)
+        },
+        label = "lcm.hydrate.fetch"
+    )
+    .await?;
+    let raws = hotpath::measure_block!("lcm.hydrate.redact", {
+        fetched
+            .iter()
+            .map(raw::verified_raw_message_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let mut messages = raws
+        .into_iter()
+        .map(|raw| load_message_from_raw(raw, request.content_slice))
+        .collect::<Vec<_>>();
 
     let has_more = messages.len() > limit;
     if has_more {
@@ -131,6 +150,7 @@ pub async fn session_providers(
 
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
+#[hotpath::measure(label = "sessions.lcm.replay_slice", future = true)]
 pub async fn session_replay_slice(
     conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,
