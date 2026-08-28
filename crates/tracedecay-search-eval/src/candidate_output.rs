@@ -85,6 +85,8 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
+use crate::semantic_cut::SemanticCutV1;
+
 mod control;
 use control::ActiveControl;
 
@@ -209,47 +211,43 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
-    /// Per-profile semantic acceptance cut-off, expressed as a minimum
-    /// nonnegative cosine similarity in parts per million. This is not the
-    /// former shifted `[-1, 1]` calibration domain.
+    /// Per-profile semantic acceptance cut, as a measured state rather than a
+    /// number.
     ///
     /// # This value is in force
     ///
-    /// It becomes `FusionProfile::minimum_calibrated_feature_micros[Semantic]`
-    /// (see `fusion_profile` below), it is carried through
+    /// `SemanticCutV1::threshold_ppm` becomes
+    /// `FusionProfile::minimum_calibrated_feature_micros[Semantic]` (see
+    /// `fusion_profile` below), it is carried through
     /// `DirectEvaluatedProfileMaterialV1` into the daemon candidate builder,
     /// and `tracedecay_query::retrieval::fusion` drops every semantic
-    /// contribution whose calibrated feature falls under it. Editing this
-    /// number changes production retrieval, not just the evaluation fixture.
+    /// contribution whose calibrated feature falls under it. What is declared
+    /// here changes production retrieval, not just the evaluation fixture.
     ///
-    /// An earlier revision of this comment claimed the opposite — that the
-    /// field was documentation only — after the wiring had already landed. The
-    /// claim survived long enough for the value to be re-tuned five times in
-    /// one day (`700000` → `690000` → `700000` → `400000` → `635000`) as a way
-    /// to move a failing activation gate. Keep `calibration_threshold_ppm_is_in_force`
-    /// green so the claim cannot come back.
+    /// # Why it is not a number
     ///
-    /// # It is a second cut on an already-measured quantity
+    /// This field used to be a bare `calibration_threshold_ppm: u32`, and an
+    /// earlier revision of this comment claimed it was documentation only —
+    /// after the wiring had already landed. The claim survived long enough for
+    /// the value to be re-tuned five times in one day (`700000` → `690000` →
+    /// `700000` → `400000` → `635000`) as a way to move a failing activation
+    /// gate, because moving it was cheaper than measuring it.
     ///
     /// The semantic lane *also* abstains on
     /// `SemanticCalibrationProfileV1::maximum_distance_micros`, which
     /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
     /// measures from the committed generation's own vectors — deliberately,
     /// because a cosine cut-off is a property of the model and corpus rather
-    /// than of a checked-in profile. This field therefore imposes a *second*,
-    /// tighter, unmeasured cut on the same cosine score after the measured one
-    /// has already run.
+    /// than of a checked-in profile. A hand-picked constant imposing a second,
+    /// tighter cut on the same score was never the fix for the regime gap that
+    /// module documents.
     ///
-    /// That gap is real and is documented in `acceptance_calibration`: the
-    /// measured bound is a code↔code background distribution, while this gate
-    /// decides natural-language↔code queries, which sit in a different score
-    /// regime. A hand-picked constant is not the fix. The workload already
-    /// carries the labelled data the honest fix needs — relevant anchors and
-    /// `no_answer` negatives, split into `train` and `validation` — so the cut
-    /// must be derived from the train partition's measured positive/negative
-    /// separation and then hold on validation. Until that derivation exists,
-    /// do not move this number to make a gate pass.
-    pub calibration_threshold_ppm: u32,
+    /// [`crate::semantic_cut`] closes it instead: the cut is derived from the
+    /// train partition's measured positive/negative separation and must hold
+    /// on validation, and the state carries the provenance that derivation
+    /// produced. There is no longer a number here to tune —
+    /// `semantic_cut_is_derived_and_in_force` pins that.
+    pub semantic_cut: SemanticCutV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
 }
@@ -307,6 +305,21 @@ pub struct RankedCandidateRowV1 {
     pub tier: String,
 }
 
+/// One semantic candidate's calibrated score, retained beside its identity.
+///
+/// This is the raw evidence the semantic cut is derived from. The candidate is
+/// carried in the same shape as a ranked row so the workload's own anchor
+/// matching applies to it unchanged, and the score is the calibrated feature
+/// fusion itself would compare against the cut — recomputable from the
+/// oracle's retained raw score, so validation reconstructs this rather than
+/// trusting it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticCandidateScoreRowV1 {
+    pub candidate: RankedCandidateRowV1,
+    pub calibrated_feature_micros: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QueryCandidateRowV1 {
@@ -316,6 +329,11 @@ pub struct QueryCandidateRowV1 {
     pub historical: HistoricalQueryExecutionV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<SemanticNativeQueryOutputV1>,
+    /// Every semantic candidate the exact-flat oracle produced for this query,
+    /// with the calibrated score fusion sees. Empty for a profile with no
+    /// semantic lane, and empty when the semantic stage stayed pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_scores: Vec<SemanticCandidateScoreRowV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1044,9 +1062,9 @@ pub fn validate_workload_for_tuning(
                 profile.profile_id
             )));
         }
-        if profile.calibration_threshold_ppm > 1_000_000 {
+        if let Err(error) = profile.semantic_cut.validate() {
             return Err(CandidateOutputError::Contract(format!(
-                "profile {} calibration threshold exceeds one million ppm",
+                "profile {} declares an unusable semantic cut: {error}",
                 profile.profile_id
             )));
         }
@@ -1595,6 +1613,7 @@ fn retrieve_one_native_query(
         &retrieval_budget(),
     )?);
     validate_native_query_output(profile, &prepared.fallback, &native)?;
+    let semantic_scores = map_semantic_score_rows(published, profile, &native)?;
     let ranked = map_ranked_candidate_list(published, &ranked)?;
     let (historical, historical_ranked) = historical_candidates(published, query)?;
     let ranked = merge_candidate_timelines(query, ranked, historical_ranked);
@@ -1604,7 +1623,67 @@ fn retrieve_one_native_query(
         ranked,
         historical,
         native: Some(native),
+        semantic_scores,
     })
+}
+
+/// Retain every semantic candidate's calibrated score beside its identity.
+///
+/// The exact-flat oracle is captured before fusion applies the cut, so these
+/// are the scores the cut is derived from *and* the scores it gates — the
+/// derivation observes exactly the quantity it decides, and costs no
+/// additional model work. A pending semantic stage retains nothing rather than
+/// an empty measurement.
+fn map_semantic_score_rows(
+    published: &PublishedCorpus,
+    profile: &ProfileSpecV1,
+    native: &SemanticNativeQueryOutputV1,
+) -> Result<Vec<SemanticCandidateScoreRowV1>, CandidateOutputError> {
+    let SemanticNativeStageResultV1::Complete(oracle) = &native.exact_flat_oracle else {
+        return Ok(Vec::new());
+    };
+    let calibration = semantic_score_domain_calibration(&profile.profile_id)?;
+    let mut rows = Vec::with_capacity(oracle.hits.len());
+    for hit in &oracle.hits {
+        let entry = published
+            .occurrence_map
+            .get(hit.candidate.anchor_id.as_str())
+            .or_else(|| {
+                published
+                    .occurrence_map
+                    .get(hit.candidate.source_occurrence_id.as_str())
+            })
+            .cloned()
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "semantic oracle candidate {} has no corpus occurrence binding",
+                    hit.candidate.anchor_id
+                ))
+            })?;
+        let anchor = hit.candidate.anchor_id.as_str().to_owned();
+        let mut anchors = entry.display_anchors;
+        if !anchors.contains(&anchor) {
+            anchors.insert(0, anchor.clone());
+        }
+        let tier = if hit.candidate.exact_class() != ExactClass::Approximate {
+            "exact"
+        } else {
+            "approximate"
+        };
+        rows.push(SemanticCandidateScoreRowV1 {
+            candidate: RankedCandidateRowV1 {
+                anchor,
+                anchors,
+                scope: entry.scope,
+                document_id: entry.document_id,
+                tier: tier.to_owned(),
+            },
+            calibrated_feature_micros: calibration
+                .calibrate(hit.candidate.raw_score)
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        });
+    }
+    Ok(rows)
 }
 
 fn validate_native_query_output(
@@ -2081,6 +2160,9 @@ fn query_row_from_composition(
         abstained,
         historical,
         native: None,
+        // This path composes without a native semantic lane, so it observes no
+        // semantic score to retain.
+        semantic_scores: Vec::new(),
     })
 }
 
@@ -3271,6 +3353,46 @@ fn graph_seeds_from_outcomes(
     seeds
 }
 
+/// Build one lane's score-domain calibration.
+///
+/// The semantic lane's bounds are the evaluation score domain's, under which a
+/// calibrated feature is nonnegative cosine similarity in ppm. This is the
+/// single definition: [`semantic_score_domain_calibration`] reuses it so the
+/// score the cut is derived from is byte-identically the score fusion
+/// compares against the cut.
+fn score_domain_calibration(
+    lane: RetrieverKind,
+    domain: &str,
+    profile_id: &str,
+) -> Result<ScoreDomainCalibrationV1, CandidateOutputError> {
+    let score_domain = id::<ScoreDomainId>(domain)?;
+    let (raw_min_micros, raw_max_micros) = if lane == RetrieverKind::Semantic {
+        (
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
+            tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+        )
+    } else {
+        (0, 1_000_000)
+    };
+    Ok(ScoreDomainCalibrationV1 {
+        calibration_profile_id: id(&format!("calibration.{}.{profile_id}", lane.as_str()))?,
+        score_domain,
+        raw_min_micros,
+        raw_max_micros,
+    })
+}
+
+/// The semantic lane's calibration for one profile.
+pub(crate) fn semantic_score_domain_calibration(
+    profile_id: &str,
+) -> Result<ScoreDomainCalibrationV1, CandidateOutputError> {
+    score_domain_calibration(
+        RetrieverKind::Semantic,
+        tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+        profile_id,
+    )
+}
+
 fn fusion_profile(
     profile: &ProfileSpecV1,
     include_semantic: bool,
@@ -3318,28 +3440,8 @@ fn fusion_profile(
     .into_iter()
     .filter(|(lane, _)| weights.contains_key(lane))
     .map(|(lane, domain)| {
-        let score_domain = id::<ScoreDomainId>(domain)?;
-        let (raw_min_micros, raw_max_micros) = if lane == RetrieverKind::Semantic {
-            (
-                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
-                tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
-            )
-        } else {
-            (0, 1_000_000)
-        };
-        Ok((
-            score_domain.clone(),
-            ScoreDomainCalibrationV1 {
-                calibration_profile_id: id(&format!(
-                    "calibration.{}.{}",
-                    lane.as_str(),
-                    profile.profile_id
-                ))?,
-                score_domain,
-                raw_min_micros,
-                raw_max_micros,
-            },
-        ))
+        let calibration = score_domain_calibration(lane, domain, &profile.profile_id)?;
+        Ok((calibration.score_domain.clone(), calibration))
     })
     .collect::<Result<BTreeMap<_, _>, CandidateOutputError>>()?;
     Ok(FusionProfile {
@@ -3351,7 +3453,10 @@ fn fusion_profile(
         calibrations,
         score_domain_calibrations,
         minimum_calibrated_feature_micros: (include_semantic && profile.semantic_weight_ppm > 0)
-            .then_some((RetrieverKind::Semantic, profile.calibration_threshold_ppm))
+            .then_some((
+                RetrieverKind::Semantic,
+                profile.semantic_cut.threshold_ppm(),
+            ))
             .into_iter()
             .collect(),
         weights_micros: weights,
@@ -3538,6 +3643,9 @@ mod fallback_baseline_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic_cut::{
+        LabelledSemanticRelevanceV1, LabelledSemanticScoreV1, derive_and_validate_semantic_cut,
+    };
     use crate::semantic_native::SemanticNativePendingReasonV1;
 
     struct TestRepositoryFixture {
@@ -3659,16 +3767,17 @@ mod tests {
             semantic_calibration.raw_max_micros,
             tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
         );
-        // Pin the binding, not the number. Restating the constant here just
-        // makes it a second place to edit when someone tunes the gate; what
-        // must hold is that the checked-in declaration is exactly the cut that
+        // Pin the binding, not the number. Restating a value here just makes
+        // it a second place to edit when someone tunes the gate; what must
+        // hold is that the checked-in cut state is exactly the cut that
         // reaches fusion.
         let declared = workload
             .profile_matrix
             .iter()
             .find(|spec| spec.profile_id == "hybrid-conservative")
             .expect("checked-in hybrid-conservative profile")
-            .calibration_threshold_ppm;
+            .semantic_cut
+            .threshold_ppm();
         assert_eq!(
             semantic
                 .profile
@@ -3690,13 +3799,19 @@ mod tests {
         );
     }
 
-    /// `calibration_threshold_ppm` was documented as "not a threshold in
-    /// force" while it was in fact gating production fusion. That false claim
-    /// made the field look like a free fixture knob, and it was re-tuned five
-    /// times in one day to move a failing activation gate. This test states
-    /// the real contract so the claim cannot silently return.
+    /// The semantic cut was once a bare `calibration_threshold_ppm: u32`
+    /// documented as "not a threshold in force" while it was in fact gating
+    /// production fusion. That false claim made the field look like a free
+    /// fixture knob, and it was re-tuned five times in one day to move a
+    /// failing activation gate.
+    ///
+    /// This test pins the *derivation*, not a constant. It states three
+    /// things: whatever cut a profile declares reaches fusion verbatim; the
+    /// only way to move that cut is to change the labelled scores it was
+    /// derived from; and there is no bare number left in the profile for
+    /// anyone to edit toward a passing gate.
     #[test]
-    fn calibration_threshold_ppm_is_in_force() {
+    fn semantic_cut_is_derived_and_in_force() {
         let mut spec = workload()
             .profile_matrix
             .iter()
@@ -3709,15 +3824,55 @@ mod tests {
             declared
                 .minimum_calibrated_feature_micros
                 .get(&RetrieverKind::Semantic),
-            Some(&spec.calibration_threshold_ppm),
+            Some(&spec.semantic_cut.threshold_ppm()),
             "the declared cut must reach fusion verbatim"
         );
 
-        spec.calibration_threshold_ppm += 1;
-        let moved = fusion_profile(&spec, true).expect("moved fusion profile");
+        // The cut can only be moved by re-deriving it from labelled scores.
+        // Feeding the derivation a separated population and stamping the
+        // result must move the gate to exactly what was measured.
+        let train = labelled_separation_fixture(700_000);
+        let derived = derive_and_validate_semantic_cut(&train, &train)
+            .expect("a cleanly separated population derives a cut that holds");
+        assert_eq!(derived.threshold_ppm(), 700_000);
+        spec.semantic_cut = derived;
+        let moved = fusion_profile(&spec, true).expect("re-derived fusion profile");
+        assert_eq!(
+            moved
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&700_000),
+            "a re-derived cut must reach fusion, and only a measurement produces one"
+        );
         assert_ne!(
             declared.minimum_calibrated_feature_micros, moved.minimum_calibrated_feature_micros,
-            "moving the declaration must move the gate: this field is not documentation"
+            "re-deriving on different evidence must move the gate: this field is not \
+             documentation"
+        );
+
+        // Shifting the measured scores shifts the gate with them. Nothing else
+        // can: there is no numeric field left to edit.
+        let shifted = labelled_separation_fixture(820_000);
+        spec.semantic_cut = derive_and_validate_semantic_cut(&shifted, &shifted)
+            .expect("the shifted population also derives a cut");
+        assert_eq!(
+            fusion_profile(&spec, true)
+                .expect("shifted fusion profile")
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&820_000),
+            "the gate follows the measurement"
+        );
+
+        // An unmeasured profile admits every candidate rather than gating on a
+        // guess, mirroring `acceptance_calibration`'s uncalibrated bound.
+        spec.semantic_cut = SemanticCutV1::Unmeasured;
+        assert_eq!(
+            fusion_profile(&spec, true)
+                .expect("unmeasured fusion profile")
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&crate::semantic_cut::ADMIT_EVERY_CANDIDATE_THRESHOLD_PPM)
         );
 
         // With the semantic lane absent there is nothing for the cut to gate,
@@ -3729,6 +3884,30 @@ mod tests {
                 .minimum_calibrated_feature_micros
                 .is_empty()
         );
+    }
+
+    /// Twelve labelled positives at `floor_ppm` and above, cleanly separated
+    /// from twelve labelled negatives two hundred thousand ppm below them.
+    fn labelled_separation_fixture(floor_ppm: u32) -> Vec<LabelledSemanticScoreV1> {
+        (0..12_u32)
+            .flat_map(|index| {
+                let step = index * 10_000;
+                [
+                    LabelledSemanticScoreV1 {
+                        query_id: format!("train-{index:03}"),
+                        strata: vec!["natural_language".to_owned()],
+                        calibrated_feature_micros: floor_ppm + step,
+                        relevance: LabelledSemanticRelevanceV1::Positive,
+                    },
+                    LabelledSemanticScoreV1 {
+                        query_id: format!("train-{index:03}-absent"),
+                        strata: vec!["no_answer".to_owned()],
+                        calibrated_feature_micros: floor_ppm - 200_000 + step,
+                        relevance: LabelledSemanticRelevanceV1::Negative,
+                    },
+                ]
+            })
+            .collect()
     }
 
     #[test]

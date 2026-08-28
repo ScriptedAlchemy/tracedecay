@@ -204,7 +204,7 @@ fn validate_activation_profile_matrix(
         || rerank.rerank_weight_ppm == 0
         || rerank.lexical_weight_ppm != semantic.lexical_weight_ppm
         || rerank.graph_weight_ppm != semantic.graph_weight_ppm
-        || rerank.calibration_threshold_ppm != semantic.calibration_threshold_ppm
+        || rerank.semantic_cut != semantic.semantic_cut
     {
         return Err(SearchEvalError::Contract(
             "rerank comparison must differ from the semantic profile only by rerank material"
@@ -906,7 +906,7 @@ fn candidate_matches_anchor(
             .any(|candidate_anchor| candidate_anchor == anchor)
 }
 
-fn candidate_matches_any_anchor(
+pub(crate) fn candidate_matches_any_anchor(
     candidate: &candidate_output::RankedCandidateRowV1,
     anchors: &[String],
 ) -> bool {
@@ -960,7 +960,10 @@ fn ndcg_at_10_ppm(
     }
 }
 
-fn label_strings(label: &serde_json::Value, field: &str) -> Result<Vec<String>, SearchEvalError> {
+pub(crate) fn label_strings(
+    label: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<String>, SearchEvalError> {
     let Some(value) = label.get(field) else {
         return Ok(Vec::new());
     };
@@ -1352,6 +1355,7 @@ mod tests {
             ranked,
             historical: HistoricalQueryExecutionV1::NotRequested,
             native: None,
+            semantic_scores: Vec::new(),
         }
     }
 

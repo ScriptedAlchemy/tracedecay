@@ -116,7 +116,10 @@ fn moving_the_measured_scores_moves_the_derived_cut() {
     // `540_000`, where rejecting every negative costs a third of the
     // positives for `666_666`.
     assert_eq!(baseline, 700_000);
-    assert_eq!(moved, 500_000, "the cut tracks the scores it was measured on");
+    assert_eq!(
+        moved, 500_000,
+        "the cut tracks the scores it was measured on"
+    );
     assert_ne!(baseline, moved);
 }
 
@@ -187,7 +190,8 @@ fn unmeasured_admits_everything_and_gates_nothing() {
     let cut = SemanticCutV1::Unmeasured;
     assert_eq!(cut.threshold_ppm(), ADMIT_EVERY_CANDIDATE_THRESHOLD_PPM);
     assert!(!cut.gates_candidates());
-    cut.validate().expect("an unmeasured profile is a valid state");
+    cut.validate()
+        .expect("an unmeasured profile is a valid state");
 }
 
 #[test]
@@ -204,7 +208,9 @@ fn a_train_derived_cut_that_holds_on_validation_records_its_held_out_behaviour()
         panic!("expected a derived cut");
     };
     assert_eq!(threshold_ppm, 700_000);
-    let validation = provenance.validation.expect("a gating cut records validation");
+    let validation = provenance
+        .validation
+        .expect("a gating cut records validation");
     assert_eq!(validation.positives_dropped, 0);
     assert_eq!(
         validation.negatives_rejected, 12,
