@@ -4760,7 +4760,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.mark_reconciled(metadata, Some(stat_signature));
+        self.mark_reconciled();
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
@@ -4911,24 +4911,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
+            let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+            let signature = self.worktree_stat_signature().ok();
+            self.mark_reconciled_state(metadata.clone(), signature.clone());
             let repository_parse_identity_digest =
                 canonical_sha256(generation.repository_parse_identity())
                     .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            RestoreFreshnessWitnessV1 {
-                generation_id: generation.manifest().generation_id.as_str().to_owned(),
-                git_metadata_signature: sampled_metadata.stable_signature(),
-                stat_signature: sampled_signature,
-                repository_parse_identity_digest: repository_parse_identity_digest
-                    .as_str()
-                    .to_owned(),
-                ignored_source_admissions_digest: generation
-                    .ignored_source_admissions_digest()
-                    .as_str()
-                    .to_owned(),
-                ignored_source_paths: Vec::new(),
+            if let Some(stat_signature) = signature {
+                RestoreFreshnessWitnessV1 {
+                    generation_id: generation.manifest().generation_id.as_str().to_owned(),
+                    git_metadata_signature: metadata.stable_signature(),
+                    stat_signature,
+                    repository_parse_identity_digest: repository_parse_identity_digest
+                        .as_str()
+                        .to_owned(),
+                    ignored_source_admissions_digest: generation
+                        .ignored_source_admissions_digest()
+                        .as_str()
+                        .to_owned(),
+                    ignored_source_paths: Vec::new(),
+                }
+                .persist(&self.store_root);
             }
-            .persist(&self.store_root);
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(
                 generation.snapshot().content_identity.clone(),
@@ -4966,12 +4970,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let snapshot_content_identity = captured.snapshot.content_identity;
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
-        if let Some(witness) = witness {
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let signature = self.worktree_stat_signature().ok();
+        self.mark_reconciled_state(metadata.clone(), signature.clone());
+        if let (Some(witness), Some(stat_signature)) = (witness, signature) {
             RestoreFreshnessWitnessV1 {
                 generation_id: witness.generation_id,
-                git_metadata_signature: sampled_metadata.stable_signature(),
-                stat_signature: sampled_signature,
+                git_metadata_signature: metadata.stable_signature(),
+                stat_signature,
                 repository_parse_identity_digest: witness.repository_parse_identity_digest,
                 ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
                 ignored_source_paths: witness.ignored_source_paths,
@@ -5262,11 +5268,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.validate_generation_identity(&active)?;
             self.adopt_ignored_source_roster(&active);
         }
-        // Sample tier-1 git metadata and the tier-2 stat signature for the state
-        // we are reconciling to; stored on return so the next query-admission
-        // check compares against them.
-        let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
-        let sampled_signature = self.worktree_stat_signature().ok();
+        // Capture may advance `.git/index` mtime (gix::open). The post-reconcile
+        // witness is sampled at `mark_reconciled`, after that side effect, so
+        // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let hints = self
@@ -5305,7 +5309,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self._retained_snapshot_memory =
                     std::mem::take(&mut captured.retained_reservations);
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-                self.mark_reconciled(sampled_metadata, sampled_signature);
+                self.mark_reconciled();
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
@@ -5352,7 +5356,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     self._retained_snapshot_memory =
                         std::mem::take(&mut captured.retained_reservations);
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
-                    self.mark_reconciled(sampled_metadata, sampled_signature);
+                    self.mark_reconciled();
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                         snapshot_content_identity,
                         overflow_reconciled,
@@ -5364,7 +5368,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled(sampled_metadata, sampled_signature);
+            self.mark_reconciled();
 
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(
@@ -5400,11 +5404,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         unreachable!("the bounded reconciliation loop returns on its final attempt")
     }
 
-    fn mark_reconciled(
-        &mut self,
-        metadata: identity::GitMetadataFingerprintV1,
-        signature: Option<String>,
-    ) {
+    fn mark_reconciled(&mut self) {
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let signature = self.worktree_stat_signature().ok();
         self.mark_reconciled_state(metadata, signature);
         self.persist_freshness_witness();
     }

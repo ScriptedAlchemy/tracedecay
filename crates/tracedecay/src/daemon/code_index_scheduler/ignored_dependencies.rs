@@ -208,8 +208,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Err(CodeIndexIgnoredDependencyRefusalV1::ScopeMismatch.into());
         }
         self.identity = resolved;
-        let sampled_metadata =
-            super::identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let captured = match self.capture_authoritative_snapshot(Some(control)) {
             Ok(captured) => captured,
             Err(error) => {
@@ -262,8 +260,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.retained_snapshot_bytes = retained_bytes;
         self._retained_snapshot_memory = retained_reservations;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
-        let sampled_signature = self.worktree_stat_signature().ok();
-        self.mark_reconciled(sampled_metadata, sampled_signature);
+        self.mark_reconciled();
         let latest = self.bind_latest_complete(Arc::clone(&generation), None);
         let publication = publication_evidence(reextracted_files, &generation)?;
         Ok(CodeIndexIgnoredDependencyBuildV1 {
