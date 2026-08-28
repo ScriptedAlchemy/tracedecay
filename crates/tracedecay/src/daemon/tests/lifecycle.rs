@@ -802,6 +802,22 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
         .with_profile_identity(profile_identity);
+    // Daemon bootstrap installs the profile-scoped code-index worker plan
+    // before it binds and publishes any transport endpoint
+    // (`bootstrap::install_profile_worker_plan`), and project open refuses
+    // outright without it. This test drives `serve_windows_broker_client`
+    // directly, so it must reproduce that ordering itself; a freshly prepared
+    // test profile always initializes its persisted `ProfileSessions`
+    // selection to the default, so charging that default against a default
+    // invocation state's own resident-memory authority installs exactly the
+    // plan production would have computed. Leaving it out made the warmup poll
+    // spin until its timeout unless some *other* test in the same binary won
+    // the process-wide worker-plan `OnceLock` first.
+    super::super::DaemonInvocationState::default()
+        .install_worker_selection(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+        )
+        .expect("install portable broker profile worker plan");
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));
