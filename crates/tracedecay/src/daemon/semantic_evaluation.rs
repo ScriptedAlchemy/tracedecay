@@ -37,7 +37,8 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
 use tracedecay_usecases::store::vector_generations::{
-    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    VectorGenerationStoreErrorV1,
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -279,15 +280,29 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
             store.generation(&vector_generation_id, Arc::clone(retained.cancellation())),
             label = "daemon.semantic.evaluation.candidate.vector_generation"
         ))
-        .await?
+        .await
         .map_err(|error| {
+            hotpath::measure_block!(
+                "daemon.semantic.evaluation.candidate.vector_generation.control_interrupted",
+                ()
+            );
+            error
+        })?
+        .map_err(|error| {
+            record_vector_generation_failure(&error);
             tracing::warn!(
                 error = %error,
                 "semantic evaluation candidate vector generation is unavailable"
             );
             SemanticActivationCoordinationErrorV1::Unavailable
-        })?
-        .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+        })?;
+    let Some(vector) = vector else {
+        hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.missing",
+            ()
+        );
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    };
     if vector.source_generation() != &snapshot.source_generation
         || vector.source_manifest_digest() != &snapshot.source_manifest_digest
     {
@@ -307,6 +322,57 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
         "daemon.semantic.evaluation.candidate.materialize",
         daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
     )
+}
+
+fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
+    match error {
+        VectorGenerationStoreErrorV1::Cancelled => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.cancelled",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::DeadlineExceeded => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.deadline",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingPublished,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_missing_published",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::IdentityMismatch,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_identity",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_missing_snapshot",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Corrupt(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.corrupt",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Unavailable(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.unavailable",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Storage(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.storage",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::ConcurrentMutation => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.concurrent_mutation",
+            ()
+        ),
+        _ => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.other",
+            ()
+        ),
+    }
 }
 
 pub(super) fn semantic_publication_generation(
