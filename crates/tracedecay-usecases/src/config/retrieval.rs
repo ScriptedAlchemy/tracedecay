@@ -92,14 +92,16 @@ impl PassingRetrievalEvaluationV1 {
         evaluated_profile_id: &str,
     ) -> Result<Self, RetrievalProfileActivationErrorV1> {
         if report.status != DirectEvaluationStatusV1::Pass {
-            return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass);
+            return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass(
+                format!("report status is {:?}, not Pass", report.status),
+            ));
         }
         let rows = report
             .profiles
             .iter()
             .filter(|row| row.profile_id == evaluated_profile_id)
             .collect::<Vec<_>>();
-        validate_passing_profile_rows(&rows)?;
+        validate_passing_profile_rows(evaluated_profile_id, &rows)?;
         let report_digest =
             canonical_sha256(&(EVALUATION_ID_DOMAIN, report)).map_err(contract_error)?;
         let evaluation_anchor =
@@ -128,21 +130,39 @@ impl PassingRetrievalEvaluationV1 {
 }
 
 fn validate_passing_profile_rows(
+    evaluated_profile_id: &str,
     rows: &[&DirectProfileEvaluationV1],
 ) -> Result<(), RetrievalProfileActivationErrorV1> {
-    if rows.is_empty()
-        || rows
-            .iter()
-            .any(|row| row.status != DirectEvaluationStatusV1::Pass)
+    if rows.is_empty() {
+        return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass(
+            format!("report carries no row for profile {evaluated_profile_id}"),
+        ));
+    }
+    if let Some(failed) = rows
+        .iter()
+        .find(|row| row.status != DirectEvaluationStatusV1::Pass)
     {
-        return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass);
+        return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass(
+            format!(
+                "profile {evaluated_profile_id} partition {} is {:?}, not Pass",
+                failed.partition, failed.status
+            ),
+        ));
     }
     let partitions = rows
         .iter()
         .map(|row| row.partition.as_str())
         .collect::<BTreeSet<_>>();
     if partitions != BTreeSet::from(["train", "validation"]) {
-        return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass);
+        // Certification is cross-validated by construction: a cut fitted on
+        // one partition must still hold on the other, so a report that covers
+        // only one of them can never certify.
+        return Err(RetrievalProfileActivationErrorV1::EvaluationDidNotPass(
+            format!(
+                "profile {evaluated_profile_id} covers partitions {partitions:?}, expected exactly \
+                 train and validation"
+            ),
+        ));
     }
     Ok(())
 }
@@ -941,8 +961,12 @@ fn audit_event(
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalProfileActivationErrorV1 {
-    #[error("retrieval evaluation did not pass")]
-    EvaluationDidNotPass,
+    /// The payload names the exact row, partition, or status that withheld
+    /// certification. Without it the caller can only observe that activation
+    /// failed, which is the signal that invites tuning an evaluation fixture
+    /// until the gate happens to agree.
+    #[error("retrieval evaluation did not pass: {0}")]
+    EvaluationDidNotPass(String),
     #[error("retrieval profile is incompatible with its evaluated values")]
     IncompatibleProfile,
     #[error("retrieval profile integrity check failed")]

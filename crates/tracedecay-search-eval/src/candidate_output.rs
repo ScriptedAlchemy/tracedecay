@@ -209,23 +209,46 @@ pub struct ProfileSpecV1 {
     pub graph_weight_ppm: u32,
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
-    /// Declared per-profile acceptance cut-off, expressed as a minimum
+    /// Per-profile semantic acceptance cut-off, expressed as a minimum
     /// nonnegative cosine similarity in parts per million. This is not the
     /// former shifted `[-1, 1]` calibration domain.
     ///
-    /// This does **not** gate candidate admission. The semantic lane abstains
-    /// on `SemanticCalibrationProfileV1::maximum_distance_micros`, which is
-    /// measured from the committed generation's own vectors by
-    /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
-    /// — deliberately, because a fixed cosine cut-off is a property of the
-    /// model and corpus rather than of a checked-in profile.
+    /// # This value is in force
     ///
-    /// The field is currently read only to assert that the rerank comparison
-    /// profile differs from the semantic one by rerank material alone. Wiring
-    /// it as an explicit override of the measured bound would mean carrying it
-    /// through `DirectEvaluatedProfileMaterialV1` into the daemon candidate
-    /// builder; until then, treat a value here as documentation, not as a
-    /// threshold in force.
+    /// It becomes `FusionProfile::minimum_calibrated_feature_micros[Semantic]`
+    /// (see `fusion_profile` below), it is carried through
+    /// `DirectEvaluatedProfileMaterialV1` into the daemon candidate builder,
+    /// and `tracedecay_query::retrieval::fusion` drops every semantic
+    /// contribution whose calibrated feature falls under it. Editing this
+    /// number changes production retrieval, not just the evaluation fixture.
+    ///
+    /// An earlier revision of this comment claimed the opposite — that the
+    /// field was documentation only — after the wiring had already landed. The
+    /// claim survived long enough for the value to be re-tuned five times in
+    /// one day (`700000` → `690000` → `700000` → `400000` → `635000`) as a way
+    /// to move a failing activation gate. Keep `calibration_threshold_ppm_is_in_force`
+    /// green so the claim cannot come back.
+    ///
+    /// # It is a second cut on an already-measured quantity
+    ///
+    /// The semantic lane *also* abstains on
+    /// `SemanticCalibrationProfileV1::maximum_distance_micros`, which
+    /// `tracedecay_usecases::semantic_runtime::measure_acceptance_calibration`
+    /// measures from the committed generation's own vectors — deliberately,
+    /// because a cosine cut-off is a property of the model and corpus rather
+    /// than of a checked-in profile. This field therefore imposes a *second*,
+    /// tighter, unmeasured cut on the same cosine score after the measured one
+    /// has already run.
+    ///
+    /// That gap is real and is documented in `acceptance_calibration`: the
+    /// measured bound is a code↔code background distribution, while this gate
+    /// decides natural-language↔code queries, which sit in a different score
+    /// regime. A hand-picked constant is not the fix. The workload already
+    /// carries the labelled data the honest fix needs — relevant anchors and
+    /// `no_answer` negatives, split into `train` and `validation` — so the cut
+    /// must be derived from the train partition's measured positive/negative
+    /// separation and then hold on validation. Until that derivation exists,
+    /// do not move this number to make a gate pass.
     pub calibration_threshold_ppm: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_policy: Option<EvaluationRerankPolicyV1>,
@@ -3636,12 +3659,22 @@ mod tests {
             semantic_calibration.raw_max_micros,
             tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1
         );
+        // Pin the binding, not the number. Restating the constant here just
+        // makes it a second place to edit when someone tunes the gate; what
+        // must hold is that the checked-in declaration is exactly the cut that
+        // reaches fusion.
+        let declared = workload
+            .profile_matrix
+            .iter()
+            .find(|spec| spec.profile_id == "hybrid-conservative")
+            .expect("checked-in hybrid-conservative profile")
+            .calibration_threshold_ppm;
         assert_eq!(
             semantic
                 .profile
                 .minimum_calibrated_feature_micros
                 .get(&RetrieverKind::Semantic),
-            Some(&635_000)
+            Some(&declared)
         );
         let reranked =
             load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
@@ -3654,6 +3687,47 @@ mod tests {
         assert_eq!(
             reranked.rerank.as_ref().map(|policy| policy.max_candidates),
             Some(16)
+        );
+    }
+
+    /// `calibration_threshold_ppm` was documented as "not a threshold in
+    /// force" while it was in fact gating production fusion. That false claim
+    /// made the field look like a free fixture knob, and it was re-tuned five
+    /// times in one day to move a failing activation gate. This test states
+    /// the real contract so the claim cannot silently return.
+    #[test]
+    fn calibration_threshold_ppm_is_in_force() {
+        let mut spec = workload()
+            .profile_matrix
+            .iter()
+            .find(|spec| spec.semantic_weight_ppm > 0)
+            .expect("a semantic profile")
+            .clone();
+
+        let declared = fusion_profile(&spec, true).expect("semantic fusion profile");
+        assert_eq!(
+            declared
+                .minimum_calibrated_feature_micros
+                .get(&RetrieverKind::Semantic),
+            Some(&spec.calibration_threshold_ppm),
+            "the declared cut must reach fusion verbatim"
+        );
+
+        spec.calibration_threshold_ppm += 1;
+        let moved = fusion_profile(&spec, true).expect("moved fusion profile");
+        assert_ne!(
+            declared.minimum_calibrated_feature_micros, moved.minimum_calibrated_feature_micros,
+            "moving the declaration must move the gate: this field is not documentation"
+        );
+
+        // With the semantic lane absent there is nothing for the cut to gate,
+        // so it must not leak into the fallback profile.
+        spec.semantic_weight_ppm = 0;
+        assert!(
+            fusion_profile(&spec, true)
+                .expect("lexical-only fusion profile")
+                .minimum_calibrated_feature_micros
+                .is_empty()
         );
     }
 
