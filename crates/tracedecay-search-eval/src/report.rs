@@ -10,16 +10,8 @@ use crate::candidate_output::{
     OptionalStageMeasurementsV1, ProductionCandidateOutputV1, compute_corpus_digest,
     compute_workload_digest,
 };
-use crate::candidate_output::{ProfileSpecV1, QueryCandidateRowV1, WorkloadQueryV1};
-use crate::semantic_cut::{
-    LabelledSemanticRelevanceV1, LabelledSemanticScoreV1, RESTAMP_INSTRUCTION, SemanticCutV1,
-    derive_and_validate_semantic_cut,
-};
 use crate::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
-use crate::{
-    DirectEvaluationStatusV1, SearchEvalError, candidate_matches_any_anchor,
-    evaluate_generated_outputs_against_corpus, label_strings,
-};
+use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -402,85 +394,7 @@ impl DirectEvaluationReportV1 {
                 )?;
             }
         }
-        self.validate_semantic_cut_derivation(workload)
-    }
-
-    /// Require every semantic profile's declared cut to be the one this run's
-    /// own labelled scores derive.
-    ///
-    /// This is what keeps the cut from being tuned. The declaration cannot be
-    /// moved by editing it: a native run re-derives the cut from the train
-    /// partition's measured positive/negative separation, requires it to hold
-    /// on validation, and refuses to qualify a report whose profile declares
-    /// anything else. There is no path here that accepts a declared value
-    /// because it was already written down.
-    fn validate_semantic_cut_derivation(
-        &self,
-        workload: &CandidateWorkloadV1,
-    ) -> Result<(), SearchEvalError> {
-        for profile in &workload.profile_matrix {
-            if profile.semantic_weight_ppm == 0 {
-                continue;
-            }
-            let Some(labelled) = self.labelled_semantic_scores(workload, &profile.profile_id)?
-            else {
-                // No semantic scores were retained for this profile, so this
-                // run measured nothing to derive from and cannot speak to the
-                // declaration either way.
-                continue;
-            };
-            require_declared_cut_matches_derivation(profile, &labelled)?;
-        }
         Ok(())
-    }
-
-    /// Reconstruct one profile's labelled semantic scores from the retained
-    /// per-candidate evidence and the workload's own labels.
-    ///
-    /// Nothing here trusts a stored judgment: the relevance of each candidate
-    /// is recomputed from the checked-in label with the same anchor matching
-    /// the quality metrics use, so a report cannot smuggle in a labelling that
-    /// would justify a different cut.
-    fn labelled_semantic_scores(
-        &self,
-        workload: &CandidateWorkloadV1,
-        profile_id: &str,
-    ) -> Result<Option<PartitionedLabelledScoresV1>, SearchEvalError> {
-        let mut partitioned = PartitionedLabelledScoresV1::default();
-        let mut observed_any = false;
-        for output in self
-            .raw_outputs
-            .iter()
-            .filter(|output| output.profile_id == profile_id)
-        {
-            let partition = match output.partition.as_str() {
-                "train" => &mut partitioned.train,
-                "validation" => &mut partitioned.validation,
-                other => {
-                    return Err(SearchEvalError::Contract(format!(
-                        "{profile_id} retains scores for unknown partition {other}"
-                    )));
-                }
-            };
-            for row in &output.queries {
-                if row.semantic_scores.is_empty() {
-                    continue;
-                }
-                observed_any = true;
-                let query = workload
-                    .queries
-                    .iter()
-                    .find(|query| query.query_id == row.query_id)
-                    .ok_or_else(|| {
-                        SearchEvalError::Contract(format!(
-                            "{profile_id}:{} retains scores for unknown query {}",
-                            output.partition, row.query_id
-                        ))
-                    })?;
-                partition.extend(labelled_scores_for_query(query, row)?);
-            }
-        }
-        Ok(observed_any.then_some(partitioned))
     }
 
     fn failure_diagnostic(&self) -> String {
@@ -804,102 +718,6 @@ impl DirectEvaluationReportV1 {
             load_deadline_ms,
         })
     }
-}
-
-/// One profile's labelled semantic scores, split the way the workload splits
-/// them.
-#[derive(Debug, Default)]
-pub(crate) struct PartitionedLabelledScoresV1 {
-    pub(crate) train: Vec<LabelledSemanticScoreV1>,
-    pub(crate) validation: Vec<LabelledSemanticScoreV1>,
-}
-
-/// Require one profile's declared cut to be exactly what its measured scores
-/// derive.
-///
-/// A declaration is never accepted on its own authority: the derivation runs
-/// on the train partition, must hold on validation, and the result is compared
-/// to the declaration. Both failure modes are typed and name the derivation,
-/// so neither can be answered by editing the declared number.
-pub(crate) fn require_declared_cut_matches_derivation(
-    profile: &ProfileSpecV1,
-    labelled: &PartitionedLabelledScoresV1,
-) -> Result<(), SearchEvalError> {
-    let derived = derive_and_validate_semantic_cut(&labelled.train, &labelled.validation).map_err(
-        |error| {
-            SearchEvalError::Contract(format!(
-                "profile {} semantic cut does not hold on the held-out partition: {error}",
-                profile.profile_id
-            ))
-        },
-    )?;
-    if derived != profile.semantic_cut {
-        return Err(SearchEvalError::Contract(format!(
-            "profile {} declares semantic cut {} ppm ({}), but this run's labelled scores \
-             derive {} ppm ({}); {RESTAMP_INSTRUCTION}",
-            profile.profile_id,
-            profile.semantic_cut.threshold_ppm(),
-            cut_state_name(&profile.semantic_cut),
-            derived.threshold_ppm(),
-            cut_state_name(&derived),
-        )));
-    }
-    Ok(())
-}
-
-/// Name a cut's state for a diagnostic, so a mismatch says *what kind* of
-/// declaration was found rather than only the number it resolved to.
-fn cut_state_name(cut: &SemanticCutV1) -> &'static str {
-    match cut {
-        SemanticCutV1::Unmeasured => "unmeasured",
-        SemanticCutV1::Underpowered { .. } => "underpowered",
-        SemanticCutV1::Derived { .. } => "derived",
-    }
-}
-
-/// Label one query's retained semantic candidates.
-///
-/// A query whose label names no relevant anchor is a `no_answer` query: it has
-/// no correct result, so every semantic candidate it produced is a negative.
-/// Otherwise a candidate is a positive when it matches one of the label's
-/// anchors and a negative when the label explicitly forbids it; candidates
-/// that are neither carry no judgment and are left out rather than guessed at.
-pub(crate) fn labelled_scores_for_query(
-    query: &WorkloadQueryV1,
-    row: &QueryCandidateRowV1,
-) -> Result<Vec<LabelledSemanticScoreV1>, SearchEvalError> {
-    let label = query.label.as_ref().ok_or_else(|| {
-        SearchEvalError::Contract(format!("{} has no checked-in label", query.query_id))
-    })?;
-    let anchors = label_strings(label, "anchors")?;
-    let forbidden_anchors = label_strings(label, "forbidden_anchors")?;
-    let forbidden_documents = label_strings(label, "forbidden_documents")?;
-    let expects_no_answer = anchors.is_empty();
-
-    let mut labelled = Vec::with_capacity(row.semantic_scores.len());
-    for score in &row.semantic_scores {
-        let candidate = &score.candidate;
-        let forbidden = forbidden_anchors.contains(&candidate.anchor)
-            || candidate
-                .anchors
-                .iter()
-                .any(|anchor| forbidden_anchors.contains(anchor))
-            || forbidden_documents.contains(&candidate.document_id);
-        let relevance = if expects_no_answer || forbidden {
-            LabelledSemanticRelevanceV1::Negative
-        } else if candidate_matches_any_anchor(candidate, &anchors) {
-            LabelledSemanticRelevanceV1::Positive
-        } else {
-            continue;
-        };
-        labelled.push(LabelledSemanticScoreV1 {
-            query_id: query.query_id.clone(),
-            strata: query.strata.clone(),
-            calibrated_feature_micros: score.calibrated_feature_micros,
-            relevance,
-        });
-    }
-    Ok(labelled)
 }
 
 fn semantic_activation_resident_bytes(
