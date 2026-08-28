@@ -679,24 +679,49 @@ fn sealed_artifact_open_probe() {
     let mut authority = RelationalAuthority::default();
     let identity = projection("sealed-store:probe", "code");
 
+    // Production-shaped journaling: a generation of this size rides as a
+    // sealed code generation replay (source reference in the journal, rows
+    // supplied by the publication owner), exactly like the code-index
+    // publisher.
     let manifest = probe_manifest(identity.clone(), rows);
-    let record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &manifest,
-        "publish:probe-g1",
-        None,
-        '9',
+    let record = authority.stage(
+        manifest
+            .relational_sealed_replay(
+                registered.binding.shard_id.clone(),
+                GraphIdempotencyKey::new("publish:probe-g1").unwrap(),
+                digest('9'),
+                None,
+                SealedCodeGenerationReplay {
+                    repository: RepositoryId::new("repository.sealed-probe").unwrap(),
+                    generation: CodeGenerationId::new("code-generation.sealed-probe").unwrap(),
+                    sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                        "sha256:{}",
+                        "5".repeat(64)
+                    ))
+                    .unwrap(),
+                    projector_revision: GraphProjectorRevision::try_from(
+                        "projector.sealed-probe".to_owned(),
+                    )
+                    .unwrap(),
+                },
+                &|| Ok(()),
+            )
+            .unwrap(),
     );
-    drop(manifest);
 
     let seal_started = std::time::Instant::now();
-    let commit = publish(
-        &registered,
-        temp.path(),
-        &mut authority,
-        &record.publication.key,
-    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            Some(Arc::new(manifest)),
+        )
+        .unwrap();
     let seal_wall = seal_started.elapsed();
     assert!(commit.snapshot.serves_from_sealed_store());
     let receipt = receipt_for_generation(temp.path(), "probe-g1").unwrap();
