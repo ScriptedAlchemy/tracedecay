@@ -138,23 +138,26 @@
   },
   "profile_matrix": [
     {
-      "calibration_threshold_ppm": 0,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "query-fallback",
       "rerank_weight_ppm": 0,
+      "semantic_cut": {
+        "state": "unmeasured"
+      },
       "semantic_weight_ppm": 0
     },
     {
-      "calibration_threshold_ppm": 635000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-conservative",
       "rerank_weight_ppm": 0,
+      "semantic_cut": {
+        "state": "unmeasured"
+      },
       "semantic_weight_ppm": 250000
     },
     {
-      "calibration_threshold_ppm": 635000,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-reranked",
@@ -168,6 +171,9 @@
         "policy_id": "rerank.hybrid-reranked.v1"
       },
       "rerank_weight_ppm": 125000,
+      "semantic_cut": {
+        "state": "unmeasured"
+      },
       "semantic_weight_ppm": 250000
     }
   ],
