@@ -5,7 +5,7 @@ use tracedecay_code_index::{
     parallelism,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-        CodeIndexRepositoryParseIdentityV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     },
 };
 use tracedecay_domain::{
@@ -18,6 +18,29 @@ use super::{
     ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, projection_key,
 };
 use crate::support::{RUST_SOURCE, id};
+
+/// Read one `/proc/self/status` figure in KiB.
+fn status_kib(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find(|line| line.starts_with(&format!("{field}:")))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn mib(kib: u64) -> f64 {
+    kib as f64 / 1024.0
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
 
 /// Multi-file build request whose files differ in content and in cost, so a
 /// parallel sweep genuinely reorders completion relative to snapshot order.
@@ -113,4 +136,136 @@ pub(super) fn assert_parallel_and_sequential_generations_are_byte_identical() {
         canonical_sha256(&sequential).expect("sequential digest"),
         canonical_sha256(&parallel).expect("parallel digest"),
     );
+}
+
+/// The row census a decoded generation exposes, so a width change that
+/// silently dropped, duplicated, or reordered restored rows cannot pass by
+/// re-encoding to the same length.
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedCensus {
+    generation_id: String,
+    state_digest: String,
+    chunks: usize,
+    symbols: usize,
+    imports: usize,
+    edges: usize,
+    edge_abstentions: usize,
+    lineage: usize,
+    snapshot_files: usize,
+}
+
+fn decode_at_width(width: usize, sealed: &[u8]) -> (Vec<u8>, DecodedCensus) {
+    parallelism::force_indexing_workers_for_test(width);
+    let generation =
+        CodeIndexPublishedGenerationV1::decode_sealed(sealed).expect("sealed generation decodes");
+    let census = DecodedCensus {
+        generation_id: generation.manifest().generation_id.as_str().to_owned(),
+        state_digest: generation
+            .projection()
+            .publication_digest()
+            .as_str()
+            .to_owned(),
+        chunks: generation.chunks().chunks().len(),
+        symbols: generation.symbols().symbols.len(),
+        imports: generation.imports().len(),
+        edges: generation.edges().len(),
+        edge_abstentions: generation.edge_abstentions().len(),
+        lineage: generation.lineage().len(),
+        snapshot_files: generation.snapshot().files.len(),
+    };
+    // Re-encoding is canonical, so identical re-encoded bytes prove the whole
+    // decoded state — every restored row, in order — is identical, not just
+    // the fields the census names.
+    let reencoded = generation.encode_sealed().expect("sealed re-encoding");
+    parallelism::clear_forced_indexing_workers_for_test();
+    (reencoded, census)
+}
+
+/// Width is sizing policy on the way in as well as on the way out. Restoring
+/// each file's exact-extraction authority fans out across the indexing pool,
+/// so a generation decoded with that sweep running inline must restore exactly
+/// the state a full-width decode restores — same rows, same order, same bytes.
+pub(super) fn assert_parallel_and_sequential_decodes_are_byte_identical() {
+    const FILES: usize = 64;
+
+    let sealed = sealed_bytes_at_width(1, FILES);
+
+    let (sequential_bytes, sequential_census) = decode_at_width(1, &sealed);
+    let (parallel_bytes, parallel_census) =
+        decode_at_width(parallelism::indexing_worker_target(64), &sealed);
+
+    assert_eq!(
+        sequential_census, parallel_census,
+        "decoded generation census changed with indexing width"
+    );
+    assert!(
+        sequential_bytes == parallel_bytes,
+        "re-encoded generation bytes changed with decode width"
+    );
+    // A width-1 decode must reproduce the exact bytes it was handed, so the
+    // sequential path is pinned to the seal itself and not merely to itself.
+    assert!(
+        sequential_bytes == sealed,
+        "width-1 decode did not round-trip the sealed bytes"
+    );
+    assert_eq!(
+        canonical_sha256(&sequential_bytes).expect("sequential digest"),
+        canonical_sha256(&parallel_bytes).expect("parallel digest"),
+    );
+}
+
+/// Sealed-decode measurement harness. Not a contract — nothing here asserts on
+/// a timing or a memory figure.
+///
+/// `VmHWM` only ever rises within a process, so a peak-RSS figure is only
+/// comparable across widths when each width runs in its own process. Run one
+/// width per invocation:
+///
+/// ```text
+/// TRACEDECAY_DECODE_WIDTH=1 TRACEDECAY_DECODE_FILES=4000 \
+///   cargo test -p tracedecay-code-index --all-features --profile perf \
+///   --test code_index_suite -- --ignored --nocapture --exact \
+///   production_orchestration::sealed_decode_width_probe
+/// ```
+///
+/// `TRACEDECAY_DECODE_WIDTH=0` (the default) uses the host width.
+pub(super) fn run_sealed_decode_width_probe() {
+    let files = env_usize("TRACEDECAY_DECODE_FILES", 4_000);
+    let width = env_usize("TRACEDECAY_DECODE_WIDTH", 0);
+
+    // Build and seal at full width; only the decode is under measurement.
+    let sealed = sealed_bytes_at_width(parallelism::indexing_worker_target(64), files);
+
+    if width > 0 {
+        parallelism::force_indexing_workers_for_test(width);
+    }
+    let effective = parallelism::indexing_workers();
+
+    let before_rss = status_kib("VmRSS").unwrap_or(0);
+    let started = std::time::Instant::now();
+    let generation =
+        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("sealed generation decodes");
+    let decode_wall = started.elapsed();
+    let after_rss = status_kib("VmRSS").unwrap_or(0);
+    let peak_rss = status_kib("VmHWM").unwrap_or(0);
+
+    let chunks = generation.chunks().chunks().len();
+    let symbols = generation.symbols().symbols.len();
+    drop(generation);
+    parallelism::clear_forced_indexing_workers_for_test();
+
+    println!("=== sealed decode width probe ===");
+    println!("files              {files}");
+    println!("chunks             {chunks}");
+    println!("symbols            {symbols}");
+    println!("sealed bytes       {}", sealed.len());
+    println!("effective width    {effective}");
+    println!("decode wall        {decode_wall:?}");
+    println!("VmRSS before       {:.1} MiB", mib(before_rss));
+    println!("VmRSS after        {:.1} MiB", mib(after_rss));
+    println!(
+        "VmRSS delta        {:.1} MiB",
+        mib(after_rss.saturating_sub(before_rss))
+    );
+    println!("VmHWM (peak)       {:.1} MiB", mib(peak_rss));
 }
