@@ -14,7 +14,7 @@ use tracedecay_api::read_model::DashboardFreshnessStateV1;
 #[inline(always)]
 pub(crate) fn record_error_class(class: &'static str) {
     #[cfg(feature = "hotpath")]
-    hotpath::val!("dashboard.http.error_class").set(&class);
+    hotpath::val!("dashboard_api.http.error_class").set(&class);
     #[cfg(not(feature = "hotpath"))]
     let _ = class;
 }
@@ -22,7 +22,7 @@ pub(crate) fn record_error_class(class: &'static str) {
 #[inline(always)]
 pub(crate) fn record_response_bytes(len: usize) {
     #[cfg(feature = "hotpath")]
-    hotpath::gauge!("dashboard.http.response_bytes").set(len as f64);
+    hotpath::gauge!("dashboard_api.http.response_bytes").set(len as f64);
     #[cfg(not(feature = "hotpath"))]
     let _ = len;
 }
@@ -79,7 +79,7 @@ pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
             DashboardFreshnessStateV1::Absent => "absent",
             DashboardFreshnessStateV1::Unsupported => "unsupported",
         };
-        hotpath::val!("dashboard.freshness.state").set(&class);
+        hotpath::val!("dashboard_api.freshness.state").set(&class);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = state;

@@ -36,6 +36,7 @@ pub struct DoctorFindingsPayloadV1 {
 }
 
 /// `GET /api/doctor/findings`
+#[hotpath::measure(label = "dashboard_api.doctor.findings", future = true)]
 pub async fn findings(
     State(state): State<DashboardState>,
     Query(params): Query<DoctorFindingsQueryV1>,

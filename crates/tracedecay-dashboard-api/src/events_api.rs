@@ -486,23 +486,27 @@ impl EventStreamState {
         state: &DashboardState,
         scope: &DashboardScopeV1,
     ) -> Vec<DashboardEventV1> {
-        hotpath::measure_block!("dashboard.events.poll", {
-            let mut events = Vec::new();
-            if let Some(snapshot) = registry_snapshot(state).await {
-                self.registry_roots = snapshot.roots;
-                if let Some(event) =
-                    self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+        hotpath::future!(
+            async move {
+                let mut events = Vec::new();
+                if let Some(snapshot) = registry_snapshot(state).await {
+                    self.registry_roots = snapshot.roots;
+                    if let Some(event) =
+                        self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+                    {
+                        events.push(event);
+                    }
+                }
+                if let Some(total) = summed_store_bytes(state).await
+                    && let Some(event) = self.detect_storage_change(total, scope)
                 {
                     events.push(event);
                 }
-            }
-            if let Some(total) = summed_store_bytes(state).await
-                && let Some(event) = self.detect_storage_change(total, scope)
-            {
-                events.push(event);
-            }
-            events
-        })
+                events
+            },
+            label = "dashboard_api.events.poll"
+        )
+        .await
     }
 }
 
@@ -693,28 +697,32 @@ async fn send_event(
     connection_ref: Option<&str>,
     mut event: DashboardEventV1,
 ) -> Result<(), ()> {
-    hotpath::measure_block!("dashboard.events.delivery", {
-        if let Some(connection_ref) = connection_ref
-            && !delivery_settlements
-                .attach_receipt(&mut event, connection_ref)
-                .await
-        {
-            return Ok(());
-        }
-        let receipt = event.delivery_receipt.clone();
-        let frame = match encode_event(&event) {
-            Ok(frame) => frame,
-            Err(_) => {
-                if let Some(receipt) = receipt.as_deref() {
-                    delivery_settlements
-                        .drop_receipt(receipt, tracedecay_domain::DeliveryDropReasonV1::Invalid)
-                        .await;
-                }
-                return Err(());
+    hotpath::future!(
+        async move {
+            if let Some(connection_ref) = connection_ref
+                && !delivery_settlements
+                    .attach_receipt(&mut event, connection_ref)
+                    .await
+            {
+                return Ok(());
             }
-        };
-        tx.send(Ok(frame)).await.map_err(|_| ())
-    })
+            let receipt = event.delivery_receipt.clone();
+            let frame = match encode_event(&event) {
+                Ok(frame) => frame,
+                Err(_) => {
+                    if let Some(receipt) = receipt.as_deref() {
+                        delivery_settlements
+                            .drop_receipt(receipt, tracedecay_domain::DeliveryDropReasonV1::Invalid)
+                            .await;
+                    }
+                    return Err(());
+                }
+            };
+            tx.send(Ok(frame)).await.map_err(|_| ())
+        },
+        label = "dashboard_api.events.delivery"
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -802,7 +810,8 @@ fn accumulate_record(
 /// Serialize one typed event into an SSE frame, named by its stream so the
 /// client can route by `event:` without parsing the payload first.
 fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
-    let data = hotpath::measure_block!("dashboard.http.serialize", serde_json::to_string(event))?;
+    let data =
+        hotpath::measure_block!("dashboard_api.http.serialize", serde_json::to_string(event))?;
     crate::observe::record_response_bytes(data.len());
     let frame = Event::default().event(event.kind.stream()).data(data);
     let resume_sequence = match &event.kind {

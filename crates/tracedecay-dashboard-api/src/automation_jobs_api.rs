@@ -86,6 +86,7 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.list", future = true)]
 pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     let jobs = load_jobs(&state.dashboard_root)
         .await
@@ -93,6 +94,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     Ok(Json(json!({ "jobs": jobs, "count": jobs.len() })))
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]
 pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
         .map_err(|err| bad_request(&format!("invalid job: {err}")))?;
@@ -142,6 +144,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
     Ok(Json(json!({ "job": job })))
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.view", future = true)]
 pub async fn view(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -150,6 +153,7 @@ pub async fn view(
     Ok(Json(json!({ "job": job })))
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.update", future = true)]
 pub async fn update(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -222,6 +226,7 @@ pub async fn update(
     Ok(Json(json!({ "job": updated })))
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.delete", future = true)]
 pub async fn delete(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -253,6 +258,7 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": job_id })))
 }
 
+#[hotpath::measure(label = "dashboard_api.jobs.run", future = true)]
 pub async fn run(
     State(state): State<DashboardState>,
     Extension(control): Extension<DashboardHttpRequestControlV1>,

@@ -166,9 +166,11 @@ const UNAVAILABLE_NOTE: &str =
 pub async fn freshness(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1>> {
-    let envelope = hotpath::measure_block!("dashboard.freshness.projection", {
-        project_code_index_freshness(&state).await
-    });
+    let envelope = hotpath::future!(
+        async move { project_code_index_freshness(&state).await },
+        label = "dashboard_api.freshness.projection"
+    )
+    .await;
     crate::observe::record_freshness_state(envelope.freshness.state);
     Json(envelope)
 }

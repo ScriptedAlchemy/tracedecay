@@ -1110,10 +1110,24 @@ impl Drop for DashboardHttpCancellationGuard {
 }
 
 pub fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) -> Router {
-    app.layer(middleware::from_fn_with_state(
+    let app = app.layer(middleware::from_fn_with_state(
         DashboardHttpAdmission { port: addr.port() },
         admit_dashboard_http_request,
-    ))
+    ));
+    with_hotpath_server_layer(app)
+}
+
+/// Attach Hotpath only after the complete dashboard router and admission
+/// middleware are assembled. Nested/leaf routers stay unlayered so merged
+/// routes emit exactly one server event.
+#[cfg(feature = "hotpath")]
+fn with_hotpath_server_layer(router: Router) -> Router {
+    router.layer(hotpath::AxumLayer::new())
+}
+
+#[cfg(not(feature = "hotpath"))]
+fn with_hotpath_server_layer(router: Router) -> Router {
+    router
 }
 
 async fn admit_dashboard_http_request(
@@ -1122,14 +1136,14 @@ async fn admit_dashboard_http_request(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let admitted = hotpath::measure_block!("dashboard.http.admission", {
+    let admitted = hotpath::measure_block!("dashboard_api.http.admission", {
         admit_dashboard_http_control(admission, headers, request)
     });
     let (request, mut cancellation_guard) = match admitted {
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
-    let response = hotpath::measure_block!("dashboard.http.handler", next.run(request).await);
+    let response = next.run(request).await;
     cancellation_guard.completed = true;
     crate::observe::observe_response(&response);
     response
@@ -1843,33 +1857,38 @@ async fn forward_project_request(
     state: DashboardState,
     req: Request<Body>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.http.forward_project", {
-        let (mut parts, body) = req.into_parts();
-        let request_control = parts
-            .extensions
-            .get::<DashboardHttpRequestControlV1>()
-            .cloned();
-        parts.extensions.clear();
-        if let Some(request_control) = request_control {
-            parts.extensions.insert(request_control);
-        }
-        let req = Request::from_parts(parts, body);
-        match project_api.with_state(state).oneshot(req).await {
-            Ok(response) => response,
-            Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "detail": format!("dashboard project route failed: {err}"),
-                })),
-            )
-                .into_response(),
-        }
-    })
+    hotpath::future!(
+        async move {
+            let (mut parts, body) = req.into_parts();
+            let request_control = parts
+                .extensions
+                .get::<DashboardHttpRequestControlV1>()
+                .cloned();
+            parts.extensions.clear();
+            if let Some(request_control) = request_control {
+                parts.extensions.insert(request_control);
+            }
+            let req = Request::from_parts(parts, body);
+            match project_api.with_state(state).oneshot(req).await {
+                Ok(response) => response,
+                Err(err) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "error",
+                        "detail": format!("dashboard project route failed: {err}"),
+                    })),
+                )
+                    .into_response(),
+            }
+        },
+        label = "dashboard_api.http.forward_project"
+    )
+    .await
 }
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
+#[hotpath::measure(label = "dashboard_api.http.capabilities", future = true)]
 async fn capabilities(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,

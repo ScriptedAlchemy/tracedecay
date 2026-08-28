@@ -322,10 +322,12 @@ pub fn install_dashboard_pr_autotrack_read_port(
     PR_AUTOTRACK_READ_PORT.set(port)
 }
 
+#[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
     Ok(Json(settings_envelope(&state, None, None, None).await?))
 }
 
+#[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
 pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
@@ -410,6 +412,7 @@ pub async fn patch_project_settings(
     }))
 }
 
+#[hotpath::measure(label = "dashboard_api.settings.patch_user", future = true)]
 pub async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
@@ -477,6 +480,7 @@ pub async fn patch_user_settings(
 /// Saves only the ProfileSessions-backed code-index worker selection. This is
 /// deliberately not a branch of `patch_user_settings`: its independent CAS
 /// revision makes a mixed project/profile mutation unrepresentable.
+#[hotpath::measure(label = "dashboard_api.settings.patch_workers", future = true)]
 pub async fn patch_code_index_worker_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,

@@ -32,6 +32,7 @@ pub struct CollectionQueryV1 {
 /// An explicit `collection` query parameter names the target; without one the
 /// selector falls through to the (currently absent) default collection and
 /// reports the typed no-collection state.
+#[hotpath::measure(label = "dashboard_api.multi_root.resolve", future = true)]
 pub async fn resolve_collection(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,

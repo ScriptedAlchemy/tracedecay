@@ -50,6 +50,7 @@ enum CommandOverridePatch {
     Value(String),
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
@@ -63,6 +64,7 @@ pub async fn overview(
     snapshot_response(&snapshot)
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.patch", future = true)]
 pub async fn patch_settings(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
@@ -100,6 +102,7 @@ pub async fn patch_settings(
     snapshot_response(&snapshot)
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.refresh", future = true)]
 pub async fn refresh_all(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
@@ -113,6 +116,7 @@ pub async fn refresh_all(
     snapshot_response(&snapshot)
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.refresh_language", future = true)]
 pub async fn refresh_language(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,

@@ -51,6 +51,7 @@ pub struct ManagedSkillUpdateRequest {
     update: ManagedSkillUpdate,
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.list", future = true)]
 pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     let profile_root = profile_root(&state)?;
     let skills = list_managed_skills(profile_root)
@@ -78,6 +79,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     })))
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.view", future = true)]
 pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     let profile_root = profile_root(&state)?;
     let skill = load_managed_skill(profile_root, &id)
@@ -86,6 +88,7 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     skill_payload(profile_root, skill).await
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
 pub async fn create(
     State(state): State<DashboardState>,
     Json(request): Json<ManagedSkillCreateRequest>,
@@ -93,6 +96,7 @@ pub async fn create(
     execute_skill_command(&state, request.into_create_command()).await
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.update", future = true)]
 pub async fn update(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
@@ -109,14 +113,17 @@ pub async fn update(
     .await
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.disable", future = true)]
 pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Disable { id }).await
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.archive", future = true)]
 pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Archive { id }).await
 }
 
+#[hotpath::measure(label = "dashboard_api.skills.restore", future = true)]
 pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Restore { id }).await
 }

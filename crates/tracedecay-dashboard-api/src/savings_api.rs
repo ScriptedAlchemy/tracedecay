@@ -491,6 +491,7 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
+#[hotpath::measure(label = "dashboard_api.savings.overview", future = true)]
 pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>> {
@@ -602,31 +603,35 @@ pub async fn overview(
 pub async fn costs(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CostsReadModelV1>> {
-    hotpath::measure_block!("dashboard.savings.costs", {
-        let model = costs_model(&state).await;
-        let metrics = model.usage.iter().chain(&model.estimated_cost);
-        let eligible = metrics.clone().count() as u64;
-        let known = metrics
-            .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
-            .count() as u64;
-        let envelope = if model.current && known == eligible {
-            DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
-                DashboardCoverageV1::complete(eligible, "metrics"),
-                model,
-            )
-        } else {
-            DashboardEnvelopeV1::partial(
-                scope_from_state(&state),
-                eligible,
-                known,
-                "metrics",
-                vec!["incomplete_metric_coverage".to_owned()],
-                model,
-            )
-        };
-        Json(envelope)
-    })
+    hotpath::future!(
+        async move {
+            let model = costs_model(&state).await;
+            let metrics = model.usage.iter().chain(&model.estimated_cost);
+            let eligible = metrics.clone().count() as u64;
+            let known = metrics
+                .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+                .count() as u64;
+            let envelope = if model.current && known == eligible {
+                DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(eligible, "metrics"),
+                    model,
+                )
+            } else {
+                DashboardEnvelopeV1::partial(
+                    scope_from_state(&state),
+                    eligible,
+                    known,
+                    "metrics",
+                    vec!["incomplete_metric_coverage".to_owned()],
+                    model,
+                )
+            };
+            Json(envelope)
+        },
+        label = "dashboard_api.savings.costs"
+    )
+    .await
 }
 
 // `costs_http` / `costs_export` are deleted with their last caller, for the
@@ -851,7 +856,8 @@ pub async fn ledger(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
 ) -> Json<Value> {
-    hotpath::measure_block!("dashboard.savings.ledger", {
+    hotpath::future!(
+        async move {
         let (range, since) = match range_since(params.range.as_deref()) {
             Ok(range) => range,
             Err(error) => return Json(read_failed_block(error)),
@@ -917,7 +923,11 @@ pub async fn ledger(
                 "calls": i64_field(row, "calls"),
             })).collect::<Vec<_>>(),
         }))
-    })
+
+        },
+        label = "dashboard_api.savings.ledger"
+    )
+    .await
 }
 
 /// GET `/api/plugins/savings/sessions?range=&limit=&offset=`
@@ -929,7 +939,8 @@ pub async fn sessions(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SessionsParams>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.savings.sessions", {
+    hotpath::future!(
+        async move {
         let (range, since) = match range_since(params.range.as_deref()) {
             Ok(range) => range,
             Err(error) => {
@@ -1130,13 +1141,18 @@ pub async fn sessions(
             )
                 .into_response(),
         }
-    })
+
+        },
+        label = "dashboard_api.savings.sessions"
+    )
+    .await
 }
 
 /// GET `/api/plugins/savings/models?range=`
 ///
 /// Per-model token aggregates from the session store plus canonical
 /// provider-usage cost grouped by exact provider/model and day.
+#[hotpath::measure(label = "dashboard_api.savings.models", future = true)]
 pub async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,

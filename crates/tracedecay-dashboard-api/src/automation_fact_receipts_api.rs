@@ -21,6 +21,7 @@ pub struct ListParams {
     limit: Option<i64>,
 }
 
+#[hotpath::measure(label = "dashboard_api.receipts.list", future = true)]
 pub async fn list(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
@@ -94,6 +95,7 @@ pub async fn list(
     }
 }
 
+#[hotpath::measure(label = "dashboard_api.receipts.view", future = true)]
 pub async fn view(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,

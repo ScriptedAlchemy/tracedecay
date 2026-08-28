@@ -153,6 +153,7 @@ pub(super) struct ProjectContextPayloadV1 {
     aliases: Vec<tracedecay_global_db::ProjectAliasRecord>,
 }
 
+#[hotpath::measure(label = "dashboard_api.projects.list", future = true)]
 pub async fn list(
     State(runtime): State<DashboardRuntime>,
     Query(params): Query<ProjectsParams>,
@@ -295,6 +296,7 @@ pub fn registry_unavailable_response(
     ))
 }
 
+#[hotpath::measure(label = "dashboard_api.projects.context", future = true)]
 pub async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,

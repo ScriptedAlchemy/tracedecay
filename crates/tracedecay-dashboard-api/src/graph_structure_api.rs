@@ -279,122 +279,126 @@ async fn call_chain(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.graph.call_chain", {
-        let from = params.from.trim();
-        let to = params.to.trim();
-        if from.is_empty() || to.is_empty() {
-            return unmeasured_response::<CallChainMeasurementV1>(
+    hotpath::future!(
+        async move {
+            let from = params.from.trim();
+            let to = params.to.trim();
+            if from.is_empty() || to.is_empty() {
+                return unmeasured_response::<CallChainMeasurementV1>(
+                    &state,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "both from and to node ids are required",
+                );
+            }
+            let max_depth = params
+                .max_depth
+                .unwrap_or(MAX_CALL_CHAIN_DEPTH)
+                .clamp(1, MAX_CALL_CHAIN_DEPTH);
+            let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
+                Ok(control) => control,
+                Err(response) => return *response,
+            };
+            let graph = match admitted_graph::<CallChainMeasurementV1>(
                 &state,
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "both from and to node ids are required",
-            );
-        }
-        let max_depth = params
-            .max_depth
-            .unwrap_or(MAX_CALL_CHAIN_DEPTH)
-            .clamp(1, MAX_CALL_CHAIN_DEPTH);
-        let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
-        let graph = match admitted_graph::<CallChainMeasurementV1>(
-            &state,
-            &control,
-            CallableCodeOperationKind::Callees,
-        )
-        .await
-        {
-            Ok(graph) => graph,
-            Err(response) => return response,
-        };
-        let from_occurrence = match SymbolOccurrenceId::new(from.to_owned()) {
-            Ok(occurrence) => occurrence,
-            Err(error) => {
-                return unmeasured_response::<CallChainMeasurementV1>(
-                    &state,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_node_identity",
-                    &error.to_string(),
-                );
+                &control,
+                CallableCodeOperationKind::Callees,
+            )
+            .await
+            {
+                Ok(graph) => graph,
+                Err(response) => return response,
+            };
+            let from_occurrence = match SymbolOccurrenceId::new(from.to_owned()) {
+                Ok(occurrence) => occurrence,
+                Err(error) => {
+                    return unmeasured_response::<CallChainMeasurementV1>(
+                        &state,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_node_identity",
+                        &error.to_string(),
+                    );
+                }
+            };
+            let to_occurrence = match SymbolOccurrenceId::new(to.to_owned()) {
+                Ok(occurrence) => occurrence,
+                Err(error) => {
+                    return unmeasured_response::<CallChainMeasurementV1>(
+                        &state,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_node_identity",
+                        &error.to_string(),
+                    );
+                }
+            };
+            let from_node = match symbol_summary(&graph, &from_occurrence) {
+                Ok(Some(node)) => node,
+                Ok(None) => {
+                    return unmeasured_response::<CallChainMeasurementV1>(
+                        &state,
+                        StatusCode::NOT_FOUND,
+                        "node_not_found",
+                        &format!("source node not found: {from}"),
+                    );
+                }
+                Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
+            };
+            match symbol_summary(&graph, &to_occurrence) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return unmeasured_response::<CallChainMeasurementV1>(
+                        &state,
+                        StatusCode::NOT_FOUND,
+                        "node_not_found",
+                        &format!("target node not found: {to}"),
+                    );
+                }
+                Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
             }
-        };
-        let to_occurrence = match SymbolOccurrenceId::new(to.to_owned()) {
-            Ok(occurrence) => occurrence,
-            Err(error) => {
-                return unmeasured_response::<CallChainMeasurementV1>(
-                    &state,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_node_identity",
-                    &error.to_string(),
-                );
-            }
-        };
-        let from_node = match symbol_summary(&graph, &from_occurrence) {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                return unmeasured_response::<CallChainMeasurementV1>(
-                    &state,
-                    StatusCode::NOT_FOUND,
-                    "node_not_found",
-                    &format!("source node not found: {from}"),
-                );
-            }
-            Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
-        };
-        match symbol_summary(&graph, &to_occurrence) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return unmeasured_response::<CallChainMeasurementV1>(
-                    &state,
-                    StatusCode::NOT_FOUND,
-                    "node_not_found",
-                    &format!("target node not found: {to}"),
-                );
-            }
-            Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
-        }
-        let path = match graph.reader.shortest_path(
-            &from_occurrence,
-            &to_occurrence,
-            &[RelationEdgeKindV1::Calls],
-            max_depth as u32,
-            STRATA_MAX_DEPENDENCY_EDGES,
-            Arc::clone(&graph.cancellation),
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                return graph_error_response::<CallChainMeasurementV1>(
-                    &state,
-                    crate::graph::map_projection_error(error),
-                );
-            }
-        };
-        let steps = match call_chain_steps(&state, &graph, from_node, path.path.as_deref()) {
-            Ok(steps) => steps,
-            Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
-        };
-        let found = path.path.is_some();
-        let hop_count = path.path.as_ref().map(Vec::len);
-        measured_response(
-            &state,
-            CallChainMeasurementV1 {
-                from_node_id: from.to_string(),
-                to_node_id: to.to_string(),
-                max_depth,
-                directed: true,
-                edge_kind: "calls",
-                selection: "single_shortest_path",
-                complete: path.complete,
-                found,
-                hop_count,
-                steps,
-            },
-            2,
-            "endpoint nodes",
-            Some(graph.reader.generation().as_str().to_owned()),
-        )
-    })
+            let path = match graph.reader.shortest_path(
+                &from_occurrence,
+                &to_occurrence,
+                &[RelationEdgeKindV1::Calls],
+                max_depth as u32,
+                STRATA_MAX_DEPENDENCY_EDGES,
+                Arc::clone(&graph.cancellation),
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    return graph_error_response::<CallChainMeasurementV1>(
+                        &state,
+                        crate::graph::map_projection_error(error),
+                    );
+                }
+            };
+            let steps = match call_chain_steps(&state, &graph, from_node, path.path.as_deref()) {
+                Ok(steps) => steps,
+                Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
+            };
+            let found = path.path.is_some();
+            let hop_count = path.path.as_ref().map(Vec::len);
+            measured_response(
+                &state,
+                CallChainMeasurementV1 {
+                    from_node_id: from.to_string(),
+                    to_node_id: to.to_string(),
+                    max_depth,
+                    directed: true,
+                    edge_kind: "calls",
+                    selection: "single_shortest_path",
+                    complete: path.complete,
+                    found,
+                    hop_count,
+                    steps,
+                },
+                2,
+                "endpoint nodes",
+                Some(graph.reader.generation().as_str().to_owned()),
+            )
+        },
+        label = "dashboard_api.graph.call_chain"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/strata`
@@ -402,128 +406,135 @@ async fn strata(
     State(state): State<DashboardState>,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.graph.strata", {
-        let control = match graph_control::<StrataMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
-        let graph = match admitted_graph::<StrataMeasurementV1>(
-            &state,
-            &control,
-            CallableCodeOperationKind::Facets,
-        )
-        .await
-        {
-            Ok(graph) => graph,
-            Err(response) => return response,
-        };
-        let graph_generation = graph.reader.generation().as_str().to_owned();
-        let cache_key = graph_generation.clone();
-        let cache = STRATA_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
-        let mut guard = cache.lock().await;
-        let (snapshot, cache_state) = if let Some(existing) = guard.get(&cache_key)
-            && existing.graph_generation == graph_generation
-        {
-            (existing.clone(), "hit")
-        } else {
-            let scan = match tokio::time::timeout(
-                STRATA_SCAN_BUDGET,
-                GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
-                    .build_file_adjacency_bounded(STRATA_MAX_FILES, STRATA_MAX_DEPENDENCY_EDGES),
+    hotpath::future!(
+        async move {
+            let control = match graph_control::<StrataMeasurementV1>(&state, control) {
+                Ok(control) => control,
+                Err(response) => return *response,
+            };
+            let graph = match admitted_graph::<StrataMeasurementV1>(
+                &state,
+                &control,
+                CallableCodeOperationKind::Facets,
             )
             .await
             {
-                Ok(Ok(scan)) => scan,
-                Ok(Err(error)) => {
-                    return graph_runtime_error_response::<StrataMeasurementV1>(&state, error);
-                }
-                Err(_) => {
-                    return failed_response::<StrataMeasurementV1>(
-                        &state,
-                        "strata_scan_timed_out",
-                        format!(
-                            "file adjacency scan exceeded the {}ms budget",
-                            STRATA_SCAN_BUDGET.as_millis()
-                        ),
-                        true,
-                    );
-                }
+                Ok(graph) => graph,
+                Err(response) => return response,
             };
-            let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
-            let mut files = Vec::with_capacity(scan.adjacency.len());
-            for chain in &depth.chains {
-                for path in &chain.scc_files {
-                    files.push(StrataFileV1 {
-                        path: path.clone(),
-                        depth: chain.depth,
-                        scc_size: chain.scc_files.len(),
-                        chain: chain.chain.clone(),
-                    });
-                }
-            }
-            files.sort_by(|left, right| {
-                right
-                    .depth
-                    .cmp(&left.depth)
-                    .then_with(|| left.path.cmp(&right.path))
-            });
-            let clusters = dsm_clusters(&scan.adjacency)
-                .into_iter()
-                .enumerate()
-                .map(|(index, cluster)| {
-                    let boundary_edges = cluster.boundary_edges();
-                    StrataClusterV1 {
-                        order: index,
-                        directory: cluster.directory,
-                        file_count: cluster.file_count,
-                        internal_edges: cluster.internal_edges,
-                        outgoing_edges: cluster.outgoing_edges,
-                        incoming_edges: cluster.incoming_edges,
-                        boundary_edges,
+            let graph_generation = graph.reader.generation().as_str().to_owned();
+            let cache_key = graph_generation.clone();
+            let cache = STRATA_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+            let mut guard = cache.lock().await;
+            let (snapshot, cache_state) = if let Some(existing) = guard.get(&cache_key)
+                && existing.graph_generation == graph_generation
+            {
+                (existing.clone(), "hit")
+            } else {
+                let scan = match tokio::time::timeout(
+                    STRATA_SCAN_BUDGET,
+                    GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
+                        .build_file_adjacency_bounded(
+                            STRATA_MAX_FILES,
+                            STRATA_MAX_DEPENDENCY_EDGES,
+                        ),
+                )
+                .await
+                {
+                    Ok(Ok(scan)) => scan,
+                    Ok(Err(error)) => {
+                        return graph_runtime_error_response::<StrataMeasurementV1>(&state, error);
                     }
-                })
-                .collect();
-            let computed = Arc::new(CachedStrataV1 {
-                graph_generation: graph_generation.clone(),
-                max_depth: depth.max_depth,
-                ideal_depth: depth.ideal_depth,
-                files,
-                clusters,
-                files_examined: scan.files_examined,
-                dependency_edges_examined: scan.dependency_edges_examined,
-            });
-            guard.insert(cache_key, computed.clone());
-            (computed, "miss")
-        };
-        drop(guard);
+                    Err(_) => {
+                        return failed_response::<StrataMeasurementV1>(
+                            &state,
+                            "strata_scan_timed_out",
+                            format!(
+                                "file adjacency scan exceeded the {}ms budget",
+                                STRATA_SCAN_BUDGET.as_millis()
+                            ),
+                            true,
+                        );
+                    }
+                };
+                let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
+                let mut files = Vec::with_capacity(scan.adjacency.len());
+                for chain in &depth.chains {
+                    for path in &chain.scc_files {
+                        files.push(StrataFileV1 {
+                            path: path.clone(),
+                            depth: chain.depth,
+                            scc_size: chain.scc_files.len(),
+                            chain: chain.chain.clone(),
+                        });
+                    }
+                }
+                files.sort_by(|left, right| {
+                    right
+                        .depth
+                        .cmp(&left.depth)
+                        .then_with(|| left.path.cmp(&right.path))
+                });
+                let clusters = dsm_clusters(&scan.adjacency)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, cluster)| {
+                        let boundary_edges = cluster.boundary_edges();
+                        StrataClusterV1 {
+                            order: index,
+                            directory: cluster.directory,
+                            file_count: cluster.file_count,
+                            internal_edges: cluster.internal_edges,
+                            outgoing_edges: cluster.outgoing_edges,
+                            incoming_edges: cluster.incoming_edges,
+                            boundary_edges,
+                        }
+                    })
+                    .collect();
+                let computed = Arc::new(CachedStrataV1 {
+                    graph_generation: graph_generation.clone(),
+                    max_depth: depth.max_depth,
+                    ideal_depth: depth.ideal_depth,
+                    files,
+                    clusters,
+                    files_examined: scan.files_examined,
+                    dependency_edges_examined: scan.dependency_edges_examined,
+                });
+                guard.insert(cache_key, computed.clone());
+                (computed, "miss")
+            };
+            drop(guard);
 
-        measured_response(
-            &state,
-            StrataMeasurementV1 {
-                graph_generation: snapshot.graph_generation.clone(),
-                granularity: "file",
-                dependency_edge_kinds: ["calls", "uses"],
-                algorithm: "tarjan_scc_then_longest_path",
-                cluster_ordering: "dsm_boundary_edges_desc_then_file_count_desc",
-                max_depth: snapshot.max_depth,
-                ideal_depth: snapshot.ideal_depth,
-                files: snapshot.files.clone(),
-                clusters: snapshot.clusters.clone(),
-                scan: StrataScanV1 {
-                    cache_scope: "graph_generation",
-                    cache_state,
-                    budget_ms: STRATA_SCAN_BUDGET.as_millis() as u64,
-                    max_files: STRATA_MAX_FILES,
-                    max_dependency_edges: STRATA_MAX_DEPENDENCY_EDGES,
-                    files_examined: snapshot.files_examined,
-                    dependency_edges_examined: snapshot.dependency_edges_examined,
+            measured_response(
+                &state,
+                StrataMeasurementV1 {
+                    graph_generation: snapshot.graph_generation.clone(),
+                    granularity: "file",
+                    dependency_edge_kinds: ["calls", "uses"],
+                    algorithm: "tarjan_scc_then_longest_path",
+                    cluster_ordering: "dsm_boundary_edges_desc_then_file_count_desc",
+                    max_depth: snapshot.max_depth,
+                    ideal_depth: snapshot.ideal_depth,
+                    files: snapshot.files.clone(),
+                    clusters: snapshot.clusters.clone(),
+                    scan: StrataScanV1 {
+                        cache_scope: "graph_generation",
+                        cache_state,
+                        budget_ms: STRATA_SCAN_BUDGET.as_millis() as u64,
+                        max_files: STRATA_MAX_FILES,
+                        max_dependency_edges: STRATA_MAX_DEPENDENCY_EDGES,
+                        files_examined: snapshot.files_examined,
+                        dependency_edges_examined: snapshot.dependency_edges_examined,
+                    },
                 },
-            },
-            snapshot.files_examined as u64,
-            "files",
-            Some(snapshot.graph_generation.clone()),
-        )
-    })
+                snapshot.files_examined as u64,
+                "files",
+                Some(snapshot.graph_generation.clone()),
+            )
+        },
+        label = "dashboard_api.graph.strata"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/facts`
@@ -532,48 +543,51 @@ async fn node_facts(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.graph.node_facts", {
-        let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
-        let graph = match admitted_graph::<FactMatchesMeasurementV1>(
-            &state,
-            &control,
-            CallableCodeOperationKind::ExactOccurrence,
-        )
-        .await
-        {
-            Ok(graph) => graph,
-            Err(response) => return response,
-        };
-        let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
-            Ok(occurrence) => occurrence,
-            Err(response) => return *response,
-        };
-        let symbol = match symbol_summary(&graph, &occurrence) {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                return unmeasured_response::<FactMatchesMeasurementV1>(
-                    &state,
-                    StatusCode::NOT_FOUND,
-                    "node_not_found",
-                    &format!("node not found: {node_id}"),
-                );
-            }
-            Err(error) => {
-                return graph_error_response::<FactMatchesMeasurementV1>(&state, error);
-            }
-        };
-        let node = match node_ref(&state, &symbol) {
-            Ok(node) => node,
-            Err(error) => return graph_error_response::<FactMatchesMeasurementV1>(&state, error),
-        };
-        let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
-        let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
-        let connection = state.mem_db.read_connection();
-        let fts_query = format!("\"{}\"", node.name.replace('"', "\"\""));
-        let fts_sql = "
+    hotpath::future!(
+        async move {
+            let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
+                Ok(control) => control,
+                Err(response) => return *response,
+            };
+            let graph = match admitted_graph::<FactMatchesMeasurementV1>(
+                &state,
+                &control,
+                CallableCodeOperationKind::ExactOccurrence,
+            )
+            .await
+            {
+                Ok(graph) => graph,
+                Err(response) => return response,
+            };
+            let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
+                Ok(occurrence) => occurrence,
+                Err(response) => return *response,
+            };
+            let symbol = match symbol_summary(&graph, &occurrence) {
+                Ok(Some(node)) => node,
+                Ok(None) => {
+                    return unmeasured_response::<FactMatchesMeasurementV1>(
+                        &state,
+                        StatusCode::NOT_FOUND,
+                        "node_not_found",
+                        &format!("node not found: {node_id}"),
+                    );
+                }
+                Err(error) => {
+                    return graph_error_response::<FactMatchesMeasurementV1>(&state, error);
+                }
+            };
+            let node = match node_ref(&state, &symbol) {
+                Ok(node) => node,
+                Err(error) => {
+                    return graph_error_response::<FactMatchesMeasurementV1>(&state, error);
+                }
+            };
+            let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
+            let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
+            let connection = state.mem_db.read_connection();
+            let fts_query = format!("\"{}\"", node.name.replace('"', "\"\""));
+            let fts_sql = "
         SELECT current.fact_id, payload.content, current.trust_score,
                current.updated_at, payload.payload_json
         FROM memory_v2_assertion_payloads_fts fts
@@ -587,48 +601,51 @@ async fn node_facts(
           AND current.payload_access = 'eligible'
         ORDER BY bm25(memory_v2_assertion_payloads_fts), current.updated_at DESC
         LIMIT ?2";
-        let mut fts_rows =
-            match query_rows(&connection, fts_sql, params![fts_query, row_limit]).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    return failed_response::<FactMatchesMeasurementV1>(
-                        &state,
-                        "fact_payload_fts_read_failed",
-                        error,
-                        true,
-                    );
-                }
+            let mut fts_rows =
+                match query_rows(&connection, fts_sql, params![fts_query, row_limit]).await {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        return failed_response::<FactMatchesMeasurementV1>(
+                            &state,
+                            "fact_payload_fts_read_failed",
+                            error,
+                            true,
+                        );
+                    }
+                };
+            let fts_truncated = fts_rows.len() > FACT_MATCH_LIMIT;
+            fts_rows.truncate(FACT_MATCH_LIMIT);
+            let fts_coverage = fact_arm_coverage(fts_rows.len(), fts_truncated);
+            let node_name = node.name.clone();
+            let measurement = FactMatchesMeasurementV1 {
+                node,
+                name: node_name,
+                normalized_name,
+                granularity: "name_match",
+                identity_semantics: "not_symbol_identity",
+                caption: "citing this name",
+                same_name_collision_possible: true,
+                entity_matches: Vec::new(),
+                payload_fts_matches: fts_rows.clone(),
+                arms: vec![FactMatchArmV1 {
+                    match_basis: "memory_v2_assertion_payloads_fts",
+                    strength: "free_text_phrase",
+                    collision_warning: "text mentions are not symbol identity",
+                    coverage: fts_coverage,
+                    facts: fts_rows,
+                }],
             };
-        let fts_truncated = fts_rows.len() > FACT_MATCH_LIMIT;
-        fts_rows.truncate(FACT_MATCH_LIMIT);
-        let fts_coverage = fact_arm_coverage(fts_rows.len(), fts_truncated);
-        let node_name = node.name.clone();
-        let measurement = FactMatchesMeasurementV1 {
-            node,
-            name: node_name,
-            normalized_name,
-            granularity: "name_match",
-            identity_semantics: "not_symbol_identity",
-            caption: "citing this name",
-            same_name_collision_possible: true,
-            entity_matches: Vec::new(),
-            payload_fts_matches: fts_rows.clone(),
-            arms: vec![FactMatchArmV1 {
-                match_basis: "memory_v2_assertion_payloads_fts",
-                strength: "free_text_phrase",
-                collision_warning: "text mentions are not symbol identity",
-                coverage: fts_coverage,
-                facts: fts_rows,
-            }],
-        };
-        measured_response(
-            &state,
-            measurement,
-            1,
-            "canonical fact-match arms",
-            Some(graph.reader.generation().as_str().to_owned()),
-        )
-    })
+            measured_response(
+                &state,
+                measurement,
+                1,
+                "canonical fact-match arms",
+                Some(graph.reader.generation().as_str().to_owned()),
+            )
+        },
+        label = "dashboard_api.graph.node_facts"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/tests`
@@ -637,166 +654,174 @@ async fn node_tests(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.graph.node_tests", {
-        let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
-            Ok(control) => control,
-            Err(response) => return *response,
-        };
-        let graph = match admitted_graph::<TestMapMeasurementV1>(
-            &state,
-            &control,
-            CallableCodeOperationKind::Callers,
-        )
-        .await
-        {
-            Ok(graph) => graph,
-            Err(response) => return response,
-        };
-        let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
-            Ok(occurrence) => occurrence,
-            Err(response) => return *response,
-        };
-        let symbol = match symbol_summary(&graph, &occurrence) {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                return unmeasured_response::<TestMapMeasurementV1>(
+    hotpath::future!(
+        async move {
+            let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
+                Ok(control) => control,
+                Err(response) => return *response,
+            };
+            let graph = match admitted_graph::<TestMapMeasurementV1>(
+                &state,
+                &control,
+                CallableCodeOperationKind::Callers,
+            )
+            .await
+            {
+                Ok(graph) => graph,
+                Err(response) => return response,
+            };
+            let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
+                Ok(occurrence) => occurrence,
+                Err(response) => return *response,
+            };
+            let symbol = match symbol_summary(&graph, &occurrence) {
+                Ok(Some(node)) => node,
+                Ok(None) => {
+                    return unmeasured_response::<TestMapMeasurementV1>(
+                        &state,
+                        StatusCode::NOT_FOUND,
+                        "node_not_found",
+                        &format!("node not found: {node_id}"),
+                    );
+                }
+                Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
+            };
+            let node = match node_ref(&state, &symbol) {
+                Ok(node) => node,
+                Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
+            };
+            let graph_version = Some(graph.reader.generation().as_str().to_owned());
+            if !is_callable_kind(&node.kind) {
+                return measured_response(
                     &state,
-                    StatusCode::NOT_FOUND,
-                    "node_not_found",
-                    &format!("node not found: {node_id}"),
+                    TestMapMeasurementV1 {
+                        node,
+                        granularity: "symbol",
+                        algorithm: "callers_depth_3_intersect_test_files_or_test_annotations",
+                        caller_depth: TEST_CALLER_DEPTH,
+                        applicable: false,
+                        reason: Some("source node is not callable"),
+                        tests: Vec::new(),
+                        test_files: Vec::new(),
+                    },
+                    1,
+                    "source symbols",
+                    graph_version,
                 );
             }
-            Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
-        };
-        let node = match node_ref(&state, &symbol) {
-            Ok(node) => node,
-            Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
-        };
-        let graph_version = Some(graph.reader.generation().as_str().to_owned());
-        if !is_callable_kind(&node.kind) {
-            return measured_response(
+
+            let callers = match graph.reader.impact(
+                std::slice::from_ref(&occurrence),
+                &[RelationEdgeKindV1::Calls],
+                TEST_CALLER_DEPTH as u32,
+                STRATA_MAX_FILES,
+                STRATA_MAX_DEPENDENCY_EDGES,
+                Arc::clone(&graph.cancellation),
+            ) {
+                Ok(callers) => callers,
+                Err(error) => {
+                    return graph_error_response::<TestMapMeasurementV1>(
+                        &state,
+                        crate::graph::map_projection_error(error),
+                    );
+                }
+            };
+            if !callers.complete && callers.impacted.len() == STRATA_MAX_FILES {
+                return graph_error_response::<TestMapMeasurementV1>(
+                    &state,
+                    crate::graph::CodeGraphReadError::BudgetExhausted {
+                        detail: "test-map caller expansion exceeded its complete-symbol budget"
+                            .to_owned(),
+                    },
+                );
+            }
+            let caller_occurrences = callers
+                .impacted
+                .iter()
+                .map(|caller| caller.summary.occurrence.clone())
+                .collect::<Vec<_>>();
+            let annotations = match graph.reader.callers(
+                &caller_occurrences,
+                &[RelationEdgeKindV1::Annotates],
+                STRATA_MAX_DEPENDENCY_EDGES,
+                Arc::clone(&graph.cancellation),
+            ) {
+                Ok(annotations) => annotations,
+                Err(error) => {
+                    return graph_error_response::<TestMapMeasurementV1>(
+                        &state,
+                        crate::graph::map_projection_error(error),
+                    );
+                }
+            };
+            if annotations.len() != callers.impacted.len() {
+                return graph_error_response::<TestMapMeasurementV1>(
+                    &state,
+                    graph_reset_required(
+                        "test-map annotation batches did not match their caller seeds",
+                    ),
+                );
+            }
+            let mut tests = Vec::new();
+            for (caller, annotations) in callers.impacted.iter().zip(annotations) {
+                let caller = match node_ref(&state, &caller.summary) {
+                    Ok(caller) => caller,
+                    Err(error) => {
+                        return graph_error_response::<TestMapMeasurementV1>(&state, error);
+                    }
+                };
+                let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
+                    "test_file"
+                } else if match has_test_annotation(&annotations) {
+                    Ok(has_test_annotation) => has_test_annotation,
+                    Err(error) => {
+                        return graph_error_response::<TestMapMeasurementV1>(&state, error);
+                    }
+                } {
+                    "test_annotation"
+                } else {
+                    continue;
+                };
+                tests.push(CoveringTestV1 {
+                    id: caller.id,
+                    name: caller.name,
+                    file_path: caller.file_path,
+                    start_line: caller.start_line,
+                    qualification,
+                });
+            }
+            tests.sort_by(|left, right| {
+                left.file_path
+                    .cmp(&right.file_path)
+                    .then_with(|| left.start_line.cmp(&right.start_line))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let test_files = tests
+                .iter()
+                .map(|test| test.file_path.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            measured_response(
                 &state,
                 TestMapMeasurementV1 {
                     node,
                     granularity: "symbol",
                     algorithm: "callers_depth_3_intersect_test_files_or_test_annotations",
                     caller_depth: TEST_CALLER_DEPTH,
-                    applicable: false,
-                    reason: Some("source node is not callable"),
-                    tests: Vec::new(),
-                    test_files: Vec::new(),
+                    applicable: true,
+                    reason: None,
+                    tests,
+                    test_files,
                 },
                 1,
                 "source symbols",
                 graph_version,
-            );
-        }
-
-        let callers = match graph.reader.impact(
-            std::slice::from_ref(&occurrence),
-            &[RelationEdgeKindV1::Calls],
-            TEST_CALLER_DEPTH as u32,
-            STRATA_MAX_FILES,
-            STRATA_MAX_DEPENDENCY_EDGES,
-            Arc::clone(&graph.cancellation),
-        ) {
-            Ok(callers) => callers,
-            Err(error) => {
-                return graph_error_response::<TestMapMeasurementV1>(
-                    &state,
-                    crate::graph::map_projection_error(error),
-                );
-            }
-        };
-        if !callers.complete && callers.impacted.len() == STRATA_MAX_FILES {
-            return graph_error_response::<TestMapMeasurementV1>(
-                &state,
-                crate::graph::CodeGraphReadError::BudgetExhausted {
-                    detail: "test-map caller expansion exceeded its complete-symbol budget"
-                        .to_owned(),
-                },
-            );
-        }
-        let caller_occurrences = callers
-            .impacted
-            .iter()
-            .map(|caller| caller.summary.occurrence.clone())
-            .collect::<Vec<_>>();
-        let annotations = match graph.reader.callers(
-            &caller_occurrences,
-            &[RelationEdgeKindV1::Annotates],
-            STRATA_MAX_DEPENDENCY_EDGES,
-            Arc::clone(&graph.cancellation),
-        ) {
-            Ok(annotations) => annotations,
-            Err(error) => {
-                return graph_error_response::<TestMapMeasurementV1>(
-                    &state,
-                    crate::graph::map_projection_error(error),
-                );
-            }
-        };
-        if annotations.len() != callers.impacted.len() {
-            return graph_error_response::<TestMapMeasurementV1>(
-                &state,
-                graph_reset_required(
-                    "test-map annotation batches did not match their caller seeds",
-                ),
-            );
-        }
-        let mut tests = Vec::new();
-        for (caller, annotations) in callers.impacted.iter().zip(annotations) {
-            let caller = match node_ref(&state, &caller.summary) {
-                Ok(caller) => caller,
-                Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
-            };
-            let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
-                "test_file"
-            } else if match has_test_annotation(&annotations) {
-                Ok(has_test_annotation) => has_test_annotation,
-                Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
-            } {
-                "test_annotation"
-            } else {
-                continue;
-            };
-            tests.push(CoveringTestV1 {
-                id: caller.id,
-                name: caller.name,
-                file_path: caller.file_path,
-                start_line: caller.start_line,
-                qualification,
-            });
-        }
-        tests.sort_by(|left, right| {
-            left.file_path
-                .cmp(&right.file_path)
-                .then_with(|| left.start_line.cmp(&right.start_line))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        let test_files = tests
-            .iter()
-            .map(|test| test.file_path.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        measured_response(
-            &state,
-            TestMapMeasurementV1 {
-                node,
-                granularity: "symbol",
-                algorithm: "callers_depth_3_intersect_test_files_or_test_annotations",
-                caller_depth: TEST_CALLER_DEPTH,
-                applicable: true,
-                reason: None,
-                tests,
-                test_files,
-            },
-            1,
-            "source symbols",
-            graph_version,
-        )
-    })
+            )
+        },
+        label = "dashboard_api.graph.node_tests"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/sessions`
@@ -805,7 +830,8 @@ async fn node_sessions(
     control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::measure_block!("dashboard.graph.node_sessions", {
+    hotpath::future!(
+        async move {
         let control = match graph_control::<NodeSessionsMeasurementV1>(&state, control) {
             Ok(control) => control,
             Err(response) => return *response,
@@ -885,7 +911,11 @@ async fn node_sessions(
             "sessions with provider-native edited-file metadata",
             Some(graph.reader.generation().as_str().to_owned()),
         )
-    })
+
+        },
+        label = "dashboard_api.graph.node_sessions"
+    )
+    .await
 }
 
 struct AdmittedGraphReadV1 {
