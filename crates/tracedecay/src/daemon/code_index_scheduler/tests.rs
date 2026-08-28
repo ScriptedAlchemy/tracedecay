@@ -5288,6 +5288,23 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
         "the mounted worktree must accept a refresh hint"
     );
     let newer = wait_for_generation_change(&registry, fixture.path(), &original_id).await;
+    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    let newer_generation = loop {
+        if let Some(generation) = registry
+            .serving_code_scope(fixture.path())
+            .await
+            .and_then(|scope| scope.serving_generation)
+        {
+            if generation.manifest().generation_id == newer {
+                break generation;
+            }
+        }
+        assert!(
+            Instant::now() <= serving_deadline,
+            "foreign replacement must seat the newer serving generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
 
     assert_eq!(
         registry
@@ -5300,11 +5317,6 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
         registry.latest_generation_id(fixture.path()).await,
         Some(newer.clone())
     );
-    let newer_generation = registry
-        .serving_code_scope(fixture.path())
-        .await
-        .and_then(|scope| scope.serving_generation)
-        .expect("newer retained generation");
     let ServingGenerationInstallationOutcomeV1::Installed(newer_installation) = registry
         .install_exact_serving_generation(fixture.path(), &newer_generation)
         .await
@@ -5319,10 +5331,16 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
     );
     assert!(
         registry
-            .latest_generation_id(fixture.path())
+            .serving_code_scope(fixture.path())
             .await
+            .and_then(|scope| scope.serving_generation)
             .is_none(),
-        "the exact failed generation must be retired"
+        "the exact failed generation must be retired from the serving slot"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(newer),
+        "retiring the serving slot must not wipe the text lane that latest_generation_id falls back to"
     );
 
     registry.shutdown().await;
