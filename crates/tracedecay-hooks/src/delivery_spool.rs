@@ -116,7 +116,7 @@ pub struct HookDeliveryReceiptSpoolV1 {
 }
 
 impl HookDeliveryReceiptSpoolV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.open")]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
         let root = root.into();
         ensure_root(&root)?;
@@ -146,7 +146,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(spool)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.append")]
     pub fn append(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
@@ -181,7 +181,7 @@ impl HookDeliveryReceiptSpoolV1 {
     /// retained for its stable identity.  Callers must forward the returned
     /// settlement to the daemon so a retry replays the original timestamps
     /// rather than reconstructing a conflicting delivery attempt.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.append_or_replay")]
     pub fn append_or_replay(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
@@ -211,7 +211,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(receipt.clone())
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.pending")]
     pub fn pending(
         &self,
         limit: usize,
@@ -235,7 +235,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(receipts)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.acknowledge")]
     pub fn acknowledge(&self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
         let path = self.receipt_path(receipt_id);
         if !validate_regular_or_missing(&path).map_err(map_read_error)? {
@@ -248,7 +248,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(true)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.delivery.receipt_paths")]
     fn receipt_paths(&self) -> Result<Vec<PathBuf>, HookDeliverySpoolError> {
         let mut paths = Vec::new();
         for entry in fs::read_dir(&self.root).map_err(|_| HookDeliverySpoolError::Io)? {

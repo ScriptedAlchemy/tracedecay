@@ -185,7 +185,7 @@ pub enum NativeHookDecodeError {
 /// Per-payload decode fan-out. Every native hook byte stream a host receives
 /// passes through here once, so this is the boundary that reflects decode
 /// cost across all provider shapes without measuring each `decode_*` helper.
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.native.decode_event")]
 pub fn decode_native_hook_event(
     host: NativeHostIdentityV1,
     payload: &[u8],

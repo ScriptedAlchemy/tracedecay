@@ -36,7 +36,7 @@ impl HookSpoolV1 {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.write_lease")]
 pub(super) fn write_lease_file(
     file: &mut File,
     lease: HookSpoolWriterLeaseV1,
@@ -59,7 +59,7 @@ pub(super) fn write_lease_file(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.spool.acquire_lease")]
 pub(super) fn acquire_lease(
     root: &Path,
     lease_duration_micros: i64,

@@ -91,7 +91,7 @@ impl HookSpoolV1 {
     /// metadata, records, or cursors. The normal writer lease still fences a
     /// live adapter, and only the three incompatible transport-owned files are
     /// removed.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.reset")]
     pub fn reset(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
@@ -125,7 +125,7 @@ impl HookSpoolV1 {
     /// mutations with [`HookSpoolError::WriterLeaseLost`]; the only recovery is
     /// to drop it and reopen, which is lossless because every record and
     /// acknowledgement is durable before its call returns.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.open")]
     pub fn open(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
@@ -138,7 +138,7 @@ impl HookSpoolV1 {
         Self::open_after_lease(root, config, lease, lease_file, now)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.open_after_lease")]
     fn open_after_lease(
         root: PathBuf,
         config: HookSpoolConfigV1,
@@ -244,7 +244,7 @@ impl HookSpoolV1 {
     /// is rejected. The append intent is persisted before frame publication,
     /// and the frame + containing directory are fsynced before the sequence is
     /// advanced.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.append")]
     pub fn append(
         &mut self,
         envelope: HookEventEnvelopeV2,
@@ -318,7 +318,7 @@ impl HookSpoolV1 {
 
     /// Return up to four fair session batches. FIFO is preserved inside each
     /// session; a session with an in-flight claim is skipped until released.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.claim_replay")]
     pub fn claim_replay_batches(
         &mut self,
         now: UtcMicros,
@@ -413,7 +413,7 @@ impl HookSpoolV1 {
     /// Persist one daemon acknowledgement and compact logically deleted
     /// frames. Out-of-order session acknowledgements are supported so fair
     /// replay never waits behind another session's transient saturation.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.acknowledge")]
     pub fn acknowledge(
         &mut self,
         acknowledgement: HookSpoolAckV1,
@@ -578,7 +578,7 @@ impl HookSpoolV1 {
         }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "hooks.spool.compact")]
     fn compact_pending(&mut self) -> Result<(), HookSpoolError> {
         self.ensure_healthy()?;
         let mut bytes = Vec::with_capacity(self.pending_bytes() as usize);

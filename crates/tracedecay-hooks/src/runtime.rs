@@ -151,7 +151,7 @@ pub trait AsyncHookAdmissionPortV1 {
 /// Validate exact daemon-issued scope before yielding to asynchronous local
 /// admission. This function performs no search, model, command, store-open, or
 /// external-network work.
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.runtime.admit_async", future = true)]
 pub async fn admit_async_exact_scope(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -204,7 +204,7 @@ pub struct HookSynchronousResultV1 {
 /// hook dispatch cost as felt by the host. The completion mix is what tells
 /// apart a healthy hook path from one that is quietly missing its budget or
 /// falling back to replay.
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.runtime.finish_synchronous")]
 pub fn finish_synchronous_hook(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -372,7 +372,7 @@ const fn route_for_rollback(
     Ok(rollback.route)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.runtime.deliver_feedback_rollback")]
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
@@ -467,7 +467,7 @@ const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
 /// budget remains, so an over-budget or foreign-scope hook can never surface
 /// another scope's feedback. Acknowledgement failure withholds nothing already
 /// earned: the outcome is reported so callers can record it truthfully.
-#[hotpath::measure]
+#[hotpath::measure(label = "hooks.runtime.deliver_feedback", future = true)]
 pub async fn deliver_hook_feedback<T, P>(
     envelope: &HookEventEnvelopeV2,
     receipt: &HookAdmissionReceiptV1,
