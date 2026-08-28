@@ -174,6 +174,12 @@ struct PreparedSemanticActivationPublicationV1 {
     report: DirectEvaluationReportV1,
     accepted_profile: AcceptedRetrievalProfileV1,
     accepted_runtime: RetrievalRuntimeCompatibilityV1,
+    query_fallback: PreparedQueryFallbackPublicationV1,
+}
+
+struct PreparedQueryFallbackPublicationV1 {
+    accepted_profile: AcceptedRetrievalProfileV1,
+    accepted_runtime: RetrievalRuntimeCompatibilityV1,
 }
 
 /// Non-publishing result of a genuine direct evaluation against one exact
@@ -218,6 +224,7 @@ pub struct SemanticEvaluationAuthorityPublicationV1 {
     evidence: SemanticActivationPublicationEvidenceV1,
     accepted_profile: AcceptedRetrievalProfileV1,
     runtime: RetrievalRuntimeCompatibilityV1,
+    query_fallback: PreparedQueryFallbackPublicationV1,
 }
 
 impl SemanticEvaluationAuthorityPublicationV1 {
@@ -235,41 +242,68 @@ impl SemanticEvaluationAuthorityPublicationV1 {
         self.accepted_profile
             .executable_under(&self.runtime)
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-        let bootstrap_query = self.accepted_profile.is_exact_query_fallback();
-        let profile_digest = self.accepted_profile.profile_digest().clone();
+        self.query_fallback
+            .accepted_profile
+            .executable_under(&self.query_fallback.accepted_runtime)
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        let publication_identity = SemanticEvaluationPublicationIdentityV1 {
+            scope_digest: expected.scope.scope_digest.clone(),
+            code_generation: expected.code_generation.clone(),
+            code_source_manifest_digest: expected.code_source_manifest_digest.clone(),
+            code_snapshot_digest: expected.code_snapshot_digest.clone(),
+            semantic_source_generation: expected.semantic_source_generation.clone(),
+            vector_state_revision: expected.vector_state_revision,
+            vector_generation_id: expected.vector_generation_id.clone(),
+        };
+        let fallback_digest = self
+            .query_fallback
+            .accepted_profile
+            .profile_digest()
+            .clone();
+        self.accepted_profiles
+            .publish(
+                &expected.project_root,
+                report.clone(),
+                self.query_fallback.accepted_profile,
+                self.query_fallback.accepted_runtime,
+                publication_identity.clone(),
+                expected.code_snapshot_digest.clone(),
+            )
+            .await
+            .map_err(map_authority_error)?;
         self.accepted_profiles
             .publish(
                 &expected.project_root,
                 report,
                 self.accepted_profile,
                 self.runtime,
-                SemanticEvaluationPublicationIdentityV1 {
-                    scope_digest: expected.scope.scope_digest.clone(),
-                    code_generation: expected.code_generation.clone(),
-                    code_source_manifest_digest: expected.code_source_manifest_digest.clone(),
-                    code_snapshot_digest: expected.code_snapshot_digest.clone(),
-                    semantic_source_generation: expected.semantic_source_generation.clone(),
-                    vector_state_revision: expected.vector_state_revision,
-                    vector_generation_id: expected.vector_generation_id.clone(),
-                },
+                publication_identity,
                 expected.code_snapshot_digest.clone(),
             )
             .await
             .map_err(map_authority_error)?;
-        if bootstrap_query {
-            let configuration = current_configuration_state(&self.configuration).await?;
-            let accepted = self
-                .accepted_profiles
-                .resolve(&profile_digest)
-                .await
-                .map_err(map_authority_error)?;
-            self.configuration
-                .bootstrap_query_retrieval_profile(
-                    configuration,
-                    accepted.accepted_profile,
-                    &accepted.runtime,
-                )
-                .await?;
+        let coordinator = self
+            .configuration
+            .semantic_activation_coordinator()
+            .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+        match coordinator.current_profile_state().await {
+            Ok(_) => {}
+            Err(SemanticActivationCoordinationErrorV1::Unavailable) => {
+                let configuration = current_configuration_state(&self.configuration).await?;
+                let fallback = self
+                    .accepted_profiles
+                    .resolve(&fallback_digest)
+                    .await
+                    .map_err(map_authority_error)?;
+                self.configuration
+                    .bootstrap_query_retrieval_profile(
+                        configuration,
+                        fallback.accepted_profile,
+                        &fallback.runtime,
+                    )
+                    .await?;
+            }
+            Err(error) => return Err(error),
         }
         Ok(())
     }
@@ -367,6 +401,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             evidence,
             accepted_profile: prepared.accepted_profile.clone(),
             runtime: prepared.accepted_runtime,
+            query_fallback: prepared.query_fallback,
         };
         snapshot_authority
             .publish_if_current(&before, publication)
@@ -735,8 +770,69 @@ fn prepare_semantic_activation_publication(
                 accepted_runtime.semantic_ceiling,
             ))
         })?;
+    let query_fallback = prepare_query_fallback_publication(&report, &snapshot.runtime)?;
     Ok(PreparedSemanticActivationPublicationV1 {
         report,
+        accepted_profile,
+        accepted_runtime,
+        query_fallback,
+    })
+}
+
+fn prepare_query_fallback_publication(
+    report: &DirectEvaluationReportV1,
+    observed_runtime: &RetrievalRuntimeCompatibilityV1,
+) -> Result<PreparedQueryFallbackPublicationV1, SemanticActivationCoordinationErrorV1> {
+    let material = tracedecay_search_eval::load_default_evaluated_profile_material(
+        "query-fallback",
+    )
+    .map_err(|error| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "query fallback material is unavailable: {error}"
+        ))
+    })?;
+    let evaluation =
+        PassingRetrievalEvaluationV1::from_report(report, "query-fallback").map_err(|error| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "semantic evaluation report does not certify its query fallback: {error}"
+            ))
+        })?;
+    let evaluation_anchor = evaluation.evaluation_anchor().clone();
+    let profile = FusionProfile {
+        evaluation_result_anchor: evaluation_anchor.clone(),
+        ..material.profile
+    };
+    let diversity = DiversityPolicy {
+        evaluation_result_anchor: Some(evaluation_anchor),
+        ..material.diversity
+    };
+    let accepted_profile = AcceptedRetrievalProfileV1::new(
+        profile,
+        diversity,
+        None,
+        RetrievalCompatibilityPinsV1::default(),
+        evaluation,
+    )
+    .map_err(|error| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+            "query fallback cannot be accepted: {error}"
+        ))
+    })?;
+    let accepted_runtime = RetrievalRuntimeCompatibilityV1 {
+        retrieval_ceiling: observed_runtime.retrieval_ceiling,
+        semantic: None,
+        semantic_ceiling: None,
+        rerank: None,
+        rerank_ceiling: None,
+    };
+    accepted_profile
+        .executable_under(&accepted_runtime)
+        .map_err(|error| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "query fallback is not executable under the verified runtime: {error}"
+            ))
+        })?;
+    Ok(PreparedQueryFallbackPublicationV1 {
         accepted_profile,
         accepted_runtime,
     })
@@ -1514,23 +1610,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_packaged_publication_denies_missing_genuine_package_without_evaluator() {
-        let mut candidate = query_candidate();
-        candidate.compatibility.semantic = Some(semantic_compatibility(semantic_resources(10)));
-        let mut snapshot = query_snapshot(&candidate);
-        snapshot.runtime.semantic = candidate.compatibility.semantic.clone();
-        let candidate = candidate_rebound_to_snapshot_runtime(candidate, &snapshot)
-            .expect("current semantic snapshot rebinds the candidate");
-        let expectations = native_qualification_expectations(&snapshot, &candidate)
-            .expect("runtime pins produce native qualification expectations");
-
-        assert!(matches!(
-            qualified_default_activation_candidate(&expectations),
-            Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable)
-        ));
-    }
-
-    #[test]
     fn measured_report_resources_replace_semantic_pins_but_retain_configured_ceiling() {
         let measured = semantic_resources(10);
         let configured_ceiling = semantic_resources(20);
@@ -1560,6 +1639,39 @@ mod tests {
 
         assert_eq!(runtime.semantic, Some(accepted_semantic));
         assert_eq!(runtime.semantic_ceiling, Some(configured_ceiling));
+    }
+
+    #[test]
+    fn packaged_semantic_pass_prepares_the_exact_query_fallback() {
+        let qualification: tracedecay_search_eval::PackagedNativeQualificationV1 =
+            serde_json::from_slice(tracedecay_search_eval::packaged_native_qualification_bytes())
+                .expect("reviewed packaged qualification");
+        let material =
+            tracedecay_search_eval::load_default_evaluated_profile_material(EVALUATED_PROFILE_ID)
+                .expect("checked-in query fallback material");
+        let observed_runtime = RetrievalRuntimeCompatibilityV1 {
+            retrieval_ceiling: material.profile.retrieval_budget,
+            semantic: Some(semantic_compatibility(semantic_resources(10))),
+            semantic_ceiling: Some(semantic_resources(20)),
+            rerank: None,
+            rerank_ceiling: None,
+        };
+
+        let prepared = prepare_query_fallback_publication(
+            &qualification.portable_evidence.report,
+            &observed_runtime,
+        )
+        .expect("the reviewed semantic pass also certifies its query baseline");
+
+        assert!(prepared.accepted_profile.is_exact_query_fallback());
+        assert_eq!(prepared.accepted_runtime.semantic, None);
+        assert_eq!(prepared.accepted_runtime.semantic_ceiling, None);
+        assert_eq!(prepared.accepted_runtime.rerank, None);
+        assert_eq!(prepared.accepted_runtime.rerank_ceiling, None);
+        prepared
+            .accepted_profile
+            .executable_under(&prepared.accepted_runtime)
+            .expect("the baseline is executable under its retained runtime");
     }
 
     async fn operation_for_publish_test() -> ProductionSemanticConfigurationOperationV1 {
