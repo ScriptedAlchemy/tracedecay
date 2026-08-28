@@ -2519,3 +2519,9 @@ fn parallel_and_sequential_generations_are_byte_identical() {
 fn parallel_and_sequential_decodes_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_decodes_are_byte_identical();
 }
+
+#[test]
+#[ignore = "sealed-decode measurement harness; run one width per process, see fn docs"]
+fn sealed_decode_width_probe() {
+    parallel_equivalence::run_sealed_decode_width_probe();
+}
