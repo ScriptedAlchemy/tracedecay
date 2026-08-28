@@ -1334,34 +1334,72 @@ impl ProductionSemanticRuntimeV1 {
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<SemanticVerifiedEvaluationTargetSnapshotV1, SemanticRuntimeBackendErrorV1> {
         check_evaluation_cancellation(cancellation.as_ref())?;
-        let measured_maximum_distance_micros =
-            self.measured_acceptance_distance_micros(candidate).await;
-        let certified = certify_evaluation_target_compatibility(
-            candidate,
-            source_generation,
-            source_manifest_digest,
-            capability_manifest_digest,
-            measured_maximum_distance_micros,
-        )?;
-        validate_evaluation_target_search_index(&certified.search_index_key)?;
-        let verified = self
-            .inspect_compatible_current_generation_snapshot(
+        let measured_maximum_distance_micros = hotpath::future!(
+            self.measured_acceptance_distance_micros(candidate),
+            label = "semantic.evaluation.snapshot.acceptance_distance"
+        )
+        .await;
+        let certified = hotpath::measure_block!(
+            "semantic.evaluation.snapshot.certify_compatibility",
+            certify_evaluation_target_compatibility(
+                candidate,
+                source_generation,
+                source_manifest_digest,
+                capability_manifest_digest,
+                measured_maximum_distance_micros,
+            )
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "certify_compatibility",
+                outcome = semantic_runtime_backend_outcome(error),
+            );
+            error
+        })?;
+        hotpath::measure_block!(
+            "semantic.evaluation.snapshot.validate_search_index",
+            validate_evaluation_target_search_index(&certified.search_index_key)
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "validate_search_index",
+                outcome = semantic_runtime_backend_outcome(error),
+            );
+            error
+        })?;
+        let verified = hotpath::future!(
+            self.inspect_compatible_current_generation_snapshot(
                 &certified,
                 source_generation,
                 source_manifest_digest,
-            )
-            .await?;
+            ),
+            label = "semantic.evaluation.snapshot.verify_generation"
+        )
+        .await?;
         check_evaluation_cancellation(cancellation.as_ref())?;
         if verified.vector_generation_id != certified.vector_generation_id {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
-        let lifecycle_verification = self.evaluation_lifecycle_verification(
-            certified,
-            source_generation.clone(),
-            source_manifest_digest.clone(),
-            capability_manifest_digest.clone(),
-            verified.vector_state_revision,
-        )?;
+        let lifecycle_verification = hotpath::measure_block!(
+            "semantic.evaluation.snapshot.verify_lifecycle",
+            self.evaluation_lifecycle_verification(
+                certified,
+                source_generation.clone(),
+                source_manifest_digest.clone(),
+                capability_manifest_digest.clone(),
+                verified.vector_state_revision,
+            )
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "verify_lifecycle",
+                outcome = semantic_runtime_backend_outcome(error),
+            );
+            error
+        })?;
         Ok(SemanticVerifiedEvaluationTargetSnapshotV1 {
             semantic_compatibility: lifecycle_verification.compatibility.clone(),
             vector_state_revision: verified.vector_state_revision,
@@ -2710,6 +2748,14 @@ fn lifecycle_publication_error(
         | tracedecay_semantic::ModelLifecycleErrorV1::ArtifactImport(_) => {
             SemanticRuntimeBackendErrorV1::Unavailable
         }
+    }
+}
+
+const fn semantic_runtime_backend_outcome(error: SemanticRuntimeBackendErrorV1) -> &'static str {
+    match error {
+        SemanticRuntimeBackendErrorV1::Unavailable => "unavailable",
+        SemanticRuntimeBackendErrorV1::Rejected => "rejected",
+        SemanticRuntimeBackendErrorV1::Conflict => "conflict",
     }
 }
 
