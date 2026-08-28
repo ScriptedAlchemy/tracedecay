@@ -1635,7 +1635,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
+async fn linked_worktree_root_is_admitted_for_explicit_first_touch_init() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let primary = root.join("primary");
@@ -1668,22 +1668,20 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
         ..test_handshake_defaults()
     };
 
-    let error = match engine.project_server(&handshake).await {
-        Ok(_) => panic!("linked worktree must not claim first-touch project authority"),
-        Err(error) => error,
-    };
-
-    assert_missing_enrollment_admission(&error);
+    engine
+        .ensure_registered_project_route(&linked, handshake.allow_init)
+        .await
+        .expect("explicit init must admit a linked worktree repository root");
     assert_eq!(
         engine
             .project_open_attempts
             .load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "linked first-touch rejection must precede project opening"
+        "admission alone must not start project opening"
     );
     assert!(
         !linked.join(".tracedecay").exists(),
-        "rejection must not write linked-worktree project state"
+        "admission must not write linked-worktree project state"
     );
 }
 
