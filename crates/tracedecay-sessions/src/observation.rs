@@ -28,18 +28,42 @@ use tracedecay_runtime_core::privacy::{
 };
 
 /// Cloneable, operation-local cancellation shared by application adapters.
+///
+/// The flag is the authority: blocking and synchronous runtimes poll it, and
+/// it is what every `is_cancelled()` check reads. The notify beside it exists
+/// only so an *awaiting* caller — one parked on a lock or a channel rather
+/// than running — is woken instead of discovering the cancellation after its
+/// wait finally completes.
 #[derive(Clone, Debug, Default)]
 pub struct ObservationCancellation {
     cancelled: Arc<AtomicBool>,
+    signal: Arc<tokio::sync::Notify>,
 }
 
 impl ObservationCancellation {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.signal.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Resolves once this operation is cancelled, immediately if it already
+    /// was.
+    ///
+    /// The waiter is registered *before* the flag is re-read, so a `cancel()`
+    /// landing between the two cannot be missed: either the read observes it
+    /// or the already-registered waiter is notified.
+    pub async fn cancelled(&self) {
+        let notified = self.signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 
     /// Carries this exact operation cancellation into verified graph
@@ -47,6 +71,13 @@ impl ObservationCancellation {
     /// durable head-CAS commit point.
     pub(crate) fn verified_graph_cancellation(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancelled)
+    }
+
+    /// Borrows the shared cancellation flag for a blocking runtime whose
+    /// contract polls the flag itself instead of awaiting a signal (for
+    /// example the background-CPU admission gate).
+    pub fn cancellation_flag(&self) -> &AtomicBool {
+        &self.cancelled
     }
 }
 
