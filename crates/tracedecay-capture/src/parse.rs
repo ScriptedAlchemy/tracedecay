@@ -185,12 +185,14 @@ pub fn parse_observation_record_v1(
     source_range: ClaudeByteRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
-    parse_observation_record(
+    let parsed = parse_observation_record(
         record,
         source_range,
         ordering_domain,
         ParseLimits::default_policy(),
-    )
+    );
+    record_decode_outcome(parsed.is_ok());
+    parsed
 }
 
 /// Decodes one bounded native JSON record, consumes that decoded value in a
@@ -213,8 +215,18 @@ pub fn parse_normalized_observation_record_v1(
     )
 }
 
-#[hotpath::measure(label = "capture.parse.prepare_record")]
 pub fn prepare_observation_record_v1(
+    record: &[u8],
+    source_range: ClaudeByteRangeV1,
+    ordering_domain: ObservationOrderingDomainV1,
+) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
+    let prepared = prepare_observation_record(record, source_range, ordering_domain);
+    record_decode_outcome(prepared.is_ok());
+    prepared
+}
+
+#[hotpath::measure(label = "capture.parse.prepare_record")]
+fn prepare_observation_record(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
@@ -302,8 +314,21 @@ fn parse_observation_record(
     })
 }
 
+/// Decode-phase entry/failure tally shared by every host record pipeline.
+/// Refused records are counted too: corpus-scale waste hides in lines that are
+/// read and rejected, which success-only counters never show.
+fn record_decode_outcome(decoded: bool) {
+    if decoded {
+        hotpath::gauge!("capture.parse.records").inc(1u64);
+    } else {
+        hotpath::gauge!("capture.parse.failures").inc(1u64);
+    }
+}
+
 fn record_digest(record: &[u8]) -> [u8; 32] {
-    hotpath::gauge!("capture.parse.record_bytes").set(record.len());
+    // Cumulative decoded bytes across every host pipeline, not a last-record
+    // sample — corpus-scale throughput is the quantity being compared.
+    hotpath::gauge!("capture.parse.record_bytes").inc(record.len());
     hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
 }
 
