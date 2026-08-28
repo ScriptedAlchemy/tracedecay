@@ -61,11 +61,31 @@ pub enum ConfigurationRegistryError {
         maximum: u64,
         actual: u64,
     },
+    #[error("setting {key} payload is invalid: {reason}")]
+    InvalidSettingPayload {
+        key: SettingKey,
+        reason: InvalidSettingPayloadReason,
+    },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
         key: SettingKey,
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1,
     },
+}
+
+/// Static, field-level reason a typed setting payload was refused.
+///
+/// Variants never carry caller-supplied text, paths, or model ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum InvalidSettingPayloadReason {
+    #[error("malformed json")]
+    MalformedJson,
+    #[error("unknown field")]
+    UnknownField,
+    #[error("invalid artifact_digest")]
+    InvalidArtifactDigest,
+    #[error("invalid payload")]
+    InvalidPayload,
 }
 
 /// Immutable mapping of every supported setting to its typed definition.
@@ -310,6 +330,9 @@ impl ConfigurationRegistry {
                     actual: *actual,
                 });
             }
+        }
+        if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY {
+            validate_semantic_runtime_payload(key, value)?;
         }
         Ok(())
     }
@@ -675,6 +698,62 @@ fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
 }
 
+fn validate_semantic_runtime_payload(
+    key: &SettingKey,
+    value: &ConfigurationValueV1,
+) -> Result<(), ConfigurationRegistryError> {
+    let ConfigurationValueV1::Text(payload) = value else {
+        return Err(ConfigurationRegistryError::ValueKindMismatch {
+            key: key.clone(),
+            expected: ConfigurationValueKindV1::Text,
+            actual: value.kind(),
+        });
+    };
+    let parsed = serde_json::from_str::<SemanticConfig>(payload).map_err(|error| {
+        ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: classify_semantic_json_error(&error),
+        }
+    })?;
+    if semantic_config_has_invalid_artifact_digest(&parsed) {
+        return Err(ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
+        });
+    }
+    parsed
+        .validate()
+        .map_err(|_| ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: InvalidSettingPayloadReason::InvalidPayload,
+        })
+}
+
+fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayloadReason {
+    if error.is_syntax() || error.is_eof() {
+        return InvalidSettingPayloadReason::MalformedJson;
+    }
+    if error.is_data() && error.to_string().starts_with("unknown field") {
+        return InvalidSettingPayloadReason::UnknownField;
+    }
+    if error.is_data() {
+        InvalidSettingPayloadReason::InvalidPayload
+    } else {
+        InvalidSettingPayloadReason::MalformedJson
+    }
+}
+
+fn semantic_config_has_invalid_artifact_digest(config: &SemanticConfig) -> bool {
+    config
+        .active_profile
+        .as_ref()
+        .into_iter()
+        .chain(config.rollback_profile.as_ref())
+        .any(|profile| {
+            !tracedecay_domain::canonical_text::is_lowercase_hex(&profile.artifact_digest, 64)
+        })
+}
+
 #[cfg(test)]
 mod proximity_threshold_tests {
     use super::*;
@@ -906,5 +985,131 @@ mod context_scout_tests {
         );
         assert_eq!(settings.model_path, None);
         settings.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod semantic_runtime_payload_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::configuration::semantic::{
+        DEFAULT_FASTEMBED_MODEL_ID, SemanticProfileSelection, SemanticResourceCeilings,
+    };
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES;
+
+    fn semantic_runtime_key() -> SettingKey {
+        SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime key")
+    }
+
+    fn realistic_activation_config() -> SemanticConfig {
+        let artifact_digest = "ab".repeat(32);
+        SemanticConfig {
+            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            auto_download: true,
+            active_profile: Some(SemanticProfileSelection {
+                profile_id: "jina-embeddings-v2-base-code".to_owned(),
+                accepted_profile_digest: ManifestDigest::new(format!("sha256:{artifact_digest}"))
+                    .expect("accepted profile digest"),
+                artifact_digest,
+                artifact_path: PathBuf::from(concat!(
+                    "/var/lib/tracedecay/semantic-models/",
+                    "jina-embeddings-v2-base-code/",
+                    "revision-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+                    "onnx/model.onnx"
+                )),
+            }),
+            rollback_profile: None,
+            resources: SemanticResourceCeilings {
+                max_model_bytes: 700 * 1024 * 1024,
+                max_tokenizer_bytes: 64 * 1024 * 1024,
+                max_resident_bytes: 2 * 1024 * 1024 * 1024,
+                max_threads: 8,
+                max_concurrent_sessions: 4,
+                max_batch_size: 32,
+                max_sequence_length: 512,
+                load_deadline_ms: 30_000,
+            },
+        }
+    }
+
+    fn encoded_activation_payload() -> String {
+        let encoded =
+            serde_json::to_string(&realistic_activation_config()).expect("semantic runtime JSON");
+        assert!(
+            encoded.len() > CANONICAL_TEXT_MAX_BYTES,
+            "activation payload must exceed the 512-byte label bound, got {}",
+            encoded.len()
+        );
+        encoded
+    }
+
+    #[test]
+    fn semantic_runtime_accepts_a_realistic_activation_payload() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let payload = encoded_activation_payload();
+        registry
+            .validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            )
+            .expect("realistic semantic.runtime.v1 payload");
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_malformed_json() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text("{".to_owned()),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::MalformedJson,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_an_unknown_field() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let mut document = serde_json::to_value(realistic_activation_config()).expect("json value");
+        document
+            .as_object_mut()
+            .expect("object")
+            .insert("unexpected_field".to_owned(), serde_json::json!(true));
+        let payload = serde_json::to_string(&document).expect("unknown-field JSON");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::UnknownField,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_an_invalid_artifact_digest() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let mut config = realistic_activation_config();
+        if let Some(profile) = config.active_profile.as_mut() {
+            profile.artifact_digest = "0".repeat(63);
+        }
+        let payload = serde_json::to_string(&config).expect("invalid digest JSON");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
+                ..
+            })
+        ));
     }
 }
