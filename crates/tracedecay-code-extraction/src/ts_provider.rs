@@ -215,8 +215,10 @@ fn parse_extractor_source_inner(
                 .ok_or_else(|| "tree-sitter parse returned None".to_string())
         },
         |result| match result {
-            Ok(tree) => tree.root_node().named_child_count(),
-            Err(_) => 0,
+            Ok(tree) => {
+                crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
+            }
+            Err(_) => crate::hotpath_observe::ParseFileOutcome::NoTree,
         },
     )
 }

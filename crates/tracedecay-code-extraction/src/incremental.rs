@@ -673,8 +673,11 @@ fn parse_with_deadline(
         source.len(),
         || parse_with_deadline_unmeasured(parser, source, old_tree, limits),
         |result| match result {
-            Ok((tree, _)) => tree.root_node().named_child_count(),
-            Err(_) => 0,
+            Ok((tree, _)) => {
+                crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
+            }
+            Err(ParseError::TimedOut { .. }) => crate::hotpath_observe::ParseFileOutcome::TimedOut,
+            Err(_) => crate::hotpath_observe::ParseFileOutcome::NoTree,
         },
     )
 }
