@@ -1137,16 +1137,20 @@ impl GraphDbRegistry {
         // the manifest was proven to bind that replay's digests when it was
         // decoded above, so the stored rows verify directly against the head
         // digest without canonicalizing the full manifest a second time.
-        match verify_recovered_generation(native, &identity, &head.recovered_digest, &check) {
+        // Through the marker-aware entry point, not the free function: an
+        // open over container bytes an earlier open already proved resolves
+        // by stat instead of re-streaming every row, and either outcome is
+        // recorded. Corruption still fails here exactly as the full proof
+        // would - `expected` comes from the relational head, never a marker.
+        drop(guard);
+        match database.verify_activated_generation(&identity, &head.recovered_digest, &check) {
             Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
-                drop(guard);
                 database.quarantine_generation(&identity)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
         }
-        drop(guard);
         // Recovery adopts a matching sealed compact artifact from disk when
         // one exists; anything stale or unreadable is discarded and reads
         // stay on the staging rows just verified above.
@@ -1592,6 +1596,9 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        // Discard what the fixture's own publication proved; only the
+        // operation under test is being counted.
+        let _ = crate::take_graph_db_verification_counters();
         reset_sealed_copy_proofs();
         let first = registry
             .publish_verified(
@@ -1650,6 +1657,9 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        // Discard what the fixture's own publication proved; only the
+        // operation under test is being counted.
+        let _ = crate::take_graph_db_verification_counters();
         reset_sealed_copy_proofs();
         let republished = fixture
             .registry
@@ -1686,6 +1696,9 @@ mod historical_publication_reuse_tests {
         drop(seated);
 
         reset_recovered_generation_enumerations();
+        // Discard what the fixture's own publication proved; only the
+        // operation under test is being counted.
+        let _ = crate::take_graph_db_verification_counters();
         let recovered = fixture
             .registry
             .recover_verified_snapshot(
@@ -1721,6 +1734,9 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        // Discard what the fixture's own publication proved; only the
+        // operation under test is being counted.
+        let _ = crate::take_graph_db_verification_counters();
         let resumed = fixture
             .registry
             .publish_verified(
@@ -1733,10 +1749,20 @@ mod historical_publication_reuse_tests {
             .unwrap();
         assert_eq!(resumed.head, fixture.head);
         assert_eq!(resumed.snapshot.generation(), &fixture.generation);
+        // One proof, whichever kind. Before the duplicate-proof fix this
+        // enumerated the stored rows twice; since verify-once, an open over
+        // unchanged container bytes settles it by stat instead. Either way the
+        // invariant under test is that the work happens exactly once.
+        let counters = crate::take_graph_db_verification_counters();
+        assert_eq!(
+            counters.full_verifications + counters.marker_hits,
+            1,
+            "a fresh-from-disk republication must prove the generation exactly once, not twice"
+        );
         assert_eq!(
             recovered_generation_enumerations(),
-            1,
-            "a fresh-from-disk republication must stream the full proof exactly once, not twice"
+            usize::from(counters.full_verifications == 1),
+            "row enumeration must happen only when the proof was not inherited"
         );
     }
 
@@ -1756,6 +1782,9 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        // Discard what the fixture's own publication proved; only the
+        // operation under test is being counted.
+        let _ = crate::take_graph_db_verification_counters();
         let recovered = fixture
             .registry
             .recover_verified_snapshot(
@@ -1767,10 +1796,20 @@ mod historical_publication_reuse_tests {
             .unwrap();
         assert_eq!(recovered.generation(), &fixture.generation);
         assert_eq!(recovered.verified_head(), &fixture.head);
+        // A fresh-from-disk open must still *prove* the generation before
+        // serving it. Since verify-once that proof may be inherited from a
+        // marker over the same container bytes rather than re-streamed; what
+        // must never happen is serving with no proof at all.
+        let counters = crate::take_graph_db_verification_counters();
+        assert_eq!(
+            counters.full_verifications + counters.marker_hits,
+            1,
+            "a genuinely fresh-from-disk open must resolve the recovered-digest proof exactly once"
+        );
         assert_eq!(
             recovered_generation_enumerations(),
-            1,
-            "a genuinely fresh-from-disk open must pay the full recovered-digest proof"
+            usize::from(counters.full_verifications == 1),
+            "row enumeration must happen only when the proof was not inherited"
         );
     }
 }

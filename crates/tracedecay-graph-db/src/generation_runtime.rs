@@ -241,6 +241,42 @@ impl GraphDb {
         reopen_fallback: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
+        // Cheapest proof first: a marker filed by an earlier open of these
+        // exact container bytes. `expected` still comes from the relational
+        // authority, so a marker can only assert freshness - it can neither
+        // name which generation is served nor make a wrong digest pass, and
+        // corruption stays a typed failure from the full proof below. This is
+        // the mount point for the verify-once path; without it the marker set
+        // is written at close and never consulted, because publication routes
+        // through here rather than through `verify_activated_generation`.
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {
+            check()?;
+            let physical_namespace = identity.physical_namespace()?;
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            let commit = latest_projection(
+                database,
+                &physical_namespace,
+                &identity.projection.projection,
+            )?
+            .ok_or_else(|| {
+                GraphDbError::unavailable(
+                    "verified graph generation has no complete native generation rows",
+                )
+            })?
+            .commit;
+            drop(guard);
+            // Carry the inherited proof into this open's published set, so a
+            // daemon that only serves reads does not drop it at close.
+            self.inner.markers.record_fresh(&locator);
+            crate::hotpath_observe::record_generation_verification(
+                GenerationVerification::VerifiedFresh,
+                canonical_bytes,
+            );
+            return Ok((commit, expected.clone()));
+        }
         if self.ensure_sealed_generation_store(identity, expected, check)? {
             check()?;
             let physical_namespace = identity.physical_namespace()?;

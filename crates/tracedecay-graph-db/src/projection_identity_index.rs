@@ -126,17 +126,28 @@ impl IdentityIndexCache {
         cancellation: &dyn GraphCancellation,
     ) -> Result<Option<Arc<ProjectionIdentityIndex>>, GraphDbError> {
         let epoch = self.epoch.load(Ordering::Acquire);
-        let owner_node_count =
-            nodes_with_label_count(database.graph_store().as_ref(), scope.owner_label);
         let key = IdentityIndexKey {
             owner_label: scope.owner_label.to_owned(),
             record_label: scope.record_label.to_owned(),
             identity_property: scope.identity_property.to_owned(),
         };
 
-        if let Some(index) = self.cached(&key, epoch, owner_node_count)? {
+        // The epoch alone authorizes a hit. Every mutation path acquires the
+        // database write guard and every acquisition site invalidates this
+        // cache, so a matching epoch already proves the store's nodes are the
+        // ones this index was built from. The cardinality re-check that used
+        // to run here walked `all_labels()` and split every key on the
+        // composite separator - O(label universe) per page, which made the
+        // catalog warm quadratic again once paging itself was O(page): 1079
+        // counts x 633ms measured against a 430k-chunk generation. The count
+        // is still computed on the miss path below and retained on the entry,
+        // so a rebuilt index reports the cardinality it was built from.
+        if let Some(index) = self.cached(&key, epoch)? {
             return Ok(Some(index));
         }
+
+        let owner_node_count =
+            nodes_with_label_count(database.graph_store().as_ref(), scope.owner_label);
 
         let Some(index) = build_identity_index(database, scope, owner_node_count, cancellation)?
         else {
@@ -166,7 +177,6 @@ impl IdentityIndexCache {
         &self,
         key: &IdentityIndexKey,
         epoch: u64,
-        owner_node_count: usize,
     ) -> Result<Option<Arc<ProjectionIdentityIndex>>, GraphDbError> {
         let entries = self
             .entries
@@ -175,11 +185,7 @@ impl IdentityIndexCache {
         if entries.epoch != epoch {
             return Ok(None);
         }
-        Ok(entries
-            .indexes
-            .get(key)
-            .filter(|index| index.owner_node_count == owner_node_count)
-            .map(Arc::clone))
+        Ok(entries.indexes.get(key).map(Arc::clone))
     }
 }
 
