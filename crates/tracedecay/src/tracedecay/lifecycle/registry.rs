@@ -63,6 +63,7 @@ fn artifact_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 impl TraceDecay {
+    #[hotpath::measure(label = "lifecycle.register_project_store", future = true)]
     pub(crate) async fn register_project_store_in_global_registry(&self) -> Result<()> {
         static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

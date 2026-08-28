@@ -54,6 +54,7 @@ impl VerifiedGraphQuery {
         Arc::clone(&self.cancellation)
     }
 
+    #[hotpath::measure(label = "graph.query.dead_code", future = true)]
     pub(crate) async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
@@ -65,10 +66,12 @@ impl VerifiedGraphQuery {
             .await
     }
 
+    #[hotpath::measure(label = "graph.query.circular", future = true)]
     pub(crate) async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
         self.manager().find_circular_dependencies().await
     }
 
+    #[hotpath::measure(label = "graph.query.file_adjacency", future = true)]
     pub(crate) async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
@@ -354,6 +357,7 @@ fn graph_corrupt(detail: &str) -> crate::errors::TraceDecayError {
 }
 
 impl TraceDecay {
+    #[hotpath::measure(label = "graph.query.open_verified", future = true)]
     pub(crate) async fn open_verified_graph_query(
         &self,
         projection: &dyn CodeGraphProjectionReadPort,

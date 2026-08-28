@@ -44,6 +44,7 @@ impl TraceDecay {
     /// Code-index generations are immutable and refreshed by the daemon-owned
     /// scheduler. Crash reconciliation therefore verifies the transaction's
     /// byte authority here instead of mutating the retired root graph store.
+    #[hotpath::measure(label = "edits.commit_postimages", future = true)]
     pub(crate) async fn commit_source_edit_postimages(
         &self,
         files: &[PlannedSourceEditFile],
@@ -64,6 +65,7 @@ impl TraceDecay {
     }
 }
 
+#[hotpath::measure(label = "edits.rollback_planned_files")]
 pub(in crate::tracedecay) fn rollback_planned_source_edit_files(
     project_root: &Path,
     files: &[PlannedSourceEditFile],
@@ -99,6 +101,7 @@ pub(in crate::tracedecay) fn rollback_planned_source_edit_files(
     Ok(())
 }
 
+#[hotpath::measure(label = "edits.publish_planned")]
 pub(in crate::tracedecay) fn publish_planned_source_edit(
     project_root: &Path,
     relative_path: &str,

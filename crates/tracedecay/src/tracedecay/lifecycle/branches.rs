@@ -27,6 +27,7 @@ impl TraceDecay {
     /// canonical main database; the branch argument only decides which
     /// tracked branch's provenance the open is scoped to and whether the
     /// caller must be warned about a fallback.
+    #[hotpath::measure(label = "lifecycle.resolve_db_for_branch")]
     pub(crate) fn resolve_db_for_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
@@ -120,6 +121,7 @@ impl TraceDecay {
 
     /// Opens a tracked branch through the canonical registered runtime while
     /// the caller holds the exact profile's exclusive maintenance lease.
+    #[hotpath::measure(label = "lifecycle.open_branch.exclusive", future = true)]
     pub async fn open_branch_with_exclusive_maintenance(
         project_root: &Path,
         branch_name: &str,
@@ -165,6 +167,7 @@ impl TraceDecay {
         .await
     }
 
+    #[hotpath::measure(label = "lifecycle.open_branch.registered", future = true)]
     pub(crate) async fn open_branch_with_registered_configuration(
         project_root: &Path,
         branch_name: &str,

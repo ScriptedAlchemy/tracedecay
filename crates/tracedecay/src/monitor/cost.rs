@@ -225,6 +225,7 @@ async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<s
     crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
+#[hotpath::measure(label = "doctor.monitor.cost.fetch", future = true)]
 async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
     let handshake = global_cost_handshake()?;
     let fetch = async {

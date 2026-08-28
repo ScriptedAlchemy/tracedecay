@@ -98,6 +98,7 @@ impl TraceDecay {
 
     /// Performs a single string replacement.
     /// Fails if `old_str` is not found or matches more than once.
+    #[hotpath::measure(label = "edits.str_replace", future = true)]
     pub(crate) async fn str_replace(
         &self,
         path: &str,
@@ -173,6 +174,7 @@ impl TraceDecay {
 
     /// Applies multiple string replacements atomically.
     /// Fails if any `old_str` doesn't match exactly once.
+    #[hotpath::measure(label = "edits.multi_str_replace", future = true)]
     pub(crate) async fn multi_str_replace(
         &self,
         path: &str,
@@ -290,6 +292,7 @@ impl TraceDecay {
 
     /// Inserts content before or after a unique anchor.
     /// Anchor can be a string or 1-indexed line number.
+    #[hotpath::measure(label = "edits.insert_at", future = true)]
     pub(crate) async fn insert_at(
         &self,
         path: &str,
@@ -405,6 +408,7 @@ impl TraceDecay {
     /// match — if the name is ambiguous, callable definitions win; if still
     /// ambiguous after that filter, the edit is refused so we don't clobber
     /// the wrong site.
+    #[hotpath::measure(label = "edits.replace_symbol", future = true)]
     pub(crate) async fn replace_symbol(
         &self,
         graph: SourceEditGraphReadV1,
@@ -473,6 +477,7 @@ impl TraceDecay {
     /// Inserts `content` immediately before or after a named symbol. `position`
     /// is one of `"before"` or `"after"`. Uses the same resolution logic as
     /// `replace_symbol`.
+    #[hotpath::measure(label = "edits.insert_at_symbol", future = true)]
     pub(crate) async fn insert_at_symbol(
         &self,
         graph: SourceEditGraphReadV1,

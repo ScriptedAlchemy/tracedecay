@@ -30,6 +30,7 @@ pub(in crate::tracedecay) struct SourceEditFileAuthority {
 }
 
 impl SourceEditFileAuthority {
+    #[hotpath::measure(label = "edits.file_authority.open")]
     pub(in crate::tracedecay) fn open(project_root: &Path, relative: &Path) -> Result<Self> {
         let relative = normalize_source_edit_relative_path(relative)?;
         let root = Dir::open_ambient_dir(project_root, ambient_authority())
@@ -183,6 +184,7 @@ impl SourceEditFileAuthority {
         Ok(())
     }
 
+    #[hotpath::measure(label = "edits.file_authority.publish")]
     pub(super) fn publish(
         &self,
         relative_path: &str,
@@ -289,6 +291,7 @@ impl SourceEditFileAuthority {
         })
     }
 
+    #[hotpath::measure(label = "edits.file_authority.remove")]
     pub(super) fn remove(
         &self,
         relative_path: &str,

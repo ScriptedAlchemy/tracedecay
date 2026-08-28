@@ -17,6 +17,7 @@ use super::preview::edit_success_message;
 
 impl TraceDecay {
     /// Performs structural rewrite using ast-grep CLI.
+    #[hotpath::measure(label = "edits.ast_grep_rewrite", future = true)]
     pub(crate) async fn ast_grep_rewrite(
         &self,
         path: &str,

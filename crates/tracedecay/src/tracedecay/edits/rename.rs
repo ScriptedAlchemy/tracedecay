@@ -264,6 +264,7 @@ fn resolve_graph_site(
 }
 
 impl TraceDecay {
+    #[hotpath::measure(label = "edits.rename_symbol", future = true)]
     pub(crate) async fn rename_symbol(
         &self,
         graph: SourceEditGraphReadV1,
