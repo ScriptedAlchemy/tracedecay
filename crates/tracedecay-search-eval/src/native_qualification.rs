@@ -10,7 +10,11 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use flate2::{
+    Compression,
+    read::{GzDecoder, ZlibDecoder},
+    write::ZlibEncoder,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -33,11 +37,18 @@ const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
 const DAEMON_NATIVE_QUALIFICATION_BLOB_MAGIC: &[u8] = b"tracedecay.native-qualification.zlib.v1\0";
 const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
-// Qualification bytes remain unavailable until a genuine native run has
-// produced a reviewed report. An empty slice is an unavailable artifact, never
-// a synthetic qualification, and is rejected before JSON decoding.
-const PACKAGED_NATIVE_QUALIFICATION_BYTES: &[u8] = &[];
-const PACKAGED_NATIVE_QUALIFICATION_SHA256: Option<&str> = None;
+// This checked-in gzip is generated only from a genuine `qualify-native` run.
+// The decoded canonical JSON remains the validation authority; compression
+// keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
+const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
+    include_bytes!("../assets/native-qualification-v1.json.gz");
+const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_659_749;
+const PACKAGED_NATIVE_QUALIFICATION_SHA256: &str =
+    "sha256:72647e4ec74b3ac4e95a962a7265ca4274247e7f4a8872dc25472f2b8a7a0f3c";
+
+static PACKAGED_NATIVE_QUALIFICATION_CANONICAL: OnceLock<
+    Result<Vec<u8>, PackagedNativeQualificationErrorV1>,
+> = OnceLock::new();
 
 static PACKAGED_NATIVE_QUALIFICATION: OnceLock<
     Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1>,
@@ -619,7 +630,7 @@ pub fn load_packaged_native_qualification_from_bytes(
 
 /// Embedded qualification bytes. Empty means the package makes no claim.
 pub fn packaged_native_qualification_bytes() -> &'static [u8] {
-    PACKAGED_NATIVE_QUALIFICATION_BYTES
+    embedded_qualification_bytes().unwrap_or_default()
 }
 
 /// Load embedded bytes through one process-wide SHA-pinned structural parse,
@@ -627,11 +638,6 @@ pub fn packaged_native_qualification_bytes() -> &'static [u8] {
 pub fn qualified_default_activation_candidate(
     expectations: &NativeQualificationExpectationsV1,
 ) -> Result<PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1> {
-    if PACKAGED_NATIVE_QUALIFICATION_BYTES.is_empty()
-        || PACKAGED_NATIVE_QUALIFICATION_SHA256.is_none()
-    {
-        return Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable);
-    }
     let qualification = PACKAGED_NATIVE_QUALIFICATION
         .get_or_init(load_embedded_qualification)
         .clone()?;
@@ -641,17 +647,42 @@ pub fn qualified_default_activation_candidate(
 
 fn load_embedded_qualification()
 -> Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1> {
-    let expected = PACKAGED_NATIVE_QUALIFICATION_SHA256
-        .ok_or(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable)?;
-    if canonical_sha256(PACKAGED_NATIVE_QUALIFICATION_BYTES) != expected {
+    let canonical = embedded_qualification_bytes()?;
+    if canonical_sha256(canonical) != PACKAGED_NATIVE_QUALIFICATION_SHA256 {
         return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
     }
-    let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(
-        PACKAGED_NATIVE_QUALIFICATION_BYTES,
-    )
-    .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(canonical)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+    if serde_json::to_vec(&qualification)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?
+        != canonical
+    {
+        return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+    }
     validate_document_bindings(&qualification)?;
     Ok(qualification)
+}
+
+fn embedded_qualification_bytes() -> Result<&'static [u8], PackagedNativeQualificationErrorV1> {
+    PACKAGED_NATIVE_QUALIFICATION_CANONICAL
+        .get_or_init(|| {
+            if PACKAGED_NATIVE_QUALIFICATION_GZIP.is_empty() {
+                return Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable);
+            }
+            let mut decoder = GzDecoder::new(PACKAGED_NATIVE_QUALIFICATION_GZIP);
+            let mut canonical = Vec::with_capacity(PACKAGED_NATIVE_QUALIFICATION_BYTES);
+            decoder
+                .by_ref()
+                .take((MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES + 1) as u64)
+                .read_to_end(&mut canonical)
+                .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)?;
+            if canonical.len() != PACKAGED_NATIVE_QUALIFICATION_BYTES {
+                return Err(PackagedNativeQualificationErrorV1::CorruptBytes);
+            }
+            Ok(canonical)
+        })
+        .as_deref()
+        .map_err(Clone::clone)
 }
 
 fn activation_candidate_from_qualification(
@@ -1017,11 +1048,18 @@ mod tests {
     }
 
     #[test]
-    fn package_denies_activation_without_reviewed_native_evidence() {
-        assert!(packaged_native_qualification_bytes().is_empty());
+    fn package_loads_sha_pinned_reviewed_native_evidence() {
+        let bytes = packaged_native_qualification_bytes();
+        assert_eq!(bytes.len(), PACKAGED_NATIVE_QUALIFICATION_BYTES);
+        let qualification = load_embedded_qualification().expect("reviewed qualification");
+        assert_eq!(qualification.schema_version, 1);
         assert_eq!(
-            load_embedded_qualification(),
-            Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable)
+            qualification.qualification_key.evaluated_profile_id,
+            "hybrid-conservative"
+        );
+        assert_eq!(
+            qualification.portable_evidence.report.status,
+            DirectEvaluationStatusV1::Pass
         );
     }
 }
