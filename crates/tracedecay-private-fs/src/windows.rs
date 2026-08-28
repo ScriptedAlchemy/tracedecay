@@ -136,6 +136,7 @@ pub fn current_user_sid_string() -> io::Result<String> {
 }
 
 /// Create one private directory without changing any existing ancestor ACL.
+#[hotpath::measure(label = "private_fs.create_directory")]
 pub fn create_private_directory(path: &Path) -> io::Result<()> {
     with_private_security_attributes(path, PathKind::Directory, |attributes| {
         let absolute = absolute_security_path(path)?;
@@ -174,6 +175,7 @@ pub fn validate_private_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Open an exact protected, inheritable current-user directory.
+#[hotpath::measure(label = "private_fs.open_directory")]
 pub fn open_private_directory(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -197,6 +199,7 @@ pub fn validate_private_file(path: &Path) -> io::Result<()> {
 }
 
 /// Open an existing regular file only after validating its exact ACL.
+#[hotpath::measure(label = "private_fs.open_file")]
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -208,6 +211,7 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Protect an existing regular file through its exact opened handle.
+#[hotpath::measure(label = "private_fs.make_private_file")]
 pub fn make_private_file(path: &Path) -> io::Result<File> {
     let file = open_handle_with_share(
         path,
@@ -242,6 +246,7 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
 
 /// Create a new empty regular file while retaining its exact handle if
 /// post-creation ACL validation fails.
+#[hotpath::measure(label = "private_fs.create_file")]
 pub fn create_private_file_retained(
     path: &Path,
 ) -> Result<File, crate::PrivateFileCreationFailure> {
@@ -262,6 +267,7 @@ pub fn create_private_file_retained(
 }
 
 /// Returns bytes available to the current user at `path` (quota-aware).
+#[hotpath::measure(label = "private_fs.available_space")]
 pub fn available_space(path: &Path) -> io::Result<u64> {
     let encoded = encode_path(path)?;
     let mut available = 0_u64;
