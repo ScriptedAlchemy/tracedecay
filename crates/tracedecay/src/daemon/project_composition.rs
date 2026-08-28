@@ -199,8 +199,41 @@ pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<Path
     tracedecay_sessions::runtime::home_dir()
 }
 
+/// Measured shell over [`production_project_server_inner`]. The body below is
+/// the daemon's largest state machine (~9 MB); `hotpath`'s attribute wrapper
+/// embeds the wrapped future by value, so measuring the body directly inlines
+/// those megabytes into every caller and overflowed a runtime worker's stack
+/// at project mount. Boxing the inner future keeps the measured wrapper (and
+/// every caller) pointer-sized - the `_inner`/`Box::pin` pattern from the
+/// 37MB-future fix.
 #[hotpath::measure(label = "daemon.project.compose.server", future = true)]
 pub(super) async fn production_project_server(
+    store_administration: &StoreAdministration,
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    invocation: &DaemonInvocationState,
+    http_application_registry: &http_application::DaemonHttpApplicationRegistry,
+    canonical_project_path: &Path,
+    handshake: &DaemonHandshake,
+    runtime: ProductionProjectCompositionRuntime,
+    cancellation: &CancellationToken,
+    #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
+) -> Result<ProductionProjectComposition> {
+    Box::pin(production_project_server_inner(
+        store_administration,
+        project_open_gates,
+        invocation,
+        http_application_registry,
+        canonical_project_path,
+        handshake,
+        runtime,
+        cancellation,
+        #[cfg(test)]
+        project_open_attempts,
+    ))
+    .await
+}
+
+async fn production_project_server_inner(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
     invocation: &DaemonInvocationState,

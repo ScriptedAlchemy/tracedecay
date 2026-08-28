@@ -2472,7 +2472,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 entry
             }
         };
-        let worker_loop = async move {
+        // Boxed at definition on purpose: this worker's state machine is the
+        // largest future in the daemon (reconcile + text advance + decode +
+        // activation + swap inline), and an unboxed `let` materializes the
+        // whole machine on the spawning runtime worker's stack before
+        // `tokio::spawn` can move it to the heap - measured tonight as an
+        // instant stack overflow at project mount. `Box::pin` around the
+        // async block constructs it into the allocation instead (the same
+        // pattern as the `_inner` boxed fns from the 37MB-future fix).
+        let worker_loop = Box::pin(async move {
             // Bounded retry state for activating an already-sealed complete
             // generation. The sealed artifact is immutable and retryable, so a
             // retryable activation failure must not fall through into a
@@ -3239,7 +3247,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let _ = result;
             }
-        };
+        });
         let task = tokio::spawn(hotpath::future!(
             worker_loop,
             label = "daemon.code_index.scheduler_worker"
