@@ -273,13 +273,19 @@ async fn configuration_http_sdk(
     .await
     .expect("bind production configuration HTTP service");
     let endpoint = format!("http://{}", service.endpoint());
-    let client = Client::builder(ConnectionMode::local(
-        &endpoint,
-        target.project_id.as_str(),
-        HTTP_AUTH_TOKEN,
-    ))
-    .origin(service.origin())
-    .build()
+    let origin = service.origin().to_owned();
+    let project_id = target.project_id.clone();
+    let client = tokio::task::spawn_blocking(move || {
+        Client::builder(ConnectionMode::local(
+            &endpoint,
+            project_id.as_str(),
+            HTTP_AUTH_TOKEN,
+        ))
+        .origin(origin)
+        .build()
+    })
+    .await
+    .expect("generated SDK client task")
     .expect("generated SDK client");
     (service, client)
 }
