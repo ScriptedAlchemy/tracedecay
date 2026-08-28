@@ -1554,11 +1554,11 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn produce_and_hydrate_flow_canonicalizes_each_digest_once_per_instance() {
-        let manifest = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        let produced = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
         reset_manifest_canonicalizations();
         reset_dependency_closure_canonicalizations();
 
-        let replay = manifest
+        let replay = produced
             .relational_replay(
                 shard(),
                 GraphIdempotencyKey::new("publish:digest-memo").unwrap(),
@@ -1570,8 +1570,8 @@ mod manifest_digest_memo_tests {
         assert_eq!(manifest_canonicalizations(), 1);
         assert_eq!(dependency_closure_canonicalizations(), 1);
 
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
+        let sealed = produced.expected_recovered_digest(&|| Ok(())).unwrap();
+        let dependency_digest = produced.dependency_closure_digest(&|| Ok(())).unwrap();
         assert_eq!(sealed, replay.expected_recovered_digest);
         assert_eq!(dependency_digest, replay.dependency_generation_closure_digest);
         assert_eq!(
