@@ -3155,6 +3155,45 @@ fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
     assert!(active_text_artifact_path(store.path()).is_file());
 }
 
+/// A cold generation must finish text-serving activation in one call.
+///
+/// One bounded advance never finalizes even a small generation, so an
+/// activation that stopped after a single advance always reported typed
+/// warming and never seated the owners it is responsible for. Assert the
+/// activation outcome and the resulting owner readiness -- never elapsed time.
+#[test]
+fn cold_activation_completes_text_serving_in_one_call() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn cold_activation() {}\n"),
+        ("src/second.rs", "pub fn second_unit() -> usize { 2 }\n"),
+        ("src/third.rs", "pub fn third_unit() -> usize { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    assert!(
+        !latest.text_serving_is_ready(),
+        "a freshly published generation must start cold"
+    );
+    latest
+        .activate_text_serving()
+        .expect("cold activation must drive the artifact build to completion");
+    assert!(
+        latest.text_serving_is_ready(),
+        "activation must leave the text serving owners installed"
+    );
+    assert!(
+        !latest.text_serving_needs_work(),
+        "a completed activation must leave no resumable build behind"
+    );
+}
+
 #[test]
 fn corrupt_durable_text_artifact_is_quarantined_and_rebuilt() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn repaired() {}\n")]);
