@@ -151,10 +151,27 @@ impl GraphDbRegistry {
     ) -> Result<GraphDbLeaseV1, GraphDbError> {
         let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let mut state = self.state_lock()?;
+        let requested_shard = &registration.binding().shard_id;
+        // Collected before the mutable borrow so the error can name what *is*
+        // mounted alongside what was asked for.
+        let mounted_shards = state
+            .entries
+            .keys()
+            .map(|shard| format!("{shard:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let entry = state
             .entries
-            .get_mut(&registration.binding().shard_id)
-            .ok_or_else(|| GraphDbError::unavailable("graph runtime is not registered"))?;
+            .get_mut(requested_shard)
+            .ok_or_else(|| {
+                // Name the shard that is missing and the ones that are
+                // mounted: this failure is otherwise indistinguishable from
+                // "the graph is down", when in practice it means the caller
+                // resolved a different shard than the one it attached.
+                GraphDbError::unavailable(format!(
+                    "graph runtime is not registered for shard {requested_shard:?}; mounted shards: [{mounted_shards}]"
+                ))
+            })?;
         match entry {
             super::RegistryEntry::Ready {
                 binding,
