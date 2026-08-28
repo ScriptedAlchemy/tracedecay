@@ -24,6 +24,7 @@ pub mod semantic_vector_native;
 mod state;
 mod traversal;
 mod vector;
+mod verified_marker;
 
 pub use backup::GraphBackupReceipt;
 pub use bundle::{
@@ -94,6 +95,11 @@ pub use registry::{
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
 
+/// What hydration decoded on **this thread** since the last take.
+///
+/// Scoped to the calling thread so that a reading is exactly the work that
+/// thread drove, and a test running in parallel cannot contribute to another
+/// test's counts.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphDbHydrationCounters {
@@ -107,6 +113,34 @@ pub struct GraphDbHydrationCounters {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
     hotpath_observe::take_hydration_counters()
+}
+
+/// How sealed-generation verification resolved on **this thread** since the
+/// last take.
+///
+/// Independent of the Hotpath feature on purpose: a test that asserts a marker
+/// hit skipped the row enumeration must be able to observe that in an ordinary
+/// build.
+///
+/// Scoped to the calling thread so that a reading is exactly the verification
+/// work that thread drove, and a test running in parallel cannot contribute to
+/// another test's counts.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphDbVerificationCounters {
+    /// Generations whose digest a verified-generation marker already proved.
+    pub marker_hits: u64,
+    /// Canonical bytes those marker hits did **not** re-hash.
+    pub marker_hit_bytes: u64,
+    /// Generations whose rows were streamed and hashed in full.
+    pub full_verifications: u64,
+    /// Canonical bytes those full proofs hashed.
+    pub full_verification_bytes: u64,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
+    hotpath_observe::take_verification_counters()
 }
 pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]

@@ -26,6 +26,10 @@ use super::{
 /// from the database, never from an in-memory manifest row. That is what lets
 /// publication release the staged bulk rows before this proof runs.
 ///
+/// Returns the digest and the number of canonical bytes it hashed. The byte
+/// count is what the verify gauge reports and what a verified-generation
+/// marker records, so a later marker hit can report the same magnitude of work
+/// it avoided.
 /// Each row costs exactly one storage load: entities decode straight from
 /// their enumerated node, and relation endpoints memoize their identity refs
 /// so a hub entity resolves once per generation instead of once per incident
@@ -40,7 +44,7 @@ pub(crate) fn recovered_generation_digest_from_database(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<String, GraphDbError> {
+) -> Result<(String, u64), GraphDbError> {
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
     let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
@@ -129,8 +133,9 @@ pub(crate) fn recovered_generation_digest_from_database(
             "recovered generation relation",
         )?;
     }
+    let canonical_bytes = writer.total_bytes();
     writer.finish()?;
-    Ok(encode_lowercase_hex(&digest.finalize()))
+    Ok((encode_lowercase_hex(&digest.finalize()), canonical_bytes))
 }
 
 /// Resolves one relation endpoint to its `GraphEntityRef`, memoized by
@@ -290,7 +295,7 @@ mod tests {
         let guard = database.read_guard().unwrap();
         let native = guard.as_ref().unwrap();
 
-        let streamed =
+        let (streamed, _canonical_bytes) =
             recovered_generation_digest_from_database(native, &manifest.identity(), &|| Ok(()))
                 .unwrap();
 

@@ -37,6 +37,8 @@ mod replay_decode;
 #[cfg(feature = "graph-sealed-store")]
 #[path = "verified_generation_contract/sealed_store.rs"]
 mod sealed_store;
+#[path = "verified_generation_contract/verify_once.rs"]
+mod verify_once;
 mod support;
 
 use support::{RegisteredGraph, TestCancellation, owner_registration, registration};
