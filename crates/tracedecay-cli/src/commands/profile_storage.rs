@@ -364,16 +364,21 @@ async fn brokered_storage_report(
     let mut report = tracedecay::retention::storage_report::StorageReport::default();
     let mut cursor = None;
     for _ in 0..MAX_PAGES {
-        let request = super::daemon::daemon_tool_json(
-            None,
-            "tracedecay_admin_cli",
-            serde_json::json!({
-                "action": "storage_report",
-                "project_id": project_id,
-                "project_root": project_root,
-                "cursor": cursor,
-                "limit": PAGE_LIMIT,
-            }),
+        // One entry per page: the call count exposes how many pages a report
+        // walked, which is what makes a slow storage report diagnosable.
+        let request = hotpath::future!(
+            super::daemon::daemon_tool_json(
+                None,
+                "tracedecay_admin_cli",
+                serde_json::json!({
+                    "action": "storage_report",
+                    "project_id": project_id,
+                    "project_root": project_root,
+                    "cursor": cursor,
+                    "limit": PAGE_LIMIT,
+                }),
+            ),
+            label = "cli.profile_storage.report_page"
         );
         let value = tokio::time::timeout(Duration::from_secs(10), request)
             .await
