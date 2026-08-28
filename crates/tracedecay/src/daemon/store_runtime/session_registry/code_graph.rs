@@ -1661,7 +1661,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let authority = self
             .registry
             .retain_code_graph_store(
-                StoreRuntimeKey::new(project_shard, self.incarnation),
+                StoreRuntimeKey::new(project_shard.clone(), self.incarnation),
                 code_shard.clone(),
                 generation_id.clone(),
             )
@@ -1669,6 +1669,23 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|failure| {
                 session_registry_error("retain exact code graph authority", format!("{failure:?}"))
             })?;
+        // The pre-retain heal above keys the freshly reconstructed project
+        // shard, but every later publish/recover lease keys the registry by
+        // this lease's binding (`registered_database` uses
+        // `registration.binding().shard_id`). A preserved profile or a
+        // publication row from a prior run can carry a different shard
+        // identity than the one reconstructed here, so heal the exact key
+        // the lookup will use and name both identities when they diverge.
+        let bound_shard = authority.binding().shard_id.clone();
+        if bound_shard != project_shard {
+            tracing::warn!(
+                event = "code_graph_lease_binding_shard_diverged",
+                probed = ?project_shard,
+                bound = ?bound_shard,
+                "code graph lease binding names a different shard than the reconstructed project shard"
+            );
+            self.ensure_code_graph_shard_attached(&bound_shard).await;
+        }
         // Offer the already-decoded seal before any publication or recovery can
         // reach the manifest provider. The offer is keyed by the exact shard the
         // provider resolves bindings under, and is only ever served on an exact
