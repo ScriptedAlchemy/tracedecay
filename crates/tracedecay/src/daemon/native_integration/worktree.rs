@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tracedecay_application::git::{
@@ -31,6 +31,11 @@ use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::store::SharedDaemonNativeIntegrationStore;
+
+#[cfg(feature = "hotpath")]
+type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 
 #[derive(Clone)]
 pub(crate) struct DaemonAuthorizedScopeSetReader {
@@ -78,12 +83,24 @@ impl Default for HolderFenceRootV1 {
 /// Process-wide exact-root admission authority shared by Work, LSP, and
 /// native cleanup. A durable cleanup journal keeps its write fence across
 /// requests and daemon-owned runtime mounts until reconciliation is terminal.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct WorktreeHolderAdmissionFenceV1 {
-    state: Arc<Mutex<HolderFenceStateV1>>,
+    state: Arc<ProfiledStdMutex<HolderFenceStateV1>>,
+}
+
+impl Default for WorktreeHolderAdmissionFenceV1 {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(hotpath::mutex!(
+                std::sync::Mutex::new(HolderFenceStateV1::default()),
+                label = "daemon.git.worktree.holder_fence"
+            )),
+        }
+    }
 }
 
 impl WorktreeHolderAdmissionFenceV1 {
+    #[hotpath::measure(label = "daemon.git.worktree.admit", future = true)]
     pub(crate) async fn admit_holders(
         &self,
         roots: impl IntoIterator<Item = PathBuf>,
@@ -115,6 +132,7 @@ impl WorktreeHolderAdmissionFenceV1 {
         Some(admissions)
     }
 
+    #[hotpath::measure(label = "daemon.git.worktree.mark_recovery", future = true)]
     pub(crate) async fn mark_recovery_required(&self, roots: impl IntoIterator<Item = PathBuf>) {
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
@@ -257,6 +275,7 @@ pub(crate) struct DaemonNativeWorktreeAuthority {
 }
 
 impl DaemonNativeWorktreeAuthority {
+    #[hotpath::measure(label = "daemon.git.worktree.open")]
     pub(crate) fn open(
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -522,6 +541,7 @@ impl DaemonNativeWorktreeAuthority {
 }
 
 impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
+    #[hotpath::measure(label = "daemon.git.worktree.inventory")]
     fn inventory(
         &self,
         request: &WorktreeInventoryRequestV1,
@@ -599,6 +619,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         )))
     }
 
+    #[hotpath::measure(label = "daemon.git.worktree.inspect")]
     fn inspect(
         &self,
         request: &WorktreeCleanupInspectRequestV1,
@@ -621,6 +642,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         })
     }
 
+    #[hotpath::measure(label = "daemon.git.worktree.confirm")]
     fn confirm(
         &self,
         request: &WorktreeCleanupConfirmRequestV1,

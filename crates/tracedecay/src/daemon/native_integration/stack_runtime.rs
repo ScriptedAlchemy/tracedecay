@@ -78,6 +78,7 @@ struct DaemonStackDeliveryStoreV1 {
 }
 
 impl DaemonStackDeliveryStoreV1 {
+    #[hotpath::measure(label = "daemon.native_integration.stack_open")]
     fn open(database: RegisteredGlobalDbLeaseV1, project_id: &ProjectId) -> Result<Self, String> {
         let project_id = project_id.as_str().to_owned();
         let (commands, receiver) = sync_channel(STACK_DELIVERY_STORE_ACTOR_CAPACITY);
@@ -676,6 +677,7 @@ impl StackDeliveryAuthorizationPort for StackRuntimePortsV1 {
 }
 
 impl StackDeliveryPort for StackRuntimePortsV1 {
+    #[hotpath::measure(label = "daemon.native_integration.stack_deliver")]
     fn deliver(&self, batch: &StackDeliveryBatchV1) -> Result<(), StackCoordinatorErrorV1> {
         if batch.deliveries.is_empty()
             || batch.deliveries.len() > MAX_GITHUB_STACK_DELIVERY_BATCH_V1
@@ -752,6 +754,7 @@ pub(crate) struct DaemonGitHubStackRuntimeV1 {
 
 impl DaemonGitHubStackRuntimeV1 {
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.native_integration.stack_mount")]
     pub(crate) fn mount(
         project_id: ProjectId,
         scope: ResolvedScope,

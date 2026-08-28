@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreResult};
 
@@ -16,17 +16,34 @@ use crate::global_db::RegisteredGlobalDbLeaseV1;
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
 
+#[cfg(feature = "hotpath")]
+type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
+
 /// Retains the one `DaemonGitIndexTransactionStore` actor for each daemon-owned
 /// project database. Dropping the registry closes every actor when the daemon
 /// store administration shuts down.
-#[derive(Default)]
 pub(crate) struct GitIndexTransactionStoreRegistry {
-    stores: Mutex<HashMap<PathBuf, SharedDaemonGitIndexTransactionStore>>,
+    stores: ProfiledStdMutex<HashMap<PathBuf, SharedDaemonGitIndexTransactionStore>>,
     closed: AtomicBool,
+}
+
+impl Default for GitIndexTransactionStoreRegistry {
+    fn default() -> Self {
+        Self {
+            stores: hotpath::mutex!(
+                std::sync::Mutex::new(HashMap::new()),
+                label = "daemon.git.tx.stores"
+            ),
+            closed: AtomicBool::new(false),
+        }
+    }
 }
 
 impl GitIndexTransactionStoreRegistry {
     /// Returns the existing actor for `database`, or opens exactly one.
+    #[hotpath::measure(label = "daemon.git.tx.store_ensure")]
     pub(crate) fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -66,6 +83,7 @@ impl GitIndexTransactionStoreRegistry {
         Ok(())
     }
 
+    #[hotpath::measure(label = "daemon.git.tx.store_shutdown", future = true)]
     pub(crate) async fn shutdown_all(&self) -> GitIndexTransactionStoreResult<usize> {
         self.closed.store(true, Ordering::SeqCst);
         let stores = {

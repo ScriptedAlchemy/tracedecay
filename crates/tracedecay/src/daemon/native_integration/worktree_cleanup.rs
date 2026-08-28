@@ -28,6 +28,7 @@ enum CleanupNativeStateV1 {
 }
 
 impl DaemonNativeWorktreeAuthority {
+    #[hotpath::measure(label = "daemon.git.worktree.remove")]
     pub(super) fn remove_cleanup(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
@@ -154,6 +155,7 @@ impl DaemonNativeWorktreeAuthority {
         self.execute_remove(transaction, scope_set, admission)
     }
 
+    #[hotpath::measure(label = "daemon.git.worktree.reconcile")]
     pub(super) fn reconcile_cleanup(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,

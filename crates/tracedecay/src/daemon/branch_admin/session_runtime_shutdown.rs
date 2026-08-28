@@ -17,6 +17,7 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         }
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.session_runtime_shutdown", future = true)]
     pub(in crate::daemon) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.cancel();
         let mut failures = Vec::new();
@@ -127,6 +128,7 @@ impl StoreAdministration {
     /// [`SessionRuntimeMemoryGraphReconciliationShutdownV1::shutdown`] has
     /// joined terminal hook, schema-convergence, and reconciliation workers;
     /// the drain drops the runtimes those workers publish through.
+    #[hotpath::measure(label = "daemon.branch_admin.close_graph_runtimes", future = true)]
     pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let registries = self
             .session_runtime_registries

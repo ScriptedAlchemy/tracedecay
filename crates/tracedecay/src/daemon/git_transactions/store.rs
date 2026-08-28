@@ -7,8 +7,13 @@
 //! rusqlite-runtime calls and every synchronous port call receives exactly one reply.
 //! It has no filesystem path and cannot create a JSON side-file authority.
 
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "hotpath")]
+type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -78,8 +83,8 @@ enum StoreCommand {
 /// actor exit. It intentionally has no `Clone` implementation: one daemon
 /// service owns one bounded queue and actor for its transaction authority.
 pub(crate) struct DaemonGitIndexTransactionStore {
-    commands: Mutex<Option<SyncSender<StoreCommand>>>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    commands: ProfiledStdMutex<Option<SyncSender<StoreCommand>>>,
+    worker: ProfiledStdMutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 enum ActorDatabase {
@@ -140,6 +145,7 @@ struct PreviewGcTestObserver {
 }
 
 impl DaemonGitIndexTransactionStore {
+    #[hotpath::measure(label = "daemon.git.tx.store_open")]
     pub(crate) fn open(
         database: RegisteredGlobalDbLeaseV1,
     ) -> GitIndexTransactionStoreResult<Self> {
@@ -195,8 +201,14 @@ impl DaemonGitIndexTransactionStore {
             return Err(error);
         }
         Ok(Self {
-            commands: Mutex::new(Some(commands)),
-            worker: Mutex::new(Some(worker)),
+            commands: hotpath::mutex!(
+                std::sync::Mutex::new(Some(commands)),
+                label = "daemon.git.tx.store.commands"
+            ),
+            worker: hotpath::mutex!(
+                std::sync::Mutex::new(Some(worker)),
+                label = "daemon.git.tx.store.worker"
+            ),
         })
     }
 

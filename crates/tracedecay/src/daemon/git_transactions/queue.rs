@@ -6,6 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+
+#[cfg(feature = "hotpath")]
+type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -47,7 +52,7 @@ impl Drop for OccupiedGate<'_> {
 }
 
 pub(crate) struct RepositoryMutationQueue {
-    gates: Mutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
+    gates: ProfiledStdMutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
     pending: AtomicUsize,
     capacity: usize,
 }
@@ -57,7 +62,10 @@ const MAX_PENDING_REPOSITORY_MUTATIONS: usize = 64;
 impl Default for RepositoryMutationQueue {
     fn default() -> Self {
         Self {
-            gates: Mutex::new(BTreeMap::new()),
+            gates: hotpath::mutex!(
+                Mutex::new(BTreeMap::new()),
+                label = "daemon.git.tx.mutation_gates"
+            ),
             pending: AtomicUsize::new(0),
             capacity: MAX_PENDING_REPOSITORY_MUTATIONS,
         }
@@ -78,7 +86,10 @@ impl RepositoryMutationQueue {
     #[cfg(test)]
     pub(crate) fn with_capacity_for_test(capacity: usize) -> Self {
         Self {
-            gates: Mutex::new(BTreeMap::new()),
+            gates: hotpath::mutex!(
+                Mutex::new(BTreeMap::new()),
+                label = "daemon.git.tx.mutation_gates"
+            ),
             pending: AtomicUsize::new(0),
             capacity,
         }
@@ -98,6 +109,7 @@ impl RepositoryMutationQueue {
     /// therefore must only publish a proven-no-change outcome. This lets
     /// callers durably record cancellation without waiting behind unrelated
     /// native work.
+    #[hotpath::measure(label = "daemon.git.tx.queue")]
     pub(crate) fn with_repository_cancellable<T>(
         &self,
         repository_id: &RepositoryId,

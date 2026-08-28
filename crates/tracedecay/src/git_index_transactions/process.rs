@@ -1,5 +1,6 @@
 use std::env;
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -47,6 +48,7 @@ pub(super) fn run_command_with_stdin(
             "native Git stdin was not available".to_owned(),
         ));
     };
+    let mut stdin = hotpath::io!(stdin, label = "daemon.git.index_tx.git.stdin");
     stdin
         .write_all(input)
         .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
@@ -65,8 +67,14 @@ pub(super) fn run_command_with_stdin(
 }
 
 pub(super) fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(bytes),
+    match File::open(path) {
+        Ok(file) => {
+            let mut file = hotpath::io!(file, label = "daemon.git.index_tx.optional.file");
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+            Ok(bytes)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
     }
@@ -99,6 +107,7 @@ pub(super) fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.git.index_tx.fsync.directory")]
 pub(super) fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexError> {
     let parent = path
         .parent()

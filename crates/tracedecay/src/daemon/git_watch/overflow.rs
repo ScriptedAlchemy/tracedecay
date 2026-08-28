@@ -161,6 +161,7 @@ impl GitWatcher {
 /// One backstop pass over the overflow roster: re-attempt in-memory admission
 /// (a slot may have freed), and while still refused keep the repository on
 /// the scheduler-ingress freshness floor.
+#[hotpath::measure(label = "daemon.git.watch.overflow", future = true)]
 pub(super) async fn cover_overflowed_repositories(watcher: &GitWatcher) {
     let due = {
         let mut roster = watcher

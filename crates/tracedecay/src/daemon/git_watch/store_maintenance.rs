@@ -84,6 +84,7 @@ impl ScopeRootProofInputsV1 {
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the maintenance owner keeps the GC cadence
 /// eligible for a retry.
+#[hotpath::measure(label = "daemon.git.maintenance.branch_gc", future = true)]
 pub(super) async fn run_gc(
     administration: &StoreAdministration,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -143,6 +144,10 @@ pub(super) async fn run_gc(
 /// A mutating action resets the cursor because the returned census described
 /// pre-action state; a no-action page advances it, and end-of-census publishes
 /// only fixed-size aggregate counts for Doctor.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.semantic_vector_retention",
+    future = true
+)]
 pub(super) async fn run_semantic_vector_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -426,6 +431,10 @@ fn classify_vector_readable_sources(
 /// pointer index, rollback floor, and the serving generation) so sealed files
 /// cannot grow without bound while the graph is dark. Reset, corrupt, and
 /// denied vector authorities stay fail-closed and collect nothing.
+#[hotpath::measure(
+    label = "daemon.git.maintenance.code_generation_retention",
+    future = true
+)]
 pub(super) async fn run_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -1021,6 +1030,7 @@ async fn collect_scope_root_proof_inputs(
 /// every candidate physical scope hash to its exact logical source shard. A
 /// candidate is collected only when both authorities say it is unreferenced;
 /// missing, conflicting, or stale vector evidence collects nothing.
+#[hotpath::measure(label = "daemon.git.maintenance.scope_reconciliation", future = true)]
 pub(super) async fn run_code_index_scope_reconciliation(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -1589,6 +1599,7 @@ pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> Pa
     )
 }
 
+#[hotpath::measure(label = "daemon.git.maintenance.session_retention", future = true)]
 pub(super) async fn run_session_retention(
     database: &crate::global_db::RegisteredGlobalDb,
     config: &RetentionConfig,
@@ -1696,6 +1707,10 @@ pub(super) async fn run_session_retention(
     succeeded
 }
 
+#[hotpath::measure(
+    label = "daemon.git.maintenance.observability_retention",
+    future = true
+)]
 pub(super) async fn run_observability_analytics_retention(
     database: &crate::global_db::RegisteredGlobalDb,
     store: &'static str,
@@ -1796,6 +1811,7 @@ impl RetainedCompactionStore<'_> {
 /// is met, schedules a bounded incremental vacuum in the deferred background
 /// lane. The placement is structurally forbidden from competing
 /// with foreground writes; the page cap keeps the reclaim off the hot path.
+#[hotpath::measure(label = "daemon.git.maintenance.compaction", future = true)]
 async fn run_compaction(
     store: RetainedCompactionStore<'_>,
     store_name: &'static str,
@@ -1907,6 +1923,7 @@ fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after
 /// file: a busy or failing branch database never blocks the rest, but keeps
 /// the maintenance cadence retry-eligible — see
 /// `src/retention/branch_compaction.rs` for the compaction policy itself.
+#[hotpath::measure(label = "daemon.git.maintenance.branch_compaction", future = true)]
 pub(super) async fn run_branch_compaction(
     cg: &TraceDecay,
     config: &CompactionThresholdConfig,

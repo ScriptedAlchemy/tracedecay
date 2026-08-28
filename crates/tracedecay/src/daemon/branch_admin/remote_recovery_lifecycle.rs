@@ -156,6 +156,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         })
     }
 
+    #[hotpath::measure(label = "daemon.branch_admin.remote_recovery_quiesce", future = true)]
     pub(in crate::daemon) async fn quiesce(
         &self,
         project_id: &ProjectId,
