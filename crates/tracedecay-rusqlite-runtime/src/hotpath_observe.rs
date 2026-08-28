@@ -247,6 +247,82 @@ pub(crate) fn record_writer_transaction(rows: u64, lock_held_micros: u64) {
     );
 }
 
+/// One admission refusal, split by which resource was saturated.
+///
+/// `submit_authorized` already counts sheds by priority, but a shed alone
+/// cannot say whether the operation lane or the byte budget filled first —
+/// and the fix differs (batch fan-out versus payload size). The two causes
+/// are recorded at the sole admission authority so any future caller of
+/// [`crate::admission::Admission::reserve`] is counted the same way.
+#[inline(always)]
+pub(crate) fn record_admission_refused_operations() {
+    add("rusqlite.admission.refused.operations", 1);
+}
+
+#[inline(always)]
+pub(crate) fn record_admission_refused_bytes() {
+    add("rusqlite.admission.refused.bytes", 1);
+}
+
+/// Rows the bounded per-commit retention pass actually deleted.
+///
+/// The prune shares every commit's transaction, so its span alone cannot say
+/// whether a slow commit was deleting a real backlog or scanning an empty
+/// candidate set. A rising row count alongside a hot
+/// `rusqlite.ledger.prune_superseded` span means backlog convergence; a flat
+/// zero means the scan itself is the cost.
+#[inline(always)]
+pub(crate) fn record_ledger_pruned_rows(rows: u64) {
+    add("rusqlite.ledger.pruned_rows", rows);
+}
+
+/// How an interactive exact-SQL transaction released the writer thread.
+///
+/// The `rusqlite.exact_sql.transaction` span measures how long the writer
+/// thread was held, but a duration cannot say whether the hold ended in a
+/// durable commit or was wasted work. Expired and abandoned holds are the
+/// cancellations that block every queued write behind them for nothing.
+#[derive(Clone, Copy)]
+pub(crate) enum ExactSqlTransactionOutcome {
+    Committed,
+    CommitFailed,
+    RolledBack,
+    Expired,
+    Abandoned,
+    BeginFailed,
+}
+
+#[inline(always)]
+pub(crate) fn record_exact_sql_transaction_outcome(outcome: ExactSqlTransactionOutcome) {
+    add(
+        match outcome {
+            ExactSqlTransactionOutcome::Committed => "rusqlite.exact_sql.transaction.committed",
+            ExactSqlTransactionOutcome::CommitFailed => {
+                "rusqlite.exact_sql.transaction.commit_failed"
+            }
+            ExactSqlTransactionOutcome::RolledBack => "rusqlite.exact_sql.transaction.rolled_back",
+            ExactSqlTransactionOutcome::Expired => "rusqlite.exact_sql.transaction.expired",
+            ExactSqlTransactionOutcome::Abandoned => "rusqlite.exact_sql.transaction.abandoned",
+            ExactSqlTransactionOutcome::BeginFailed => {
+                "rusqlite.exact_sql.transaction.begin_failed"
+            }
+        },
+        1,
+    );
+}
+
+/// One idle-loop wake that re-ran a checkpoint because hard drain is pending.
+///
+/// Under hard WAL pressure the worker retries every 100ms until blockers
+/// clear. `rusqlite.checkpoint.dispatch.scheduled` counts those retries in
+/// with ordinary post-batch evaluations; this counter isolates the retry
+/// loop, so a stuck drain shows up as this number climbing while
+/// `rusqlite.checkpoint.frames.*` stays flat.
+#[inline(always)]
+pub(crate) fn record_checkpoint_hard_retry_wake() {
+    add("rusqlite.checkpoint.dispatch.hard_retry", 1);
+}
+
 #[inline(always)]
 pub(crate) fn record_exact_sql_dispatch() {
     add("rusqlite.writer.dispatch.exact_sql", 1);

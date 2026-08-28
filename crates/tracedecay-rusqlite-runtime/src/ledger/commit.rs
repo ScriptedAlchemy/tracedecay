@@ -50,7 +50,7 @@ pub(crate) fn record_runtime_commit(
     record_with_bookkeeping(transaction, metadata, transaction_scope, bookkeeping)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite.ledger.record_commit")]
 fn record_with_bookkeeping(
     transaction: &impl LedgerTransaction,
     metadata: &StoreOperationMetadataV1,

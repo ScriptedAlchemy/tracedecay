@@ -79,6 +79,7 @@ WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
 /// or already present in an upgraded database - converges over subsequent
 /// commits instead of being tied to the single transition commit that first
 /// discovered it.
+#[hotpath::measure(label = "rusqlite.ledger.prune_superseded")]
 pub(super) fn prune_superseded(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -88,7 +89,7 @@ pub(super) fn prune_superseded(
         checkpoint.watermark.authority_epoch.get(),
         "authority epoch",
     )?;
-    Ok(transaction.execute(
+    let pruned = transaction.execute(
         DELETE_SUPERSEDED,
         params![
             &submission.binding_key.shard_json,
@@ -96,5 +97,7 @@ pub(super) fn prune_superseded(
             persisted_epoch,
             MAX_PRUNED_ROWS_PER_COMMIT,
         ],
-    )?)
+    )?;
+    crate::hotpath_observe::record_ledger_pruned_rows(u64::try_from(pruned).unwrap_or(u64::MAX));
+    Ok(pruned)
 }
