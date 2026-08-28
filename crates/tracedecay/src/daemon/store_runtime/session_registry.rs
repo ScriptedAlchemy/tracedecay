@@ -298,7 +298,17 @@ impl ProjectRuntimeOwnerRegistryV1 {
                     "project runtime owner map lock is poisoned".to_owned(),
                 )
             })?;
-            let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+            // An unmounted project has no relation graph to settle. Deferring
+            // to `reserve_session_replacement`, which reports the same absence
+            // as `Ok(None)`, keeps retirement idempotent: re-running it after a
+            // partially completed attempt (remote deletion retries the whole
+            // `CancelRuntimeOwners` phase) must be a no-op, not a retryable
+            // route refusal that can never clear. Only a project that *is*
+            // mounted under another lifecycle state refuses settlement.
+            let Some(state) = entries.get(project_id) else {
+                return Ok(());
+            };
+            let ProjectRuntimeOwnerStateV1::Ready(owners) = state else {
                 return Err(TraceDecayError::project_route(
                     "project_runtime_replacing_sessions",
                     true,
