@@ -2697,6 +2697,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     label = "daemon.code_index.reconcile"
                 )
                 .await;
+                // Source reconciliation is complete: release the public
+                // freshness guard before the published-pass text reopen and
+                // graph seating below. Holding it through those phases
+                // reports a just-published current generation as refreshing,
+                // and every reader in that window serves it as stale.
+                drop(_reconcile_pass);
                 // A publication must first reopen and finish its own
                 // lightweight text owner: publication moved the durable
                 // pointer, so the prior owner is no longer authoritative even
@@ -2823,9 +2829,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         published_pass,
                         "graph seating skipped this pass; the sealed generation stays unseated"
                     );
-                }
-                if prepare_graph {
-                    drop(_reconcile_pass);
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
