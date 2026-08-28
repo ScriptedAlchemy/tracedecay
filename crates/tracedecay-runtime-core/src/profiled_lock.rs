@@ -19,28 +19,21 @@
 //! A mutex paired with a [`std::sync::Condvar`] cannot be instrumented at all:
 //! `Condvar::wait` demands a real [`std::sync::MutexGuard`] and the wrapper
 //! hands back its own guard type. Leave those locks alone.
+//!
+//! The aliases are unconditional on purpose: the `hotpath::mutex!` /
+//! `rw_lock!` macros expand by the *hotpath crate's* feature state, which
+//! Cargo unifies workspace-wide - a sibling crate enabling profiling flips
+//! the macros' return types even when this crate's own `hotpath` feature is
+//! off. Aliasing through the same crate (each wrapper is its std counterpart
+//! in the no-op build) keeps alias and macro in lockstep under any feature
+//! unification.
 
-#[cfg(feature = "hotpath")]
 pub(crate) type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledMutex<T> = std::sync::Mutex<T>;
 
-#[cfg(feature = "hotpath")]
 pub(crate) type ProfiledMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
-#[cfg(feature = "hotpath")]
 pub(crate) type ProfiledRwLock<T> = hotpath::rw_locks::RwLock<T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledRwLock<T> = std::sync::RwLock<T>;
 
-#[cfg(feature = "hotpath")]
 pub(crate) type ProfiledRwLockReadGuard<'a, T> = hotpath::rw_locks::RwLockReadGuard<'a, T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledRwLockReadGuard<'a, T> = std::sync::RwLockReadGuard<'a, T>;
 
-#[cfg(feature = "hotpath")]
 pub(crate) type ProfiledRwLockWriteGuard<'a, T> = hotpath::rw_locks::RwLockWriteGuard<'a, T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledRwLockWriteGuard<'a, T> = std::sync::RwLockWriteGuard<'a, T>;

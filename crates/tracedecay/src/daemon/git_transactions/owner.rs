@@ -35,10 +35,7 @@ use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
-#[cfg(feature = "hotpath")]
 type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdRwLock<T> = std::sync::RwLock<T>;
 
 #[cfg(feature = "hotpath")]
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;

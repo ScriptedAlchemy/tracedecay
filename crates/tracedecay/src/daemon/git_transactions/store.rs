@@ -10,10 +10,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 
-#[cfg(feature = "hotpath")]
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{

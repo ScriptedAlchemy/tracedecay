@@ -7,10 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-#[cfg(feature = "hotpath")]
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::Duration;
 
 use thiserror::Error;

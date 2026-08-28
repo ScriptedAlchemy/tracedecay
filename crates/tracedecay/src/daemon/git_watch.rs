@@ -51,10 +51,7 @@ use tracedecay_runtime_core::git_discovery::{
 
 use crate::config::SyncConfig;
 
-#[cfg(feature = "hotpath")]
 pub(super) type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-pub(super) type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 
 #[cfg(feature = "hotpath")]
 pub(super) type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;

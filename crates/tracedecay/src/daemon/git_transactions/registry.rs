@@ -16,10 +16,7 @@ use crate::global_db::RegisteredGlobalDbLeaseV1;
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
 
-#[cfg(feature = "hotpath")]
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 
 /// Retains the one `DaemonGitIndexTransactionStore` actor for each daemon-owned
 /// project database. Dropping the registry closes every actor when the daemon

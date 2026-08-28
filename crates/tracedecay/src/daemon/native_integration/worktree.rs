@@ -32,10 +32,7 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::store::SharedDaemonNativeIntegrationStore;
 
-#[cfg(feature = "hotpath")]
 type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 
 #[derive(Clone)]
 pub(crate) struct DaemonAuthorizedScopeSetReader {

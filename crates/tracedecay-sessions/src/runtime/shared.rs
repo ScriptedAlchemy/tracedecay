@@ -16,10 +16,7 @@ use tracedecay_runtime_core::worktree::GitRepoIdentityOutcome;
 use crate::runtime::SessionMessageRecord;
 pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 
-#[cfg(feature = "hotpath")]
 type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ProfiledMutex<T> = Mutex<T>;
 
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
