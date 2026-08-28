@@ -43,6 +43,7 @@ the real defects were projection throughput and writer contention.)
 ## Choose the correct facility
 
 - Synchronous function or bounded phase: `#[hotpath::measure]` or `hotpath::measure_block!("static.label", expression)`.
+- Bulk instrumentation of a suspect area: `#[hotpath::measure_all]` on an inline `mod` or `impl` block applies `measure` to every function inside; exclude trivial or noisy functions with `#[hotpath::skip]`. It cannot be a file-level inner attribute, and trait-impl methods get timing/allocation but not CPU-sample attribution. Use it to blanket one investigation target, not the codebase; trim it back per the instrumentation rules before merge.
 - Async task lifetime, suspension, polling, or cancellation: `#[hotpath::measure(future = true)]` or `hotpath::future!(future, label = "static.label")`; use one, not both.
 - Stream production/consumption: `hotpath::stream!`.
 - Queue depth and send-to-receive latency: `hotpath::channel!`; default wrap mode changes endpoint types, while `proxy = true` preserves them but loses exact depth/latency.
