@@ -344,8 +344,10 @@ impl ConfigurationMutationGrantReceiptV1 {
     }
 }
 
-use crate::canonical_text::validate_canonical_string as validate_canonical_label;
 use crate::canonical_text::validated_string_newtype;
+use crate::canonical_text::{
+    is_canonical_text, validate_canonical_string as validate_canonical_label,
+};
 
 fn validate_setting_key(value: &str) -> Result<(), DomainError> {
     validate_canonical_label(value, "configuration setting key")?;
@@ -1282,7 +1284,15 @@ impl ConfigurationValueV1 {
         match self {
             Self::Boolean(_) | Self::Unsigned(_) => Ok(()),
             Self::CodeIndexWorkerSelection(selection) => selection.validate(),
-            Self::Text(value) => validate_canonical_label(value, "configuration text value"),
+            Self::Text(value) => {
+                if is_canonical_text(value) {
+                    Ok(())
+                } else {
+                    Err(DomainError::NonCanonical {
+                        field: "configuration text value",
+                    })
+                }
+            }
             Self::StringList(values) => {
                 for value in values {
                     validate_canonical_label(value, "configuration text list value")?;

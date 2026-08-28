@@ -186,3 +186,53 @@ impl SemanticConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::configuration::ConfigurationValueV1;
+
+    #[test]
+    fn selected_profile_configuration_is_not_bounded_like_an_identity() {
+        let configuration = SemanticConfig {
+            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            auto_download: true,
+            active_profile: Some(SemanticProfileSelection {
+                profile_id: "hybrid-conservative".to_owned(),
+                accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "a".repeat(64)
+                ))
+                .expect("accepted profile digest"),
+                artifact_digest: "b".repeat(64),
+                artifact_path: PathBuf::from(format!(
+                    "/var/lib/tracedecay/profiles/default/semantic-models/installs/{}/516f4baf13dec4ddddda8631e019b5737c8bc250/{}",
+                    DEFAULT_FASTEMBED_MODEL_ID,
+                    "c".repeat(64)
+                )),
+            }),
+            rollback_profile: None,
+            resources: SemanticResourceCeilings::default(),
+        };
+        configuration
+            .validate()
+            .expect("selected semantic profile is valid");
+        let encoded = serde_json::to_string(&configuration).expect("semantic configuration JSON");
+        assert!(
+            encoded.len() > tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES,
+            "fixture must exceed the identity/label text bound"
+        );
+
+        ConfigurationValueV1::Text(encoded)
+            .validate()
+            .expect("structured configuration text must not inherit an identity byte bound");
+        for invalid in ["", " padded", "padded ", "line\nbreak"] {
+            assert!(
+                ConfigurationValueV1::Text(invalid.to_owned())
+                    .validate()
+                    .is_err(),
+                "free configuration text still requires canonical content"
+            );
+        }
+    }
+}
