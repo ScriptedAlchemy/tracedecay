@@ -91,6 +91,9 @@ async fn persist_with_work_census(
     store: &impl ObservationStore,
     writes: Vec<AnchoredObservationWrite>,
 ) -> (Vec<ObservationBatchPersistOutcome>, u64, u64) {
+    // Keeps this census immune to another test thread poisoning the
+    // process-global callsite interest cache; see the helper's documentation.
+    crate::tests::harness::install_tracing_callsite_keepalive();
     let trace = Arc::new(ObservationWorkTrace::default());
     let dispatch = Dispatch::new(ObservationWorkSubscriber {
         trace: Arc::clone(&trace),
