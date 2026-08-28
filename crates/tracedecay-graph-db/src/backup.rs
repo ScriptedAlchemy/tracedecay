@@ -72,6 +72,7 @@ impl GraphDb {
     /// (folding any write-ahead-log sidecar into the fenced snapshot), the
     /// native full backup is staged and hashed, and the backup directory is
     /// published atomically only after the source store closed durably.
+    #[hotpath::measure(label = "graph_db.backup.create", impl_type = "GraphDb")]
     pub fn create_verified_backup(
         source: &Path,
         destination: &Path,
@@ -152,6 +153,7 @@ impl GraphDb {
     /// written, the fenced epoch is rebuilt into a staging file, the staged
     /// store must open cleanly under the current format authority, and the
     /// destination is published atomically with rollback on failure.
+    #[hotpath::measure(label = "graph_db.backup.restore", impl_type = "GraphDb")]
     pub fn restore_verified_backup(
         backup_root: &Path,
         destination: &Path,
@@ -192,6 +194,7 @@ impl GraphDb {
 
     /// Verifies that the closed graph store at `path` opens cleanly under
     /// the current format authority, then closes it again.
+    #[hotpath::measure(label = "graph_db.backup.verify", impl_type = "GraphDb")]
     pub fn verify_closed_store(
         path: &Path,
         cancellation: &Arc<dyn GraphCancellation>,
