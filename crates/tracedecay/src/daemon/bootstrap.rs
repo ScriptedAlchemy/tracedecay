@@ -87,6 +87,7 @@ pub async fn run_foreground(
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure(label = "daemon.bootstrap.run_foreground", future = true)]
 pub async fn run_foreground(
     _socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -247,7 +248,7 @@ pub async fn run_foreground(
                 ))
                 .await
             }),
-            label = "daemon.client.broker_connection"
+            label = "daemon.bootstrap.broker_connection"
         ));
     }
     lifecycle.begin_draining();
@@ -476,6 +477,7 @@ fn hosted_dashboard_shutdown_owner() -> shutdown_coordination::ShutdownOwner {
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.bootstrap.run_foreground", future = true)]
 async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -694,7 +696,7 @@ async fn run_foreground_unix(
         ));
         client_tasks.spawn(hotpath::future!(
             with_connection_admission(permit, client),
-            label = "daemon.client.socket_connection"
+            label = "daemon.bootstrap.socket_connection"
         ));
     }
     engine.lifecycle.begin_draining();
@@ -774,6 +776,7 @@ async fn run_foreground_unix(
 /// `ProfileSessions` configuration before publishing a transport endpoint.
 /// Account-deletion-only boots return before this point and never start
 /// projectless capture work.
+#[hotpath::measure(label = "daemon.bootstrap.worker_plan", future = true)]
 async fn install_profile_worker_plan(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -862,6 +865,7 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.bootstrap.prepare_socket", future = true)]
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {

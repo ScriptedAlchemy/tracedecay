@@ -340,6 +340,7 @@ fn unquote(s: &str) -> String {
 /// `daemon.err.log` on macOS. Returns an empty map when no log source is
 /// readable (the doctor treats that as "no watcher telemetry available").
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.logging.watcher_events")]
 pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
     let text = read_daemon_log_tail(max_lines);
     let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
@@ -354,6 +355,7 @@ pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> 
 
 /// Best-effort read of the tail of the daemon log across service runners.
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.engine.logging.read_tail")]
 fn read_daemon_log_tail(max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
     if let Some(data_dir) = crate::config::user_data_dir() {

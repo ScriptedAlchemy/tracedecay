@@ -100,6 +100,7 @@ pub(super) fn daemon_protocol_state(transport_hint: &Path) -> DaemonProtocolStat
     daemon_protocol_state_with_timeout(transport_hint, std::time::Duration::from_secs(10))
 }
 
+#[hotpath::measure(label = "daemon.service.probe.protocol_state")]
 pub(super) fn daemon_protocol_state_with_timeout(
     transport_hint: &Path,
     timeout: std::time::Duration,

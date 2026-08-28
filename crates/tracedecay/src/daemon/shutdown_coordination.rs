@@ -228,6 +228,7 @@ pub(super) fn prepare_shutdown_owner_phases(
 }
 
 impl PreparedShutdownOwners {
+    #[hotpath::measure(label = "daemon.shutdown.owners.join", future = true)]
     pub(super) async fn join(self, deadline: Instant) -> ShutdownReceipt {
         let mut receipts = Vec::new();
         for phase in self.phases {
@@ -250,6 +251,7 @@ impl PreparedShutdownOwners {
     }
 }
 
+#[hotpath::measure(label = "daemon.shutdown.phase.join", future = true)]
 async fn join_shutdown_phase(
     deadline: Instant,
     owners: Vec<(usize, &'static str, Option<String>, ShutdownJoinFactory)>,

@@ -206,6 +206,7 @@ async fn doctor_runtime_value(
     value
 }
 
+#[hotpath::measure(label = "daemon.engine.doctor.runtime", future = true)]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
     store_administration: Option<&super::StoreAdministration>,
@@ -513,6 +514,7 @@ pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> se
     doctor_runtime_value_inner(handshake, None, false).await
 }
 
+#[hotpath::measure(label = "daemon.engine.doctor.runtime_write", future = true)]
 pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
@@ -544,6 +546,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
 /// as a probe. Returns the activity guard when the request falls through to
 /// the broker's regular routing, or `None` once the core response has been
 /// written and the connection is complete.
+#[hotpath::measure(label = "daemon.engine.doctor.serve", future = true)]
 pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,

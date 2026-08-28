@@ -20,6 +20,7 @@ use super::{SOCKET_ENV, connection_for_socket_path};
 
 pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
+#[hotpath::measure(label = "daemon.engine.hooks.notify", future = true)]
 pub async fn notify_hook_event(
     project_path: &Path,
     event: DaemonHookEvent,
@@ -51,6 +52,7 @@ pub async fn notify_hook_event(
     }
 }
 
+#[hotpath::measure(label = "daemon.engine.hooks.deliver", future = true)]
 async fn notify_hook_event_to_connection(
     project_path: &Path,
     event: DaemonHookEvent,

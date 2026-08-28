@@ -86,6 +86,7 @@ pub(super) struct DaemonAuthority {
 }
 
 impl DaemonAuthority {
+    #[hotpath::measure(label = "daemon.engine.authority.acquire")]
     pub(super) fn acquire(
         profile_root: &Path,
         endpoint: &DaemonEndpoint,
@@ -285,6 +286,7 @@ impl Drop for DaemonAuthority {
     }
 }
 
+#[hotpath::measure(label = "daemon.engine.authority.current")]
 pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
     #[cfg(windows)]
     if !validate_existing_profile_root(profile_root)? {

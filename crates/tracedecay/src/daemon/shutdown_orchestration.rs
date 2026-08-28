@@ -152,6 +152,7 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
     *status = ShutdownStatus::Failed(errors.join("; retry failed: "));
 }
 
+#[hotpath::measure(label = "daemon.shutdown.coordinate", future = true)]
 pub(super) async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
     shutdown_deadline: tokio::time::Instant,
@@ -269,6 +270,7 @@ where
     receipt
 }
 
+#[hotpath::measure(label = "daemon.shutdown.run", future = true)]
 async fn run_daemon_shutdown(
     lifecycle: DaemonLifecycle,
     mut plan: DaemonShutdownPlan,
@@ -342,6 +344,7 @@ async fn run_daemon_shutdown(
     }
 }
 
+#[hotpath::measure(label = "daemon.shutdown.join_aborted_clients", future = true)]
 async fn join_aborted_clients_until(
     clients: &mut JoinSet<Result<()>>,
     deadline: tokio::time::Instant,

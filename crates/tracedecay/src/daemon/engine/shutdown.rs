@@ -21,6 +21,7 @@ use crate::daemon::store_shutdown::ShutdownTaskReceipt;
 use crate::daemon::{log_daemon_event, project_open_tasks, shutdown_project_servers};
 
 impl DaemonEngine {
+    #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
 
@@ -195,30 +196,36 @@ impl DaemonEngine {
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
-            move |_| async move {
-                // Ordering is the correctness contract here: close registry
-                // admission, cancel reconciliation, JOIN the workers while
-                // their runtimes are still alive, and only then drain the
-                // retained owners and close the graphs. Closing before the
-                // join leaves the standing owner attachments leased and the
-                // close reports a structural Conflict on every shutdown.
-                // Every step stays bounded by this owner's deadline, so a
-                // genuinely stuck pass still surfaces as a typed timeout.
-                let owner = administration
-                    .prepare_memory_graph_reconciliation_shutdown()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                owner.cancel();
-                owner.shutdown().await?;
-                store_telemetry_sampling.release_retained_handles_for_shutdown();
-                administration
-                    .close_retained_graph_runtimes_for_shutdown()
-                    .await
-                    .map_err(|error| error.to_string())
+            move |_| {
+                hotpath::future!(
+                    async move {
+                        // Ordering is the correctness contract here: close registry
+                        // admission, cancel reconciliation, JOIN the workers while
+                        // their runtimes are still alive, and only then drain the
+                        // retained owners and close the graphs. Closing before the
+                        // join leaves the standing owner attachments leased and the
+                        // close reports a structural Conflict on every shutdown.
+                        // Every step stays bounded by this owner's deadline, so a
+                        // genuinely stuck pass still surfaces as a typed timeout.
+                        let owner = administration
+                            .prepare_memory_graph_reconciliation_shutdown()
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        owner.cancel();
+                        owner.shutdown().await?;
+                        store_telemetry_sampling.release_retained_handles_for_shutdown();
+                        administration
+                            .close_retained_graph_runtimes_for_shutdown()
+                            .await
+                            .map_err(|error| error.to_string())
+                    },
+                    label = "daemon.engine.memory_graph_reconciliation"
+                )
             },
         )
     }
 
+    #[hotpath::measure(label = "daemon.engine.shutdown.servers", future = true)]
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
         deadline: tokio::time::Instant,

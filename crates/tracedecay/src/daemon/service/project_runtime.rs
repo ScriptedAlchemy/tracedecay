@@ -637,7 +637,7 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
             }
         }
         drop(fences);
-        hotpath::gauge!("request_in_flight").inc(-1.0);
+        hotpath::gauge!("daemon.service.request_in_flight").inc(-1.0);
         self.registry.signal_reservation_changed();
     }
 }
@@ -783,6 +783,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     /// Publish a component, refusing if this project already has a live one.
+    #[hotpath::measure(label = "daemon.service.project_runtime.register", future = true)]
     pub(crate) async fn register<C>(
         &self,
         project_root: PathBuf,
@@ -819,6 +820,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Only for components whose caller has already established that the
     /// replacement carries the same authority as the incumbent.
+    #[hotpath::measure(label = "daemon.service.project_runtime.publish", future = true)]
     pub(crate) async fn publish<C>(
         &self,
         project_root: PathBuf,

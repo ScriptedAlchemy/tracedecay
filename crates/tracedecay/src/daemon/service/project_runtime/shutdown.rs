@@ -13,6 +13,7 @@ pub(super) enum ShutdownState {
 }
 
 impl ProjectRuntimeRegistryV1 {
+    #[hotpath::measure(label = "daemon.service.project_runtime.retire_roots", future = true)]
     pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         {
             let mut fences = self.lock_root_fences();
@@ -21,6 +22,7 @@ impl ProjectRuntimeRegistryV1 {
         self.drain_roots(roots).await
     }
 
+    #[hotpath::measure(label = "daemon.service.project_runtime.quiesce_roots", future = true)]
     pub(crate) async fn quiesce_roots(
         &self,
         roots: &BTreeSet<PathBuf>,
@@ -109,6 +111,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Routers become unavailable before feedback owners drop, Work providers
     /// are joined, and process-wide semantic handles are unregistered.
+    #[hotpath::measure(label = "daemon.service.project_runtime.shutdown", future = true)]
     pub(crate) async fn shut_down_all(&self) -> bool {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();

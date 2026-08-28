@@ -104,6 +104,7 @@ impl DaemonLifecycle {
         }
     }
 
+    #[hotpath::measure(label = "daemon.engine.lifecycle.wait_draining", future = true)]
     pub(crate) async fn wait_for_draining(&self) {
         loop {
             let notified = self.inner.draining_notify.notified();
@@ -114,6 +115,7 @@ impl DaemonLifecycle {
         }
     }
 
+    #[hotpath::measure(label = "daemon.engine.lifecycle.wait_idle", future = true)]
     pub(crate) async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.idle.notified();
@@ -183,16 +185,20 @@ impl DaemonLifecycle {
         }
         let completed = Arc::clone(&shutdown.coordinator_completed);
         drop(shutdown);
-        *coordinator_task = Some(tokio::spawn(async move {
-            let _completion = DaemonShutdownCoordinatorCompletion(completed);
-            task.await;
-        }));
+        *coordinator_task = Some(tokio::spawn(hotpath::future!(
+            async move {
+                let _completion = DaemonShutdownCoordinatorCompletion(completed);
+                task.await;
+            },
+            label = "daemon.engine.shutdown.coordinator"
+        )));
         true
     }
 
     /// A receipt is sent immediately before the coordinator returns. Await
     /// task completion while leaving its handle in lifecycle ownership, so a
     /// cancelled waiter cannot detach the final coordinator exit.
+    #[hotpath::measure(label = "daemon.engine.shutdown.coordinator.wait", future = true)]
     pub(super) async fn wait_for_finished_shutdown_coordinator(&self) {
         loop {
             let completed = {
@@ -228,6 +234,7 @@ impl DaemonLifecycle {
 
     /// Reap only an already-finished coordinator. Its join cannot suspend,
     /// which keeps cancellation from taking ownership out of lifecycle state.
+    #[hotpath::measure(label = "daemon.engine.shutdown.coordinator.join", future = true)]
     pub(super) async fn join_finished_shutdown_coordinator(&self) {
         let coordinator_task = {
             let shutdown = self
@@ -283,6 +290,7 @@ impl DaemonLifecycle {
 }
 
 impl DaemonShutdownAttempt {
+    #[hotpath::measure(label = "daemon.engine.shutdown.wait_receipt", future = true)]
     pub(super) async fn wait_for_receipt(
         &self,
     ) -> std::result::Result<Arc<DaemonShutdownReceipt>, String> {

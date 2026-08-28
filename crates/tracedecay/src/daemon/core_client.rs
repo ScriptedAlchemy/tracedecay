@@ -136,6 +136,7 @@ pub(crate) fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection
     }
 }
 
+#[hotpath::measure(label = "daemon.engine.client.liveness", future = true)]
 pub(crate) async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
     request_label: &str,
@@ -179,6 +180,7 @@ pub(crate) async fn ensure_daemon_connection_live(
     })
 }
 
+#[hotpath::measure(label = "daemon.engine.client.read_response", future = true)]
 pub(crate) async fn next_daemon_response_line<R>(
     reader: &mut R,
     connection: &DaemonConnection,
@@ -279,6 +281,7 @@ pub(crate) async fn connect_to_daemon_connection(
     connect_to_daemon_connection_within(connection, None).await
 }
 
+#[hotpath::measure(label = "daemon.engine.client.connect", future = true)]
 pub(crate) async fn connect_to_daemon_connection_within(
     connection: &DaemonConnection,
     client_deadline: Option<DaemonClientDeadline>,
@@ -330,6 +333,7 @@ pub(crate) async fn connect_with_restart_grace(
 
 /// Resolves endpoint authority on every retry because a daemon restart rotates
 /// both its authority epoch and authentication token.
+#[hotpath::measure(label = "daemon.engine.client.connect_grace", future = true)]
 async fn connect_with_restart_grace_resolving(
     mut resolve: impl FnMut() -> Result<DaemonConnection>,
     grace: Duration,
@@ -356,6 +360,7 @@ async fn connect_with_restart_grace_resolving(
     }
 }
 
+#[hotpath::measure(label = "daemon.engine.client.call_tool", future = true)]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -527,6 +532,7 @@ fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
     error_message_is_project_open_retryable(&error.to_string())
 }
 
+#[hotpath::measure(label = "daemon.engine.client.call_tool_retry", future = true)]
 async fn call_tool_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,

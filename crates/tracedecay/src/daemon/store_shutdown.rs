@@ -147,7 +147,12 @@ where
 
     let mut outcomes = Vec::new();
     while !joins.is_empty() {
-        match tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()).await {
+        match hotpath::future!(
+            tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()),
+            label = "daemon.store_runtime.shutdown_wait"
+        )
+        .await
+        {
             Ok(Some(Ok((id, task_status)))) => {
                 if let Some((ordinal, owner, _, _)) = pending.remove(&id) {
                     outcomes.push((
@@ -189,7 +194,12 @@ where
                     )
                 }));
                 while !joins.is_empty() {
-                    match tokio::time::timeout_at(deadline, joins.join_next()).await {
+                    match hotpath::future!(
+                        tokio::time::timeout_at(deadline, joins.join_next()),
+                        label = "daemon.store_runtime.shutdown_abort_wait"
+                    )
+                    .await
+                    {
                         Ok(Some(_)) => {}
                         Ok(None) | Err(_) => break,
                     }
