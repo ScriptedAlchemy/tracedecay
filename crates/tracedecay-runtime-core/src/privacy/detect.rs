@@ -494,6 +494,7 @@ fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
         .any(|compound| separated.ends_with(compound))
 }
 
+#[hotpath::measure(label = "runtime_core.privacy.redact_values")]
 pub(crate) fn redact_sensitive_values(
     mut payload: Value,
     sensitive_keys: &BTreeSet<String>,
@@ -539,6 +540,12 @@ pub(crate) fn redact_sensitive_values(
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
+    if !findings.is_empty() {
+        hotpath::gauge!("runtime_core.privacy.redactions").inc(findings.len() as f64);
+    }
+    if !quarantine_findings.is_empty() {
+        hotpath::gauge!("runtime_core.privacy.quarantines").inc(quarantine_findings.len() as f64);
+    }
     Ok(DetectionResult {
         payload,
         findings,
@@ -683,6 +690,9 @@ pub(super) fn redact_text(
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
+    // One aggregate counter per scanned value; a span here would put probe
+    // overhead on every string of every hydrated payload.
+    hotpath::gauge!("runtime_core.privacy.rules_evaluated").inc(patterns.len() as f64);
     let mut candidates = Vec::new();
     for (pattern, keywords_present) in patterns.iter().zip(patterns.keyword_presence(text)) {
         let (detector, confidence, replacement) = pattern_metadata(pattern.kind());

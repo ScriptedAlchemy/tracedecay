@@ -514,6 +514,7 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
                 let retry_delay = (automatic_failures < AUTOMATIC_RETRY_LIMIT).then(|| {
                     let delay = AUTOMATIC_RETRY_BASE.saturating_mul(1 << automatic_failures);
                     automatic_failures += 1;
+                    hotpath::gauge!("runtime_core.memory_graph.worker_retries").inc(1.0);
                     delay
                 });
                 Some((false, retry_delay))

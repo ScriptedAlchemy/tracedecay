@@ -286,6 +286,7 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         match reconcile_project_memory_graph_pass(&db).await {
             Ok(()) => true,
             Err(error) => {
+                hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
                 tracing::warn!(
                     error_kind = reconciliation_error_kind(&error),
                     "project memory graph reconciliation remains pending"
@@ -309,6 +310,10 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
     }
 }
 
+/// One full reconciliation sweep: diff (canonical source load + manifest
+/// build) then apply (verified-manifest publication). The Hotpath span is the
+/// sweep's wall-time authority; per-node work is deliberately unmeasured.
+#[hotpath::measure(label = "runtime_core.memory_graph.reconcile_pass")]
 async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<()> {
     let _pass = db
         .begin_project_memory_reconciliation_pass()
@@ -327,6 +332,10 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let loaded = load_source(db, &owner, None, Some(db)).await?;
+    hotpath::gauge!("runtime_core.memory_graph.source_entities")
+        .set(loaded.source.entities.len() as f64);
+    hotpath::gauge!("runtime_core.memory_graph.source_relations")
+        .set(loaded.source.relations.len() as f64);
     let watermark = source_watermark(&owner, &loaded.source, None)?;
     let manifest = build_manifest(
         &owner,
@@ -350,9 +359,12 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         })?;
     let runtime = issue_memory_graph_operation(db)?;
     let snapshot = match tokio::task::spawn_blocking(move || {
-        runtime
-            .runtime()
-            .reconcile_verified_manifest(&manifest, idempotency_key)
+        hotpath::measure_block!(
+            "runtime_core.memory_graph.publish_apply",
+            runtime
+                .runtime()
+                .reconcile_verified_manifest(&manifest, idempotency_key)
+        )
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -432,6 +444,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
     match reconcile_project_memory_graph_pass(&db).await {
         Ok(()) => {}
         Err(error) => {
+            hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
             tracing::warn!(
                 error_kind = reconciliation_error_kind(&error),
                 "project memory graph publication after write remains pending"
@@ -546,6 +559,9 @@ async fn lineage_stamp_tx(
     Ok(Some(row_i64(&row, 0, OPERATION)?))
 }
 
+/// The reconciliation sweep's diff phase: materializes the canonical
+/// entity/relation source the verified graph is compared against.
+#[hotpath::measure(label = "runtime_core.memory_graph.source_load")]
 async fn load_source(
     db: &Database,
     owner: &FactOwnerV1,
