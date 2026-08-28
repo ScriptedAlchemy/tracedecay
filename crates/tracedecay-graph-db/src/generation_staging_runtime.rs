@@ -38,11 +38,14 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        plan.validate()
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        receipt
-            .validate()
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        hotpath::measure_block!("graph_db.generation.stage.batch.validate", {
+            plan.validate()
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            receipt
+                .validate()
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            native_contract::validate_semantic_native_batch(plan, receipt, &batch)
+        })?;
         if receipt.key.stage != plan.key {
             return Err(GraphDbError::Conflict);
         }
@@ -55,7 +58,6 @@ impl GraphDb {
             return Err(GraphDbError::Conflict);
         }
         require_staged_batch_mutation_count(batch.mutations.len())?;
-        native_contract::validate_semantic_native_batch(plan, receipt, &batch)?;
         let logical_output_digest = batch.semantic_vector_output_digest()?;
         require_receipt_output_digest(&logical_output_digest, &receipt.output_digest)?;
         batch.namespace = physical_namespace;
@@ -73,7 +75,10 @@ impl GraphDb {
         crate::hotpath_observe::record_hydration_source(
             crate::hotpath_observe::HydrationSource::Staged,
         );
-        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let _snapshot_gate = hotpath::measure_block!(
+            "graph_db.generation.stage.batch.snapshot_gate_wait",
+            self.wait_snapshot_gate_write()
+        );
         self.require_staged_generation_writable(&locator)?;
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -85,51 +90,54 @@ impl GraphDb {
             }
             return Err(GraphDbError::Conflict);
         }
-        let (entity_count, relation_count) =
-            projection_node_counts(database, &batch.namespace, &batch.projection)?;
-        let mut new_entities = 0usize;
-        let mut new_relations = 0usize;
-        for mutation in &batch.mutations {
-            check()?;
-            match mutation {
-                GraphMutation::UpsertEntity(entity)
-                    if load_entity(database, &batch.namespace, &entity.identity)?.is_none() =>
-                {
-                    new_entities = new_entities.checked_add(1).ok_or_else(|| {
-                        GraphDbError::budget_exhausted_count(
-                            GraphBudgetKind::Capacity,
-                            MAX_VERIFIED_GENERATION_ENTITIES,
-                        )
-                    })?;
+        hotpath::measure_block!("graph_db.generation.stage.batch.capacity", {
+            let (entity_count, relation_count) =
+                projection_node_counts(database, &batch.namespace, &batch.projection)?;
+            let mut new_entities = 0usize;
+            let mut new_relations = 0usize;
+            for mutation in &batch.mutations {
+                check()?;
+                match mutation {
+                    GraphMutation::UpsertEntity(entity)
+                        if load_entity(database, &batch.namespace, &entity.identity)?.is_none() =>
+                    {
+                        new_entities = new_entities.checked_add(1).ok_or_else(|| {
+                            GraphDbError::budget_exhausted_count(
+                                GraphBudgetKind::Capacity,
+                                MAX_VERIFIED_GENERATION_ENTITIES,
+                            )
+                        })?;
+                    }
+                    GraphMutation::UpsertRelation(relation)
+                        if load_relation(database, &batch.namespace, &relation.identity)?
+                            .is_none() =>
+                    {
+                        new_relations = new_relations.checked_add(1).ok_or_else(|| {
+                            GraphDbError::budget_exhausted_count(
+                                GraphBudgetKind::Capacity,
+                                MAX_VERIFIED_GENERATION_RELATIONS,
+                            )
+                        })?;
+                    }
+                    GraphMutation::UpsertEntity(_)
+                    | GraphMutation::DeleteEntity(_)
+                    | GraphMutation::UpsertRelation(_)
+                    | GraphMutation::DeleteRelation(_) => {}
                 }
-                GraphMutation::UpsertRelation(relation)
-                    if load_relation(database, &batch.namespace, &relation.identity)?.is_none() =>
-                {
-                    new_relations = new_relations.checked_add(1).ok_or_else(|| {
-                        GraphDbError::budget_exhausted_count(
-                            GraphBudgetKind::Capacity,
-                            MAX_VERIFIED_GENERATION_RELATIONS,
-                        )
-                    })?;
-                }
-                GraphMutation::UpsertEntity(_)
-                | GraphMutation::DeleteEntity(_)
-                | GraphMutation::UpsertRelation(_)
-                | GraphMutation::DeleteRelation(_) => {}
             }
-        }
-        require_generation_capacity(
-            "entities",
-            entity_count,
-            new_entities,
-            MAX_VERIFIED_GENERATION_ENTITIES,
-        )?;
-        require_generation_capacity(
-            "relations",
-            relation_count,
-            new_relations,
-            MAX_VERIFIED_GENERATION_RELATIONS,
-        )?;
+            require_generation_capacity(
+                "entities",
+                entity_count,
+                new_entities,
+                MAX_VERIFIED_GENERATION_ENTITIES,
+            )?;
+            require_generation_capacity(
+                "relations",
+                relation_count,
+                new_relations,
+                MAX_VERIFIED_GENERATION_RELATIONS,
+            )
+        })?;
         if receipt.key.ordinal > 0 {
             let prior_key = SemanticVectorStageBatchKey {
                 stage: receipt.key.stage.clone(),
@@ -144,21 +152,24 @@ impl GraphDb {
         }
         check()?;
         let mut state = self.state_write_guard()?;
-        let commit = self.apply_locked(
-            database,
-            &mut state,
-            batch,
-            mutation::CommitMetadata {
-                digest: batch_digest.clone(),
-                generation_dependency_digest: None,
-                publication_record: Some((
-                    idempotency_key,
-                    batch_digest,
-                    receipt.receipt_digest.as_str().to_owned(),
-                )),
-            },
-            &mutation::RelationEndpointNamespaces::new(),
-            check,
+        let commit = hotpath::measure_block!(
+            "graph_db.generation.stage.batch.apply_locked",
+            self.apply_locked_without_vector_index_maintenance(
+                database,
+                &mut state,
+                batch,
+                mutation::CommitMetadata {
+                    digest: batch_digest.clone(),
+                    generation_dependency_digest: None,
+                    publication_record: Some((
+                        idempotency_key,
+                        batch_digest,
+                        receipt.receipt_digest.as_str().to_owned(),
+                    )),
+                },
+                &mutation::RelationEndpointNamespaces::new(),
+                check,
+            )
         )?;
         Ok(commit)
     }

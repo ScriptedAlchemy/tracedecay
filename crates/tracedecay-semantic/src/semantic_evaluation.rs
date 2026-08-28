@@ -215,7 +215,8 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
         Self {
             inner,
             admitted_projection: artifact_authority.projection().clone(),
-            max_threads: artifact_authority.execution_max_threads(),
+            max_threads: u32::try_from(artifact_authority.embedding_execution_plan().intra_threads)
+                .unwrap_or(u32::MAX),
             cache,
             cache_policy,
             cancellation,
@@ -444,7 +445,7 @@ pub fn prepare_semantic_evaluation_projection(
     let inner = RuntimeChunkVectorEncoderV1::new(
         Arc::clone(&runtime),
         progress,
-        authority.execution_max_threads(),
+        authority.embedding_execution_plan(),
     );
     let mut encoder = CachedSemanticEvaluationChunkEncoderV1::new(
         inner,
@@ -511,7 +512,7 @@ pub fn measure_semantic_evaluation_projection_cancellation(
     let inner = RuntimeChunkVectorEncoderV1::new(
         Arc::clone(&runtime),
         Arc::clone(&progress),
-        authority.execution_max_threads(),
+        authority.embedding_execution_plan(),
     );
     let inner = CancelAfterFirstModelBatchV1 {
         inner,

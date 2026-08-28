@@ -224,6 +224,48 @@ impl GraphDb {
         );
     }
 
+    /// Proves a generation durably before its relational head can advance.
+    ///
+    /// A sealed per-generation store is closed, reopened, and checked against
+    /// `expected` before installation. When that proof is available, closing
+    /// and reopening the accumulated staging database would prove the same
+    /// rows a second time while checkpointing every older generation too.
+    /// The staging database remains the WAL-backed replay and fallback
+    /// authority; configurations without a sealed artifact retain the
+    /// original close/reopen proof when `reopen_fallback` requires it.
+    pub(crate) fn verify_generation_for_publication(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        row_counts: (usize, usize),
+        reopen_fallback: bool,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
+        if self.ensure_sealed_generation_store(identity, expected, check)? {
+            check()?;
+            let physical_namespace = identity.physical_namespace()?;
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            let commit = latest_projection(
+                database,
+                &physical_namespace,
+                &identity.projection.projection,
+            )?
+            .ok_or_else(|| {
+                GraphDbError::unavailable(
+                    "sealed graph publication has no complete native generation rows",
+                )
+            })?
+            .commit;
+            return Ok((commit, expected.clone()));
+        }
+        if reopen_fallback {
+            self.reopen_and_verify_existing_generation(identity, expected, row_counts, check)
+        } else {
+            self.verify_existing_generation(identity, expected, check)
+        }
+    }
+
     /// Stages one generation in bounded, durably receipted native pages.
     ///
     /// Entity pages precede relation pages, so every local endpoint exists
@@ -630,7 +672,9 @@ impl GraphDb {
                 .write()
                 .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
             let database = database_guard.take().ok_or(GraphDbError::Closed)?;
-            if let Err(error) = database.close() {
+            if let Err(error) =
+                hotpath::measure_block!("graph_db.generation.reopen.close", database.close())
+            {
                 self.inner.poisoned.store(true, Ordering::Release);
                 return Err(GraphDbError::DurabilityUncertain {
                     message: format!(

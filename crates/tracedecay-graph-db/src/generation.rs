@@ -907,7 +907,7 @@ pub(crate) fn verify_recovered_generation(
 /// staging database (`crate::sealed_store`). Kept apart so the staging
 /// enumeration count the publication tests pin ("stream the proof exactly
 /// once") stays a statement about the authority's rows; the sealed copy pays
-/// its own proofs (pre-compact and post-reopen), counted separately.
+/// its own post-reopen proof, counted separately.
 #[hotpath::measure(label = "graph_db.sealed_store.verify")]
 pub(crate) fn verify_sealed_copy_generation(
     database: &GrafeoDB,
@@ -1011,7 +1011,7 @@ pub(crate) fn reset_sealed_copy_proofs() {
 }
 
 /// Recovered-digest proofs run over sealed per-generation copies on this
-/// thread (build: pre-compact + post-reopen; adoption: post-reopen only).
+/// thread after durable reopen, before installation.
 #[cfg(test)]
 pub(crate) fn sealed_copy_proofs() -> usize {
     SEALED_COPY_PROOFS.with(std::cell::Cell::get)

@@ -142,7 +142,9 @@ pub struct GraphDbVerificationCounters {
 pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
     hotpath_observe::take_verification_counters()
 }
-pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
+pub use traversal::{
+    GraphRelationTarget, GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit,
+};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use vector::{GraphVectorIndexRequest, GraphVectorIndexStatus};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]

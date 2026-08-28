@@ -26,8 +26,8 @@ use crate::{
     GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest,
     GraphPublicationReceipt, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, GraphWriteBatch,
-    ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
+    GraphRelationTarget, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
+    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
     VectorSearchResult, mutation, traversal, vector,
 };
 
@@ -566,6 +566,72 @@ impl GraphDb {
         Ok(batches)
     }
 
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_targets", impl_type = "GraphDb")]
+    pub fn outgoing_relation_targets(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::outgoing_relation_targets(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
+    /// Bulk kind-filtered incoming fan-out with the same shape, cancellation,
+    /// and aggregate relation budget as [`Self::outgoing_relations`].
+    #[hotpath::measure(label = "graph_db.traversal.incoming", impl_type = "GraphDb")]
+    pub fn incoming_relations(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::incoming_relations(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "graph_db.traversal.reachable", impl_type = "GraphDb")]
     pub fn reachable_entities(
@@ -829,25 +895,31 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        ensure_initial_vector_indexes(database, &batch)?;
-        let mut vector_updates = Vec::new();
-        for mutation in &batch.mutations {
-            check()?;
-            let GraphMutation::UpsertEntity(entity) = mutation else {
-                continue;
-            };
-            for (name, property) in &entity.properties {
+        hotpath::measure_block!(
+            "graph_db.vector_index.ensure_initial",
+            ensure_initial_vector_indexes(database, &batch)
+        )?;
+        let vector_updates = hotpath::measure_block!("graph_db.vector_index.collect_updates", {
+            let mut vector_updates = Vec::new();
+            for mutation in &batch.mutations {
                 check()?;
-                let GraphProperty::Vector(vector) = property else {
+                let GraphMutation::UpsertEntity(entity) = mutation else {
                     continue;
                 };
-                vector_updates.push((
-                    entity.identity.clone(),
-                    vector_property_key(name, vector.dimension, vector.metric),
-                    Value::Vector(vector.values.clone().into()),
-                ));
+                for (name, property) in &entity.properties {
+                    check()?;
+                    let GraphProperty::Vector(vector) = property else {
+                        continue;
+                    };
+                    vector_updates.push((
+                        entity.identity.clone(),
+                        vector_property_key(name, vector.dimension, vector.metric),
+                        Value::Vector(vector.values.clone().into()),
+                    ));
+                }
             }
-        }
+            Ok::<_, GraphDbError>(vector_updates)
+        })?;
         let namespace = batch.namespace.clone();
         let commit = mutation::apply(
             database,
@@ -865,45 +937,76 @@ impl GraphDb {
         // handle, and retry would short-circuit as exact publication replay
         // without ever repairing them. Settlement failures instead poison the
         // handle and surface as typed DurabilityUncertain.
-        for (identity, property, value) in vector_updates {
-            let stored = match crate::state::load_entity(database, &namespace, &identity) {
-                Ok(Some(stored)) => stored,
-                Ok(None) => {
-                    self.inner.poisoned.store(true, Ordering::Release);
-                    return Err(GraphDbError::DurabilityUncertain {
-                        message: format!(
-                            "committed vector entity `{identity}` is missing from native identity index; commit settlement is incomplete"
-                        ),
-                    });
+        hotpath::measure_block!("graph_db.vector_index.refresh", {
+            for (identity, property, value) in vector_updates {
+                let stored = match crate::state::load_entity(database, &namespace, &identity) {
+                    Ok(Some(stored)) => stored,
+                    Ok(None) => {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        return Err(GraphDbError::DurabilityUncertain {
+                            message: format!(
+                                "committed vector entity `{identity}` is missing from native identity index; commit settlement is incomplete"
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        return Err(GraphDbError::DurabilityUncertain {
+                            message: format!(
+                                "committed vector entity `{identity}` could not be read for native index refresh; commit settlement is incomplete: {error}"
+                            ),
+                        });
+                    }
+                };
+                require_committed_vector_scalar(database, stored.node, &property, &value)
+                    .inspect_err(|_| {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                    })?;
+                // `mutation::apply` has already committed this exact scalar. Grafeo
+                // Session mutations do not maintain HNSW, so this identical direct
+                // write is index refresh only. The outer database write guard keeps
+                // readers excluded; after reopen the non-durable index is Missing
+                // until an explicit retained owner calls `ensure_vector_index`.
+                if database.graph_store().has_vector_index(
+                    &vector::native_vector_label(&namespace, &stored.projection),
+                    &property,
+                ) {
+                    database.set_node_property(stored.node, &property, value);
                 }
-                Err(error) => {
-                    self.inner.poisoned.store(true, Ordering::Release);
-                    return Err(GraphDbError::DurabilityUncertain {
-                        message: format!(
-                            "committed vector entity `{identity}` could not be read for native index refresh; commit settlement is incomplete: {error}"
-                        ),
-                    });
-                }
-            };
-            require_committed_vector_scalar(database, stored.node, &property, &value).inspect_err(
-                |_| {
-                    self.inner.poisoned.store(true, Ordering::Release);
-                },
-            )?;
-            // `mutation::apply` has already committed this exact scalar. Grafeo
-            // Session mutations do not maintain HNSW, so this identical direct
-            // write is index refresh only. The outer database write guard keeps
-            // readers excluded; after reopen the non-durable index is Missing
-            // until an explicit retained owner calls `ensure_vector_index`.
-            if database.graph_store().has_vector_index(
-                &vector::native_vector_label(&namespace, &stored.projection),
-                &property,
-            ) {
-                database.set_node_property(stored.node, &property, value);
             }
-        }
+            Ok::<_, GraphDbError>(())
+        })?;
         if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = sync_wal(database)
+            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
+        {
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(error);
+        }
+        Ok(commit)
+    }
+
+    /// Commits a persistence-only batch without maintaining an ephemeral
+    /// HNSW index that the next close/reopen would discard.
+    pub(crate) fn apply_locked_without_vector_index_maintenance(
+        &self,
+        database: &GrafeoDB,
+        state: &mut FormatState,
+        batch: GraphWriteBatch,
+        metadata: mutation::CommitMetadata,
+        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        let commit = mutation::apply(
+            database,
+            state,
+            batch,
+            metadata,
+            endpoint_namespaces,
+            &self.inner.poisoned,
+            check,
+        )?;
+        if self.inner.durability == GraphDurability::WalSync
+            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
         {
             self.inner.poisoned.store(true, Ordering::Release);
             return Err(error);

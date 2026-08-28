@@ -68,9 +68,14 @@ pub(crate) fn apply(
         generation_dependency_digest,
         publication_record,
     } = metadata;
-    let existing = ExistingBatchState::load(database, &batch)?;
-    let external_endpoints =
-        validate_references(database, &batch, &existing, endpoint_namespaces, check)?;
+    let existing = hotpath::measure_block!(
+        "graph_db.mutation.existing_state",
+        ExistingBatchState::load(database, &batch)
+    )?;
+    let external_endpoints = hotpath::measure_block!(
+        "graph_db.mutation.validate_references",
+        validate_references(database, &batch, &existing, endpoint_namespaces, check)
+    )?;
     let sequence = state
         .sequence
         .checked_add(1)
@@ -84,21 +89,26 @@ pub(crate) fn apply(
     };
     let previous_projection = latest_projection(database, &batch.namespace, &batch.projection)?;
     let mut session = database.session();
-    session
-        .begin_transaction()
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let result = apply_in_transaction(
-        &session,
-        state,
-        &batch,
-        &commit,
-        previous_projection
-            .as_ref()
-            .map(|projection| projection.node),
-        publication_record.as_ref(),
-        &existing,
-        &external_endpoints,
-        check,
+    hotpath::measure_block!(
+        "graph_db.mutation.begin_transaction",
+        session.begin_transaction()
+    )
+    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    let result = hotpath::measure_block!(
+        "graph_db.mutation.apply_changes",
+        apply_in_transaction(
+            &session,
+            state,
+            &batch,
+            &commit,
+            previous_projection
+                .as_ref()
+                .map(|projection| projection.node),
+            publication_record.as_ref(),
+            &existing,
+            &external_endpoints,
+            check,
+        )
     );
     if let Err(error) = result {
         return Err(rollback_or_poison(&mut session, error, poisoned));
@@ -113,7 +123,8 @@ pub(crate) fn apply(
             poisoned,
         ));
     }
-    session.commit().map_err(map_commit_error)?;
+    hotpath::measure_block!("graph_db.mutation.commit", session.commit())
+        .map_err(map_commit_error)?;
     state.sequence = sequence;
     Ok(commit)
 }

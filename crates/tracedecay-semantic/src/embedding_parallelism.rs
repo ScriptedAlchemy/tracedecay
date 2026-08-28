@@ -26,12 +26,36 @@
 /// memory rather than CPU binds. Values below 1 are ignored.
 const EMBED_SESSIONS_ENV: &str = "TRACEDECAY_EMBED_SESSIONS";
 
-/// Never open more concurrent sessions than this regardless of host width:
-/// each session is a full resident copy of the model graph.
-const MAX_EMBEDDING_SESSIONS: usize = 16;
+/// Intra-op width at which independent sessions remain the preferred way to
+/// fill the shared CPU authority. The execution planner only widens a session
+/// beyond this when the admitted resident-session capacity is the binding
+/// constraint.
+const BASELINE_INTRA_THREADS: usize = 4;
 
 /// Maximum intra-op threads requested by the shipped default configuration.
-pub const DEFAULT_INTRA_THREADS: u32 = 4;
+/// Smaller hosts and hosts able to retain more independent sessions are
+/// narrowed by [`embedding_execution_plan_for`].
+pub const DEFAULT_INTRA_THREADS: u32 = 12;
+
+/// Host-derived default for the artifact's maximum intra-op width.
+#[must_use]
+pub fn default_max_intra_threads() -> u32 {
+    default_max_intra_threads_for(detected_cores())
+}
+
+#[must_use]
+pub fn default_max_intra_threads_for(total_cores: usize) -> u32 {
+    u32::try_from(total_cores.max(1))
+        .unwrap_or(u32::MAX)
+        .min(DEFAULT_INTRA_THREADS)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EmbeddingExecutionPlanV1 {
+    pub intra_threads: usize,
+    pub sessions: usize,
+    pub limiting_reason: EmbeddingSessionLimitingReasonV1,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmbeddingSessionLimitingReasonV1 {
@@ -74,14 +98,6 @@ fn embedding_intra_threads_for(shared_cpu_budget: usize, configured_threads: u32
         .min(shared_cpu_budget.max(1))
 }
 
-/// Native ONNX intra-op demand admitted against the installed process CPU
-/// authority. The artifact value is a ceiling, not permission to oversubscribe
-/// a narrower host.
-#[must_use]
-pub(crate) fn embedding_intra_threads(configured_threads: u32) -> usize {
-    embedding_intra_threads_for(installed_cpu_budget(), configured_threads)
-}
-
 /// Concurrent embedding sessions for a host with `total_cores` logical CPUs,
 /// given the intra-op thread ceiling admitted by the artifact.
 ///
@@ -90,47 +106,113 @@ pub(crate) fn embedding_intra_threads(configured_threads: u32) -> usize {
 #[must_use]
 pub fn embedding_session_width_for(
     total_cores: usize,
-    intra_threads: u32,
+    max_intra_threads: u32,
     configured_max_sessions: u32,
 ) -> usize {
-    embedding_session_plan_for(
+    embedding_execution_plan_for(
         embedding_cpu_target(total_cores),
-        intra_threads,
+        max_intra_threads,
         configured_max_sessions,
+        configured_max_sessions as usize,
         None,
     )
-    .0
+    .sessions
 }
 
-fn embedding_session_plan_for(
+fn embedding_execution_plan_for(
     shared_cpu_budget: usize,
-    intra_threads: u32,
+    configured_max_intra_threads: u32,
     configured_max_sessions: u32,
+    resident_session_limit: usize,
     environment_override: Option<usize>,
-) -> (usize, EmbeddingSessionLimitingReasonV1) {
+) -> EmbeddingExecutionPlanV1 {
     let shared_cpu_budget = shared_cpu_budget.max(1);
-    let intra = embedding_intra_threads_for(shared_cpu_budget, intra_threads);
     let configured = (configured_max_sessions as usize).max(1);
-    let cpu_safe_sessions = (shared_cpu_budget / intra).max(1);
+    let resident = resident_session_limit.max(1);
+    let preferred_intra_threads = BASELINE_INTRA_THREADS
+        .min(configured_max_intra_threads as usize)
+        .max(1);
+    let cpu_safe_sessions = (shared_cpu_budget / preferred_intra_threads).max(1);
     let requested = environment_override.unwrap_or(configured);
-    let effective = requested
+    let sessions = requested
         .min(configured)
-        .min(MAX_EMBEDDING_SESSIONS)
+        .min(resident)
         .min(cpu_safe_sessions);
-    let limiting_reason = if effective < requested {
-        if effective == cpu_safe_sessions {
+    let intra_threads = embedding_intra_threads_for(
+        shared_cpu_budget / sessions.max(1),
+        configured_max_intra_threads,
+    );
+    let limiting_reason = if sessions < requested {
+        if sessions == resident {
+            EmbeddingSessionLimitingReasonV1::ResidentSessionLimit
+        } else if sessions == cpu_safe_sessions {
             EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget
-        } else if effective == configured {
+        } else if sessions == configured {
             EmbeddingSessionLimitingReasonV1::ConfiguredMaximum
         } else {
-            EmbeddingSessionLimitingReasonV1::ResidentSessionLimit
+            EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget
         }
     } else if environment_override.is_some() {
         EmbeddingSessionLimitingReasonV1::EnvironmentOverride
     } else {
         EmbeddingSessionLimitingReasonV1::ConfiguredMaximum
     };
-    (effective, limiting_reason)
+    EmbeddingExecutionPlanV1 {
+        intra_threads,
+        sessions,
+        limiting_reason,
+    }
+}
+
+/// Joint runtime plan for native inference and resident session fan-out.
+///
+/// Session count and intra-op width must be selected together. Planning them
+/// independently leaves admitted CPUs idle whenever the pool can retain fewer
+/// sessions than CPU arithmetic requested.
+#[must_use]
+pub(crate) fn embedding_execution_plan(
+    configured_max_intra_threads: u32,
+    configured_max_sessions: u32,
+    resident_session_limit: usize,
+) -> EmbeddingExecutionPlanV1 {
+    let shared_cpu_budget = installed_cpu_budget();
+    let environment_override = env_width(EMBED_SESSIONS_ENV);
+    let plan = embedding_execution_plan_for(
+        shared_cpu_budget,
+        configured_max_intra_threads,
+        configured_max_sessions,
+        resident_session_limit,
+        environment_override,
+    );
+    record_execution_plan(
+        plan,
+        environment_override.unwrap_or(configured_max_sessions as usize),
+        shared_cpu_budget,
+        resident_session_limit,
+    );
+    plan
+}
+
+fn record_execution_plan(
+    plan: EmbeddingExecutionPlanV1,
+    requested_sessions: usize,
+    shared_cpu_budget: usize,
+    resident_session_limit: usize,
+) {
+    hotpath::gauge!("semantic_embedding_sessions_requested").set(requested_sessions);
+    hotpath::gauge!("semantic_embedding_sessions_effective").set(plan.sessions);
+    hotpath::gauge!("semantic_embedding_sessions_cpu_safe")
+        .set((shared_cpu_budget / plan.intra_threads.min(BASELINE_INTRA_THREADS).max(1)).max(1));
+    hotpath::gauge!("semantic_embedding_sessions_resident_safe").set(resident_session_limit.max(1));
+    hotpath::gauge!("semantic_embedding_intra_threads").set(plan.intra_threads);
+    hotpath::gauge!("semantic_embedding_sessions_limiting_reason").set(
+        match plan.limiting_reason {
+            EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget => 1,
+            EmbeddingSessionLimitingReasonV1::EnvironmentOverride => 2,
+            EmbeddingSessionLimitingReasonV1::ConfiguredMaximum => 3,
+            EmbeddingSessionLimitingReasonV1::ResidentSessionLimit => 4,
+        },
+    );
 }
 
 /// Concurrent embedding sessions on this host, honouring the operator
@@ -139,29 +221,17 @@ fn embedding_session_plan_for(
 pub fn embedding_session_width(intra_threads: u32, configured_max_sessions: u32) -> usize {
     let configured = (configured_max_sessions as usize).max(1);
     let shared_cpu_budget = installed_cpu_budget();
-    let intra = embedding_intra_threads_for(shared_cpu_budget, intra_threads);
-    let cpu_safe_sessions = (shared_cpu_budget / intra).max(1);
     let environment_override = env_width(EMBED_SESSIONS_ENV);
     let requested = environment_override.unwrap_or(configured);
-    let (effective, limiting_reason) = embedding_session_plan_for(
+    let plan = embedding_execution_plan_for(
         shared_cpu_budget,
         intra_threads,
         configured_max_sessions,
+        configured,
         environment_override,
     );
-    hotpath::gauge!("semantic_embedding_sessions_requested").set(requested);
-    hotpath::gauge!("semantic_embedding_sessions_effective").set(effective);
-    hotpath::gauge!("semantic_embedding_sessions_cpu_safe").set(cpu_safe_sessions);
-    // The other half of effective native width: `sessions * intra_threads`
-    // is the CPU demand admitted against the shared code-index budget.
-    hotpath::gauge!("semantic_embedding_intra_threads").set(intra);
-    hotpath::gauge!("semantic_embedding_sessions_limiting_reason").set(match limiting_reason {
-        EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget => 1,
-        EmbeddingSessionLimitingReasonV1::EnvironmentOverride => 2,
-        EmbeddingSessionLimitingReasonV1::ConfiguredMaximum => 3,
-        EmbeddingSessionLimitingReasonV1::ResidentSessionLimit => 4,
-    });
-    effective
+    record_execution_plan(plan, requested, shared_cpu_budget, configured);
+    plan.sessions
 }
 
 /// Session-pool sizing that lets the derived concurrency actually be used.
@@ -172,7 +242,8 @@ pub fn embedding_session_width(intra_threads: u32, configured_max_sessions: u32)
 /// projection sessions.
 #[must_use]
 pub fn embedding_pool_sessions(intra_threads: u32, configured_max_sessions: u32) -> usize {
-    embedding_session_width(intra_threads, configured_max_sessions).saturating_add(1)
+    let _ = intra_threads;
+    (configured_max_sessions as usize).max(1).saturating_add(1)
 }
 
 /// Host-derived default for the configuration's concurrent-session ceiling.
@@ -187,11 +258,7 @@ pub fn default_max_concurrent_sessions() -> u32 {
 
 #[must_use]
 pub fn default_max_concurrent_sessions_for(total_cores: usize) -> u32 {
-    let width = embedding_session_width_for(
-        total_cores,
-        DEFAULT_INTRA_THREADS,
-        MAX_EMBEDDING_SESSIONS as u32,
-    );
+    let width = embedding_session_width_for(total_cores, BASELINE_INTRA_THREADS as u32, u32::MAX);
     u32::try_from(width.max(1)).unwrap_or(1)
 }
 
@@ -233,39 +300,91 @@ mod tests {
     #[test]
     fn forced_sessions_are_clamped_to_the_shared_cpu_budget() {
         assert_eq!(
-            embedding_session_plan_for(8, 4, 64, Some(12)),
-            (
-                2,
-                EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget
-            )
+            embedding_execution_plan_for(8, 4, 64, 64, Some(12)),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 4,
+                sessions: 2,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget,
+            }
         );
         assert_eq!(
-            embedding_session_plan_for(64, 4, 1, Some(12)),
-            (1, EmbeddingSessionLimitingReasonV1::ConfiguredMaximum)
+            embedding_execution_plan_for(64, 4, 1, 64, Some(12)),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 4,
+                sessions: 1,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
+            }
         );
     }
 
     #[test]
-    fn wider_intra_threads_narrow_the_session_width() {
-        assert_eq!(embedding_session_width_for(96, 1, 64), 16);
-        assert_eq!(embedding_session_width_for(96, 32, 64), 1);
-        assert_eq!(embedding_session_width_for(96, 128, 64), 1);
+    fn intra_thread_ceiling_does_not_reduce_independent_session_width() {
+        assert_eq!(embedding_session_width_for(96, 1, 64), 48);
+        assert_eq!(embedding_session_width_for(96, 32, 64), 12);
+        assert_eq!(embedding_session_width_for(96, 128, 64), 12);
+    }
+
+    #[test]
+    fn default_intra_thread_ceiling_is_valid_on_small_and_large_hosts() {
+        assert_eq!(default_max_intra_threads_for(1), 1);
+        assert_eq!(default_max_intra_threads_for(8), 8);
+        assert_eq!(default_max_intra_threads_for(96), 12);
+    }
+
+    #[test]
+    fn resident_capacity_reassigns_idle_cpu_to_the_sessions_that_fit() {
+        assert_eq!(
+            embedding_execution_plan_for(48, 12, 12, 4, None),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 12,
+                sessions: 4,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ResidentSessionLimit,
+            }
+        );
+        assert_eq!(
+            embedding_execution_plan_for(8, 12, 12, 2, None),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 4,
+                sessions: 2,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ResidentSessionLimit,
+            }
+        );
+        assert_eq!(
+            embedding_execution_plan_for(4, 12, 12, 1, None),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 4,
+                sessions: 1,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ResidentSessionLimit,
+            }
+        );
+    }
+
+    #[test]
+    fn configured_thread_and_session_ceilings_remain_authoritative() {
+        assert_eq!(
+            embedding_execution_plan_for(48, 8, 3, 12, None),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 8,
+                sessions: 3,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
+            }
+        );
+        assert_eq!(embedding_pool_sessions(8, 32), 33);
     }
 
     #[test]
     fn low_width_native_thread_demand_fits_the_shared_cpu_authority() {
         for shared_cpu_budget in 1..=3usize {
-            let intra_threads =
-                embedding_intra_threads_for(shared_cpu_budget, DEFAULT_INTRA_THREADS);
-            let (sessions, _) = embedding_session_plan_for(
+            let plan = embedding_execution_plan_for(
                 shared_cpu_budget,
                 DEFAULT_INTRA_THREADS,
-                MAX_EMBEDDING_SESSIONS as u32,
+                u32::MAX,
+                usize::MAX,
                 None,
             );
 
-            assert_eq!(intra_threads, shared_cpu_budget);
-            assert!(sessions * intra_threads <= shared_cpu_budget);
+            assert_eq!(plan.intra_threads, shared_cpu_budget);
+            assert!(plan.sessions * plan.intra_threads <= shared_cpu_budget);
         }
     }
 

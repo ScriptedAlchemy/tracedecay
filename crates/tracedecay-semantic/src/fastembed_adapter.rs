@@ -181,6 +181,7 @@ struct VerifiedEmbeddingArtifactV1 {
     max_batch_texts: u32,
     max_batch_bytes: u32,
     max_threads: u32,
+    max_concurrent_sessions: u32,
     resident_byte_ceiling: u64,
     /// What ONE warmed session is expected to retain, derived from the
     /// artifact's own declared member lengths.
@@ -283,6 +284,10 @@ impl VerifiedEmbeddingArtifactV1 {
         self.max_threads
     }
 
+    fn max_concurrent_sessions(&self) -> u32 {
+        self.max_concurrent_sessions.max(1)
+    }
+
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
     }
@@ -291,6 +296,14 @@ impl VerifiedEmbeddingArtifactV1 {
     /// [`Self::resident_byte_ceiling`], which the pool still enforces.
     pub fn resident_bytes_estimate(&self) -> u64 {
         self.resident_bytes_estimate.min(self.resident_byte_ceiling)
+    }
+
+    fn resident_session_limit(&self) -> usize {
+        let estimate = self.resident_bytes_estimate().max(1);
+        usize::try_from(self.resident_byte_ceiling / estimate)
+            .unwrap_or(usize::MAX)
+            .max(1)
+            .min(self.max_concurrent_sessions() as usize)
     }
 
     pub fn load_deadline_ms(&self) -> u64 {
@@ -465,6 +478,12 @@ impl AdmittedProjectionArtifactV1 {
                     payload.resource_ceiling.max_sequence_length,
                 ),
                 max_threads: payload.resource_ceiling.max_threads,
+                // Persisted artifact manifests predate runtime session
+                // fan-out. They still carry the exact per-session resource
+                // ceiling; use the host-derived default here while the live
+                // session pool remains the final concurrency authority.
+                max_concurrent_sessions:
+                    crate::embedding_parallelism::default_max_concurrent_sessions(),
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
                 resident_bytes_estimate: resident_bytes_estimate_for(
                     declared_member_bytes,
@@ -540,6 +559,7 @@ impl AdmittedProjectionArtifactV1 {
                     resources.max_sequence_length,
                 ),
                 max_threads: resources.max_threads,
+                max_concurrent_sessions: resources.max_concurrent_sessions,
                 resident_byte_ceiling: resources.max_resident_bytes,
                 resident_bytes_estimate: resident_bytes_estimate_for(
                     model_member.length.saturating_add(tokenizer.length),
@@ -627,8 +647,19 @@ impl AdmittedProjectionArtifactV1 {
 
     /// Maximum intra-op width admitted with the artifact. The process CPU
     /// authority may narrow the native runtime below this ceiling.
+    #[cfg(test)]
     pub(crate) fn execution_max_threads(&self) -> u32 {
         self.runtime_artifact.max_threads()
+    }
+
+    pub(crate) fn embedding_execution_plan(
+        &self,
+    ) -> crate::embedding_parallelism::EmbeddingExecutionPlanV1 {
+        crate::embedding_parallelism::embedding_execution_plan(
+            self.runtime_artifact.max_threads(),
+            self.runtime_artifact.max_concurrent_sessions(),
+            self.runtime_artifact.resident_session_limit(),
+        )
     }
 
     #[cfg(any(test, feature = "semantic-fastembed"))]
@@ -1159,8 +1190,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
         let model =
             hotpath::measure_block!("semantic.model.member_bytes", fastembed_model(artifact))?;
         hotpath::gauge!("semantic_model_member_bytes").set(model.onnx_file.len());
-        let intra_threads =
-            crate::embedding_parallelism::embedding_intra_threads(artifact.max_threads());
+        let intra_threads = authority.embedding_execution_plan().intra_threads;
         let options = InitOptionsUserDefined::new()
             .with_max_length(artifact.truncation_length() as usize)
             .with_intra_threads(intra_threads)
@@ -1839,6 +1869,7 @@ mod tests {
                 max_batch_texts: 8,
                 max_batch_bytes: 16 * 1024,
                 max_threads: 4,
+                max_concurrent_sessions: 4,
                 resident_byte_ceiling: 64 * 1024 * 1024,
                 resident_bytes_estimate: 8 * 1024 * 1024,
                 load_deadline_ms: 30_000,

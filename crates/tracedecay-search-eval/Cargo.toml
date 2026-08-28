@@ -9,6 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/assets/**", "/src/**"]
 
 [dependencies]
+flate2 = "1"
 gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
     "blob-diff",

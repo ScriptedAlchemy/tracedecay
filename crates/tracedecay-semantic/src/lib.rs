@@ -127,7 +127,7 @@ impl Default for SemanticResourceCeilings {
             max_resident_bytes: 2 * 1024 * 1024 * 1024,
             // The artifact admits this maximum. The installed background CPU
             // authority narrows the native runtime on smaller hosts.
-            max_threads: embedding_parallelism::DEFAULT_INTRA_THREADS,
+            max_threads: embedding_parallelism::default_max_intra_threads(),
             // Concurrent sessions are pure sizing: each one is an independent
             // invocation of the same graph over the same tensor shape. Default
             // to what the serving reservation leaves room for instead of
@@ -657,7 +657,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                     let encoder = RuntimeChunkVectorEncoderV1::new(
                         Arc::clone(&candidate),
                         Arc::clone(&progress),
-                        authority.execution_max_threads(),
+                        authority.embedding_execution_plan(),
                     );
                     let batch_units = batch.request.changes.added_or_changed.len() as u64;
                     let prepared = prepare_vector_generation_async(
@@ -1014,12 +1014,10 @@ where
     fn new(
         runtime: Arc<SemanticRuntimeService<R>>,
         progress: Arc<SemanticRuntimeScheduleCancellationV1>,
-        configured_intra_threads: u32,
+        execution: embedding_parallelism::EmbeddingExecutionPlanV1,
     ) -> Self {
-        let intra_threads =
-            embedding_parallelism::embedding_intra_threads(configured_intra_threads);
-        let width =
-            embedding_parallelism::embedding_session_width(configured_intra_threads, u32::MAX);
+        let intra_threads = execution.intra_threads;
+        let width = execution.sessions;
         // The width the host arithmetic asks for. Compare against
         // `semantic_embed_sessions_held` to see what the pool actually
         // granted; the two diverging is the only symptom pool pressure has on

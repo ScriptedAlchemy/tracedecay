@@ -36,22 +36,53 @@ impl ProjectRuntimeRegistryV1 {
     ) -> Option<ProjectRuntimeRequestLeaseV1> {
         let candidate_roots = candidate_roots(project_root, canonical_root);
         let mut fences = self.lock_root_fences();
-        if self.closed.load(Ordering::Acquire)
-            || candidate_roots.iter().any(|root| fences.contains(root))
-        {
+        if self.closed.load(Ordering::Acquire) {
+            hotpath::gauge!("daemon.service.request_admission.closed_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_request_admission",
+                outcome = "unavailable",
+                reason = "registry_closed",
+                "project request runtime registry is closed"
+            );
+            return None;
+        }
+        if candidate_roots.iter().any(|root| fences.contains(root)) {
+            hotpath::gauge!("daemon.service.request_admission.fenced_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_request_admission",
+                outcome = "unavailable",
+                reason = "root_fenced",
+                "project request root is fenced"
+            );
             return None;
         }
         let runtimes = self.lock_runtimes();
         if !candidate_roots
             .iter()
             .any(|root| runtimes.contains_key(root))
-            || candidate_roots.iter().any(|root| {
-                fences
-                    .request_leases
-                    .get(root)
-                    .is_some_and(|count| *count == usize::MAX)
-            })
         {
+            hotpath::gauge!("daemon.service.request_admission.runtime_missing_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_request_admission",
+                outcome = "unavailable",
+                reason = "runtime_missing",
+                "project request runtime is not registered"
+            );
+            return None;
+        }
+        if candidate_roots.iter().any(|root| {
+            fences
+                .request_leases
+                .get(root)
+                .is_some_and(|count| *count == usize::MAX)
+        }) {
+            hotpath::gauge!("daemon.service.request_admission.lease_overflow_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_request_admission",
+                outcome = "unavailable",
+                reason = "lease_overflow",
+                "project request lease counter is exhausted"
+            );
             return None;
         }
         for root in &candidate_roots {

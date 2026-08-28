@@ -11,9 +11,13 @@
 //! `CompactStore` section, and proven against the generation's recovered
 //! digest before it serves a single read.
 //!
-//! The sealed store is a **derived artifact**: the staging database remains
-//! the authority, every sealed store is digest-verified before installation,
-//! and any failure to build or open one falls back to the staging database.
+//! The sealed store is a **derived artifact**: the WAL-backed staging database
+//! remains the replay and fallback authority, every sealed store is digest-
+//! verified after durable reopen before installation, and any later failure
+//! to open one falls back to the staging database. When the artifact is
+//! available during publication, that post-reopen proof is also the durable
+//! generation proof; repeating a close/reopen proof over the accumulated
+//! staging database would verify the same rows while rewriting older ones.
 //! Retirement deletes the artifact directory with the generation; quarantine
 //! discards it. Nothing ever writes to a sealed store after compaction — the
 //! handle is marked read-only and refuses writes with a typed error.
@@ -361,24 +365,24 @@ impl GraphDb {
     /// digest-verified, and is installed for reads. Builds it from this
     /// staging database's verified rows when missing.
     ///
-    /// A memory-backed database and a disabled lane both return `Ok(())`
-    /// without an artifact: sealed stores are a derived read-path artifact
-    /// and never a publication precondition in those configurations.
+    /// Returns `true` when the exact post-reopen-verified artifact is
+    /// installed. A memory-backed database and a disabled lane return
+    /// `false`; their publication path retains the staging proof.
     #[hotpath::measure(label = "graph_db.sealed_store.ensure", impl_type = "GraphDb")]
     pub(crate) fn ensure_sealed_generation_store(
         &self,
         identity: &GraphGenerationManifestIdentity,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<bool, GraphDbError> {
         if sealed_store_disabled() {
-            return Ok(());
+            return Ok(false);
         }
         let Some(reopen) = self.inner.reopen.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(database_path) = reopen.config.path.clone() else {
-            return Ok(());
+            return Ok(false);
         };
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
@@ -389,11 +393,12 @@ impl GraphDb {
             if let Some(existing) = sealed.get(&locator)
                 && existing.recovered_digest() == expected.as_str()
             {
-                return Ok(());
+                return Ok(true);
             }
         }
         let store = build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
-        self.install_sealed_generation_store(locator, store)
+        self.install_sealed_generation_store(locator, store)?;
+        Ok(true)
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -509,7 +514,7 @@ impl GraphDb {
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let mut state = self.state_write_guard()?;
-        mutation::apply(
+        self.apply_locked_without_vector_index_maintenance(
             database,
             &mut state,
             batch,
@@ -519,12 +524,8 @@ impl GraphDb {
                 publication_record: None,
             },
             endpoint_namespaces,
-            &self.inner.poisoned,
             check,
         )?;
-        if self.inner.durability == GraphDurability::WalSync {
-            crate::runtime::sync_wal(database)?;
-        }
         Ok(())
     }
 }
@@ -577,7 +578,7 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let built = copy_compact_and_close(source, identity, expected, &staging, check)
+    let built = copy_compact_and_close(source, identity, &staging, check)
         .inspect_err(|_| remove_sealed_directory(&staging));
     let (entities, relations, form) = built?;
     let receipt = SealedStoreReceiptV1 {
@@ -604,11 +605,19 @@ fn build_or_open_sealed_store(
             return Err(sealed_store_io_failure("artifact install failed", error));
         }
     }
-    open_sealed_store(&directory, identity, expected)?.ok_or_else(|| {
-        GraphDbError::unavailable(
-            "sealed generation store disappeared between install and reopen".to_owned(),
-        )
-    })
+    match open_sealed_store(&directory, identity, expected) {
+        Ok(Some(store)) => Ok(store),
+        Ok(None) => {
+            remove_sealed_directory(&directory);
+            Err(GraphDbError::unavailable(
+                "sealed generation store disappeared between install and reopen".to_owned(),
+            ))
+        }
+        Err(error) => {
+            remove_sealed_directory(&directory);
+            Err(error)
+        }
+    }
 }
 
 /// Streams the generation's verified rows into a fresh database under
@@ -618,7 +627,6 @@ fn build_or_open_sealed_store(
 fn copy_compact_and_close(
     source: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
-    expected: &GraphRecoveredGenerationDigestV1,
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize, &'static str), GraphDbError> {
@@ -824,20 +832,11 @@ fn copy_compact_and_close(
         check,
     )?;
 
-    // Prove the copy: the sealed rows must reproduce the recovered digest
-    // before anything is compacted or served.
-    {
-        let guard = sealed.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        verify_sealed_copy_generation(database, identity, expected, check)
-            .map_err(|error| sealed_store_failure("pre-compact verification failed", error))?;
-    }
-
     // Compact only when the pinned engine round-trips every scalar the rows
     // carry; otherwise the artifact stays in replay form, still isolated per
-    // generation. The post-reopen digest proof re-checks whichever form was
-    // written, so a wrong choice here surfaces as a typed refusal, never as
-    // silently wrong reads.
+    // generation. The post-reopen digest proof checks the exact durable form
+    // before installation, so copy, compaction, or persistence corruption all
+    // surface as typed refusal rather than silently wrong reads.
     let form = if saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES {
         SEALED_STORE_FORM_REPLAY
     } else {

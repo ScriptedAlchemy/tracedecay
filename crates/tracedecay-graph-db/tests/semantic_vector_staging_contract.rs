@@ -3,9 +3,16 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+#[cfg(feature = "test-helpers")]
+use sha2::{Digest, Sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
     SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+};
+#[cfg(feature = "test-helpers")]
+use tracedecay_graph_db::{
+    GraphGenerationId, GraphNamespace, GraphProjectionId, GraphVectorIndexRequest,
+    GraphVectorIndexStatus, VectorMetric, semantic_vector_native,
 };
 use tracedecay_store::{
     GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
@@ -85,6 +92,53 @@ fn registration_with_cancellation(
 ) -> GraphDbRegistration {
     registration.cancellation = cancellation;
     registration
+}
+
+#[test]
+#[cfg(feature = "test-helpers")]
+fn semantic_stage_persists_vectors_without_ephemeral_hnsw_maintenance() {
+    let fixture = ContractFixture::new();
+    let mut authority = fixture.authority();
+    let plan = fixture.plan("deferred-hnsw", "semantic-deferred-hnsw", None);
+    let (batch, receipt) = fixture.batch_and_receipt(&plan, 1.5);
+    fixture.begin_and_append(&mut authority, &plan, &receipt, "deferred-hnsw");
+    fixture
+        .apply(&mut authority, &receipt, batch, "deferred-hnsw.native")
+        .unwrap();
+
+    let namespace = GraphNamespace::new(plan.key.projection.namespace.as_str()).unwrap();
+    let projection = GraphProjectionId::new(plan.key.projection.projection.as_str()).unwrap();
+    let generation = GraphGenerationId::new(plan.publication_key.generation.as_str()).unwrap();
+    let physical_namespace = GraphNamespace::new(format!(
+        "generation:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&(namespace, &projection, generation)).unwrap()
+        ))
+    ))
+    .unwrap();
+    let database = fixture
+        .graph
+        .registry
+        .resolve(fixture.registration())
+        .unwrap();
+
+    assert_eq!(
+        database
+            .vector_index_status(GraphVectorIndexRequest {
+                namespace: physical_namespace,
+                projection,
+                property: semantic_vector_native::vector_property(
+                    plan.semantic_generation_id.as_digest().as_str(),
+                )
+                .unwrap(),
+                dimension: usize::from(plan.recipe.embedding_dimension),
+                metric: VectorMetric::Cosine,
+                cancellation: Arc::new(TestCancellation),
+            })
+            .unwrap(),
+        GraphVectorIndexStatus::Missing,
+        "staging persists vector scalars, but its non-durable HNSW would be discarded on reopen"
+    );
 }
 
 fn finalize_retention_step(

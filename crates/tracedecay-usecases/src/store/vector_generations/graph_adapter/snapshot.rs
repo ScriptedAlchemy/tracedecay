@@ -1,10 +1,12 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionTelemetry,
-    GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    TraversalRequest, TraversalResult, TraversalVisit, VerifiedGraphSnapshot,
+    GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphRelationRef, GraphRelationTarget, TraversalRequest, TraversalResult, TraversalVisit,
+    VerifiedGraphSnapshot,
 };
 
 /// Exact verified read authority for one semantic-vector projection generation.
@@ -50,6 +52,19 @@ impl SemanticVectorVerifiedRead {
                 cancellation,
             )
             .and_then(|relation| relation.map(storage_relation).transpose())
+    }
+
+    pub(super) fn outgoing_relation_targets(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
+        self.require_projection(namespace, &self.inner.projection().projection)?;
+        self.inner
+            .outgoing_relation_targets(starts, relation_kinds, max_relations, cancellation)
     }
 
     pub(super) fn projection_telemetry(

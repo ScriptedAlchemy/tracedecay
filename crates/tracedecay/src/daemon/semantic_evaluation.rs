@@ -37,7 +37,8 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
 use tracedecay_usecases::store::vector_generations::{
-    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    VectorGenerationStoreErrorV1,
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -279,28 +280,114 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
             store.generation(&vector_generation_id, Arc::clone(retained.cancellation())),
             label = "daemon.semantic.evaluation.candidate.vector_generation"
         ))
-        .await?
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
-        .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+        .await
+        .map_err(|error| {
+            hotpath::measure_block!(
+                "daemon.semantic.evaluation.candidate.vector_generation.control_interrupted",
+                ()
+            );
+            error
+        })?
+        .map_err(|error| {
+            record_vector_generation_failure(&error);
+            tracing::warn!(
+                error = %error,
+                "semantic evaluation candidate vector generation is unavailable"
+            );
+            SemanticActivationCoordinationErrorV1::Unavailable
+        })?;
+    let Some(vector) = vector else {
+        hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.missing",
+            ()
+        );
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    };
     if vector.source_generation() != &snapshot.source_generation
         || vector.source_manifest_digest() != &snapshot.source_manifest_digest
     {
+        tracing::warn!(
+            source_generation_matches = vector.source_generation() == &snapshot.source_generation,
+            source_manifest_matches =
+                vector.source_manifest_digest() == &snapshot.source_manifest_digest,
+            "semantic evaluation candidate vector identity conflicts with the code snapshot"
+        );
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     }
     let runtime = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.production_runtime",
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-    )
-    .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    );
+    let Some(runtime) = runtime else {
+        tracing::warn!("semantic evaluation candidate production runtime is unavailable");
+        return Err(SemanticActivationCoordinationErrorV1::Unavailable);
+    };
     let resources = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.resource_requirement",
         runtime.evaluation_target_resource_requirement()
     )
-    .map_err(coordination_error_from_runtime)?;
+    .map_err(|error| {
+        tracing::warn!(
+            ?error,
+            "semantic evaluation candidate resource requirement is unavailable"
+        );
+        coordination_error_from_runtime(error)
+    })?;
     hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.materialize",
         daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
     )
+}
+
+fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
+    match error {
+        VectorGenerationStoreErrorV1::Cancelled => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.cancelled",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::DeadlineExceeded => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.deadline",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingPublished,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_missing_published",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::IdentityMismatch,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_identity",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.base_missing_snapshot",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Corrupt(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.corrupt",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Unavailable(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.unavailable",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::Storage(_) => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.storage",
+            ()
+        ),
+        VectorGenerationStoreErrorV1::ConcurrentMutation => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.concurrent_mutation",
+            ()
+        ),
+        _ => hotpath::measure_block!(
+            "daemon.semantic.evaluation.candidate.vector_generation.failed.other",
+            ()
+        ),
+    }
 }
 
 pub(super) fn semantic_publication_generation(
@@ -1184,14 +1271,15 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
         '_,
         Result<SemanticEvaluationPublicationSnapshotV1, SemanticActivationCoordinationErrorV1>,
     > {
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             self.control.checkpoint()?;
             let code = self
                 .control
-                .interruptible(
+                .interruptible(hotpath::future!(
                     self.scheduler
                         .semantic_evaluation_snapshot_for_scope(&self.scope),
-                )
+                    label = "daemon.semantic.evaluation.snapshot.code"
+                ))
                 .await?
                 .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
             let (
@@ -1214,7 +1302,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     let capability_manifest_digest = code.capability_manifest_digest.clone();
                     let cancellation = Arc::clone(&self.control)
                         as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
-                    let mut verification = tokio::spawn(async move {
+                    let mut verification = tokio::spawn(hotpath::future!(async move {
                         runtime
                             .inspect_verified_evaluation_target_snapshot(
                                 &candidate,
@@ -1225,7 +1313,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                             )
                             .await
                             .map_err(coordination_error_from_runtime)
-                    });
+                    }, label = "daemon.semantic.evaluation.snapshot.verify_target"));
                     let receipt = await_semantic_task(&self.control, &mut verification).await?;
                     (
                         Some(code.source_generation.clone()),
@@ -1238,8 +1326,11 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                 }
                 None => (None, None, None, None, None, None),
             };
-            let evaluated = crate::search_eval::load_default_evaluated_profile_material(
-                &self.candidate.evaluated_profile_id,
+            let evaluated = hotpath::measure_block!(
+                "daemon.semantic.evaluation.snapshot.profile_material",
+                crate::search_eval::load_default_evaluated_profile_material(
+                    &self.candidate.evaluated_profile_id,
+                )
             )
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
             self.control.checkpoint()?;
@@ -1263,7 +1354,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     rerank_ceiling: evaluated.rerank,
                 },
             })
-        })
+        }, label = "daemon.semantic.evaluation.snapshot.current"))
     }
 
     fn evaluate_default_candidate<'a>(
@@ -1332,7 +1423,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
         expected: &'a SemanticEvaluationPublicationSnapshotV1,
         publication: SemanticEvaluationAuthorityPublicationV1,
     ) -> SemanticRuntimeFuture<'a, Result<(), SemanticActivationCoordinationErrorV1>> {
-        Box::pin(async move {
+        Box::pin(hotpath::future!(async move {
             self.snapshot.control.checkpoint()?;
             let expected_code = super::code_index_scheduler::SemanticEvaluationCodeSnapshotV1 {
                 source_generation: expected.code_generation.clone(),
@@ -1343,14 +1434,15 @@ impl SemanticEvaluationPublicationSnapshotPortV1
             let _code_lease = self
                 .snapshot
                 .control
-                .interruptible(
+                .interruptible(hotpath::future!(
                     self.snapshot
                         .scheduler
                         .acquire_semantic_evaluation_publication_lease(
                             &self.snapshot.scope,
                             &expected_code,
                         ),
-                )
+                    label = "daemon.semantic.evaluation.publish.code_lease"
+                ))
                 .await?
                 .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
             let semantic_lifecycle_verification = expected.semantic_lifecycle_verification.clone();
@@ -1377,9 +1469,10 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                 Some((runtime, _, revision, generation)) => Some(
                     self.snapshot
                         .control
-                        .interruptible(
+                        .interruptible(hotpath::future!(
                             runtime.acquire_vector_publication_lease(*revision, generation),
-                        )
+                            label = "daemon.semantic.evaluation.publish.vector_lease"
+                        ))
                         .await?
                         .map_err(|_| SemanticActivationCoordinationErrorV1::Conflict)?,
                 ),
@@ -1390,7 +1483,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                 let verification = verification.clone();
                 let cancellation = Arc::clone(&self.snapshot.control)
                     as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
-                let mut acquisition = tokio::spawn(async move {
+                let mut acquisition = tokio::spawn(hotpath::future!(async move {
                     runtime
                         .acquire_verified_evaluation_target_publication_lease(
                             &verification,
@@ -1398,16 +1491,20 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                         )
                         .await
                         .map_err(coordination_error_from_runtime)
-                });
+                }, label = "daemon.semantic.evaluation.publish.lifecycle_lease"));
                 Some(await_semantic_task(&self.snapshot.control, &mut acquisition).await?)
             } else {
                 None
             };
             self.snapshot.control.try_begin_commit()?;
-            let result = publication.commit(expected).await;
+            let result = hotpath::future!(
+                publication.commit(expected),
+                label = "daemon.semantic.evaluation.publish.commit"
+            )
+            .await;
             self.snapshot.control.checkpoint()?;
             result
-        })
+        }, label = "daemon.semantic.evaluation.publish.total"))
     }
 }
 

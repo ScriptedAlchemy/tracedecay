@@ -438,8 +438,8 @@ impl GraphDbRegistry {
 
     /// Publishes a native generation in two bounded, crash-safe attempts when
     /// this call writes any durable staging page. The retry proves the exact
-    /// finalization receipt, then performs the mandatory close/reopen digest
-    /// proof without repeating native staging.
+    /// finalization receipt, then performs the durable generation proof
+    /// without repeating native staging.
     pub fn publish_verified_with_durable_stage_boundary(
         &self,
         registration: GraphDbRegistration,
@@ -643,10 +643,10 @@ impl GraphDbRegistry {
                     &identity,
                     &mut visiting,
                 )?;
-                // The journaled replay's expected recovered digest is
-                // already proven to bind this exact manifest, so the
-                // close/reopen recovered-digest proof verifies against it
-                // directly instead of re-canonicalizing the full manifest.
+                // The journaled replay's expected recovered digest already
+                // binds this exact manifest, so the durable generation proof
+                // checks against it directly instead of re-canonicalizing the
+                // full manifest.
                 let sealed_digest = &replay.publication.expected_recovered_digest;
                 let row_counts = (entity_rows, relation_rows);
                 let (historical_commit, recovered_digest) =
@@ -654,7 +654,7 @@ impl GraphDbRegistry {
                         (true, _) => {
                             // Staging consumes the manifest and drops its rows
                             // once the last page commit is durable, so the
-                            // close/reopen below no longer overlaps them.
+                            // artifact proof below no longer overlaps them.
                             let staged = database
                                 .apply_generation_unverified_with_digest_observed(
                                     manifest,
@@ -665,41 +665,46 @@ impl GraphDbRegistry {
                                 return Err(GraphDbError::DeadlineExceeded);
                             }
                             let commit = staged.commit();
-                            let (_, recovered) = database.reopen_and_verify_existing_generation(
+                            let (_, recovered) = database.verify_generation_for_publication(
                                 &identity,
                                 sealed_digest,
                                 row_counts,
+                                true,
                                 &check,
                             )?;
                             (commit, recovered)
                         }
                         (false, true) => {
                             drop(manifest);
-                            database.reopen_and_verify_existing_generation(
+                            database.verify_generation_for_publication(
                                 &identity,
                                 sealed_digest,
                                 row_counts,
+                                true,
                                 &check,
                             )?
                         }
                         (false, false) if reopen_metadata => {
                             drop(manifest);
-                            database.reopen_and_verify_existing_generation(
+                            database.verify_generation_for_publication(
                                 &identity,
                                 sealed_digest,
                                 row_counts,
+                                true,
                                 &check,
                             )?
                         }
                         (false, false) => {
                             drop(manifest);
-                            database.verify_existing_generation(&identity, sealed_digest, &check)?
+                            database.verify_generation_for_publication(
+                                &identity,
+                                sealed_digest,
+                                row_counts,
+                                false,
+                                &check,
+                            )?
                         }
                     };
-                // Seal implies an isolated compact store: adopt or build the
-                // per-generation artifact from the rows the digest just
-                // proved, before this head starts serving reads.
-                database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
                 operation.check(self, context)?;
                 // The digest proof above already streamed this generation's
                 // stored rows against the head's journaled recovered digest
@@ -747,11 +752,11 @@ impl GraphDbRegistry {
             &mut visiting,
         )?;
 
-        // The journaled replay's expected recovered digest is already proven
-        // to bind this exact manifest (inline decode, sealed identity pin, or
-        // supplied-manifest binding above), so the close/reopen
-        // recovered-digest proof verifies against it directly instead of
-        // re-canonicalizing the full manifest a second time.
+        // The journaled replay's expected recovered digest already binds this
+        // exact manifest (inline decode, sealed identity pin, or supplied-
+        // manifest binding above), so the durable generation proof checks
+        // against it directly instead of re-canonicalizing the full manifest
+        // a second time.
         let sealed_digest = &replay.publication.expected_recovered_digest;
         let row_counts = (entity_rows, relation_rows);
         let verified = match (apply_native, has_supplied_manifest) {
@@ -760,8 +765,8 @@ impl GraphDbRegistry {
             // commit must install them natively before verification.
             //
             // Staging consumes the manifest and releases its bulk rows at the
-            // last durable page commit, so the close/reopen and the streamed
-            // recovered-digest proof below run without them resident.
+            // last durable page commit, so the artifact proof below runs
+            // without them resident.
             (true, _) | (false, true) => {
                 let staged = database.apply_generation_unverified_with_digest_observed(
                     manifest,
@@ -773,26 +778,34 @@ impl GraphDbRegistry {
                 }
                 let commit = staged.commit();
                 database
-                    .reopen_and_verify_existing_generation(
+                    .verify_generation_for_publication(
                         &identity,
                         sealed_digest,
                         row_counts,
+                        true,
                         &check,
                     )
                     .map(|(_, recovered)| (commit, recovered))
             }
             (false, false) if reopen_metadata => {
                 drop(manifest);
-                database.reopen_and_verify_existing_generation(
+                database.verify_generation_for_publication(
                     &identity,
                     sealed_digest,
                     row_counts,
+                    true,
                     &check,
                 )
             }
             (false, false) => {
                 drop(manifest);
-                database.verify_existing_generation(&identity, sealed_digest, &check)
+                database.verify_generation_for_publication(
+                    &identity,
+                    sealed_digest,
+                    row_counts,
+                    false,
+                    &check,
+                )
             }
         };
         let (commit, recovered_digest) = match verified {
@@ -813,12 +826,6 @@ impl GraphDbRegistry {
         };
         database
             .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
-        // Seal implies an isolated compact store. Built after the recovered
-        // digest proved the staged rows and before the relational CAS, so a
-        // build failure is a typed, retryable publication error rather than a
-        // post-linearization surprise. The artifact is digest-bound to this
-        // exact generation, so a competing publisher adopting it is safe.
-        database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
         operation.check(self, context)?;
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
@@ -1597,19 +1604,23 @@ mod historical_publication_reuse_tests {
             .unwrap();
         assert_eq!(
             recovered_generation_enumerations(),
-            1,
-            "first publication must stream the recovered-digest proof exactly once"
+            if cfg!(feature = "graph-sealed-store") {
+                0
+            } else {
+                1
+            },
+            "the durable sealed proof must replace the staging proof when available"
         );
-        // The sealed per-generation copy pays its own two proofs (pre-compact
-        // and post-reopen) and never re-streams the staging rows.
+        // The sealed per-generation copy is proved after durable reopen,
+        // before it can be installed or answer a read.
         assert_eq!(
             sealed_copy_proofs(),
             if cfg!(feature = "graph-sealed-store") {
-                2
+                1
             } else {
                 0
             },
-            "a first seal proves the sealed copy before compaction and after reopen"
+            "a first seal proves the exact durable artifact before installation"
         );
         let head = first.head.clone();
         assert_eq!(first.snapshot.generation(), &manifest.generation);

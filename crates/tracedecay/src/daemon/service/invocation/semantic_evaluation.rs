@@ -153,6 +153,13 @@ impl DaemonInvocationService {
             return application_problem(request_id, problem);
         }
         let Some(project_root) = project_root else {
+            hotpath::gauge!("daemon.service.semantic.unavailable.project_root_total").inc(1_u64);
+            tracing::warn!(
+                event = "semantic_evaluation_admission",
+                outcome = "unavailable",
+                reason = "project_root",
+                "semantic evaluation has no routed project root"
+            );
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -163,6 +170,14 @@ impl DaemonInvocationService {
             return application_problem(request_id, problem);
         }
         let Some(registered) = registered else {
+            hotpath::gauge!("daemon.service.semantic.unavailable.configuration_runtime_total")
+                .inc(1_u64);
+            tracing::warn!(
+                event = "semantic_evaluation_admission",
+                outcome = "unavailable",
+                reason = "configuration_runtime",
+                "semantic evaluation configuration runtime is not registered"
+            );
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -178,6 +193,14 @@ impl DaemonInvocationService {
                     return application_problem(request_id, problem);
                 }
                 let Some(operation) = operation else {
+                    hotpath::gauge!("daemon.service.semantic.unavailable.operation_total")
+                        .inc(1_u64);
+                    tracing::warn!(
+                        event = "semantic_evaluation_admission",
+                        outcome = "unavailable",
+                        reason = "operation",
+                        "semantic evaluation operation is not installed"
+                    );
                     return DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,
@@ -193,6 +216,14 @@ impl DaemonInvocationService {
         let canonical_root = match canonical_root {
             Ok(root) => root,
             Err(_) => {
+                hotpath::gauge!("daemon.service.semantic.unavailable.canonical_root_total")
+                    .inc(1_u64);
+                tracing::warn!(
+                    event = "semantic_evaluation_admission",
+                    outcome = "unavailable",
+                    reason = "canonical_root",
+                    "semantic evaluation project root cannot be canonicalized"
+                );
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::Unavailable,
@@ -258,6 +289,14 @@ impl DaemonInvocationService {
                             let qualification_bytes = crate::search_eval::encode_packaged_native_qualification(
                                 evaluation,
                                 qualification_key,
+                            )
+                            .map_err(|error| {
+                                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    error.to_string(),
+                                )
+                            })?;
+                            let qualification_bytes = crate::search_eval::encode_daemon_native_qualification_blob(
+                                &qualification_bytes,
                             )
                             .map_err(|error| {
                                 SemanticActivationCoordinationErrorV1::RejectedDetail(
