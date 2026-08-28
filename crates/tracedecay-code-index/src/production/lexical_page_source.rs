@@ -1606,69 +1606,76 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
-        let (bytes, next_file_offset) = read_next_file_bytes(
-            &mut self.reader,
-            file_offset,
-            self.files_end_offset,
-            self.maximum_file_bytes,
-            control,
-        )?;
-        let file: PersistedFileGenerationArtifactsV1 =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed lexical file decoding failed: {error}"
-                ))
+        let (file, next_file_offset) =
+            hotpath::measure_block!("code_index.restore.file_decode", {
+                let (bytes, next_file_offset) = read_next_file_bytes(
+                    &mut self.reader,
+                    file_offset,
+                    self.files_end_offset,
+                    self.maximum_file_bytes,
+                    control,
+                )?;
+                let file: PersistedFileGenerationArtifactsV1 = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed lexical file decoding failed: {error}"
+                        ))
+                    })?;
+                Ok::<_, CodeIndexProductionErrorV1>((file, next_file_offset))
             })?;
-        file.artifacts
-            .validate()
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        file.artifacts
-            .validate_generation_import_authority(&file.extraction)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        let document = &file.artifacts.chunks.document;
-        if file.extraction.file_occurrence_id != document.file_occurrence_id
-            || file.extraction.content_digest != document.content_digest
-            || file.authority.content_digest != document.content_digest
-            || file
-                .artifacts
-                .chunks
-                .chunks
-                .iter()
-                .any(|chunk| chunk.anchor.generation_id != file.extraction.generation_id)
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical extraction authority does not match its admitted document"
-                    .to_owned(),
-            ));
-        }
-        let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        let mut symbol_displays = BTreeMap::new();
-        for symbol in &file.artifacts.symbols {
-            let display = VerifiedSealedLexicalSymbolDisplayV1 {
-                occurrence: symbol.occurrence.clone(),
-                simple_name: symbol.simple_name.clone(),
-                qualified_name: symbol.qualified_name.clone(),
-                kind: symbol.kind.clone(),
-            };
-            if symbol_displays
-                .insert(symbol.occurrence.clone(), display)
-                .is_some()
+        hotpath::measure_block!("code_index.restore.file_admit", {
+            file.artifacts
+                .validate()
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            file.artifacts
+                .validate_generation_import_authority(&file.extraction)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            let document = &file.artifacts.chunks.document;
+            if file.extraction.file_occurrence_id != document.file_occurrence_id
+                || file.extraction.content_digest != document.content_digest
+                || file.authority.content_digest != document.content_digest
+                || file
+                    .artifacts
+                    .chunks
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.anchor.generation_id != file.extraction.generation_id)
             {
                 return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file contains duplicate symbol display identities".to_owned(),
+                    "sealed lexical extraction authority does not match its admitted document"
+                        .to_owned(),
                 ));
             }
-        }
-        let imports = file.artifacts.imports;
-        let chunks = exact_authority
-            .admit_all(file.artifacts.chunks.chunks)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        Ok(AdmittedSealedLexicalFileV1 {
-            chunks,
-            symbol_displays,
-            imports,
-            next_file_offset,
+            let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            let mut symbol_displays = BTreeMap::new();
+            for symbol in &file.artifacts.symbols {
+                let display = VerifiedSealedLexicalSymbolDisplayV1 {
+                    occurrence: symbol.occurrence.clone(),
+                    simple_name: symbol.simple_name.clone(),
+                    qualified_name: symbol.qualified_name.clone(),
+                    kind: symbol.kind.clone(),
+                };
+                if symbol_displays
+                    .insert(symbol.occurrence.clone(), display)
+                    .is_some()
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file contains duplicate symbol display identities"
+                            .to_owned(),
+                    ));
+                }
+            }
+            let imports = file.artifacts.imports;
+            let chunks = exact_authority
+                .admit_all(file.artifacts.chunks.chunks)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            Ok(AdmittedSealedLexicalFileV1 {
+                chunks,
+                symbol_displays,
+                imports,
+                next_file_offset,
+            })
         })
     }
 
