@@ -322,6 +322,9 @@ where
         cancellation_observed_while_queued: Option<tracedecay_domain::UtcMicros>,
         cancellation_requested: &impl Fn() -> Option<tracedecay_domain::UtcMicros>,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+        // Entered only after the repository permit, so this measures serialized
+        // execution in flight, distinct from `daemon.git.tx.queue` wait time.
+        let _in_flight = GitIndexApplyGaugeGuard::enter();
         let idempotency_key = request
             .native_idempotency_key()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -362,7 +365,10 @@ where
             journal,
         };
         let durable = DurableGitIndexJournal::new(&self.store);
-        let begin = match durable.begin_or_replay(begin) {
+        let begin = match hotpath::measure_block!(
+            "daemon.git.tx.journal_begin",
+            durable.begin_or_replay(begin)
+        ) {
             Ok(begin) => begin,
             Err(error) => return Err(map_journal_error(error)),
         };
@@ -495,6 +501,7 @@ where
                 Err(GitIndexTransactionPortError::NeedsInspection)
             }
             Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown) | Err(_) => {
+                hotpath::gauge!("daemon.git.tx.apply.recovered_total").inc(1_u64);
                 let mut recovery_record = (*record).clone();
                 recovery_record.journal = started;
                 let receipt = GitIndexRecoveryCoordinator::new(&self.store, &self.native)
@@ -531,6 +538,7 @@ where
             || current.configuration_digest != request.proof.configuration_digest
             || current.policy_revision != request.authority.policy.revision
         {
+            hotpath::gauge!("daemon.git.tx.apply.denied_total").inc(1_u64);
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         let decision = self.classifier.evaluate(&GitEffectClassificationInputV1 {
@@ -551,6 +559,7 @@ where
         if decision.disposition == GitEffectDispositionV1::Allow {
             Ok(())
         } else {
+            hotpath::gauge!("daemon.git.tx.apply.denied_total").inc(1_u64);
             Err(GitIndexTransactionPortError::PolicyDenied)
         }
     }
@@ -634,6 +643,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.git.tx.journal_terminal")]
 fn terminalize_admitted_receipt<S>(
     store: &S,
     durable: &DurableGitIndexJournal<'_, S>,
@@ -695,6 +705,7 @@ fn quarantine_after_admission<S>(
 where
     S: GitIndexTransactionStore,
 {
+    hotpath::gauge!("daemon.git.tx.apply.quarantined_total").inc(1_u64);
     store
         .quarantine_repository(&preview.repository_snapshot.repository_id, transaction_id)
         .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
@@ -776,6 +787,7 @@ fn replay_result(
     request: &GitIndexApplyRequestV1,
     receipt: &GitIndexTransactionReceiptV1,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+    hotpath::gauge!("daemon.git.tx.apply.replayed_total").inc(1_u64);
     result_from_receipt(
         request,
         deterministic_effect_id(&receipt.transaction_id)?,
@@ -798,6 +810,20 @@ fn result_from_receipt(
     receipt: GitIndexTransactionReceiptV1,
     execution: OperationReceipt,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+    // Every apply result — fresh, replayed, or inline-recovered — terminates
+    // here exactly once; `replayed_total`/`recovered_total` discriminate the
+    // overlapping populations.
+    match receipt.outcome {
+        GitIndexReceiptOutcomeV1::Committed => {
+            hotpath::gauge!("daemon.git.tx.apply.committed_total").inc(1_u64);
+        }
+        GitIndexReceiptOutcomeV1::AbortedNoChange => {
+            hotpath::gauge!("daemon.git.tx.apply.aborted_total").inc(1_u64);
+        }
+        GitIndexReceiptOutcomeV1::NeedsInspection => {
+            hotpath::gauge!("daemon.git.tx.apply.needs_inspection_total").inc(1_u64);
+        }
+    }
     let (termination, reconciliation) = match receipt.outcome {
         GitIndexReceiptOutcomeV1::Committed => (
             EffectTermination::Completed,
@@ -858,6 +884,25 @@ const fn operation_termination(termination: EffectTermination) -> OperationTermi
         EffectTermination::Failed => OperationTermination::Failed,
         EffectTermination::Partial => OperationTermination::Partial,
         EffectTermination::EffectUnknown => OperationTermination::EffectUnknown,
+    }
+}
+
+/// RAII gauge for serialized applies in flight (post repository-permit,
+/// admission through terminal receipt), leak-proof across every early return
+/// and quarantine path.
+struct GitIndexApplyGaugeGuard;
+
+impl GitIndexApplyGaugeGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("daemon.git.tx.apply.in_flight").inc(1_u64);
+        hotpath::gauge!("daemon.git.tx.apply.admitted_total").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for GitIndexApplyGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("daemon.git.tx.apply.in_flight").dec(1_u64);
     }
 }
 

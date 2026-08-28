@@ -641,14 +641,14 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    let configuration = graph
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open configuration currentness failed: {error}"),
-        })?;
+    let configuration = hotpath::future!(
+        graph.configuration_runtime().client().current(),
+        label = "daemon.project.open.owners.configuration_read"
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open configuration currentness failed: {error}"),
+    })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -661,15 +661,18 @@ pub(super) async fn register_project_open_production_owners(
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
-    let _scout_registry = match invocation
-        .context_scout_runtime_registrar()
-        .open_and_register(
-            database.clone(),
-            session_db.binding().shard_id.profile_id.clone(),
-            project_id.clone(),
-            project_root.to_path_buf(),
-        )
-        .await
+    let _scout_registry = match hotpath::future!(
+        invocation
+            .context_scout_runtime_registrar()
+            .open_and_register(
+                database.clone(),
+                session_db.binding().shard_id.profile_id.clone(),
+                project_id.clone(),
+                project_root.to_path_buf(),
+            ),
+        label = "daemon.project.open.owners.scout"
+    )
+    .await
     {
         Ok(registry) => registry,
         Err(DaemonContextScoutRuntimeRegistrationError::AlreadyRegistered) => invocation
@@ -708,17 +711,19 @@ pub(super) async fn register_project_open_production_owners(
     // and the native-integration mount below.
     let repository_root = crate::worktree::git_worktree_root(project_root);
     if let Some(repository_root) = repository_root.as_deref() {
-        git_transactions
-            .install_authority(
+        hotpath::future!(
+            git_transactions.install_authority(
                 repository_root,
                 access.clone(),
                 session_db.clone(),
                 tokio::runtime::Handle::current(),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("project-open Git authority registration failed: {error}"),
-            })?;
+            ),
+            label = "daemon.project.open.owners.git_authority"
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Git authority registration failed: {error}"),
+        })?;
     }
     // Preview executors were published with the read-only core. Open their
     // mutation lane only after the exact Git transaction authority exists.
@@ -736,29 +741,30 @@ pub(super) async fn register_project_open_production_owners(
         .await?;
     let work_evidence_retrieval =
         server.work_evidence_retrieval(&scope, invocation.work_federated_query_authority())?;
-    invocation
-        .configuration_runtime_registrar()
-        .register(
+    let configuration_profile_id = server
+        .profile_identity()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open configuration requires exact profile authority".to_owned(),
+        })?
+        .profile_id()
+        .clone();
+    hotpath::future!(
+        invocation.configuration_runtime_registrar().register(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
-            server
-                .profile_identity()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "project-open configuration requires exact profile authority"
-                        .to_owned(),
-                })?
-                .profile_id()
-                .clone(),
+            configuration_profile_id,
             requester.clone(),
             grant_expires_at,
             None,
             configuration_policy_digest.clone(),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open configuration runtime registration failed: {error}"),
-        })?;
+        ),
+        label = "daemon.project.open.owners.configuration"
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open configuration runtime registration failed: {error}"),
+    })?;
     let retained_observed_at = now_micros();
     let retained_grant =
         project_open_retained_grant(&access, retained_observed_at).map_err(|error| {
@@ -771,47 +777,57 @@ pub(super) async fn register_project_open_production_owners(
         scope.project_id.clone(),
         access.configuration_digest.clone(),
     );
-    invocation
-        .retained_runtime_registrar()
-        .register(
+    hotpath::future!(
+        invocation.retained_runtime_registrar().register(
             project_root.to_path_buf(),
             scope.clone(),
             requester.clone(),
             retained_grant,
             retained_ports,
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open retained runtime registration failed: {error}"),
-        })?;
+        ),
+        label = "daemon.project.open.owners.retained"
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open retained runtime registration failed: {error}"),
+    })?;
     // Mount the native-integration authority under the same pinned policy
     // digest the configuration runtime just registered, so the coordinator's
     // stale/denied predicates and the handler's minted grants agree on one
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
     let native_owner = if let Some(repository_root) = repository_root {
-        let native_owner = native_integration
-            .ensure(
-                session_db.clone(),
-                repository_root,
-                scope.project_id.clone(),
-                scope.repository_id.clone(),
-                configuration_policy_digest.clone(),
-                now_micros(),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "project-open native integration authority registration failed: {error}"
-                ),
-            })?;
-        invocation
-            .service
-            .install_worktree_cleanup_recovery_fences(&native_owner)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("project-open worktree cleanup recovery fencing failed: {error}"),
-            })?;
+        let native_owner = hotpath::future!(
+            async {
+                let native_owner = native_integration
+                    .ensure(
+                        session_db.clone(),
+                        repository_root,
+                        scope.project_id.clone(),
+                        scope.repository_id.clone(),
+                        configuration_policy_digest.clone(),
+                        now_micros(),
+                    )
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "project-open native integration authority registration failed: {error}"
+                        ),
+                    })?;
+                invocation
+                    .service
+                    .install_worktree_cleanup_recovery_fences(&native_owner)
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "project-open worktree cleanup recovery fencing failed: {error}"
+                        ),
+                    })?;
+                Ok::<_, TraceDecayError>(native_owner)
+            },
+            label = "daemon.project.open.owners.native"
+        )
+        .await?;
         Some(native_owner)
     } else {
         None
@@ -885,42 +901,50 @@ pub(super) async fn register_project_open_production_owners(
             );
         }
     }
-    invocation
-        .work_runtime_registrar()
-        .register(
-            project_root.to_path_buf(),
-            session_db.clone(),
-            work_authority.clone(),
-            requester.clone(),
-            work_grant.clone(),
-            configuration_policy_digest.clone(),
-            access.configuration_digest.clone(),
-            work_topology_policy,
-            work_proposal_routing,
-            work_evidence_retrieval,
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Workflow authority registration failed: {error}"),
-        })?;
-    if !invocation
-        .work_runtime_registrar()
-        .authority_matches(
-            project_root,
-            &work_authority,
-            &requester,
-            &work_grant,
-            &configuration_policy_digest,
-            &access.configuration_digest,
-        )
-        .await
-    {
-        return Err(TraceDecayError::Config {
-            message:
-                "project-open Workflow authority registration did not match the admitted project"
-                    .to_owned(),
-        });
-    }
+    hotpath::future!(
+        async {
+            invocation
+                .work_runtime_registrar()
+                .register(
+                    project_root.to_path_buf(),
+                    session_db.clone(),
+                    work_authority.clone(),
+                    requester.clone(),
+                    work_grant.clone(),
+                    configuration_policy_digest.clone(),
+                    access.configuration_digest.clone(),
+                    work_topology_policy,
+                    work_proposal_routing,
+                    work_evidence_retrieval,
+                )
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "project-open Workflow authority registration failed: {error}"
+                    ),
+                })?;
+            if !invocation
+                .work_runtime_registrar()
+                .authority_matches(
+                    project_root,
+                    &work_authority,
+                    &requester,
+                    &work_grant,
+                    &configuration_policy_digest,
+                    &access.configuration_digest,
+                )
+                .await
+            {
+                return Err(TraceDecayError::Config {
+                    message: "project-open Workflow authority registration did not match the admitted project"
+                        .to_owned(),
+                });
+            }
+            Ok::<_, TraceDecayError>(())
+        },
+        label = "daemon.project.open.owners.work"
+    )
+    .await?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -929,16 +953,17 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    match invocation
-        .feedback_runtime_registrar()
-        .open_and_register(
+    match hotpath::future!(
+        invocation.feedback_runtime_registrar().open_and_register(
             database.clone(),
             project_root.to_path_buf(),
             scope.clone(),
             access.clone(),
             Arc::clone(graph.configuration_runtime()),
-        )
-        .await
+        ),
+        label = "daemon.project.open.owners.feedback"
+    )
+    .await
     {
         Ok(_) | Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered) => {}
         Err(error) => {
@@ -982,10 +1007,15 @@ pub(super) async fn register_project_open_production_owners(
     let mut mounted_providers = Vec::new();
     let mut lsp_session_factory = None;
     let diagnostic_broker = server.diagnostics_lsp();
-    let indexed_generation = invocation
-        .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
-        .await;
+    // Bounds the orchestration wait around the scheduler's generation decode;
+    // the decode itself is instrumented inside the code-index subsystem.
+    let indexed_generation = hotpath::future!(
+        invocation
+            .code_index_schedulers
+            .latest_complete_ready_decoded_for_root_scope(project_root, &scope),
+        label = "daemon.project.open.owners.lsp_census"
+    )
+    .await;
     if let Some(generation) = indexed_generation {
         let mut indexed_files = generation
             .generation()

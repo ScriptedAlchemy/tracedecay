@@ -55,6 +55,7 @@ impl IndexingIdentityV1 {
     /// linked worktrees of one repository share it, while the worktree identity
     /// is anchored on the canonical checkout path so linked worktrees never
     /// collapse into one another.
+    #[hotpath::measure(label = "daemon.code_index.identity.resolve")]
     pub(crate) fn resolve(project_root: &Path) -> Result<Self, IdentityErrorV1> {
         let repository_id = repository_id_for(project_root)?;
         let worktree_id = worktree_id_for(project_root)?;
@@ -161,6 +162,7 @@ impl GitMetadataFingerprintV1 {
     /// Missing files (e.g. no `packed-refs` yet) are recorded as `None`, which
     /// still participates in change detection: a file appearing or disappearing
     /// is itself a change.
+    #[hotpath::measure(label = "daemon.code_index.identity.fingerprint")]
     pub(crate) fn capture(project_root: &Path) -> Self {
         let (git_dir, common_dir) = git_metadata_dirs(project_root);
         let head_path = git_dir.join("HEAD");

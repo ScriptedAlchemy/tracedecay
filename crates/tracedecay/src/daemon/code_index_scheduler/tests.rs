@@ -2376,11 +2376,14 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
         Ok(_) => panic!("a cold foreground read must not build serving owners"),
     }
     assert!(
-        latest
-            .text_projection_build
-            .lock()
-            .expect("text projection state")
-            .is_none(),
+        matches!(
+            &*latest
+                .text_projection_build
+                .slot
+                .lock()
+                .expect("text projection state"),
+            super::CodeTextProjectionSlotV1::Idle
+        ),
         "foreground observation must not initialize the background builder"
     );
     while !latest
@@ -2389,11 +2392,14 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
     {}
     assert!(latest.query_owners_are_warm());
     assert!(
-        latest
-            .text_projection_build
-            .lock()
-            .expect("completed text projection state")
-            .is_none(),
+        matches!(
+            &*latest
+                .text_projection_build
+                .slot
+                .lock()
+                .expect("completed text projection state"),
+            super::CodeTextProjectionSlotV1::Idle
+        ),
         "completed projection must release its partial builder state"
     );
 }
@@ -3789,11 +3795,14 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
     // build rather than each starting their own.
     assert!(
         latest.query_owners_are_warm()
-            || latest
-                .text_projection_build
-                .lock()
-                .expect("shared text projection state")
-                .is_some(),
+            || matches!(
+                &*latest
+                    .text_projection_build
+                    .slot
+                    .lock()
+                    .expect("shared text projection state"),
+                super::CodeTextProjectionSlotV1::Building(_)
+            ),
         "bounded concurrent wakes must retain one shared partial projection"
     );
     while !latest
@@ -3801,6 +3810,82 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
         .expect("finish shared text projection")
     {}
     assert!(latest.query_owners_are_warm());
+}
+
+#[test]
+fn wake_parked_behind_head_open_claim_proceeds_after_release() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn indexed() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let held = latest.hold_text_head_open();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let waiter = {
+        let latest = latest.clone();
+        std::thread::spawn(move || {
+            let result = latest.advance_text_serving(1);
+            sender.send(()).expect("waiter completion signal");
+            result
+        })
+    };
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+        "a wake must park behind an in-flight head open instead of claiming a second one"
+    );
+
+    drop(held);
+    receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("parked wake must resume once the head-open claim is released");
+    waiter
+        .join()
+        .expect("parked wake joined")
+        .expect("resumed wake must advance the projection with the released slot");
+}
+
+#[test]
+fn wake_parked_behind_head_open_returns_typed_cancelled_on_retire() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn indexed() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    // The claim stays held for the whole test: cancellation must surface
+    // through the parked wake's own checkpoint, not through claim release.
+    let _held = latest.hold_text_head_open();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let waiter = {
+        let latest = latest.clone();
+        std::thread::spawn(move || {
+            let result = latest.advance_text_serving(1);
+            sender.send(()).expect("waiter completion signal");
+            result
+        })
+    };
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(400)).is_err(),
+        "a wake must park while the head-open claim is held"
+    );
+
+    latest.text_control.retire();
+    receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("a cancelled parked wake must return while the open is still in flight");
+    match waiter.join().expect("parked wake joined") {
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled) => {}
+        other => panic!("parked wake must fail with the typed cancelled state: {other:?}"),
+    }
 }
 
 #[test]
@@ -3924,15 +4009,19 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
             .advance_text_serving(1)
             .expect("start bounded text build")
     );
-    let progress_before = latest
-        .text_projection_build
-        .lock()
-        .expect("text build state")
-        .as_ref()
-        .expect("partial build")
-        .builder
-        .progress()
-        .expect("durable progress");
+    let progress_before = {
+        let slot = latest
+            .text_projection_build
+            .slot
+            .lock()
+            .expect("text build state");
+        match &*slot {
+            super::CodeTextProjectionSlotV1::Building(build) => {
+                build.builder.progress().expect("durable progress")
+            }
+            _ => panic!("partial build"),
+        }
+    };
     let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_before.committed_pages,
@@ -3949,13 +4038,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         observed_bulk_commit: std::sync::atomic::AtomicBool::new(false),
     };
     let cancellation_started = Instant::now();
-    let cancellation = {
-        let mut build = latest
-            .text_projection_build
-            .lock()
-            .expect("text build state for controlled cancellation");
-        latest.advance_artifact_text_serving(&mut build, 1, &control)
-    };
+    let cancellation = latest.advance_artifact_text_serving(1, &control);
     assert_eq!(
         cancellation,
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
@@ -3970,15 +4053,20 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
             .load(std::sync::atomic::Ordering::Acquire),
         "cancellation must occur after preparation publishes the bulk-commit boundary"
     );
-    let progress_after = latest
-        .text_projection_build
-        .lock()
-        .expect("text build state after cancellation")
-        .as_ref()
-        .expect("cancelled build remains resumable")
-        .builder
-        .progress()
-        .expect("durable progress after cancellation");
+    let progress_after = {
+        let slot = latest
+            .text_projection_build
+            .slot
+            .lock()
+            .expect("text build state after cancellation");
+        match &*slot {
+            super::CodeTextProjectionSlotV1::Building(build) => build
+                .builder
+                .progress()
+                .expect("durable progress after cancellation"),
+            _ => panic!("cancelled build remains resumable"),
+        }
+    };
     assert_eq!(progress_after, progress_before);
     let dashboard_after = build_progress_snapshot(&scheduler);
     assert_eq!(
@@ -4145,25 +4233,21 @@ fn source_epoch_advance_does_not_discard_immutable_text_progress() {
     // Reproduce a hook arriving after a text pass captures its control but
     // before the sealed source's first cancellation checkpoint.
     scheduler.notify_path(fixture.path().join("src/lib.rs"));
-    let result = {
-        let mut build = latest
-            .text_projection_build
-            .lock()
-            .expect("generation text projection");
-        latest.advance_artifact_text_serving(&mut build, 1, &admitted)
-    };
+    let result = latest.advance_artifact_text_serving(1, &admitted);
 
     assert!(
         matches!(result, Ok(false | true)),
         "a worktree freshness epoch must not cancel immutable generation work: {result:?}"
     );
     assert!(
-        latest
-            .text_projection_build
-            .lock()
-            .expect("retained text projection")
-            .is_some()
-            || latest.query_owners_are_warm(),
+        matches!(
+            &*latest
+                .text_projection_build
+                .slot
+                .lock()
+                .expect("retained text projection"),
+            super::CodeTextProjectionSlotV1::Building(_)
+        ) || latest.query_owners_are_warm(),
         "the bounded pass must retain or complete its generation-owned progress"
     );
 }
@@ -4226,13 +4310,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
         replacement.generation().manifest().generation_id,
         original_generation
     );
-    let superseded_result = {
-        let mut build = original
-            .text_projection_build
-            .lock()
-            .expect("superseded projection state");
-        original.advance_artifact_text_serving(&mut build, 1, &original_control)
-    };
+    let superseded_result = original.advance_artifact_text_serving(1, &original_control);
     assert_eq!(
         superseded_result,
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled),
@@ -4283,11 +4361,14 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
         "generation replacement must drop the abandoned partial projection"
     );
     assert!(
-        replacement
-            .text_projection_build
-            .lock()
-            .expect("replacement projection state")
-            .is_some(),
+        matches!(
+            &*replacement
+                .text_projection_build
+                .slot
+                .lock()
+                .expect("replacement projection state"),
+            super::CodeTextProjectionSlotV1::Building(_)
+        ),
         "publishing the replacement baseline initializes only its independent projection state"
     );
 }
@@ -12172,9 +12253,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
         .expect("resolved scope")
     };
 
-    let registry = Arc::new(CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(
-        1, 1,
-    ));
+    let registry = Arc::new(CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1));
     registry
         .mount_worktree(
             test_project_id(),

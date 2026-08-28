@@ -63,11 +63,15 @@ pub(super) async fn execute_retained_application(
     let service = tracedecay_application::retained_surfaces::RetainedSurfaceServiceV1::new(
         registered.ports.as_ref().clone(),
     );
-    let execution = service.execute(&context, &cancellation_signal, observed_at, &request);
+    let execution = hotpath::future!(
+        service.execute(&context, &cancellation_signal, observed_at, &request),
+        label = "daemon.service.retained.handler"
+    );
     tokio::pin!(execution);
     let outcome = tokio::select! {
         outcome = &mut execution => outcome,
         () = request_cancellation.cancelled() => {
+            hotpath::gauge!("daemon.service.retained.cancelled_total").inc(1_u64);
             cancellation_signal.cancel(now_micros());
             execution.await
         }

@@ -92,6 +92,7 @@ impl DaemonInvocationService {
                     // root of an already-mounted store attaches an alias to
                     // the incumbent owners instead of starting a second
                     // recorder for the same store.
+                    hotpath::measure_block!("daemon.service.observability.acquire", {
                     self.store_observability
                         .acquire_or_start(
                             &database,
@@ -138,6 +139,7 @@ impl DaemonInvocationService {
                                 }
                             }
                         })
+                    })
                 },
             )
             .await?;
