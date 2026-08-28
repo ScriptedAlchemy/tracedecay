@@ -36,7 +36,7 @@ eval-helpers = []
 # Split in two on purpose, because grafeo 0.5.42 bundles two unrelated
 # things under the "tiered" name and only one of them is usable here.
 #
-# `graph-disk-tier` is the genuinely disk-backed half:
+# `graph-disk-tier` is the half that *could* be disk-backed:
 #   * `grafeo-engine/mmap` + `compact-store` compile in
 #     `database/compact_tiered.rs`, which serializes a `CompactStore`,
 #     mmaps it, and serves reads from the mapping.
@@ -44,6 +44,23 @@ eval-helpers = []
 #     `Config::with_spill_path` has any effect at all.
 # It also makes `GraphDbOpen` hand grafeo a spill directory and a bounded
 # memory budget; see `crates/tracedecay-graph-db/src/location.rs`.
+#
+# Compiling it in is not enough, and today it buys nothing. Reaching the
+# mmap tier takes an explicit `GrafeoDB::compact()` (grafeo-engine
+# `database/mod.rs`), which nothing in this crate calls, so the feature is
+# inert: measured against baseline at 100k/500k rows it moves peak RSS by
+# under 1%, inside run-to-run noise. Leave it off until something calls
+# `compact()`.
+#
+# Even then it would not tier the live graph. `SectionType::LpgStore` is
+# `mmap_able: false` (grafeo-common `storage/section.rs`), and
+# `SectionConsumer::can_spill()` returns exactly that flag, so every live
+# node and edge record is heap-resident by construction -- `TierOverride::
+# ForceDisk` on the LPG section is a silent no-op that frees zero bytes.
+# `compact()` freezes a columnar snapshot into the disk-eligible
+# `CompactStore`; all writes still land in a RAM-only `LpgStore` overlay.
+# Spilling covers the vector/text/ring index buffers and query scratch,
+# never LPG data.
 graph-disk-tier = [
     "grafeo-engine/mmap",
     "grafeo-engine/compact-store",
@@ -61,10 +78,23 @@ graph-disk-tier = [
 # because `HotVersionRef` addressed records by a u32 offset within a single
 # 1 MiB chunk that `LpgStore` had no way to enlarge. `NodeRecord` is 32
 # bytes, so an epoch hit a hard ceiling near 32 Ki records and then panicked
-# in `node_ops.rs` on `AllocError::InsufficientSpace`. The vendored fork in
-# `vendor/grafeo` fixes it: the u32 is now a flat address over the epoch's
-# chunks, so an epoch grows to the 4 GiB a u32 can reach and exhaustion is a
-# typed error. See `vendor/grafeo/PROVENANCE.md`.
+# in `node_ops.rs` on `AllocError::InsufficientSpace`. The fork wired in
+# through `[patch.crates-io]` at the workspace root fixes it: the u32 is now
+# a flat address over the epoch's chunks, so an epoch grows to the 4 GiB a
+# u32 can reach and exhaustion is a typed error.
+#
+# The fix holds -- `tests/tiered_storage_rss.rs` commits 65,536-row pages,
+# twice the old ceiling, without panicking. It just does not pay off. The
+# arena costs resident memory rather than saving it, because nothing here is
+# ever written to disk: measured with that harness on the fork, live VmRSS
+# with the store open runs +22% at 100k rows, +32% at 500k, and +28% at 1M
+# (1873.8 -> 2405.7 MiB), and peak VmHWM +10%. Commit time is 3.3x worse at
+# 100k and roughly a wash by 1M.
+#
+# So this feature is a NO-GO for enabling, and the ceiling being gone is not
+# an argument for it. Keep it off; it exists to keep the fork exercised and
+# to make re-measuring cheap if grafeo ever gives `LpgStore` a real on-disk
+# representation.
 graph-tiered-storage = [
     "graph-disk-tier",
     "grafeo-core/tiered-storage",
