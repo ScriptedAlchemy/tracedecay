@@ -483,6 +483,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     ///   bounded history walk: `GenerationBehindHead`;
     /// - claimed HEAD differs and is not reachable within the walk (or HEAD
     ///   is unborn): `HistoryRewritten`.
+    #[hotpath::measure(label = "usecases.git.join_generation")]
     pub fn join_generation(
         &self,
         bounds: &GitQueryBounds,
@@ -608,6 +609,9 @@ fn map_topology_error(error: GitTopologyProjectionError) -> GitQueryError {
 /// Build an envelope, folding query-level truncation into the coverage.
 fn envelope<T>(value: T, mut coverage: GitCoverageV1, truncated: bool) -> GitQueryEnvelopeV1<T> {
     if truncated {
+        // Bound-hit results across every query kind: a rising count means
+        // callers routinely outgrow `max_entries`, not that reads failed.
+        hotpath::gauge!("usecases.git.truncated_results").inc(1.0);
         coverage.record(GitDegradationV1::TruncatedOutput);
     }
     GitQueryEnvelopeV1 {

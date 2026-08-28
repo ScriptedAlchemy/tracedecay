@@ -1157,7 +1157,12 @@ where
                 .consume(&token_digest, expected_scope, consumed_at)
                 .map_err(handoff_authority_error)?
             {
+                // Bounded per-outcome counters: every non-consumed answer is
+                // a distinct product decision (lost grant, wrong scope,
+                // expired lifetime, double redemption), and refusals must be
+                // recorded with the same weight as successes.
                 TaskHandoffConsumeOutcome::Consumed { frontier } => {
+                    hotpath::gauge!("application.workflow.handoff.redeem.consumed").inc(1u64);
                     let frontier_digest = frontier
                         .digest()
                         .map_err(|_| TaskHandoffError::InvalidFrontier)?;
@@ -1168,10 +1173,23 @@ where
                         redeemed_at: consumed_at,
                     })
                 }
-                TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
-                TaskHandoffConsumeOutcome::ScopeMismatch => Err(TaskHandoffError::ScopeMismatch),
-                TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
-                TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
+                TaskHandoffConsumeOutcome::Missing => {
+                    hotpath::gauge!("application.workflow.handoff.redeem.missing").inc(1u64);
+                    Err(TaskHandoffError::Missing)
+                }
+                TaskHandoffConsumeOutcome::ScopeMismatch => {
+                    hotpath::gauge!("application.workflow.handoff.redeem.scope_mismatch")
+                        .inc(1u64);
+                    Err(TaskHandoffError::ScopeMismatch)
+                }
+                TaskHandoffConsumeOutcome::Expired => {
+                    hotpath::gauge!("application.workflow.handoff.redeem.expired").inc(1u64);
+                    Err(TaskHandoffError::Expired)
+                }
+                TaskHandoffConsumeOutcome::Replay => {
+                    hotpath::gauge!("application.workflow.handoff.redeem.replay").inc(1u64);
+                    Err(TaskHandoffError::Replay)
+                }
             }
         })
     }

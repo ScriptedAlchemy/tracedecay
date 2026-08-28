@@ -28,8 +28,19 @@ enum CleanupNativeStateV1 {
 }
 
 impl DaemonNativeWorktreeAuthority {
-    #[hotpath::measure(label = "daemon.git.worktree.remove")]
     pub(super) fn remove_cleanup(
+        &self,
+        request: &WorktreeCleanupRemoveRequestV1,
+        scope_set: &AuthorizedScopeSet,
+        cancellation: &CancellationSignal,
+    ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
+        let removal = self.remove_cleanup_checked(request, scope_set, cancellation);
+        record_worktree_removal_outcome(&removal);
+        removal
+    }
+
+    #[hotpath::measure(label = "daemon.git.worktree.remove")]
+    fn remove_cleanup_checked(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
@@ -155,8 +166,19 @@ impl DaemonNativeWorktreeAuthority {
         self.execute_remove(transaction, scope_set, admission)
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.reconcile")]
     pub(super) fn reconcile_cleanup(
+        &self,
+        request: &WorktreeCleanupReconcileRequestV1,
+        scope_set: &AuthorizedScopeSet,
+        cancellation: &CancellationSignal,
+    ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
+        let reconciliation = self.reconcile_cleanup_checked(request, scope_set, cancellation);
+        record_worktree_reconciliation_outcome(&reconciliation);
+        reconciliation
+    }
+
+    #[hotpath::measure(label = "daemon.git.worktree.reconcile")]
+    fn reconcile_cleanup_checked(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,
@@ -465,6 +487,72 @@ impl DaemonNativeWorktreeAuthority {
                 receipt,
             )
             .map_err(removal_store_error)
+    }
+}
+
+/// Tallies one durable worktree removal against its exact typed outcome. The
+/// outcome set is the closed [`WorktreeCleanupRemovalV1`] enum plus one
+/// contract-error bucket, so every gauge key stays compile-time static and
+/// fail-closed outcomes are recorded alongside removals.
+fn record_worktree_removal_outcome(
+    removal: &Result<WorktreeCleanupRemovalV1, WorktreeContractError>,
+) {
+    match removal {
+        Ok(WorktreeCleanupRemovalV1::Removed { .. }) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.removed").inc(1.0);
+        }
+        Ok(WorktreeCleanupRemovalV1::AlreadyRemoved { .. }) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.already_removed").inc(1.0);
+        }
+        Ok(WorktreeCleanupRemovalV1::Denied) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.denied").inc(1.0);
+        }
+        Ok(WorktreeCleanupRemovalV1::Stale) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.stale").inc(1.0);
+        }
+        Ok(WorktreeCleanupRemovalV1::DurabilityUncertain) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.durability_uncertain")
+                .inc(1.0);
+        }
+        Ok(WorktreeCleanupRemovalV1::Unavailable) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.unavailable").inc(1.0);
+        }
+        Err(_) => {
+            hotpath::gauge!("daemon.native_integration.worktree_remove.contract_error").inc(1.0);
+        }
+    }
+}
+
+/// Tallies one worktree cleanup reconciliation against its exact typed
+/// outcome, mirroring [`record_worktree_removal_outcome`] for the recovery
+/// path.
+fn record_worktree_reconciliation_outcome(
+    reconciliation: &Result<WorktreeCleanupReconciliationV1, WorktreeContractError>,
+) {
+    match reconciliation {
+        Ok(WorktreeCleanupReconciliationV1::Removed { .. }) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.removed").inc(1.0);
+        }
+        Ok(WorktreeCleanupReconciliationV1::StillPresent) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.still_present").inc(1.0);
+        }
+        Ok(WorktreeCleanupReconciliationV1::DurabilityUncertain) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.durability_uncertain")
+                .inc(1.0);
+        }
+        Ok(WorktreeCleanupReconciliationV1::Stale) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.stale").inc(1.0);
+        }
+        Ok(WorktreeCleanupReconciliationV1::Denied) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.denied").inc(1.0);
+        }
+        Ok(WorktreeCleanupReconciliationV1::Unavailable) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.unavailable").inc(1.0);
+        }
+        Err(_) => {
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.contract_error")
+                .inc(1.0);
+        }
     }
 }
 

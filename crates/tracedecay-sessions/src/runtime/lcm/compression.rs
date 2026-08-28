@@ -269,6 +269,9 @@ async fn current_unixepoch(conn: &impl QueryExecutor) -> Result<i64, LcmError> {
     Ok(row.get(0)?)
 }
 
+// Preflight loads the whole raw session to decide whether to compress, so a
+// "compression feels slow" profile must see it separately from `compress`.
+#[hotpath::measure(label = "sessions.lcm.preflight", future = true)]
 pub async fn preflight(
     conn: &impl QueryExecutor,
     request: LcmPreflightRequest,
@@ -355,6 +358,22 @@ pub async fn compress(
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
+    let response = compress_inner(conn, publisher, storage_root, request, payload_rollback).await;
+    // A failed compression discarded its ingest writes, assembled backlog,
+    // and summary drafts; success-only gauges would hide exactly that waste.
+    if response.is_err() {
+        crate::runtime::pipeline_metrics::record_lcm_compress_failed();
+    }
+    response
+}
+
+async fn compress_inner(
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
+    storage_root: &Path,
+    request: LcmCompressionRequest,
+    payload_rollback: &mut payload::PayloadFileRollback,
+) -> Result<LcmCompressionResponse, LcmError> {
     let mut request = request;
     request.max_assembly_tokens =
         compression_decision::effective_assembly_token_cap(AssemblyCapInput {
@@ -428,6 +447,7 @@ fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompression
     crate::runtime::pipeline_metrics::record_lcm_compression(
         response.summary_nodes_created,
         response.compression_attempts,
+        response.replay_token_estimate,
     );
     response
 }
@@ -457,6 +477,10 @@ async fn compress_in_transaction(
     persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
 }
 
+// The read phase: whole-session raw load plus window/plan derivation.
+// Together with `ingest_active`, `persist`, and `assemble_replay` this splits
+// the inclusive `compress` span into its sequential phases.
+#[hotpath::measure(label = "sessions.lcm.compress.prepare", future = true)]
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
@@ -790,6 +814,9 @@ async fn persist_and_replay_backlog_compression(
     ))
 }
 
+// The summary-publication transaction: chunk selection, immutable summary
+// publication, and the lifecycle/debt writes that commit the new frontier.
+#[hotpath::measure(label = "sessions.lcm.compress.persist", future = true)]
 async fn persist_compression_transaction_writes(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
@@ -1077,6 +1104,9 @@ struct ReplayWindowParts<'a> {
 /// `_assemble_context`: policy anchors are always kept, every uncondensed DAG
 /// summary node is replayed (budgeted highest depth first), and the raw tail
 /// is trimmed under the effective assembly cap.
+// Replay assembly; its DAG-build share is the nested
+// `sessions.lcm.dag.load_uncondensed` span.
+#[hotpath::measure(label = "sessions.lcm.compress.assemble_replay", future = true)]
 async fn assemble_replay_context(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1085,20 +1115,27 @@ async fn assemble_replay_context(
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
-    let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let summaries = hotpath::future!(
+        dag::load_uncondensed_summary_nodes(conn, provider, session_id),
+        label = "sessions.lcm.replay.fetch"
+    )
+    .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    Ok(assemble_replay_messages(
-        &anchors,
-        &summaries,
-        &raws,
-        anchor_source,
-        max_assembly_tokens,
-    ))
+    Ok(hotpath::measure_block!("sessions.lcm.replay.compile", {
+        assemble_replay_messages(
+            &anchors,
+            &summaries,
+            &raws,
+            anchor_source,
+            max_assembly_tokens,
+        )
+    }))
 }
 
 /// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
+#[hotpath::measure(label = "sessions.lcm.compress.assemble_overflow_replay", future = true)]
 async fn assemble_overflow_recovery_replay(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1107,15 +1144,21 @@ async fn assemble_overflow_recovery_replay(
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
-    let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let summaries = hotpath::future!(
+        dag::load_uncondensed_summary_nodes(conn, provider, session_id),
+        label = "sessions.lcm.replay.fetch"
+    )
+    .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    let candidate = assemble_replay_messages(
-        &anchors,
-        &summaries,
-        &raws,
-        anchor_source,
-        max_assembly_tokens,
-    );
+    let candidate = hotpath::measure_block!("sessions.lcm.replay.compile", {
+        assemble_replay_messages(
+            &anchors,
+            &summaries,
+            &raws,
+            anchor_source,
+            max_assembly_tokens,
+        )
+    });
     if candidate.len() == anchors.len()
         && let Some(last_unit) = replay_transactions::replay_units(&raws).last()
     {
@@ -1743,6 +1786,10 @@ async fn load_condensation_candidates(
     Ok(nodes)
 }
 
+// Active-context ingest: sanitization, payload externalization, and raw
+// upserts. This is compression's write-side file I/O + CPU phase, distinct
+// from the summary-publication transaction in `persist`.
+#[hotpath::measure(label = "sessions.lcm.compress.ingest_active", future = true)]
 async fn ingest_active_messages(
     conn: &impl Executor,
     storage_root: &Path,
@@ -1752,129 +1799,148 @@ async fn ingest_active_messages(
     ignore_message_patterns: &[String],
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<IngestedActiveMessages, LcmError> {
-    let mut replay_messages = Vec::with_capacity(messages.len());
-    let mut next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
-    let compiled_ignore_patterns = security::compile_message_patterns(ignore_message_patterns);
-    let prepared = prepare_active_messages(
-        conn,
-        provider,
-        session_id,
-        messages,
-        &compiled_ignore_patterns,
-    )
-    .await?;
-    let prefetched_message_ids = prepared
-        .iter()
-        .filter_map(|prepared| prepared.message_id.clone())
-        .collect::<Vec<_>>();
-    let prefetched_states =
-        existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
-    // Message ids written by an earlier iteration are re-read from the
-    // database so a repeated id still sees the row this loop just wrote.
-    let mut rewritten_message_ids = HashSet::new();
-
-    for (message, prepared) in messages.iter().zip(prepared) {
-        let PreparedActiveMessage {
-            role,
-            original_content,
-            storage_text,
-            message_id,
-        } = prepared;
-        let Some(message_id) = message_id else {
-            let mut replay = message.clone();
-            replay["role"] = Value::String(role);
-            replay_messages.push(replay);
-            continue;
-        };
-        let rewritten_state;
-        let existing_state = if rewritten_message_ids.contains(&message_id) {
-            rewritten_state = existing_active_message_state(conn, provider, &message_id).await?;
-            rewritten_state.as_ref()
-        } else {
-            prefetched_states.get(&message_id)
-        };
-        let ordinal = if let Some(existing) = existing_state {
-            existing.ordinal
-        } else {
-            next_available_ordinal += 1;
-            next_available_ordinal
-        };
-        let message_timestamp = message.get("timestamp").and_then(Value::as_i64);
-        let mut replay = message.clone();
-        replay["role"] = Value::String(role.clone());
-        replay["content"] = original_content.clone();
-        let initial_metadata_json = active_message_metadata(message, &replay);
-        let expected_content_hash = projected_content_hash(&storage_text);
-        if let Some(existing) = existing_state {
-            let matches_stored_row = existing.ordinal == ordinal
-                && existing.content_hash == expected_content_hash
-                && existing.metadata_json.as_deref() == Some(initial_metadata_json.as_str())
-                && existing.session_id == session_id
-                && existing.role == role
-                && existing.timestamp == message_timestamp;
-            if matches_stored_row {
-                replay_messages.push(replay);
-                continue;
-            }
-        }
-        let kind = message
-            .get("kind")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| Some(default_message_kind(&role)));
-        let record = SessionMessageRecord {
-            provider: provider.to_string(),
-            message_id: message_id.clone(),
-            session_id: session_id.to_string(),
-            role: role.clone(),
-            timestamp: message_timestamp,
-            ordinal,
-            text: storage_text.clone(),
-            kind,
-            model: message
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            tool_names: None,
-            source_path: None,
-            source_offset: None,
-            metadata_json: Some(initial_metadata_json.clone()),
-        };
-        let upsert = raw::upsert_raw_message_with_payload_tracked(
-            conn,
-            storage_root,
-            &record,
-            payload_rollback,
-        )
-        .await?;
-        rewritten_message_ids.insert(message_id.clone());
-        let raw = super::schema::load_raw_message(conn, provider, &message_id)
-            .await?
-            .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
-        let replay_content =
-            replay_content_value(&original_content, &raw, upsert.projection_text.as_str());
-        replay["content"] = replay_content;
-        if let Some(tool_calls) = replay.get("tool_calls").cloned() {
-            let protected_tool_calls = raw::protect_replay_field_value_tracked(
+    let (mut next_available_ordinal, prepared, prefetched_states) = hotpath::future!(
+        async {
+            let next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
+            let compiled_ignore_patterns =
+                security::compile_message_patterns(ignore_message_patterns);
+            let prepared = prepare_active_messages(
                 conn,
-                storage_root,
-                &record,
-                "tool_calls",
-                &tool_calls,
-                payload_rollback,
+                provider,
+                session_id,
+                messages,
+                &compiled_ignore_patterns,
             )
             .await?;
-            if protected_tool_calls != tool_calls {
-                replay["tool_calls"] = protected_tool_calls;
+            let prefetched_message_ids = prepared
+                .iter()
+                .filter_map(|prepared| prepared.message_id.clone())
+                .collect::<Vec<_>>();
+            let prefetched_states =
+                existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
+            Ok::<_, LcmError>((next_available_ordinal, prepared, prefetched_states))
+        },
+        label = "sessions.lcm.compress.ingest.fetch"
+    )
+    .await?;
+    // Message ids written by an earlier iteration are re-read from the
+    // database so a repeated id still sees the row this loop just wrote.
+    let replay_messages = hotpath::future!(
+        async {
+            let mut replay_messages = Vec::with_capacity(messages.len());
+            let mut rewritten_message_ids = HashSet::new();
+            for (message, prepared) in messages.iter().zip(prepared) {
+                let PreparedActiveMessage {
+                    role,
+                    original_content,
+                    storage_text,
+                    message_id,
+                } = prepared;
+                let Some(message_id) = message_id else {
+                    let mut replay = message.clone();
+                    replay["role"] = Value::String(role);
+                    replay_messages.push(replay);
+                    continue;
+                };
+                let rewritten_state;
+                let existing_state = if rewritten_message_ids.contains(&message_id) {
+                    rewritten_state =
+                        existing_active_message_state(conn, provider, &message_id).await?;
+                    rewritten_state.as_ref()
+                } else {
+                    prefetched_states.get(&message_id)
+                };
+                let ordinal = if let Some(existing) = existing_state {
+                    existing.ordinal
+                } else {
+                    next_available_ordinal += 1;
+                    next_available_ordinal
+                };
+                let message_timestamp = message.get("timestamp").and_then(Value::as_i64);
+                let mut replay = message.clone();
+                replay["role"] = Value::String(role.clone());
+                replay["content"] = original_content.clone();
+                let initial_metadata_json = active_message_metadata(message, &replay);
+                let expected_content_hash = projected_content_hash(&storage_text);
+                if let Some(existing) = existing_state {
+                    let matches_stored_row = existing.ordinal == ordinal
+                        && existing.content_hash == expected_content_hash
+                        && existing.metadata_json.as_deref()
+                            == Some(initial_metadata_json.as_str())
+                        && existing.session_id == session_id
+                        && existing.role == role
+                        && existing.timestamp == message_timestamp;
+                    if matches_stored_row {
+                        replay_messages.push(replay);
+                        continue;
+                    }
+                }
+                let kind = message
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| Some(default_message_kind(&role)));
+                let record = SessionMessageRecord {
+                    provider: provider.to_string(),
+                    message_id: message_id.clone(),
+                    session_id: session_id.to_string(),
+                    role: role.clone(),
+                    timestamp: message_timestamp,
+                    ordinal,
+                    text: storage_text.clone(),
+                    kind,
+                    model: message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: Some(initial_metadata_json.clone()),
+                };
+                let upsert = raw::upsert_raw_message_with_payload_tracked(
+                    conn,
+                    storage_root,
+                    &record,
+                    payload_rollback,
+                )
+                .await?;
+                rewritten_message_ids.insert(message_id.clone());
+                let raw = super::schema::load_raw_message(conn, provider, &message_id)
+                    .await?
+                    .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
+                let replay_content =
+                    replay_content_value(&original_content, &raw, upsert.projection_text.as_str());
+                replay["content"] = replay_content;
+                if let Some(tool_calls) = replay.get("tool_calls").cloned() {
+                    let protected_tool_calls = raw::protect_replay_field_value_tracked(
+                        conn,
+                        storage_root,
+                        &record,
+                        "tool_calls",
+                        &tool_calls,
+                        payload_rollback,
+                    )
+                    .await?;
+                    if protected_tool_calls != tool_calls {
+                        replay["tool_calls"] = protected_tool_calls;
+                    }
+                }
+                let metadata_json = active_replay_metadata_json(
+                    upsert.projection_metadata_json.as_deref(),
+                    &replay,
+                );
+                if metadata_json != initial_metadata_json {
+                    update_active_replay_metadata(conn, provider, &message_id, &metadata_json)
+                        .await?;
+                }
+                replay_messages.push(replay);
             }
-        }
-        let metadata_json =
-            active_replay_metadata_json(upsert.projection_metadata_json.as_deref(), &replay);
-        if metadata_json != initial_metadata_json {
-            update_active_replay_metadata(conn, provider, &message_id, &metadata_json).await?;
-        }
-        replay_messages.push(replay);
-    }
+            Ok::<_, LcmError>(replay_messages)
+        },
+        label = "sessions.lcm.compress.ingest.persist"
+    )
+    .await?;
 
     Ok(IngestedActiveMessages { replay_messages })
 }
@@ -2203,22 +2269,34 @@ async fn load_raw_messages_for_session(
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessage>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2
-             ORDER BY store_id",
-            params![provider, session_id],
-        )
-        .await?;
-    let mut messages = Vec::new();
-    while let Some(row) = rows.next().await? {
-        messages.push(raw::verified_raw_message_from_row(&row)?);
-    }
-    Ok(messages)
+    let fetched = hotpath::future!(
+        async {
+            let mut rows = conn
+                .query(
+                    "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                            timestamp, content, content_hash, storage_kind, payload_ref,
+                            snippet_text, legacy_source, legacy_truncated, metadata_json
+                     FROM lcm_raw_messages
+                     WHERE provider = ?1 AND session_id = ?2
+                     ORDER BY store_id",
+                    params![provider, session_id],
+                )
+                .await?;
+            let mut fetched = Vec::new();
+            while let Some(row) = rows.next().await? {
+                fetched.push(row);
+            }
+            Ok::<_, LcmError>(fetched)
+        },
+        label = "sessions.lcm.hydrate.fetch"
+    )
+    .await?;
+    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+        fetched
+            .iter()
+            .map(raw::verified_raw_message_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    })
 }
 
 fn message_content(message: &Value) -> String {

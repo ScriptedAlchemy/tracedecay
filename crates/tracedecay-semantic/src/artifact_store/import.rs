@@ -155,6 +155,10 @@ impl ModelArtifactStore {
     /// Append caller-provided bytes to one explicitly declared package member.
     /// The role selects a store-owned filename; a manifest path is identity
     /// metadata only and can never influence local traversal.
+    ///
+    /// Measured per chunk: aggregate demand and exact call counts expose the
+    /// lock + fsync + meta-rewrite cost paid for every appended chunk.
+    #[hotpath::measure]
     pub fn stage_member_chunk(
         &self,
         session: &mut ImportSession,
@@ -191,6 +195,7 @@ impl ModelArtifactStore {
         file.sync_all()?;
         session.meta.members[member_index].bytes_written = attempted;
         write_staging_meta(&session.staging_dir, &session.staging_path, &session.meta)?;
+        hotpath::gauge!("semantic_artifact_staged_bytes").inc(bytes.len() as u64);
         Ok(())
     }
 
@@ -359,38 +364,51 @@ impl ModelArtifactStore {
             return Err(ArtifactImportErrorV1::ResumeIdentityMismatch);
         }
 
-        for staged in &session.meta.members {
-            let file = open_cap_file(
-                &session.members_dir,
-                member_file_name(staged.member.role),
-                true,
-                false,
-                false,
-                false,
-                false,
-            )?;
-            let length = file
-                .metadata()
-                .map_err(|_| ArtifactImportErrorV1::StorageFailure)?
-                .len();
-            if length != staged.member.byte_length || staged.bytes_written != length {
-                self.quarantine_staging_locked(
-                    &session,
-                    QuarantineReasonV1::MemberLengthMismatch,
-                    now_unix,
+        // Streamed length + SHA-256 verification of every staged member.
+        // Failed verification (quarantine + typed error) drops the span guard
+        // and still records the time spent verifying.
+        hotpath::measure_block!("semantic.artifact.finalize_verify", {
+            for staged in &session.meta.members {
+                let file = open_cap_file(
+                    &session.members_dir,
+                    member_file_name(staged.member.role),
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
                 )?;
-                return Err(ArtifactImportErrorV1::LengthMismatch);
+                let length = file
+                    .metadata()
+                    .map_err(|_| ArtifactImportErrorV1::StorageFailure)?
+                    .len();
+                if length != staged.member.byte_length || staged.bytes_written != length {
+                    self.quarantine_staging_locked(
+                        &session,
+                        QuarantineReasonV1::MemberLengthMismatch,
+                        now_unix,
+                    )?;
+                    return Err(ArtifactImportErrorV1::LengthMismatch);
+                }
+                let actual = sha256_open_file(file)?;
+                if actual != staged.member.digest {
+                    self.quarantine_staging_locked(
+                        &session,
+                        QuarantineReasonV1::MemberDigestMismatch,
+                        now_unix,
+                    )?;
+                    return Err(ArtifactImportErrorV1::DigestMismatch);
+                }
             }
-            let actual = sha256_open_file(file)?;
-            if actual != staged.member.digest {
-                self.quarantine_staging_locked(
-                    &session,
-                    QuarantineReasonV1::MemberDigestMismatch,
-                    now_unix,
-                )?;
-                return Err(ArtifactImportErrorV1::DigestMismatch);
-            }
-        }
+        });
+        hotpath::gauge!("semantic_artifact_verified_bytes").set(
+            session
+                .meta
+                .members
+                .iter()
+                .map(|staged| staged.member.byte_length)
+                .sum::<u64>(),
+        );
 
         let mut record =
             self.record_for(manifest, ArtifactInventoryStateV1::Verified, now_unix, None);
@@ -415,24 +433,28 @@ impl ModelArtifactStore {
             meta: _,
         } = session;
         drop(members_dir);
-        let destination = record.artifact_digest.as_str();
-        match self.artifacts_dir.symlink_metadata(destination) {
-            Ok(_) => self.verify_artifact_record(&record)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                staging_dir.rename("members", &self.artifacts_dir, destination)?;
-                sync_cap_dir(&staging_dir)?;
-                sync_cap_dir(&self.artifacts_dir)?;
+        // Durable publication: rename into the digest-addressed layout,
+        // directory fsyncs, inventory flip to Installed, staging cleanup.
+        hotpath::measure_block!("semantic.artifact.finalize_publish", {
+            let destination = record.artifact_digest.as_str();
+            match self.artifacts_dir.symlink_metadata(destination) {
+                Ok(_) => self.verify_artifact_record(&record)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    staging_dir.rename("members", &self.artifacts_dir, destination)?;
+                    sync_cap_dir(&staging_dir)?;
+                    sync_cap_dir(&self.artifacts_dir)?;
+                }
+                Err(_) => return Err(ArtifactImportErrorV1::StorageFailure),
             }
-            Err(_) => return Err(ArtifactImportErrorV1::StorageFailure),
-        }
 
-        record.state = ArtifactInventoryStateV1::Installed;
-        inventory
-            .records
-            .insert(record.artifact_digest.to_string(), record.clone());
-        self.save_inventory_locked(&inventory)?;
-        self.remove_staging_dir_path(&staging_id)?;
-        self.clear_recovery_locked()?;
+            record.state = ArtifactInventoryStateV1::Installed;
+            inventory
+                .records
+                .insert(record.artifact_digest.to_string(), record.clone());
+            self.save_inventory_locked(&inventory)?;
+            self.remove_staging_dir_path(&staging_id)?;
+            self.clear_recovery_locked()?;
+        });
         Ok(record)
     }
 

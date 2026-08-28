@@ -104,7 +104,10 @@ pub(crate) async fn sweep_unregistered_store_page(
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(interrupted_report(completion, CollectionOutcome::default()));
+        return Ok(observed_page_report(interrupted_report(
+            completion,
+            CollectionOutcome::default(),
+        )));
     }
     let mut recovery_outcome = CollectionOutcome::default();
     let census = census_unregistered_project_dirs_page(
@@ -120,32 +123,32 @@ pub(crate) async fn sweep_unregistered_store_page(
     )
     .await?;
     let Some((findings, next_cursor)) = census else {
-        return Ok(interrupted_report(
+        return Ok(observed_page_report(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
                 .unwrap_or(UnregisteredSweepCompletionV1::DeadlineExceeded),
             recovery_outcome,
-        ));
+        )));
     };
     let plan = plan_unregistered_collection(findings, request.retention_secs);
     if !request.apply {
-        return Ok(UnregisteredStoreSweepReport {
+        return Ok(observed_page_report(UnregisteredStoreSweepReport {
             plan,
             applied: false,
             outcome: recovery_outcome,
             next_cursor,
             completion: UnregisteredSweepCompletionV1::Complete,
-        });
+        }));
     }
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(UnregisteredStoreSweepReport {
+        return Ok(observed_page_report(UnregisteredStoreSweepReport {
             plan: UnregisteredCollectionPlan::default(),
             applied: false,
             outcome: recovery_outcome,
             next_cursor: request.cursor,
             completion,
-        });
+        }));
     }
     let mut outcome = execute_unregistered_collection_controlled(
         db,
@@ -167,7 +170,7 @@ pub(crate) async fn sweep_unregistered_store_page(
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,
         CollectionCompletionV1::DeadlineExceeded => UnregisteredSweepCompletionV1::DeadlineExceeded,
     };
-    Ok(UnregisteredStoreSweepReport {
+    Ok(observed_page_report(UnregisteredStoreSweepReport {
         plan,
         applied: completion == UnregisteredSweepCompletionV1::Complete,
         outcome,
@@ -175,7 +178,7 @@ pub(crate) async fn sweep_unregistered_store_page(
             .then_some(next_cursor)
             .flatten(),
         completion,
-    })
+    }))
 }
 
 fn interrupted_report(
@@ -187,6 +190,30 @@ fn interrupted_report(
         completion,
         ..UnregisteredStoreSweepReport::default()
     }
+}
+
+/// Page-terminal census: cancelled and deadline-bounded pages count next to
+/// complete ones so a starved sweep is visible, and collected/failed items
+/// are attributed even when the page ends early.
+fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
+    match report.completion {
+        UnregisteredSweepCompletionV1::Complete => {
+            hotpath::gauge!("retention.orphan.unregistered.page_complete_total").inc(1_u64);
+        }
+        UnregisteredSweepCompletionV1::Cancelled => {
+            hotpath::gauge!("retention.orphan.unregistered.page_cancelled_total").inc(1_u64);
+        }
+        UnregisteredSweepCompletionV1::DeadlineExceeded => {
+            hotpath::gauge!("retention.orphan.unregistered.page_deadline_total").inc(1_u64);
+        }
+    }
+    hotpath::gauge!("retention.orphan.unregistered.collected_total")
+        .inc(report.outcome.collected.len());
+    hotpath::gauge!("retention.orphan.unregistered.failed_total")
+        .inc(report.outcome.errors.len());
+    hotpath::gauge!("retention.orphan.unregistered.reclaimed_bytes_total")
+        .inc(report.outcome.reclaimed_bytes);
+    report
 }
 
 /// Builds only one page of costly child inventories. Its directory cursor is

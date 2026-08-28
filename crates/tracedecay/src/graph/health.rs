@@ -78,6 +78,7 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
     let total_edges: usize = adj.values().map(HashSet::len).sum();
+    hotpath::gauge!("graph.health.acyclicity.edges_total").inc(total_edges as u64);
 
     if total_edges == 0 {
         return (1.0, 0);
@@ -126,6 +127,7 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         all_nodes.extend(targets.iter().cloned());
     }
     let file_count = all_nodes.len();
+    hotpath::gauge!("graph.health.depth.files_total").inc(file_count as u64);
 
     if file_count == 0 {
         return DepthResult {
@@ -259,6 +261,7 @@ where
     AdjHasher: BuildHasher,
     EdgeHasher: BuildHasher,
 {
+    hotpath::gauge!("graph.health.dsm.files_total").inc(adj.len() as u64);
     let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
     for file in adj.keys() {
         let directory = file
@@ -341,6 +344,7 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
     }
+    hotpath::gauge!("graph.health.modularity.nodes_total").inc(all_nodes.len() as u64);
 
     if all_nodes.is_empty() {
         return (1.0, 0);

@@ -91,7 +91,11 @@ async fn findings_for_family_with_authorities(
         );
     };
 
-    let report = match reader().await {
+    // The admitted daemon composes the report across every finding producer;
+    // this single await is the expensive phase behind both `/api/doctor/*`
+    // and `/api/storage/findings`, and the span records failed reads too.
+    let report = match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await
+    {
         Ok(admitted) => admitted.report,
         Err(error) => {
             return envelope(

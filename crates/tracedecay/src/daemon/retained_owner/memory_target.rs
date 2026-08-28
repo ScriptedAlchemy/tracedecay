@@ -1,6 +1,8 @@
 //! Exact retained-memory target selection for one admitted profile.
 
 use std::path::Path;
+#[cfg(feature = "hotpath")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -22,15 +24,59 @@ pub(crate) enum MemoryTargetAccessV1 {
 pub(crate) struct RetainedMemoryTargetV1<'a> {
     database: ProjectMemoryDbHandle<'a>,
     owner: FactOwnerV1,
+    // Ties the open-target gauge to the exact handle lifetime so cancelled or
+    // failed requests cannot leak an "open" entry.
+    #[cfg(feature = "hotpath")]
+    _observation: RetainedMemoryTargetObservationV1,
 }
 
-impl RetainedMemoryTargetV1<'_> {
+impl<'a> RetainedMemoryTargetV1<'a> {
+    fn new(database: ProjectMemoryDbHandle<'a>, owner: FactOwnerV1) -> Self {
+        Self {
+            database,
+            owner,
+            #[cfg(feature = "hotpath")]
+            _observation: RetainedMemoryTargetObservationV1::enter(),
+        }
+    }
+
     pub(crate) fn database(&self) -> &Database {
         self.database.as_db()
     }
 
     pub(crate) fn owner(&self) -> &FactOwnerV1 {
         &self.owner
+    }
+}
+
+#[cfg(feature = "hotpath")]
+static RETAINED_MEMORY_TARGETS_OPEN: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "hotpath")]
+struct RetainedMemoryTargetObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl RetainedMemoryTargetObservationV1 {
+    fn enter() -> Self {
+        let open = RETAINED_MEMORY_TARGETS_OPEN
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("daemon.retained.memory.target.opened_total").inc(1_u64);
+        hotpath::gauge!("daemon.retained.memory.target.open").set(open);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for RetainedMemoryTargetObservationV1 {
+    fn drop(&mut self) {
+        let _ = RETAINED_MEMORY_TARGETS_OPEN.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |open| open.checked_sub(1),
+        );
+        hotpath::gauge!("daemon.retained.memory.target.open")
+            .set(RETAINED_MEMORY_TARGETS_OPEN.load(Ordering::Relaxed));
     }
 }
 
@@ -48,10 +94,10 @@ pub(crate) async fn open_project_retained_memory_target<'a>(
             return denied();
         }
         let database = open_profile_memory(cg.store_runtime_registry()).await?;
-        return Ok(RetainedMemoryTargetV1 {
-            database: ProjectMemoryDbHandle::Owned(Box::new(database)),
-            owner: FactOwnerV1::Profile,
-        });
+        return Ok(RetainedMemoryTargetV1::new(
+            ProjectMemoryDbHandle::Owned(Box::new(database)),
+            FactOwnerV1::Profile,
+        ));
     }
     if memory_scope.is_some_and(|scope| scope != MemoryScopeV1::Project) {
         return denied();
@@ -70,7 +116,7 @@ pub(crate) async fn open_project_retained_memory_target<'a>(
             return denied();
         }
         let database = cg.project_memory_db().await.map_err(map_execution_error)?;
-        return Ok(RetainedMemoryTargetV1 { database, owner });
+        return Ok(RetainedMemoryTargetV1::new(database, owner));
     }
     if access == MemoryTargetAccessV1::Write {
         return denied();
@@ -86,6 +132,7 @@ async fn open_profile_memory(
         .map_err(map_execution_error)
 }
 
+#[hotpath::measure(label = "daemon.retained.memory.open_selected", future = true)]
 async fn open_selected_project_read_only<'a>(
     cg: &TraceDecay,
     selected_project_id: &ProjectId,
@@ -119,12 +166,12 @@ async fn open_selected_project_read_only<'a>(
     if database.is_writable() || !exact_scope {
         return denied();
     }
-    Ok(RetainedMemoryTargetV1 {
-        database: ProjectMemoryDbHandle::Owned(Box::new(database)),
-        owner: FactOwnerV1::Project {
+    Ok(RetainedMemoryTargetV1::new(
+        ProjectMemoryDbHandle::Owned(Box::new(database)),
+        FactOwnerV1::Project {
             project_id: selected_project_id.clone(),
         },
-    })
+    ))
 }
 
 fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {

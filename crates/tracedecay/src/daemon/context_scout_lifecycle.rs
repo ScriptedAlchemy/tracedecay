@@ -83,6 +83,42 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     worktree_id: WorktreeId,
     sessions: &RegisteredGlobalDbLeaseV1,
 ) -> AuthorityRegistrationV1 {
+    let registration = register_context_scout_lifecycle_authority_checked(
+        hook_project_id,
+        hook_worktree_id,
+        project_id,
+        worktree_id,
+        sessions,
+    );
+    // Registration transition counters plus the live-authority gauge. The
+    // gauge moves only on the two transitions that change the registry map
+    // (fresh install here, exact removal in unregister), so it tracks the
+    // map's population exactly.
+    match registration {
+        AuthorityRegistrationV1::Registered => {
+            hotpath::gauge!("daemon.context_scout.authority.registered").inc(1.0);
+            hotpath::gauge!("daemon.context_scout.authority.active").inc(1.0);
+        }
+        AuthorityRegistrationV1::AlreadyRegistered => {
+            hotpath::gauge!("daemon.context_scout.authority.already_registered").inc(1.0);
+        }
+        AuthorityRegistrationV1::Conflict => {
+            hotpath::gauge!("daemon.context_scout.authority.conflict").inc(1.0);
+        }
+        AuthorityRegistrationV1::Rejected(_) => {
+            hotpath::gauge!("daemon.context_scout.authority.rejected").inc(1.0);
+        }
+    }
+    registration
+}
+
+fn register_context_scout_lifecycle_authority_checked(
+    hook_project_id: [u8; 16],
+    hook_worktree_id: [u8; 16],
+    project_id: ProjectId,
+    worktree_id: WorktreeId,
+    sessions: &RegisteredGlobalDbLeaseV1,
+) -> AuthorityRegistrationV1 {
     if hook_project_id == [0; 16] {
         return AuthorityRegistrationV1::Rejected(AuthorityRejectionV1::ZeroHookProjectId);
     }
@@ -149,6 +185,8 @@ pub(crate) fn unregister_context_scout_lifecycle_authority(
         .is_some_and(|existing| existing.sessions.shares_client_with(sessions))
     {
         authorities.remove(&key);
+        hotpath::gauge!("daemon.context_scout.authority.unregistered").inc(1.0);
+        hotpath::gauge!("daemon.context_scout.authority.active").inc(-1.0);
         return true;
     }
     false
@@ -377,8 +415,14 @@ async fn lookup_context_scout_lifecycle(
     )
     .await
     {
-        Ok(address) => ContextScoutLifecycleLookupV1::Resolved(Box::new(address)),
+        Ok(address) => {
+            hotpath::gauge!("daemon.context_scout.lookup.resolved").inc(1.0);
+            ContextScoutLifecycleLookupV1::Resolved(Box::new(address))
+        }
         Err(reason) => {
+            // The bounded per-reason detail already goes to tracing; the
+            // counter records only the fail-closed outcome.
+            hotpath::gauge!("daemon.context_scout.lookup.unresolved").inc(1.0);
             tracing::debug!(
                 target: "tracedecay::context_scout_lifecycle",
                 reason = reason.as_str(),

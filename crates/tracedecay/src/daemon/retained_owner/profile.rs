@@ -61,6 +61,7 @@ impl ProfileRetainedConnectionAuthorityV1 {
         &self.configuration_digest
     }
 
+    #[hotpath::measure(label = "daemon.retained.profile.admit")]
     fn admit_request(
         &self,
         operation: &ApplicationOperation,
@@ -267,9 +268,11 @@ pub(crate) async fn execute_profile_retained_application(
     let ports = profile_retained_surface_ports(&authorities)?;
     let service = RetainedSurfaceServiceV1::new(ports);
     Ok(
-        match service
-            .execute(&context, &cancellation, observed_at, &request)
-            .await
+        match hotpath::future!(
+            service.execute(&context, &cancellation, observed_at, &request),
+            label = "daemon.retained.profile.serve"
+        )
+        .await
         {
             Ok(outcome) => Ok(ApplicationEnvelope {
                 contract: operation.result_contract().clone(),

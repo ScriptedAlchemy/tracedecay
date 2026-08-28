@@ -168,6 +168,7 @@ impl Drop for HookAdmissionLedgerV1 {
 
 impl HookAdmissionLedgerV1 {
     /// Open (and bounded-recover) the ledger for one host.
+    #[hotpath::measure(label = "hooks.admission.open")]
     pub fn open(
         root: impl Into<PathBuf>,
         host: HookHostV1,
@@ -246,6 +247,10 @@ impl HookAdmissionLedgerV1 {
             dropped_overflow_records,
             truncated_tail_bytes,
         };
+        hotpath::gauge!("hooks.admission.live_records").set(report.live_records);
+        hotpath::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);
+        hotpath::gauge!("hooks.admission.open.dropped_overflow")
+            .set(report.dropped_overflow_records);
         Ok((ledger, report))
     }
 
@@ -286,12 +291,14 @@ impl HookAdmissionLedgerV1 {
             if is_expired(existing.admitted_at, now, self.limits.max_age_micros) {
                 self.entries.remove(&identity);
             } else if existing.digest == digest {
+                hotpath::gauge!("hooks.admission.decision.exact_duplicate").inc(1);
                 return Ok(HookAdmissionLedgerReceiptV1 {
                     decision: HookAdmissionDecisionV1::ExactDuplicate,
                     order: existing.order,
                     work_completed: self.completed_work.contains(&identity),
                 });
             } else {
+                hotpath::gauge!("hooks.admission.decision.conflict").inc(1);
                 return Ok(HookAdmissionLedgerReceiptV1 {
                     decision: HookAdmissionDecisionV1::Conflict,
                     order: existing.order,
@@ -319,6 +326,7 @@ impl HookAdmissionLedgerV1 {
                 order,
             },
         );
+        hotpath::gauge!("hooks.admission.decision.admitted").inc(1);
         Ok(HookAdmissionLedgerReceiptV1 {
             decision: HookAdmissionDecisionV1::Admitted,
             order,
@@ -352,6 +360,7 @@ impl HookAdmissionLedgerV1 {
     }
 
     /// Drop entries older than the age bound. Returns how many were removed.
+    #[hotpath::measure(label = "hooks.admission.expire")]
     pub fn expire(&mut self, now: UtcMicros) -> Result<u32, HookAdmissionLedgerError> {
         let before = self.entries.len();
         let max_age = self.limits.max_age_micros;
@@ -363,6 +372,8 @@ impl HookAdmissionLedgerV1 {
         if removed > 0 {
             self.rewrite()?;
         }
+        hotpath::gauge!("hooks.admission.expired.removed").inc(removed);
+        hotpath::gauge!("hooks.admission.live_records").set(self.entries.len());
         Ok(removed)
     }
 
@@ -459,7 +470,10 @@ fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError
         .map_err(|_| HookAdmissionLedgerError::Io)?;
     match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(HookAdmissionLedgerError::Busy),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            hotpath::gauge!("hooks.admission.lock.contended").inc(1);
+            Err(HookAdmissionLedgerError::Busy)
+        }
         Err(std::fs::TryLockError::Error(_)) => Err(HookAdmissionLedgerError::Io),
     }
 }

@@ -137,6 +137,7 @@ impl DaemonInvocationState {
             })
     }
 
+    #[hotpath::measure(label = "daemon.invocation_state.project_drain", future = true)]
     async fn drain_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -145,6 +146,14 @@ impl DaemonInvocationState {
         reopenable: bool,
     ) -> Result<Option<crate::daemon::service::project_runtime::ProjectRuntimeRootQuiescenceV1>>
     {
+        // Bounded static transition names: a project leaves the invocation
+        // runtime either by capacity quiescence (reopenable) or by terminal
+        // remote-deletion retirement.
+        if reopenable {
+            hotpath::gauge!("daemon.invocation_state.transition.quiesce_total").inc(1_u64);
+        } else {
+            hotpath::gauge!("daemon.invocation_state.transition.retire_total").inc(1_u64);
+        }
         let retirement_kind = if reopenable {
             "capacity-retired"
         } else {
@@ -161,6 +170,7 @@ impl DaemonInvocationState {
             .retire_project_roots(project_roots)
             .await
         {
+            hotpath::gauge!("daemon.invocation_state.drain.code_index_refused_total").inc(1_u64);
             return Err(TraceDecayError::Config {
                 message: format!(
                     "code-index workers for {retirement_kind} project '{}' did not drain",
@@ -185,11 +195,15 @@ impl DaemonInvocationState {
                         project_roots,
                     )
                     .await
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: format!(
-                            "invocation runtime owners for {retirement_kind} project '{}' did not drain",
-                            project_id.as_str()
-                        ),
+                    .ok_or_else(|| {
+                        hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total")
+                            .inc(1_u64);
+                        TraceDecayError::Config {
+                            message: format!(
+                                "invocation runtime owners for {retirement_kind} project '{}' did not drain",
+                                project_id.as_str()
+                            ),
+                        }
                     })?,
             )
         } else {
@@ -203,6 +217,7 @@ impl DaemonInvocationState {
                 )
                 .await
             {
+                hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total").inc(1_u64);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -216,6 +231,8 @@ impl DaemonInvocationState {
             tokio::time::Instant::now() + super::DAEMON_TASK_ABORT_DEADLINE;
         for retirement in semantic_projection_retirements {
             if !retirement.wait_until(semantic_projection_deadline).await {
+                hotpath::gauge!("daemon.invocation_state.drain.semantic_refused_total")
+                    .inc(1_u64);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "semantic projection work for {retirement_kind} project '{}' did not drain",
@@ -369,6 +386,7 @@ impl DaemonInvocationState {
         )
     }
 
+    #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,
@@ -397,6 +415,7 @@ impl DaemonInvocationState {
                 reason = "missing project-root .git control path",
                 "project root is not a git repository; code index disabled"
             );
+            hotpath::gauge!("daemon.invocation_state.code_index_mount.skipped_total").inc(1_u64);
             return Ok(());
         }
         let canonical_project_root = project_root
@@ -452,14 +471,19 @@ impl DaemonInvocationState {
                 ),
             )
             .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("code-index scheduler could not be mounted: {error}"),
+            .map_err(|error| {
+                hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total")
+                    .inc(1_u64);
+                TraceDecayError::Config {
+                    message: format!("code-index scheduler could not be mounted: {error}"),
+                }
             })?;
         if !self
             .code_index_schedulers
             .install_semantic_vector_graph_provider(&canonical_project_root, vector_graph)
             .await
         {
+            hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
             return Err(TraceDecayError::Config {
                 message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
             });
@@ -504,6 +528,7 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
     pub(super) async fn execute_multi_root_for_project(
         &self,
         store_administration: &StoreAdministration,
@@ -578,6 +603,11 @@ impl DaemonInvocationState {
                 );
             }
         };
+        // Items-processed: the multi_root_execute span is inclusive over every
+        // admitted root, so per-request root counts are what divide its wall
+        // time into per-root service demand.
+        hotpath::gauge!("daemon.invocation_state.multi_root_roots_total")
+            .inc(scope_set.roots().len() as u64);
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
@@ -946,16 +976,28 @@ impl DaemonInvocationState {
     /// at prepare time and, critically, keeps them closed even if the
     /// coordinator later aborts the drain runner. Idempotent.
     pub(super) fn cancel_admissions(&self) {
+        // Counts cancel *requests*, not distinct transitions: the owner's
+        // synchronous cancel side is intentionally idempotent, and a repeat
+        // request after a coordinator retry is itself worth observing.
+        hotpath::gauge!("daemon.invocation_state.cancel_admissions_total").inc(1_u64);
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
     }
 
+    #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
     pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
-        self.service.expire_all().await
+        let expired = self.service.expire_all().await;
+        if !expired {
+            // A false expire-all means invocation sessions survived the
+            // drain; record the incomplete shutdown instead of hiding it
+            // behind the boolean.
+            hotpath::gauge!("daemon.invocation_state.shutdown_incomplete_total").inc(1_u64);
+        }
+        expired
     }
 }
 

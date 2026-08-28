@@ -80,7 +80,6 @@ pub struct MemoryCuratorAutomationRun {
     pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
-#[hotpath::measure(label = "automation_run_memory_curator")]
 pub async fn run_memory_curator_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -237,6 +236,10 @@ impl MemoryCuratorStore<'_> {
     }
 }
 
+// The single funnel every curator entry point (project, user, retained
+// settlement) flows through: one static run-lifetime span in the futures lane
+// so suspension and cancellation of long runs stay visible.
+#[hotpath::measure(future = true, label = "automation_run_memory_curator")]
 async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
     config: &AutomationConfig,

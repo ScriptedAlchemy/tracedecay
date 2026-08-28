@@ -84,6 +84,47 @@ pub struct HookSpoolV1 {
     round_robin_after: Option<[u8; 32]>,
     replay_claims: BTreeMap<[u8; 32], [u8; 16]>,
     recovery_required: bool,
+    /// Held for its `Drop` only: closes the writer-lease hold observation.
+    #[cfg(feature = "hotpath")]
+    _lease_hold: SpoolLeaseHoldObservationV1,
+}
+
+#[cfg(feature = "hotpath")]
+static SPOOL_LEASES_HELD: AtomicU64 = AtomicU64::new(0);
+
+/// Writer-lease hold observation. Acquisition wait is the
+/// `hooks.spool.acquire_lease` span; this records how long the sole writer
+/// lease is then *held* (open handle lifetime), which is what other writers
+/// contend against. Drop-based so panic or early return cannot leak the gauge.
+#[cfg(feature = "hotpath")]
+#[derive(Debug)]
+struct SpoolLeaseHoldObservationV1 {
+    acquired: std::time::Instant,
+}
+
+#[cfg(feature = "hotpath")]
+impl SpoolLeaseHoldObservationV1 {
+    fn enter() -> Self {
+        let held = SPOOL_LEASES_HELD
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("hooks.spool.lease.held").set(held);
+        Self {
+            acquired: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for SpoolLeaseHoldObservationV1 {
+    fn drop(&mut self) {
+        let _ = SPOOL_LEASES_HELD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            held.checked_sub(1)
+        });
+        hotpath::gauge!("hooks.spool.lease.held").set(SPOOL_LEASES_HELD.load(Ordering::Relaxed));
+        hotpath::gauge!("hooks.spool.lease.hold_micros")
+            .set(u64::try_from(self.acquired.elapsed().as_micros()).unwrap_or(u64::MAX));
+    }
 }
 
 impl HookSpoolV1 {
@@ -212,6 +253,8 @@ impl HookSpoolV1 {
             round_robin_after,
             replay_claims: BTreeMap::new(),
             recovery_required: false,
+            #[cfg(feature = "hotpath")]
+            _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
         // A crash may leave logically acknowledged frames in the active file.
         // Metadata is already durable, so this recovery compaction is safe.
@@ -403,11 +446,14 @@ impl HookSpoolV1 {
     /// List records whose maximum transport age has elapsed. They remain
     /// durable until the daemon supplies a terminal tombstone acknowledgement.
     pub fn expired_records(&self, now: UtcMicros) -> Vec<HookSpoolRecordV1> {
-        self.pending
+        let expired = self
+            .pending
             .iter()
             .filter(|record| is_expired(record, now))
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        hotpath::gauge!("hooks.spool.expired.frame_count").set(expired.len());
+        expired
     }
 
     /// Persist one daemon acknowledgement and compact logically deleted
@@ -456,6 +502,13 @@ impl HookSpoolV1 {
         self.release_usage(&removed);
         #[cfg(feature = "hotpath")]
         {
+            // A tombstone is a delivery that expired or was refused, not a
+            // success; the disposition mix keeps those failures visible.
+            hotpath::gauge!(match acknowledgement.disposition {
+                HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
+                HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
+            })
+            .inc(1);
             hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
             hotpath::gauge!("hooks.spool.queue_wait_micros")
                 .set(now.0.saturating_sub(removed.queued_at.0));

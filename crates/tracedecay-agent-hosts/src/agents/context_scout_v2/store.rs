@@ -312,6 +312,12 @@ impl ProjectContextScoutDurableStoreV1 {
         address.project_id == self.project_id && address.validate().is_ok()
     }
 
+    // The shared read funnel behind `recent`, `recent_for_protected_session`,
+    // and `recent_project`: one static label for durable recent-state reads.
+    #[hotpath::measure(
+        label = "context_scout_store_read",
+        impl_type = "ProjectContextScoutDurableStoreV1"
+    )]
     async fn recent_matching(
         &self,
         configuration_revision: [u8; 32],
@@ -537,6 +543,10 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
     }
 
+    #[hotpath::measure(
+        label = "context_scout_work_snapshot",
+        impl_type = "ProjectContextScoutDurableStoreV1"
+    )]
     pub(crate) async fn work_snapshot(
         &self,
         now: UtcMicros,

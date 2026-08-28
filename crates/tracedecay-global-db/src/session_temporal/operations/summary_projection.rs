@@ -9,6 +9,10 @@ use super::CanonicalPublicationManifest;
 ///
 /// Existing projection rows conflict at the database boundary; they are never
 /// consulted for identity, replay, authorization, or publication decisions.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.publication.project_summary"
+)]
 pub(super) async fn project_canonical_summary(
     conn: &impl Executor,
     summary_id: &str,
@@ -51,5 +55,7 @@ pub(super) async fn project_canonical_summary(
         )
         .await?;
     }
+    hotpath::gauge!("global_db.session_temporal.publication.summary_projection_rows")
+        .inc(1_u64.saturating_add(manifest.source_refs.len() as u64));
     Ok(())
 }

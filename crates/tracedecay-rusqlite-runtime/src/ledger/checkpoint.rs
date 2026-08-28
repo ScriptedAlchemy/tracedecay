@@ -41,6 +41,7 @@ pub(super) struct NextCheckpoint {
     pub(super) watermark: ShardWatermarkV1,
 }
 
+#[hotpath::measure(label = "rusqlite.ledger.checkpoint_next")]
 pub(super) fn next(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -76,6 +77,7 @@ pub(super) fn next(
     })
 }
 
+#[hotpath::measure(label = "rusqlite.ledger.checkpoint_persist")]
 pub(super) fn persist(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,

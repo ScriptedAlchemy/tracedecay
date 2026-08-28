@@ -138,7 +138,10 @@ impl HookDeliveryReceiptSpoolV1 {
             return Err(HookDeliverySpoolError::UnsafePath);
         }
         lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => HookDeliverySpoolError::Busy,
+            std::fs::TryLockError::WouldBlock => {
+                hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
+                HookDeliverySpoolError::Busy
+            }
             std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
         })?;
         let spool = Self { root, _lock: lock };
@@ -156,12 +159,14 @@ impl HookDeliveryReceiptSpoolV1 {
         if let Some(bytes) = read_bounded(&path, MAX_RECEIPT_BYTES).map_err(map_read_error)? {
             let existing = decode_receipt(&bytes)?;
             return if existing.same_identity(receipt) {
+                hotpath::gauge!("hooks.delivery.append.deduplicated").inc(1);
                 Ok(false)
             } else {
                 Err(HookDeliverySpoolError::Corrupt)
             };
         }
         if self.receipt_paths()?.len() >= MAX_PENDING_RECEIPTS {
+            hotpath::gauge!("hooks.delivery.refused.full").inc(1);
             return Err(HookDeliverySpoolError::Full);
         }
         let bytes =
@@ -191,11 +196,13 @@ impl HookDeliveryReceiptSpoolV1 {
         if let Some(bytes) = read_bounded(&path, MAX_RECEIPT_BYTES).map_err(map_read_error)? {
             let existing = decode_receipt(&bytes)?;
             if existing.same_identity(receipt) {
+                hotpath::gauge!("hooks.delivery.append.deduplicated").inc(1);
                 return Ok(existing);
             }
             return Err(HookDeliverySpoolError::Corrupt);
         }
         if self.receipt_paths()?.len() >= MAX_PENDING_RECEIPTS {
+            hotpath::gauge!("hooks.delivery.refused.full").inc(1);
             return Err(HookDeliverySpoolError::Full);
         }
         let bytes =

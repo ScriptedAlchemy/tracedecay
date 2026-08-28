@@ -388,6 +388,7 @@ fn read_mcp_config_observation(
 /// verification step rejects the effect. Snapshot once after the child exits:
 /// reading again after recording would let a foreign writer be absorbed into
 /// the transaction's intended state.
+#[hotpath::measure(label = "hosts.agent.host_cli.registry_step")]
 pub(crate) fn run_mcp_registry_step(
     program: &Path,
     args: &[&str],

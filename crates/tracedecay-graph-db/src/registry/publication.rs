@@ -6,8 +6,9 @@ use tracedecay_store::runtime::{
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayRetirementV1,
     GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationStoreV1,
-    GraphReplayRetirementOutcomeV1, GraphRetiredReplayCleanupFinalizeOutcomeV1,
-    GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
+    GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
+    GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
+    GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
 };
 
@@ -24,8 +25,9 @@ use crate::generation::{
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
+use crate::state::latest_projection;
 use crate::{
-    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
+    GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
     GraphReplayCollectionOutcome, VerifiedGraphCommit,
 };
@@ -589,6 +591,49 @@ impl GraphDbRegistry {
                     .as_ref()
                     .is_some_and(|head| head.sequence > replay.sequence)
             {
+                let locator = locator_from_key(&historical_head.key)?;
+                // This exact mounted instance may already hold the verified
+                // lease for this head: a racing publisher or an earlier
+                // recover proved these stored rows against this same
+                // recovered digest on this in-memory database moments ago.
+                // Reuse is keyed on the exact instance, head, and recovered
+                // digest (`lease.head == historical_head` compares all head
+                // fields byte-exactly), the same trust decision the recover
+                // fast path makes in `load_verified_head`. A fresh-from-disk
+                // instance starts with an empty cache and pays the full
+                // proof below.
+                if let Some(lease) = database.verified_generation(&locator)?
+                    && lease.head == historical_head
+                {
+                    operation.check(self, context)?;
+                    let physical_namespace = locator.physical_namespace()?;
+                    let commit = {
+                        let guard = database.read_guard()?;
+                        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                        latest_projection(
+                            native,
+                            &physical_namespace,
+                            &locator.projection.projection,
+                        )?
+                        .ok_or_else(|| GraphDbError::GenerationMismatch {
+                            namespace: locator.projection.namespace.to_string(),
+                            projection: locator.projection.projection.to_string(),
+                            generation: locator.generation.to_string(),
+                            message: "verified generation rows disappeared under a live lease"
+                                .to_owned(),
+                        })?
+                        .commit
+                    };
+                    let recovered_digest = historical_head.recovered_digest.clone();
+                    return seat_historical_verified_lease(
+                        database,
+                        lease,
+                        historical_head,
+                        is_current_head,
+                        commit,
+                        recovered_digest,
+                    );
+                }
                 let mut visiting = BTreeSet::new();
                 let dependencies = self.load_dependencies(
                     operation,
@@ -655,36 +700,39 @@ impl GraphDbRegistry {
                 // per-generation artifact from the rows the digest just
                 // proved, before this head starts serving reads.
                 database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
-                visiting.clear();
-                self.load_verified_head(
-                    operation,
-                    &database,
-                    authority,
-                    context,
-                    historical_head.clone(),
-                    &mut visiting,
-                )?;
-                let lease = generation_lease(&identity, historical_head.clone(), dependencies);
-                if is_current_head {
-                    // The durable CAS already advanced the head to this exact
-                    // publication (an earlier publish crashed after its
-                    // linearization point). Retrying it must seat the head for
-                    // reads, not file its own publication as history and leave
-                    // the projection without an installed verified head.
-                    database.install_verified_generation(Arc::clone(&lease))?;
-                } else {
-                    database.remember_verified_generation(&lease)?;
+                operation.check(self, context)?;
+                // The digest proof above already streamed this generation's
+                // stored rows against the head's journaled recovered digest
+                // on this instance (`historical_head` carries exactly
+                // `expected_recovered_digest`), and the dependency closure
+                // was validated when it was loaded, so the verified lease is
+                // built directly from that proof. Re-loading the head
+                // through its replay would hydrate the manifest and stream
+                // the rows a second time without adding durability.
+                let physical_namespace = locator.physical_namespace()?;
+                match database
+                    .ensure_projection_readable(&physical_namespace, &identity.projection.projection)
+                {
+                    Ok(()) => {}
+                    Err(GraphDbError::ProjectionMismatch { message, .. }) => {
+                        return Err(GraphDbError::GenerationMismatch {
+                            namespace: identity.projection.namespace.to_string(),
+                            projection: identity.projection.projection.to_string(),
+                            generation: identity.generation.to_string(),
+                            message,
+                        });
+                    }
+                    Err(error) => return Err(error),
                 }
-                database
-                    .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
-                let mut closure = BTreeMap::new();
-                collect_closure(&lease, &mut closure)?;
-                return Ok(VerifiedGraphCommit {
-                    commit: historical_commit,
-                    head: historical_head,
+                let lease = generation_lease(&identity, historical_head.clone(), dependencies);
+                return seat_historical_verified_lease(
+                    database,
+                    lease,
+                    historical_head,
+                    is_current_head,
+                    historical_commit,
                     recovered_digest,
-                    snapshot: VerifiedGraphSnapshot::new(database, lease, closure),
-                });
+                );
             }
             return Err(GraphDbError::Conflict);
         }
@@ -1099,5 +1147,600 @@ impl GraphDbRegistry {
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);
         Ok(lease)
+    }
+}
+
+/// Seats a verified lease for a historical (already durably linearized)
+/// publication and assembles its commit receipt.
+///
+/// The lease is either freshly built from a digest proof this call just ran,
+/// or reused from this exact instance's verified-generation cache; both carry
+/// the same instance-bound proof, so seating is identical.
+fn seat_historical_verified_lease(
+    database: GraphDbLeaseV1,
+    lease: Arc<VerifiedGenerationLease>,
+    head: GraphVerifiedHeadV1,
+    is_current_head: bool,
+    commit: GraphCommit,
+    recovered_digest: GraphRecoveredGenerationDigestV1,
+) -> Result<VerifiedGraphCommit, GraphDbError> {
+    if is_current_head {
+        // The durable CAS already advanced the head to this exact
+        // publication (an earlier publish crashed after its linearization
+        // point, or a racing publisher won). Retrying it must seat the head
+        // for reads, not file its own publication as history and leave the
+        // projection without an installed verified head.
+        database.install_verified_generation(Arc::clone(&lease))?;
+    } else {
+        database.remember_verified_generation(&lease)?;
+    }
+    database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
+    let mut closure = BTreeMap::new();
+    collect_closure(&lease, &mut closure)?;
+    Ok(VerifiedGraphCommit {
+        commit,
+        head,
+        recovered_digest,
+        snapshot: VerifiedGraphSnapshot::new(database, lease, closure),
+    })
+}
+
+/// Unit tests live here (not in `tests/`) because they assert on the
+/// crate-private, `cfg(test)`-only `RECOVERED_GENERATION_ENUMERATIONS`
+/// counter, which counts full stored-row digest proofs.
+#[cfg(test)]
+mod historical_publication_reuse_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_store::{
+        BrainId, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
+        GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
+        GraphPublicationProjectionPageV1, GraphPublicationReplayLookupV1,
+        GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
+        GraphPublicationReplayRecordV1, GraphPublicationReplayRetirementV1,
+        GraphPublicationReplayV1, GraphPublicationRetiredCleanupPageRequestV1,
+        GraphPublicationRetiredCleanupPageV1, GraphPublicationSequenceV1,
+        GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1, GraphPublicationStoreV1,
+        GraphProjectionIdentityV1, GraphReplayAppendOutcomeV1,
+        GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
+        GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1, ProjectId,
+        RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+        RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
+        RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+        RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+        StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+        UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    };
+    use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
+
+    use crate::generation::{
+        recovered_generation_enumerations, reset_recovered_generation_enumerations,
+    };
+    use crate::{
+        GraphCancellation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
+        GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
+        GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
+        SourceGeneration,
+    };
+
+    #[derive(Debug)]
+    struct TestCancellation;
+
+    impl GraphCancellation for TestCancellation {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestGraphLease {
+        binding: StoreRuntimeBindingV1,
+        verified_locator: VerifiedStoreLocatorV1,
+        canonical_path: PathBuf,
+    }
+
+    impl RetainedGraphStoreLeaseV1 for TestGraphLease {
+        fn binding(&self) -> &StoreRuntimeBindingV1 {
+            &self.binding
+        }
+
+        fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+            &self.verified_locator
+        }
+
+        fn canonical_path(&self) -> &Path {
+            &self.canonical_path
+        }
+    }
+
+    impl RetainedGraphStoreOwnerAttachmentV1 for TestGraphLease {
+        fn binding(&self) -> &StoreRuntimeBindingV1 {
+            &self.binding
+        }
+
+        fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+            &self.verified_locator
+        }
+
+        fn canonical_path(&self) -> &Path {
+            &self.canonical_path
+        }
+
+        fn issue_operation_lease(
+            &self,
+        ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+        {
+            Ok(Arc::new(Self {
+                binding: self.binding.clone(),
+                verified_locator: self.verified_locator.clone(),
+                canonical_path: self.canonical_path.clone(),
+            }))
+        }
+    }
+
+    struct TestProbe {
+        cancellation: RuntimeCancellationIdentityV1,
+        deadline: RuntimeDeadlineV1,
+        commit_started: AtomicBool,
+    }
+
+    impl RuntimeRequestProbeV1 for TestProbe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.deadline
+        }
+
+        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+            None
+        }
+
+        fn try_begin_commit(&self) -> bool {
+            self.commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }
+    }
+
+    fn control_and_probe() -> (RuntimeRequestControlV1, TestProbe) {
+        let cancellation = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new("reuse-test-cancellation").unwrap(),
+            generation: 1,
+        };
+        let deadline = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new("reuse-test-deadline").unwrap(),
+        };
+        (
+            RuntimeRequestControlV1 {
+                requested_at: UtcMicros(1),
+                deadline: deadline.clone(),
+                cancellation: cancellation.clone(),
+            },
+            TestProbe {
+                cancellation,
+                deadline,
+                commit_started: AtomicBool::new(false),
+            },
+        )
+    }
+
+    /// Journal-and-head fake for the publish/recover flows under test. The
+    /// replay-pool collection surfaces (pages, retirement, cleanup) answer a
+    /// typed infrastructure failure so any unexpected reach into them fails
+    /// the test loudly instead of succeeding vacuously.
+    #[derive(Default)]
+    struct RecordedAuthority {
+        next_sequence: u64,
+        records: BTreeMap<GraphPublicationKeyV1, GraphPublicationReplayRecordV1>,
+        pending: BTreeMap<GraphProjectionIdentityV1, GraphPublicationReplayRecordV1>,
+        heads: BTreeMap<GraphProjectionIdentityV1, GraphVerifiedHeadV1>,
+    }
+
+    impl RecordedAuthority {
+        fn stage(
+            &mut self,
+            publication: GraphPublicationReplayV1,
+        ) -> GraphPublicationReplayRecordV1 {
+            self.next_sequence += 1;
+            let record = GraphPublicationReplayRecordV1::new(
+                GraphPublicationSequenceV1::new(self.next_sequence).unwrap(),
+                publication,
+            )
+            .unwrap();
+            self.records
+                .insert(record.publication.key.clone(), record.clone());
+            self.pending
+                .insert(record.publication.key.projection.clone(), record.clone());
+            record
+        }
+    }
+
+    impl GraphPublicationStoreV1 for RecordedAuthority {
+        fn append_replay(
+            &mut self,
+            publication: &GraphPublicationReplayV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphReplayAppendOutcomeV1> {
+            if let Some(record) = self.records.get(&publication.key) {
+                return Ok(GraphReplayAppendOutcomeV1::ExactReplay(record.clone()));
+            }
+            Ok(GraphReplayAppendOutcomeV1::Appended(
+                self.stage(publication.clone()),
+            ))
+        }
+
+        fn pending_replay(
+            &mut self,
+            projection: &GraphProjectionIdentityV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
+            Ok(self.pending.get(projection).cloned())
+        }
+
+        fn replay(
+            &mut self,
+            key: &GraphPublicationKeyV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphPublicationReplayLookupV1> {
+            Ok(match self.records.get(key) {
+                Some(record) => GraphPublicationReplayLookupV1::Active(record.clone()),
+                None => GraphPublicationReplayLookupV1::Missing,
+            })
+        }
+
+        fn replay_page(
+            &mut self,
+            _request: &GraphPublicationReplayPageRequestV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphPublicationReplayPageV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn projection_page(
+            &mut self,
+            _request: &GraphPublicationProjectionPageRequestV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphPublicationProjectionPageV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn retire_replay(
+            &mut self,
+            _request: &GraphPublicationReplayRetirementV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn retired_cleanup_page(
+            &mut self,
+            _request: &GraphPublicationRetiredCleanupPageRequestV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphPublicationRetiredCleanupPageV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn finalize_retired_replay_cleanup(
+            &mut self,
+            _request: &GraphPublicationReplayRetirementV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphRetiredReplayCleanupFinalizeOutcomeV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn verified_head(
+            &mut self,
+            projection: &GraphProjectionIdentityV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<Option<GraphVerifiedHeadV1>> {
+            Ok(self.heads.get(projection).cloned())
+        }
+
+        fn compare_and_swap_verified_head(
+            &mut self,
+            request: &GraphVerifiedHeadCompareAndSwapV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphVerifiedHeadCasOutcomeV1> {
+            let record = self
+                .records
+                .get(&request.publication_key)
+                .cloned()
+                .ok_or(GraphPublicationStoreErrorV1::Infrastructure)?;
+            if self.heads.get(&request.publication_key.projection)
+                != request.expected_prior_head.as_ref()
+            {
+                return Ok(GraphVerifiedHeadCasOutcomeV1::Conflict {
+                    actual: self.heads.get(&request.publication_key.projection).cloned(),
+                });
+            }
+            let head = GraphVerifiedHeadV1::from_replay(&record, request.recovered_digest.clone())
+                .unwrap();
+            self.heads
+                .insert(request.publication_key.projection.clone(), head.clone());
+            self.pending.remove(&request.publication_key.projection);
+            Ok(GraphVerifiedHeadCasOutcomeV1::Advanced(head))
+        }
+    }
+
+    fn binding() -> StoreRuntimeBindingV1 {
+        StoreRuntimeBindingV1::new(
+            StoreShardIdV1::project(
+                BrainId::try_from("brain.publication-reuse".to_owned()).unwrap(),
+                UserProfileId::try_from("profile.publication-reuse".to_owned()).unwrap(),
+                ProjectId::try_from("project.publication-reuse".to_owned()).unwrap(),
+            ),
+            StoreIncarnationV1::new(1).unwrap(),
+            StoreAuthorityEpochV1::new(1).unwrap(),
+        )
+    }
+
+    fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegistration {
+        let canonical_path = root.join("graph.grafeo");
+        let verified_locator = VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            binding.incarnation,
+            canonical_store_locator_digest(&canonical_path).unwrap(),
+        );
+        GraphDbRegistration {
+            authority_lease: Arc::new(TestGraphLease {
+                binding,
+                verified_locator,
+                canonical_path,
+            }),
+            cancellation: Arc::new(TestCancellation),
+            lifecycle_cancellation: Arc::new(TestCancellation),
+            deadline: Instant::now() + Duration::from_secs(30),
+        }
+    }
+
+    fn mount(registry: &GraphDbRegistry, binding: &StoreRuntimeBindingV1, root: &Path) {
+        let operation = registration(binding.clone(), root);
+        let authority_attachment = Box::new(TestGraphLease {
+            binding: operation.authority_lease.binding().clone(),
+            verified_locator: operation.authority_lease.verified_locator().clone(),
+            canonical_path: operation.authority_lease.canonical_path().to_path_buf(),
+        });
+        let attachment = registry
+            .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+                operation,
+                authority_attachment,
+            })
+            .unwrap();
+        drop(attachment);
+    }
+
+    fn test_manifest(projection: GraphProjectionIdentity) -> GraphGenerationManifest {
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("reuse-g1").unwrap(),
+            SourceGeneration::new("source:reuse-g1".to_owned()).unwrap(),
+            GraphWatermark::new("watermark:reuse-g1".to_owned()).unwrap(),
+            Vec::new(),
+            vec![
+                GraphEntity::new(
+                    GraphEntityId::new("entity:reuse").unwrap(),
+                    BTreeSet::new(),
+                    BTreeMap::from([(
+                        GraphPropertyName::new("marker").unwrap(),
+                        GraphProperty::String("reuse".to_owned()),
+                    )]),
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    struct PublishedFixture {
+        _temp: TempDir,
+        registry: GraphDbRegistry,
+        binding: StoreRuntimeBindingV1,
+        root: PathBuf,
+        authority: RecordedAuthority,
+        key: GraphPublicationKeyV1,
+        head: GraphVerifiedHeadV1,
+        generation: GraphGenerationId,
+        projection: GraphProjectionIdentity,
+    }
+
+    /// Publishes one inline-manifest generation and asserts its proof
+    /// streamed the stored rows exactly once, so every later assertion on
+    /// the enumeration counter is against a live, observed baseline.
+    fn published_fixture() -> PublishedFixture {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let binding = binding();
+        mount(&registry, &binding, &root);
+        let mut authority = RecordedAuthority::default();
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("namespace:publication-reuse").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let manifest = test_manifest(projection.clone());
+        let record = authority.stage(
+            manifest
+                .relational_replay(
+                    binding.shard_id.clone(),
+                    GraphIdempotencyKey::new("publish:reuse-g1").unwrap(),
+                    GraphPublicationInputDigestV1::new(format!("sha256:{}", "a".repeat(64)))
+                        .unwrap(),
+                    None,
+                    &|| Ok(()),
+                )
+                .unwrap(),
+        );
+        let key = record.publication.key.clone();
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        reset_recovered_generation_enumerations();
+        let first = registry
+            .publish_verified(
+                registration(binding.clone(), &root),
+                &mut authority,
+                &context,
+                &key,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered_generation_enumerations(),
+            1,
+            "first publication must stream the recovered-digest proof exactly once"
+        );
+        let head = first.head.clone();
+        assert_eq!(first.snapshot.generation(), &manifest.generation);
+        let generation = manifest.generation.clone();
+        drop(first);
+        PublishedFixture {
+            _temp: temp,
+            registry,
+            binding,
+            root,
+            authority,
+            key,
+            head,
+            generation,
+            projection,
+        }
+    }
+
+    /// The recover-after-publish idempotent arm: republishing the exact
+    /// journaled key whose verified head is already current must reuse the
+    /// lease this same mounted instance proved moments earlier — zero
+    /// additional stored-row enumerations — and still seat the head for
+    /// reads. A follow-up recover on the same instance stays cache-served.
+    #[test]
+    fn recover_after_publish_reuses_the_instance_proof() {
+        let mut fixture = published_fixture();
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        reset_recovered_generation_enumerations();
+        let republished = fixture
+            .registry
+            .publish_verified(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key,
+                None,
+            )
+            .unwrap();
+        assert_eq!(republished.head, fixture.head);
+        assert_eq!(republished.recovered_digest, fixture.head.recovered_digest);
+        assert_eq!(republished.snapshot.generation(), &fixture.generation);
+        assert_eq!(
+            recovered_generation_enumerations(),
+            0,
+            "an idempotent republication on the proving instance must not re-enumerate the stored rows"
+        );
+        let seated = fixture
+            .registry
+            .verified_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &fixture.projection,
+            )
+            .unwrap();
+        assert_eq!(seated.generation(), &fixture.generation);
+        drop(republished);
+        drop(seated);
+
+        reset_recovered_generation_enumerations();
+        let recovered = fixture
+            .registry
+            .recover_verified_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            )
+            .unwrap();
+        assert_eq!(recovered.generation(), &fixture.generation);
+        assert_eq!(
+            recovered_generation_enumerations(),
+            0,
+            "a recover on the proving instance must stay cache-served"
+        );
+    }
+
+    /// A crash-recovery republication on a genuinely fresh-from-disk
+    /// instance must pay the full recovered-digest proof — but exactly once.
+    /// Before the duplicate-proof fix this path enumerated the stored rows
+    /// twice: once for the close/reopen digest proof and once more re-loading
+    /// the head it had just proven.
+    #[test]
+    fn fresh_instance_republication_streams_the_proof_exactly_once() {
+        let mut fixture = published_fixture();
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap()
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        reset_recovered_generation_enumerations();
+        let resumed = fixture
+            .registry
+            .publish_verified(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key,
+                None,
+            )
+            .unwrap();
+        assert_eq!(resumed.head, fixture.head);
+        assert_eq!(resumed.snapshot.generation(), &fixture.generation);
+        assert_eq!(
+            recovered_generation_enumerations(),
+            1,
+            "a fresh-from-disk republication must stream the full proof exactly once, not twice"
+        );
+    }
+
+    /// The reuse never leaks across instances: a recover on a fresh
+    /// re-mounted instance of the same store must run the full
+    /// recovered-digest proof.
+    #[test]
+    fn a_fresh_from_disk_open_still_pays_the_recovered_digest_proof() {
+        let mut fixture = published_fixture();
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap()
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        reset_recovered_generation_enumerations();
+        let recovered = fixture
+            .registry
+            .recover_verified_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            )
+            .unwrap();
+        assert_eq!(recovered.generation(), &fixture.generation);
+        assert_eq!(recovered.verified_head(), &fixture.head);
+        assert_eq!(
+            recovered_generation_enumerations(),
+            1,
+            "a genuinely fresh-from-disk open must pay the full recovered-digest proof"
+        );
     }
 }

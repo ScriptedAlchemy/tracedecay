@@ -77,6 +77,9 @@ pub fn build_execution_topology_daily_rollup(
     observed_at_micros: i64,
     page: ObservabilityPageV1,
 ) -> Result<ExecutionTopologyRollupBuildV1, ExecutionTopologyRollupBuildErrorV1> {
+    // Items processed by this daily sweep; the surrounding measure is the
+    // sweep's one wall-time authority and this sizes what it reduced.
+    hotpath::gauge!("application.topology.rollup.build.events").set(page.events.len() as u64);
     let fragment = build_execution_topology_rollup_fragment(
         authorized_scope_ref,
         exact_day_horizon,

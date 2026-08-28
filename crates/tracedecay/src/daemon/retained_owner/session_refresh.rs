@@ -46,6 +46,38 @@ pub(crate) fn admitted_session_refresh_command(
     mounted_session_root_id: &SessionRootId,
     mounted_configuration_digest: &ManifestDigest,
 ) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
+    let admitted = session_refresh_command(
+        request,
+        context,
+        cancellation_signal,
+        mounted_profile_id,
+        mounted_session_store_id,
+        mounted_session_root_id,
+        mounted_configuration_digest,
+    );
+    // Refused admissions are recorded so trigger volume that never reaches
+    // refresh execution stays visible in profiles.
+    match &admitted {
+        Ok(_) => {}
+        Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {
+            hotpath::gauge!("daemon.retained.session.refresh_admit.denied").inc(1.0);
+        }
+        Err(_) => {
+            hotpath::gauge!("daemon.retained.session.refresh_admit.refused").inc(1.0);
+        }
+    }
+    admitted
+}
+
+fn session_refresh_command(
+    request: &SessionRefreshRequestV1,
+    context: &RequestContext,
+    cancellation_signal: &CancellationSignal,
+    mounted_profile_id: &UserProfileId,
+    mounted_session_store_id: &SessionStoreId,
+    mounted_session_root_id: &SessionRootId,
+    mounted_configuration_digest: &ManifestDigest,
+) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
     if cancellation_signal.context().token_id != context.cancellation().token_id {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }

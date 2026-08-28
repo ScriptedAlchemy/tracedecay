@@ -249,14 +249,22 @@ pub async fn expand_payload(
     limit: usize,
 ) -> Result<LcmPayloadExpansion, LcmError> {
     validate_payload_ref(payload_ref)?;
-    let payload = match load_payload_metadata(conn, payload_ref).await {
-        Ok(payload) => payload,
-        Err(LcmError::PayloadNotFound) if tombstoned_raw_ref_exists(conn, payload_ref).await? => {
-            return Err(LcmError::PayloadGcd);
-        }
-        Err(err) => return Err(err),
-    };
-    let payload = validate_expand_payload_owner(conn, provider, session_id, payload).await?;
+    let payload = hotpath::future!(
+        async {
+            let payload = match load_payload_metadata(conn, payload_ref).await {
+                Ok(payload) => payload,
+                Err(LcmError::PayloadNotFound)
+                    if tombstoned_raw_ref_exists(conn, payload_ref).await? =>
+                {
+                    return Err(LcmError::PayloadGcd);
+                }
+                Err(err) => return Err(err),
+            };
+            validate_expand_payload_owner(conn, provider, session_id, payload).await
+        },
+        label = "sessions.lcm.expand.payload.fetch"
+    )
+    .await?;
     if payload.kind == "quarantined_assistant_output" {
         return Err(LcmError::PayloadLocked);
     }
@@ -264,13 +272,15 @@ pub async fn expand_payload(
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let (content, _authority) = read_verified_payload_text(
-        &path,
-        &payload.content_hash,
-        payload.byte_count,
-        payload.char_count,
-    )?
-    .ok_or(LcmError::PayloadMissing)?;
+    let (content, _authority) = hotpath::measure_block!("sessions.lcm.expand.payload.read", {
+        read_verified_payload_text(
+            &path,
+            &payload.content_hash,
+            payload.byte_count,
+            payload.char_count,
+        )?
+        .ok_or(LcmError::PayloadMissing)
+    })?;
 
     let total_char_count =
         usize::try_from(payload.char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;

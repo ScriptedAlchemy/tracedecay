@@ -237,77 +237,85 @@ async fn handle_status_command_within(
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
     let fetch_online = should_fetch_online_status_embellishments(stdout_is_terminal);
-    let worldwide = if !fetch_online || !upload_enabled {
-        None
-    } else if now - config.last_worldwide_fetch_at < 60 {
-        (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
-    } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
-        config.last_worldwide_total = total;
-        config.last_worldwide_fetch_at = now;
-        if let Err(err) = config.save_if_exists() {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
-        Some(total)
-    } else {
-        (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
-    };
-    let country_flags = if !fetch_online || !upload_enabled {
-        Vec::new()
-    } else if now - config.last_flags_fetch_at < 1800 {
-        config.cached_country_flags.clone()
-    } else {
-        let fresh = tracedecay::cloud::fetch_country_flags();
-        if !fresh.is_empty() {
-            config.cached_country_flags = fresh.clone();
-            config.last_flags_fetch_at = now;
+    // The worldwide-counter and country-flag embellishments are blocking
+    // network fetches; timed apart from the daemon round-trips so a slow
+    // `tracedecay status` can name which of the two it is waiting on.
+    let (worldwide, country_flags) = hotpath::measure_block!("cli.status.online", {
+        let worldwide = if !fetch_online || !upload_enabled {
+            None
+        } else if now - config.last_worldwide_fetch_at < 60 {
+            (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
+        } else if let Some(total) = tracedecay::cloud::fetch_worldwide_total() {
+            config.last_worldwide_total = total;
+            config.last_worldwide_fetch_at = now;
             if let Err(err) = config.save_if_exists() {
                 eprintln!("warning: could not save tracedecay config: {err}");
             }
-        }
-        if fresh.is_empty() && !config.cached_country_flags.is_empty() {
+            Some(total)
+        } else {
+            (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
+        };
+        let country_flags = if !fetch_online || !upload_enabled {
+            Vec::new()
+        } else if now - config.last_flags_fetch_at < 1800 {
             config.cached_country_flags.clone()
         } else {
-            fresh
+            let fresh = tracedecay::cloud::fetch_country_flags();
+            if !fresh.is_empty() {
+                config.cached_country_flags = fresh.clone();
+                config.last_flags_fetch_at = now;
+                if let Err(err) = config.save_if_exists() {
+                    eprintln!("warning: could not save tracedecay config: {err}");
+                }
+            }
+            if fresh.is_empty() && !config.cached_country_flags.is_empty() {
+                config.cached_country_flags.clone()
+            } else {
+                fresh
+            }
+        };
+        (worldwide, country_flags)
+    });
+    hotpath::measure_block!("cli.status.render", {
+        if should_print_status_logo(short, stdout_is_terminal) {
+            print!("{}", include_str!("resources/logo.ansi"));
         }
-    };
-    if should_print_status_logo(short, stdout_is_terminal) {
-        print!("{}", include_str!("resources/logo.ansi"));
-    }
-    let branch_info = daemon_status
-        .get("serving_branch")
-        .and_then(Value::as_str)
-        .map(|branch| tracedecay::display::BranchInfo {
-            branch: branch.to_string(),
-            parent: daemon_status
-                .get("parent_branch")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            is_fallback: false,
-        });
-    let cost_info = None;
-    if short {
-        tracedecay::display::print_status_header(
-            &census,
-            freshness.as_ref(),
-            tokens_saved,
-            global_tokens_saved,
-            worldwide,
-            &country_flags,
-            branch_info.as_ref(),
-            cost_info.as_ref(),
-        );
-    } else {
-        tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
-            census: &census,
-            freshness: freshness.as_ref(),
-            tokens_saved,
-            global_tokens_saved,
-            worldwide,
-            country_flags: &country_flags,
-            branch_info: branch_info.as_ref(),
-            cost_info: cost_info.as_ref(),
-        });
-    }
+        let branch_info = daemon_status
+            .get("serving_branch")
+            .and_then(Value::as_str)
+            .map(|branch| tracedecay::display::BranchInfo {
+                branch: branch.to_string(),
+                parent: daemon_status
+                    .get("parent_branch")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                is_fallback: false,
+            });
+        let cost_info = None;
+        if short {
+            tracedecay::display::print_status_header(
+                &census,
+                freshness.as_ref(),
+                tokens_saved,
+                global_tokens_saved,
+                worldwide,
+                &country_flags,
+                branch_info.as_ref(),
+                cost_info.as_ref(),
+            );
+        } else {
+            tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
+                census: &census,
+                freshness: freshness.as_ref(),
+                tokens_saved,
+                global_tokens_saved,
+                worldwide,
+                country_flags: &country_flags,
+                branch_info: branch_info.as_ref(),
+                cost_info: cost_info.as_ref(),
+            });
+        }
+    });
 
     if !tracedecay::config::is_in_gitignore(&project_path) {
         let dir_name = tracedecay::config::active_data_dir_name(&project_path);

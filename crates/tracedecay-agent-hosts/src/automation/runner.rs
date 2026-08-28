@@ -182,7 +182,7 @@ struct CombinedReviewPublication<'a> {
     skill_guard: Option<&'a AutomationRunSettlementGuard>,
 }
 
-#[hotpath::measure(label = "automation_run_user_session")]
+#[hotpath::measure(future = true, label = "automation_run_user_session")]
 pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
@@ -556,7 +556,7 @@ async fn acquire_combined_task_lock(
     })
 }
 
-#[hotpath::measure(label = "automation_run_combined_review_inner")]
+#[hotpath::measure(future = true, label = "automation_run_combined_review_inner")]
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,

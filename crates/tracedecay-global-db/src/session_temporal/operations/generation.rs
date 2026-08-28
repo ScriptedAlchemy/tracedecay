@@ -69,6 +69,10 @@ pub(super) fn validate_lineage_projection(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.publication.validate_predecessor"
+)]
 pub(super) async fn validate_current_predecessor(
     conn: &impl Executor,
     projection: &SessionRelationProjection,
@@ -92,6 +96,8 @@ pub(super) async fn validate_current_predecessor(
         .await?;
     let mut current_for_identity = Vec::new();
     while let Some(row) = matching.next().await? {
+        hotpath::gauge!("global_db.session_temporal.publication.predecessor_manifest_rows")
+            .inc(1_u64);
         let candidate_id: String = row.get(0)?;
         let manifest_raw: String = row.get(1)?;
         let manifest = serde_json::from_str::<super::CanonicalPublicationManifest>(&manifest_raw)
