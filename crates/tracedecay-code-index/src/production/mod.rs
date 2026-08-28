@@ -1248,6 +1248,14 @@ where
         if let Some(active) = &active {
             let sealed_scope = active.sealed_scope();
             if sealed_scope != *scope {
+                // A reference label moving under the same checkout is a
+                // rebuild, not corruption: the worktree-scoped active slot
+                // legitimately still points at the generation sealed for the
+                // previous label. Only a foreign checkout in the slot is a
+                // reset-worthy identity violation.
+                if sealed_scope.identifies_same_checkout(scope) {
+                    return Ok(None);
+                }
                 return Err(CodeIndexProductionErrorV1::Publication(
                     CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(format!(
                         "the active-generation slot for {} returned a generation sealed for {}",
@@ -1691,7 +1699,11 @@ where
                 PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
                 &config.project_id,
                 &config.repository,
-                &file.file_occurrence_id,
+                // The file occurrence id is worktree-local identity and must
+                // stay out of the byte-reuse key: linked worktrees share
+                // physical parse/chunk artifacts for identical content, and
+                // `rematerialize_for_file` rebinds the shared artifact onto
+                // each worktree's own occurrence after a hit.
                 &file.logical_path,
                 &file.content_digest,
                 descriptor,
