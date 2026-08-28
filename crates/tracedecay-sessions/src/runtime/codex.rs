@@ -110,16 +110,6 @@ const MAX_SCAN_DEPTH: u8 = 6;
 /// Bound on enumerated transcript directories (a decade of daily Codex
 /// directories is ~3700; this cap only guards against pathological trees).
 const MAX_BUCKET_DIRS: usize = 8192;
-/// Per-pass entry budget for the structural (bucket-shaping) walk.
-///
-/// The structural walk retains directories, not candidates, so bounding it by
-/// the candidate-retention budget (`max_files`) starves it: a dated
-/// `sessions/YYYY/MM/DD` tree spends the whole pass learning its own shape and
-/// the pass then reports truncation with nothing retained, even for a corpus
-/// far under the cap. Bound it by the directory budget it actually enforces so
-/// a tree that fits under [`MAX_BUCKET_DIRS`] is shaped in one pass and the
-/// retention budget is spent on candidates.
-const MAX_STRUCTURAL_ENTRIES_PER_PASS: usize = MAX_BUCKET_DIRS;
 /// Unchanged idle probes use cheap retained identities on every scheduler
 /// tick. A full emit-suppressed sweep is intentionally much less frequent so
 /// old-file rewrites are eventually detected without continuously rereading
@@ -1944,7 +1934,12 @@ fn retained_scan_step(
     // whole pass discovering its own bucket layout, leaving nothing to retain
     // candidates with — a corpus far under `max_files` then reports truncation
     // forever. Each phase is bounded independently.
-    let directory_work_limit = work_limit.max(MAX_STRUCTURAL_ENTRIES_PER_PASS);
+    // Reaching one candidate can require walking every component of its dated
+    // bucket path. Scale structural work with the requested candidate slice
+    // and the accepted depth, rather than raising every call to the global
+    // retained-directory ceiling.
+    let directory_work_limit =
+        work_limit.saturating_mul(usize::from(MAX_SCAN_DEPTH).saturating_add(2));
     let mut directory_work = 0usize;
     let mut file_work = 0usize;
     let mut paths = Vec::new();
@@ -2178,13 +2173,11 @@ fn retained_scan_step(
                 deferred,
                 resume_directories,
             } => {
-                // A validation pass is the "full emit-suppressed sweep": it
-                // retains no bytes and its whole purpose is to recompute the
-                // corpus epoch, so the retention budget must not cut it short.
-                // Capping it here meant any corpus larger than `max_files`
-                // could never re-earn the sweep-complete watermark.
-                if !scan.validation && (paths.len() >= bounds.max_files || file_work >= work_limit)
-                {
+                // Validation retains its iterator and epoch across calls just
+                // like an emit sweep. It emits no candidates, but must still
+                // obey the per-call work budget so a large Codex history cannot
+                // monopolize one scheduler turn.
+                if paths.len() >= bounds.max_files || file_work >= work_limit {
                     break;
                 }
                 let candidate = if let Some(candidate) = deferred.take() {
@@ -2213,7 +2206,7 @@ fn retained_scan_step(
                                 detail: "retained Codex file iterator disappeared",
                             },
                         )?;
-                        if !scan.validation && file_work >= work_limit {
+                        if file_work >= work_limit {
                             break None;
                         }
                         match listed.next() {

@@ -940,7 +940,7 @@ mod recent_first_discovery_tests {
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
-        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, indexed_replay_pass,
+        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::source::{
@@ -2049,6 +2049,69 @@ mod recent_first_discovery_tests {
         );
     }
 
+    #[test]
+    fn codex_validation_retains_its_cursor_without_scanning_the_corpus_in_one_call() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        for item in 0..64 {
+            write_dated_rollout(home, ("2026", "08", "28"), &format!("validation-{item:02}"));
+        }
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let mut state = CodexDiscoveryState::default();
+        state.reset_for(&source, true);
+
+        let pass = retained_pass(
+            &source,
+            &mut state,
+            bounds,
+            CodexDiscoveryFrontier::complete(CodexCorpusEpoch::initial()),
+        );
+        let scan = state
+            .scan
+            .as_ref()
+            .expect("validation cursor remains active");
+
+        assert!(pass.report.is_truncated());
+        assert!(
+            scan.validation,
+            "the validation sweep must remain in progress"
+        );
+        assert!(
+            scan.files_considered <= bounds.max_files as u64,
+            "one call must not stat the entire file corpus"
+        );
+
+        let directory_temp = TempDir::new().unwrap();
+        let directory_home = directory_temp.path();
+        for year in 2000..2032 {
+            let year = year.to_string();
+            write_dated_rollout(directory_home, (&year, "01", "01"), "validation");
+        }
+        let directory_source = CodexSource::with_home(directory_home);
+        let mut directory_state = CodexDiscoveryState::default();
+        directory_state.reset_for(&directory_source, true);
+
+        retained_pass(
+            &directory_source,
+            &mut directory_state,
+            bounds,
+            CodexDiscoveryFrontier::complete(CodexCorpusEpoch::initial()),
+        );
+        let directory_scan = directory_state
+            .scan
+            .as_ref()
+            .expect("directory validation cursor remains active");
+        assert!(directory_scan.validation);
+        let structural_work_limit = bounds
+            .max_files
+            .saturating_mul(usize::from(MAX_SCAN_DEPTH).saturating_add(2));
+        assert!(
+            directory_scan.directories.len() <= structural_work_limit,
+            "one call must not traverse the entire directory corpus"
+        );
+    }
+
     /// A backlog under the cap needs no catch-up: one pass discovers everything
     /// and reports no truncation, so no catch-up is scheduled.
     #[test]
@@ -2214,22 +2277,59 @@ mod recent_first_discovery_tests {
         assert_eq!(stored, frontier);
         assert!(stored.is_complete());
 
-        let restarted = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(bounds, stored.for_coverage(true))
-            .unwrap();
-        assert!(
-            !restarted.report.is_truncated(),
-            "a process that only reloads admission offsets must idle complete"
+        let restarted_source = CodexSource::with_home(home);
+        let mut restarted_state = CodexDiscoveryState::default();
+        let first_restart = retained_pass(
+            &restarted_source,
+            &mut restarted_state,
+            bounds,
+            stored.for_coverage(true),
         );
-        assert_eq!(restarted.next_frontier, stored);
-        assert!(restarted.report.paths.is_empty());
+        assert!(
+            first_restart.report.is_truncated(),
+            "a fresh process must validate a large persisted corpus in bounded slices"
+        );
+        assert!(first_restart.report.paths.is_empty());
+
+        let mut restarted_frontier = first_restart.next_frontier;
+        for _ in 0..64 {
+            let pass = retained_pass(
+                &restarted_source,
+                &mut restarted_state,
+                bounds,
+                restarted_frontier,
+            );
+            assert!(
+                pass.report.paths.is_empty(),
+                "unchanged restart validation must not re-emit transcripts"
+            );
+            restarted_frontier = pass.next_frontier;
+            if restarted_frontier.is_complete() {
+                break;
+            }
+        }
+        assert_eq!(restarted_frontier, stored);
 
         let added = write_dated_rollout(home, ("2026", "08", "18"), "after-restart");
-        let awakened = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(bounds, stored)
-            .unwrap();
-        assert!(awakened.report.paths.contains(&added));
-        assert!(!awakened.next_frontier.is_complete());
+        let mut rediscovered = false;
+        for _ in 0..64 {
+            let pass = retained_pass(
+                &restarted_source,
+                &mut restarted_state,
+                bounds,
+                restarted_frontier,
+            );
+            rediscovered |= pass.report.paths.contains(&added);
+            restarted_frontier = pass.next_frontier;
+            if rediscovered {
+                break;
+            }
+        }
+        assert!(
+            rediscovered,
+            "bounded restart validation must find new files"
+        );
+        assert!(!restarted_frontier.is_complete());
     }
 
     /// Symlink-to-file candidates belong to the same ordered snapshot as
