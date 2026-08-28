@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cli::ProfileStorageAction;
 use tracedecay::display::format_bytes;
 
+#[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
 pub(crate) async fn handle_profile_storage_action(
     action: ProfileStorageAction,
     assume_yes: bool,

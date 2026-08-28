@@ -21,14 +21,20 @@ static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
 
 pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::Result<()> {
     match action {
-        LspAction::Servers { json } => print_lsp_servers(json)?,
+        LspAction::Servers { json } => {
+            hotpath::measure_block!("cli.lsp.servers", print_lsp_servers(json))?
+        }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
                 return Err(tracedecay::errors::TraceDecayError::Config {
                     message: "lsp bridge requires --stdio".to_owned(),
                 });
             }
-            run_stdio_bridge(project.map(PathBuf::from)).await?;
+            hotpath::future!(
+                run_stdio_bridge(project.map(PathBuf::from)),
+                label = "cli.lsp.bridge"
+            )
+            .await?;
         }
     }
     Ok(())

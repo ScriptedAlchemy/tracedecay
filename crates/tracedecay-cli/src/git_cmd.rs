@@ -9,14 +9,16 @@ use serde_json::{Value, json};
 use crate::cli::{GitAction, GitDiffScopeArg, GitProjectArgs};
 use crate::{resolve_cli_project_root, tool_command::dispatch_catalogued_cli_operation};
 
-#[hotpath::measure]
 pub(crate) async fn handle_git_action(action: GitAction) -> tracedecay::errors::Result<()> {
     match action {
         GitAction::Status { project } => {
-            dispatch_git_read(
-                tracedecay::application_surface::ApplicationSurfaceOperation::GitStatus,
-                json!({}),
-                project,
+            hotpath::future!(
+                dispatch_git_read(
+                    tracedecay::application_surface::ApplicationSurfaceOperation::GitStatus,
+                    json!({}),
+                    project,
+                ),
+                label = "cli.git.status"
             )
             .await
         }
@@ -27,10 +29,13 @@ pub(crate) async fn handle_git_action(action: GitAction) -> tracedecay::errors::
             project,
         } => {
             let payload = git_diff_payload(scope, base, head)?;
-            dispatch_git_read(
-                tracedecay::application_surface::ApplicationSurfaceOperation::GitDiff,
-                payload,
-                project,
+            hotpath::future!(
+                dispatch_git_read(
+                    tracedecay::application_surface::ApplicationSurfaceOperation::GitDiff,
+                    payload,
+                    project,
+                ),
+                label = "cli.git.diff"
             )
             .await
         }
@@ -42,10 +47,13 @@ pub(crate) async fn handle_git_action(action: GitAction) -> tracedecay::errors::
             project,
         } => {
             let payload = git_history_payload(count, path, follow, first_parent)?;
-            dispatch_git_read(
-                tracedecay::application_surface::ApplicationSurfaceOperation::GitHistory,
-                payload,
-                project,
+            hotpath::future!(
+                dispatch_git_read(
+                    tracedecay::application_surface::ApplicationSurfaceOperation::GitHistory,
+                    payload,
+                    project,
+                ),
+                label = "cli.git.history"
             )
             .await
         }
@@ -54,22 +62,28 @@ pub(crate) async fn handle_git_action(action: GitAction) -> tracedecay::errors::
             follow_renames,
             project,
         } => {
-            dispatch_git_read(
-                tracedecay::application_surface::ApplicationSurfaceOperation::GitBlame,
-                json!({
-                    "path": path,
-                    "follow_renames": follow_renames,
-                }),
-                project,
+            hotpath::future!(
+                dispatch_git_read(
+                    tracedecay::application_surface::ApplicationSurfaceOperation::GitBlame,
+                    json!({
+                        "path": path,
+                        "follow_renames": follow_renames,
+                    }),
+                    project,
+                ),
+                label = "cli.git.blame"
             )
             .await
         }
         GitAction::Hunks { scope, project } => {
             let scope = git_hunk_scope(scope)?;
-            dispatch_git_read(
-                tracedecay::application_surface::ApplicationSurfaceOperation::GitHunks,
-                json!({ "scope": scope }),
-                project,
+            hotpath::future!(
+                dispatch_git_read(
+                    tracedecay::application_surface::ApplicationSurfaceOperation::GitHunks,
+                    json!({ "scope": scope }),
+                    project,
+                ),
+                label = "cli.git.hunks"
             )
             .await
         }

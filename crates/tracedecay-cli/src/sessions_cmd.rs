@@ -60,7 +60,6 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
-#[hotpath::measure]
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
 ) -> tracedecay::errors::Result<()> {
@@ -69,47 +68,10 @@ pub(crate) async fn handle_sessions_action(
             project_id,
             project_path,
         } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let outcome = call_daemon_tool(
-                &project_path,
-                "tracedecay_admin_cli",
-                json!({ "action": "sessions_import" }),
-            )
-            .await?;
-            await_session_sync_completion(&project_path, "session import", outcome).await?;
+            handle_sessions_import(project_id, project_path).await?;
         }
         SessionsAction::Search(args) => {
-            let project_id = args.project_id.clone();
-            let project_path = args.project_path.clone();
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let payload = call_daemon_tool(
-                &project_path,
-                "tracedecay_message_search",
-                message_search_rpc_args(*args),
-            )
-            .await?;
-            for result in payload["results"].as_array().into_iter().flatten() {
-                println!(
-                    "[{}] {} {}: {}",
-                    result
-                        .pointer("/session/provider")
-                        .and_then(Value::as_str)
-                        .unwrap_or("-"),
-                    result
-                        .pointer("/session/project_key")
-                        .and_then(Value::as_str)
-                        .unwrap_or("-"),
-                    result
-                        .pointer("/message/role")
-                        .and_then(Value::as_str)
-                        .unwrap_or("-"),
-                    result
-                        .pointer("/message/text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .replace('\n', " ")
-                );
-            }
+            handle_sessions_search(*args).await?;
         }
         SessionsAction::Refresh { action } => {
             handle_session_refresh_action(action).await?;
@@ -121,7 +83,11 @@ pub(crate) async fn handle_sessions_action(
             limit_sessions,
             dry_run,
         } => {
-            run_git_sync(project_id, project_path, since, limit_sessions, dry_run).await?;
+            hotpath::future!(
+                run_git_sync(project_id, project_path, since, limit_sessions, dry_run),
+                label = "cli.sessions.git_sync"
+            )
+            .await?;
         }
         SessionsAction::Unfinished {
             limit,
@@ -129,37 +95,99 @@ pub(crate) async fn handle_sessions_action(
             project_id,
             project_path,
         } => {
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let payload = call_daemon_tool(
-                &project_path,
-                "tracedecay_admin_cli",
-                json!({ "action": "sessions_unfinished", "limit": limit }),
-            )
-            .await?;
-            let items = payload["items"].as_array().cloned().unwrap_or_default();
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&items).map_err(|e| {
-                        tracedecay::errors::TraceDecayError::Config {
-                            message: e.to_string(),
-                        }
-                    })?
-                );
-            } else {
-                for item in items {
-                    let task_id = item["task_id"].as_str().unwrap_or("-");
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
-                        item["status"].as_str().unwrap_or("-"),
-                        item["provider"].as_str().unwrap_or("-"),
-                        item["session_id"].as_str().unwrap_or("-"),
-                        task_id,
-                        item["message_id"].as_str().unwrap_or("-"),
-                        item["evidence"].as_str().unwrap_or("")
-                    );
+            handle_sessions_unfinished(limit, json, project_id, project_path).await?;
+        }
+    }
+    Ok(())
+}
+
+#[hotpath::measure(label = "cli.sessions.import", future = true)]
+async fn handle_sessions_import(
+    project_id: Option<String>,
+    project_path: Option<String>,
+) -> tracedecay::errors::Result<()> {
+    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let outcome = call_daemon_tool(
+        &project_path,
+        "tracedecay_admin_cli",
+        json!({ "action": "sessions_import" }),
+    )
+    .await?;
+    await_session_sync_completion(&project_path, "session import", outcome).await
+}
+
+#[hotpath::measure(label = "cli.sessions.search", future = true)]
+async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay::errors::Result<()> {
+    let project_id = args.project_id.clone();
+    let project_path = args.project_path.clone();
+    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let payload = call_daemon_tool(
+        &project_path,
+        "tracedecay_message_search",
+        message_search_rpc_args(args),
+    )
+    .await?;
+    for result in payload["results"].as_array().into_iter().flatten() {
+        println!(
+            "[{}] {} {}: {}",
+            result
+                .pointer("/session/provider")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            result
+                .pointer("/session/project_key")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            result
+                .pointer("/message/role")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            result
+                .pointer("/message/text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .replace('\n', " ")
+        );
+    }
+    Ok(())
+}
+
+#[hotpath::measure(label = "cli.sessions.unfinished", future = true)]
+async fn handle_sessions_unfinished(
+    limit: usize,
+    json: bool,
+    project_id: Option<String>,
+    project_path: Option<String>,
+) -> tracedecay::errors::Result<()> {
+    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let payload = call_daemon_tool(
+        &project_path,
+        "tracedecay_admin_cli",
+        json!({ "action": "sessions_unfinished", "limit": limit }),
+    )
+    .await?;
+    let items = payload["items"].as_array().cloned().unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&items).map_err(|e| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: e.to_string(),
                 }
-            }
+            })?
+        );
+    } else {
+        for item in items {
+            let task_id = item["task_id"].as_str().unwrap_or("-");
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                item["status"].as_str().unwrap_or("-"),
+                item["provider"].as_str().unwrap_or("-"),
+                item["session_id"].as_str().unwrap_or("-"),
+                task_id,
+                item["message_id"].as_str().unwrap_or("-"),
+                item["evidence"].as_str().unwrap_or("")
+            );
         }
     }
     Ok(())
@@ -294,38 +322,71 @@ where
 {
     match action {
         SessionsRefreshAction::Start(SessionRefreshBeginArgs { selectors, json }) => {
-            dispatch_session_refresh(transport, SessionRefreshMode::Start, &selectors, None, json)
-                .await
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Start,
+                    &selectors,
+                    None,
+                    json
+                ),
+                label = "cli.sessions.refresh.start"
+            )
+            .await
         }
         SessionsRefreshAction::Begin(SessionRefreshBeginArgs { selectors, json }) => {
-            dispatch_session_refresh(transport, SessionRefreshMode::Begin, &selectors, None, json)
-                .await
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Begin,
+                    &selectors,
+                    None,
+                    json
+                ),
+                label = "cli.sessions.refresh.begin"
+            )
+            .await
         }
         SessionsRefreshAction::Status(SessionRefreshOperationArgs {
             selectors,
             handle,
             json,
         }) => {
-            dispatch_session_refresh(
-                transport,
-                SessionRefreshMode::Status,
-                &selectors,
-                Some(&handle),
-                json,
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Status,
+                    &selectors,
+                    Some(&handle),
+                    json,
+                ),
+                label = "cli.sessions.refresh.status"
             )
             .await
         }
         SessionsRefreshAction::Join(SessionRefreshBeginArgs { selectors, json }) => {
-            dispatch_session_refresh(transport, SessionRefreshMode::Join, &selectors, None, json)
-                .await
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Join,
+                    &selectors,
+                    None,
+                    json
+                ),
+                label = "cli.sessions.refresh.join"
+            )
+            .await
         }
         SessionsRefreshAction::Resume(SessionRefreshBeginArgs { selectors, json }) => {
-            dispatch_session_refresh(
-                transport,
-                SessionRefreshMode::Resume,
-                &selectors,
-                None,
-                json,
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Resume,
+                    &selectors,
+                    None,
+                    json
+                ),
+                label = "cli.sessions.refresh.resume"
             )
             .await
         }
@@ -334,12 +395,15 @@ where
             handle,
             json,
         }) => {
-            dispatch_session_refresh(
-                transport,
-                SessionRefreshMode::Cancel,
-                &selectors,
-                Some(&handle),
-                json,
+            hotpath::future!(
+                dispatch_session_refresh(
+                    transport,
+                    SessionRefreshMode::Cancel,
+                    &selectors,
+                    Some(&handle),
+                    json,
+                ),
+                label = "cli.sessions.refresh.cancel"
             )
             .await
         }

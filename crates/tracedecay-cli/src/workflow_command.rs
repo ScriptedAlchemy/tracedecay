@@ -7,7 +7,7 @@ use tracedecay_application::ApplicationResult;
 
 use crate::cli::WorkflowInvocationArgs;
 
-#[hotpath::measure(label = "cli.workflow")]
+#[hotpath::measure(label = "cli.workflow.invoke", future = true)]
 pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());

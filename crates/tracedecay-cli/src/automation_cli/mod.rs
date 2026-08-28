@@ -31,19 +31,38 @@ async fn daemon_automation_action(
     crate::commands::daemon_tool_json(Some(project_path), "tracedecay_admin_project", args).await
 }
 
-#[hotpath::measure]
 pub(crate) async fn handle_automation_command(
     action: AutomationAction,
 ) -> tracedecay::errors::Result<()> {
     match action {
         AutomationAction::Config { action } => {
-            config::handle_automation_config_command(action).await
+            hotpath::future!(
+                config::handle_automation_config_command(action),
+                label = "cli.automation.config"
+            )
+            .await
         }
-        AutomationAction::Runs { action } => runs::handle_automation_runs_command(action).await,
+        AutomationAction::Runs { action } => {
+            hotpath::future!(
+                runs::handle_automation_runs_command(action),
+                label = "cli.automation.runs"
+            )
+            .await
+        }
         AutomationAction::Skills { action } => {
-            skills::handle_automation_skills_command(action).await
+            hotpath::future!(
+                skills::handle_automation_skills_command(action),
+                label = "cli.automation.skills"
+            )
+            .await
         }
-        AutomationAction::Facts { action } => facts::handle_automation_facts_command(action).await,
+        AutomationAction::Facts { action } => {
+            hotpath::future!(
+                facts::handle_automation_facts_command(action),
+                label = "cli.automation.facts"
+            )
+            .await
+        }
     }
 }
 

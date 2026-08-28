@@ -10,6 +10,7 @@ use crate::cli::ProjectsAction;
 
 const MAX_LIMIT: usize = 1_000;
 
+#[hotpath::measure(label = "cli.projects.dispatch", future = true)]
 pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()> {
     match action {
         ProjectsAction::List { limit, json } => {
