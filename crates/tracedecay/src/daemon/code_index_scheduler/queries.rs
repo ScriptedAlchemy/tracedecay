@@ -173,6 +173,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Compose real exact/lexical/graph lane outcomes only through the
     /// accepted profile and query/cursor key authority mounted for this exact
     /// admitted scope.
+    #[hotpath::measure(label = "daemon.code_index.query.compose_fallback", future = true)]
     pub(in crate::daemon) async fn compose_query_fallback(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -239,6 +240,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.code_index.query.generation", future = true)]
     pub(in crate::daemon) async fn generation_for_controlled(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -330,6 +332,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// reconciled at query admission without any standing filesystem watcher.
     /// Partial, stale, failed, or incompatible generations never surface here:
     /// the ladder only ever returns the latest complete generation.
+    #[hotpath::measure(label = "daemon.code_index.query.resolve_serving", future = true)]
     pub(super) async fn resolve_serving_generation(
         &self,
         request: &RequestContext,
@@ -378,6 +381,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(latest)
     }
 
+    #[hotpath::measure(label = "daemon.code_index.query.resolve_text_serving", future = true)]
     async fn resolve_text_serving_generation(
         &self,
         request: &RequestContext,
@@ -815,6 +819,7 @@ fn sorted_positions_for<'a>(
 }
 
 impl GenerationRecordIndexV1 {
+    #[hotpath::measure(label = "daemon.code_index.query.record_index")]
     pub(in crate::daemon) fn build(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> Self {
@@ -1360,6 +1365,7 @@ macro_rules! resolve_start_symbol {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    #[hotpath::measure(label = "daemon.code_index.query.prepare", future = true)]
     async fn prepare_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,
@@ -1399,6 +1405,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedCallableQueryV1 { latest, query })
     }
 
+    #[hotpath::measure(label = "daemon.code_index.query.prepare_text", future = true)]
     async fn prepare_text_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,

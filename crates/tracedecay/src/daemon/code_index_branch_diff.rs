@@ -294,58 +294,60 @@ pub(super) fn code_index_branch_diff_executor(
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
         let execution_admission = Arc::clone(&execution_admission);
-        Box::pin(async move {
-            let scope = match project_open_owners::resolved_scope_for_project(
-                &request.project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => {
-                    return unavailable(
-                        None,
-                        None,
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
+        Box::pin(hotpath::future!(
+            async move {
+                let scope = match project_open_owners::resolved_scope_for_project(
+                    &request.project_root,
+                    &project_id,
+                ) {
+                    Ok(scope) => scope,
+                    Err(_) => {
+                        return unavailable(
+                            None,
+                            None,
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                let admission = match admission_provider.admit_current(&scope) {
+                    Ok(admission) => admission,
+                    Err(_) => {
+                        return unavailable(
+                            None,
+                            None,
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                let authority = match admission.authorize(&scope, request.authority.as_ref()) {
+                    Ok(authority) => authority,
+                    Err(_) => {
+                        return unavailable(
+                            None,
+                            None,
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                let control =
+                    code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+                        deadline: request.deadline.clone(),
+                        cancellation: request.cancellation.clone(),
+                    };
+                if let Some(reason) = control.termination() {
+                    return unavailable(None, None, reason);
                 }
-            };
-            let admission = match admission_provider.admit_current(&scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return unavailable(
-                        None,
-                        None,
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
-            };
-            let authority = match admission.authorize(&scope, request.authority.as_ref()) {
-                Ok(authority) => authority,
-                Err(_) => {
-                    return unavailable(
-                        None,
-                        None,
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
-            };
-            let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
-                deadline: request.deadline.clone(),
-                cancellation: request.cancellation.clone(),
-            };
-            if let Some(reason) = control.termination() {
-                return unavailable(None, None, reason);
-            }
-            let _permit = match execution_admission.try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    return unavailable(
-                        None,
-                        None,
-                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                    );
-                }
-            };
-            let generations = match schedulers
+                let _permit = match execution_admission.try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return unavailable(
+                            None,
+                            None,
+                            code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                        );
+                    }
+                };
+                let generations = match schedulers
                 .bounded_generations_for_revisions(
                     &scope,
                     &request.base_reference,
@@ -366,237 +368,254 @@ pub(super) fn code_index_branch_diff_executor(
                 Ok(generations) => generations,
                 Err(reason) => return unavailable(None, None, reason),
             };
-            let base_id = generations
-                .base
-                .generation()
-                .manifest()
-                .generation_id
-                .as_str()
-                .to_owned();
-            let head_id = generations
-                .head
-                .generation()
-                .manifest()
-                .generation_id
-                .as_str()
-                .to_owned();
-            let completed = match bounded_diff(
-                generations.base.generation(),
-                generations.head.generation(),
-                request.file_filter.as_deref(),
-                request.kind_filter.as_deref(),
-                &control,
-            ) {
-                Ok(completed) => completed,
-                Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
-            };
-            let query_authority = match schedulers.query_authority_for_scope(&scope).await {
-                Some(authority) => authority,
-                None => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
-            };
-            let freshness_digest = match canonical_sha256(&(
-                "tracedecay.code-index-branch-diff.freshness.v1",
-                generations
+                let base_id = generations
                     .base
                     .generation()
                     .manifest()
-                    .snapshot_digest
-                    .as_str(),
-                generations
-                    .head
-                    .generation()
-                    .manifest()
-                    .snapshot_digest
-                    .as_str(),
-            )) {
-                Ok(digest) => digest,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    );
-                }
-            };
-            let freshness = match FreshnessVectorDigest::new(freshness_digest.as_str()) {
-                Ok(freshness) => freshness,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    );
-                }
-            };
-            let retrieval_request = RetrievalRequest {
-                principal: authority.principal.clone(),
-                scope: RetrievalScope {
-                    privacy_domain: generations
-                        .head
-                        .generation()
-                        .manifest()
-                        .privacy_domain
-                        .clone(),
-                    root: SingleRootScopeV1 {
-                        repository: scope.repository_id.clone(),
-                        worktree: Some(scope.worktree_id.clone()),
-                        reference: Some(request.head_reference.clone()),
-                    },
-                },
-                temporal_mode: TemporalModeV1::Current,
-                snapshot: RetrievalSnapshot {
-                    watermarks: VectorWatermark::default(),
-                    freshness_digest: freshness,
-                    authorization_revision: authority.authorization_revision.clone(),
-                    captured_at: generations
-                        .base
-                        .generation()
-                        .manifest()
-                        .seal
-                        .sealed_at
-                        .max(generations.head.generation().manifest().seal.sealed_at),
-                },
-                profile_id: query_authority.profile().profile_id.clone(),
-                budget: query_authority.profile().retrieval_budget,
-            };
-            let scope_digest = match branch_diff_scope_digest(
-                &scope,
-                &request,
-                &generations.base.generation().manifest().generation_id,
-                &generations.head.generation().manifest().generation_id,
-            ) {
-                Ok(digest) => digest,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    );
-                }
-            };
-            let query_binding_digest = match branch_diff_query_binding_digest(&request) {
-                Ok(digest) => digest,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    );
-                }
-            };
-            let bindings = match PreparedQueryBindingsV1::new(
-                "code_index_branch_diff.v1",
-                scope_digest,
-                generations
+                    .generation_id
+                    .as_str()
+                    .to_owned();
+                let head_id = generations
                     .head
                     .generation()
                     .manifest()
                     .generation_id
-                    .clone(),
-                query_binding_digest,
-            ) {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
-                }
-            };
-            let prepared = match PreparedQueryV1::prepare(
-                Arc::clone(&query_authority),
-                retrieval_request,
-                request.cursor.as_deref(),
-            ) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
-                }
-            };
-            let page_size = match u32::try_from(
-                request
-                    .limit
-                    .min(code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1),
-            ) {
-                Ok(page_size) if page_size > 0 => page_size,
-                _ => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
-                    );
-                }
-            };
-            let page = match prepared.paginate(
-                &bindings,
-                completed.changes,
-                page_size,
-                tracedecay_application::clock::now_micros(),
-            ) {
-                Ok(page) => page,
-                Err(error) => {
-                    return unavailable(Some(base_id), Some(head_id), prepared_error_reason(error));
-                }
-            };
-            let total_changes = match usize::try_from(page.total) {
-                Ok(total) => total,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    );
-                }
-            };
-            let outcome = page_diff_changes(
-                &base_id,
-                &head_id,
-                page.items,
-                total_changes,
-                page.next_cursor,
-            );
-            let terminal_scope = match project_open_owners::resolved_scope_for_project(
-                &request.project_root,
-                &project_id,
-            ) {
-                Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
-                _ => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
-            };
-            let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return unavailable(
-                        Some(base_id),
-                        Some(head_id),
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
-            };
-            if terminal_admission.search_authority() != authority
-                || terminal_admission
-                    .authorize(&terminal_scope, Some(&authority))
-                    .is_err()
-            {
-                return unavailable(
-                    Some(base_id),
-                    Some(head_id),
-                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    .as_str()
+                    .to_owned();
+                let completed =
+                    match hotpath::measure_block!("daemon.code_index.branch_diff.diff", {
+                        bounded_diff(
+                            generations.base.generation(),
+                            generations.head.generation(),
+                            request.file_filter.as_deref(),
+                            request.kind_filter.as_deref(),
+                            &control,
+                        )
+                    }) {
+                        Ok(completed) => completed,
+                        Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
+                    };
+                let query_authority = match schedulers.query_authority_for_scope(&scope).await {
+                    Some(authority) => authority,
+                    None => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                let freshness_digest = match canonical_sha256(&(
+                    "tracedecay.code-index-branch-diff.freshness.v1",
+                    generations
+                        .base
+                        .generation()
+                        .manifest()
+                        .snapshot_digest
+                        .as_str(),
+                    generations
+                        .head
+                        .generation()
+                        .manifest()
+                        .snapshot_digest
+                        .as_str(),
+                )) {
+                    Ok(digest) => digest,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        );
+                    }
+                };
+                let freshness = match FreshnessVectorDigest::new(freshness_digest.as_str()) {
+                    Ok(freshness) => freshness,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        );
+                    }
+                };
+                let retrieval_request = RetrievalRequest {
+                    principal: authority.principal.clone(),
+                    scope: RetrievalScope {
+                        privacy_domain: generations
+                            .head
+                            .generation()
+                            .manifest()
+                            .privacy_domain
+                            .clone(),
+                        root: SingleRootScopeV1 {
+                            repository: scope.repository_id.clone(),
+                            worktree: Some(scope.worktree_id.clone()),
+                            reference: Some(request.head_reference.clone()),
+                        },
+                    },
+                    temporal_mode: TemporalModeV1::Current,
+                    snapshot: RetrievalSnapshot {
+                        watermarks: VectorWatermark::default(),
+                        freshness_digest: freshness,
+                        authorization_revision: authority.authorization_revision.clone(),
+                        captured_at: generations
+                            .base
+                            .generation()
+                            .manifest()
+                            .seal
+                            .sealed_at
+                            .max(generations.head.generation().manifest().seal.sealed_at),
+                    },
+                    profile_id: query_authority.profile().profile_id.clone(),
+                    budget: query_authority.profile().retrieval_budget,
+                };
+                let scope_digest = match branch_diff_scope_digest(
+                    &scope,
+                    &request,
+                    &generations.base.generation().manifest().generation_id,
+                    &generations.head.generation().manifest().generation_id,
+                ) {
+                    Ok(digest) => digest,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        );
+                    }
+                };
+                let query_binding_digest = match branch_diff_query_binding_digest(&request) {
+                    Ok(digest) => digest,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        );
+                    }
+                };
+                let bindings = match PreparedQueryBindingsV1::new(
+                    "code_index_branch_diff.v1",
+                    scope_digest,
+                    generations
+                        .head
+                        .generation()
+                        .manifest()
+                        .generation_id
+                        .clone(),
+                    query_binding_digest,
+                ) {
+                    Ok(bindings) => bindings,
+                    Err(error) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            prepared_error_reason(error),
+                        );
+                    }
+                };
+                let prepared = match PreparedQueryV1::prepare(
+                    Arc::clone(&query_authority),
+                    retrieval_request,
+                    request.cursor.as_deref(),
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            prepared_error_reason(error),
+                        );
+                    }
+                };
+                let page_size = match u32::try_from(
+                    request
+                        .limit
+                        .min(code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1),
+                ) {
+                    Ok(page_size) if page_size > 0 => page_size,
+                    _ => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                        );
+                    }
+                };
+                let page = match prepared.paginate(
+                    &bindings,
+                    completed.changes,
+                    page_size,
+                    tracedecay_application::clock::now_micros(),
+                ) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            prepared_error_reason(error),
+                        );
+                    }
+                };
+                let total_changes = match usize::try_from(page.total) {
+                    Ok(total) => total,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        );
+                    }
+                };
+                let outcome = page_diff_changes(
+                    &base_id,
+                    &head_id,
+                    page.items,
+                    total_changes,
+                    page.next_cursor,
                 );
-            }
-            if let Some(reason) = control.termination() {
-                return unavailable(Some(base_id), Some(head_id), reason);
-            }
-            outcome
-        })
+                let terminal_scope = match project_open_owners::resolved_scope_for_project(
+                    &request.project_root,
+                    &project_id,
+                ) {
+                    Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                    _ => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
+                    Ok(admission) => admission,
+                    Err(_) => {
+                        return unavailable(
+                            Some(base_id),
+                            Some(head_id),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        );
+                    }
+                };
+                if terminal_admission.search_authority() != authority
+                    || terminal_admission
+                        .authorize(&terminal_scope, Some(&authority))
+                        .is_err()
+                {
+                    return unavailable(
+                        Some(base_id),
+                        Some(head_id),
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    );
+                }
+                if let Some(reason) = control.termination() {
+                    return unavailable(Some(base_id), Some(head_id), reason);
+                }
+                outcome
+            },
+            label = "daemon.code_index.branch_diff"
+        ))
     })
 }
 

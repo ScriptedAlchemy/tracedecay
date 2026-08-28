@@ -153,14 +153,14 @@ impl CaptureProgressV1 {
         let candidate_files = self.candidate_files.load(Ordering::Relaxed);
         let processed_files = self.processed_files.load(Ordering::Relaxed);
         let captured_files = self.captured_files.load(Ordering::Relaxed);
-        hotpath::gauge!("code_index.capture.candidate_files").set(candidate_files);
-        hotpath::gauge!("code_index.capture.candidate_bytes")
+        hotpath::gauge!("daemon.code_index.capture.candidate_files").set(candidate_files);
+        hotpath::gauge!("daemon.code_index.capture.candidate_bytes")
             .set(self.candidate_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("code_index.capture.processed_files").set(processed_files);
-        hotpath::gauge!("code_index.capture.processed_bytes")
+        hotpath::gauge!("daemon.code_index.capture.processed_files").set(processed_files);
+        hotpath::gauge!("daemon.code_index.capture.processed_bytes")
             .set(self.processed_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("code_index.capture.captured_files").set(captured_files);
-        hotpath::gauge!("code_index.capture.captured_bytes")
+        hotpath::gauge!("daemon.code_index.capture.captured_files").set(captured_files);
+        hotpath::gauge!("daemon.code_index.capture.captured_bytes")
             .set(self.captured_bytes.load(Ordering::Relaxed));
     }
 
@@ -351,7 +351,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         result
     }
 
-    #[hotpath::measure(label = "code_index.capture.exact_git_tree")]
+    #[hotpath::measure(label = "daemon.code_index.capture.exact_git_tree")]
     pub(super) fn capture_exact_git_tree_snapshot(
         &self,
         source: &ExactGitTreeSourceV1,

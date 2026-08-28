@@ -344,6 +344,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Run canonical query first, then attempt semantic influence against the
     /// same authenticated query and immutable code generation.
+    #[hotpath::measure(label = "daemon.code_index.query.execute_semantic", future = true)]
     pub(in crate::daemon) async fn execute_query_with_semantic<C>(
         &self,
         project_root: &Path,
@@ -410,6 +411,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// code generation, vector generation, calibration, and authenticated QUERY
     /// query. Every abstention returns the original canonical query `Arc`.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.code_index.query.semantic_after", future = true)]
     pub(in crate::daemon) async fn execute_semantic_after_query<C>(
         &self,
         project_root: &Path,

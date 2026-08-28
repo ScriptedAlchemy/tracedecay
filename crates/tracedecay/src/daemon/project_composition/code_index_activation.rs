@@ -65,51 +65,54 @@ pub(super) fn code_index_activation_mount(
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
         let profile_id = profile_id.clone();
-        Box::pin(async move {
-            if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
-                return Err("project route was revoked before code-index mount".to_owned());
-            }
-            // Order-sensitive: subscribing before the mount is what keeps the
-            // first generation publication observable by the waiter below.
-            let publications = invocation
-                .code_index_schedulers
-                .subscribe_generation_publications();
-            let mount = invocation.mount_code_index(
-                project_id,
-                &project_root,
-                store_root,
-                Some(&semantic_runtime),
-                semantic_lifecycle,
-                Some(semantic_resources),
-                native_graph_activation,
-                graph_runtime,
-                graph_publication_database,
-            );
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {
-                    return Err("project route was cancelled during code-index mount".to_owned());
+        Box::pin(hotpath::future!(
+            async move {
+                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    return Err("project route was revoked before code-index mount".to_owned());
                 }
-                outcome = mount => outcome.map_err(|error| error.to_string())?,
-            }
-            if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
-                return Err("project route was revoked after code-index mount".to_owned());
-            }
+                // Order-sensitive: subscribing before the mount is what keeps the
+                // first generation publication observable by the waiter below.
+                let publications = invocation
+                    .code_index_schedulers
+                    .subscribe_generation_publications();
+                let mount = invocation.mount_code_index(
+                    project_id,
+                    &project_root,
+                    store_root,
+                    Some(&semantic_runtime),
+                    semantic_lifecycle,
+                    Some(semantic_resources),
+                    native_graph_activation,
+                    graph_runtime,
+                    graph_publication_database,
+                );
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        return Err("project route was cancelled during code-index mount".to_owned());
+                    }
+                    outcome = mount => outcome.map_err(|error| error.to_string())?,
+                }
+                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    return Err("project route was revoked after code-index mount".to_owned());
+                }
 
-            // Query authority depends on the first sealed generation, but
-            // hook hints must become deliverable as soon as the scheduler is
-            // mounted. Keep that wait in its own route-fenced task.
-            spawn_query_authority_when_generation_ready(QueryAuthorityWaitInputs {
-                invocation: invocation.clone(),
-                publications,
-                project_root: project_root.clone(),
-                profile_id: profile_id.clone(),
-                scope: scope.clone(),
-                route_registered: Arc::clone(&route_registered),
-                cancellation: cancellation.clone(),
-            });
-            Ok(())
-        })
+                // Query authority depends on the first sealed generation, but
+                // hook hints must become deliverable as soon as the scheduler is
+                // mounted. Keep that wait in its own route-fenced task.
+                spawn_query_authority_when_generation_ready(QueryAuthorityWaitInputs {
+                    invocation: invocation.clone(),
+                    publications,
+                    project_root: project_root.clone(),
+                    profile_id: profile_id.clone(),
+                    scope: scope.clone(),
+                    route_registered: Arc::clone(&route_registered),
+                    cancellation: cancellation.clone(),
+                });
+                Ok(())
+            },
+            label = "daemon.project.activate.mount"
+        ))
     });
     mount
 }
@@ -141,44 +144,28 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         route_registered: authority_route_registered,
         cancellation: authority_cancellation,
     } = inputs;
-    tokio::spawn(async move {
-        let mut route_poll = tokio::time::interval(std::time::Duration::from_secs(1));
-        route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let generation_ready = if authority_invocation
-            .code_index_schedulers
-            .latest_generation_id(&authority_project)
-            .await
-            .is_some()
-        {
-            true
-        } else {
-            loop {
-                if !authority_route_registered.load(Ordering::Acquire) {
-                    break false;
-                }
-                tokio::select! {
-                    () = authority_cancellation.cancelled() => break false,
-                    _ = route_poll.tick() => {
-                        if !authority_route_registered.load(Ordering::Acquire) {
-                            break false;
-                        }
-                        if authority_invocation
-                            .code_index_schedulers
-                            .latest_generation_id(&authority_project)
-                            .await
-                            .is_some()
-                        {
-                            break true;
-                        }
+    tokio::spawn(hotpath::future!(
+        async move {
+            let mut route_poll = tokio::time::interval(std::time::Duration::from_secs(1));
+            route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let generation_ready = if authority_invocation
+                .code_index_schedulers
+                .latest_generation_id(&authority_project)
+                .await
+                .is_some()
+            {
+                true
+            } else {
+                loop {
+                    if !authority_route_registered.load(Ordering::Acquire) {
+                        break false;
                     }
-                    publication = publications.recv() => match publication {
-                        Ok(publication)
-                            if publication.project_root == authority_project =>
-                        {
-                            break true;
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    tokio::select! {
+                        () = authority_cancellation.cancelled() => break false,
+                        _ = route_poll.tick() => {
+                            if !authority_route_registered.load(Ordering::Acquire) {
+                                break false;
+                            }
                             if authority_invocation
                                 .code_index_schedulers
                                 .latest_generation_id(&authority_project)
@@ -188,46 +175,65 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
                                 break true;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break false;
+                        publication = publications.recv() => match publication {
+                            Ok(publication)
+                                if publication.project_root == authority_project =>
+                            {
+                                break true;
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                if authority_invocation
+                                    .code_index_schedulers
+                                    .latest_generation_id(&authority_project)
+                                    .await
+                                    .is_some()
+                                {
+                                    break true;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                break false;
+                            }
                         }
                     }
                 }
+            };
+            if !generation_ready
+                || authority_cancellation.is_cancelled()
+                || !authority_route_registered.load(Ordering::Acquire)
+            {
+                return;
             }
-        };
-        if !generation_ready
-            || authority_cancellation.is_cancelled()
-            || !authority_route_registered.load(Ordering::Acquire)
-        {
-            return;
-        }
-        let outcome = tokio::select! {
-            biased;
-            () = authority_cancellation.cancelled() => return,
-            outcome = authority_invocation.mount_query_authority_for_project(
-                &authority_project,
-                &authority_profile_id,
-                &authority_scope,
-            ) => outcome,
-        };
-        if authority_cancellation.is_cancelled()
-            || !authority_route_registered.load(Ordering::Acquire)
-        {
-            return;
-        }
-        let mut fields = vec![
-            ("project", authority_project.display().to_string()),
-            ("phase", "code_index_query_authority".to_owned()),
-        ];
-        match outcome {
-            Ok(()) => fields.push(("outcome", "mounted".to_owned())),
-            Err(error) => {
-                fields.push(("outcome", "degraded".to_owned()));
-                fields.push(("error", error.to_string()));
+            let outcome = tokio::select! {
+                biased;
+                () = authority_cancellation.cancelled() => return,
+                outcome = authority_invocation.mount_query_authority_for_project(
+                    &authority_project,
+                    &authority_profile_id,
+                    &authority_scope,
+                ) => outcome,
+            };
+            if authority_cancellation.is_cancelled()
+                || !authority_route_registered.load(Ordering::Acquire)
+            {
+                return;
             }
-        }
-        log_daemon_event("project_open_phase", &fields);
-    });
+            let mut fields = vec![
+                ("project", authority_project.display().to_string()),
+                ("phase", "code_index_query_authority".to_owned()),
+            ];
+            match outcome {
+                Ok(()) => fields.push(("outcome", "mounted".to_owned())),
+                Err(error) => {
+                    fields.push(("outcome", "degraded".to_owned()));
+                    fields.push(("error", error.to_string()));
+                }
+            }
+            log_daemon_event("project_open_phase", &fields);
+        },
+        label = "daemon.project.activate.query_authority"
+    ));
 }
 
 /// Hint sink handed to the activation owner: it coalesces after-edit hook paths

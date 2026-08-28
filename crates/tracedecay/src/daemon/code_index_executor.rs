@@ -515,151 +515,152 @@ pub(super) fn code_index_search_executor(
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
         let execution_admission = Arc::clone(&execution_admission);
-        Box::pin(async move {
-            let scope = match project_open_owners::resolved_scope_for_project(
-                &request.project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => return code_index_scope_unavailable(),
-            };
-            let admission = match admission_provider.admit_current(&scope) {
-                Ok(admission) => admission,
-                Err(error) => {
-                    return code_index_search_unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        error.reason(),
-                    );
-                }
-            };
-            let authority = match admission.authorize(&scope, request.authority.as_ref()) {
-                Ok(authority) => authority,
-                // The executor resolves live HEAD. A mid-session checkout mints a
-                // new grant for the new ref while the route-constructed authority
-                // still names the open-time revision. This authority is daemon
-                // state, not client input; rebind to the grant just issued.
-                Err(query_mcp_admission::QueryMcpAdmissionUnavailableV1::AuthorizationStale) => {
-                    admission.search_authority()
-                }
-                Err(error) => {
-                    return code_index_search_unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        error.reason(),
-                    );
-                }
-            };
-            let terminal_expected_authority = authority.clone();
-            let request_cursor = request.cursor.clone();
-            let policy = match (
-                tracedecay_domain::SanitizerRevision::new(
-                    tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
-                ),
-                tracedecay_domain::QueryNormalizationRevision::new(
-                    tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
-                ),
-                tracedecay_domain::ExactAdmissionRuleRevision::new(
-                    tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
-                ),
-                tracedecay_domain::ComponentRevision::new(
-                    tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
-                ),
-                tracedecay_domain::ScoreDomainId::new(
-                    tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
-                ),
-            ) {
-                (
-                    Ok(sanitizer_revision),
-                    Ok(normalization_revision),
-                    Ok(exact_rule_revision),
-                    Ok(lexical_profile_revision),
-                    Ok(lexical_score_domain),
-                ) => code_index_scheduler::query_runtime::QuerySearchExecutionPolicyV1 {
-                    principal: authority.principal,
-                    authorization_revision: authority.authorization_revision,
-                    sanitizer_revision,
-                    normalization_revision,
-                    exact_rule_revision,
-                    lexical_profile_revision,
-                    lexical_score_domain,
-                    fuzzy_budget:
-                        tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
-                    graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
-                    graph_max_depth: 1,
-                    page_size: request.limit,
-                    cursor: request.cursor,
-                },
-                _ => {
+        Box::pin(hotpath::future!(
+            async move {
+                let scope = match project_open_owners::resolved_scope_for_project(
+                    &request.project_root,
+                    &project_id,
+                ) {
+                    Ok(scope) => scope,
+                    Err(_) => return code_index_scope_unavailable(),
+                };
+                let admission = match admission_provider.admit_current(&scope) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            error.reason(),
+                        );
+                    }
+                };
+                let authority = match admission.authorize(&scope, request.authority.as_ref()) {
+                    Ok(authority) => authority,
+                    // The executor resolves live HEAD. A mid-session checkout mints a
+                    // new grant for the new ref while the route-constructed authority
+                    // still names the open-time revision. This authority is daemon
+                    // state, not client input; rebind to the grant just issued.
+                    Err(
+                        query_mcp_admission::QueryMcpAdmissionUnavailableV1::AuthorizationStale,
+                    ) => admission.search_authority(),
+                    Err(error) => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            error.reason(),
+                        );
+                    }
+                };
+                let terminal_expected_authority = authority.clone();
+                let request_cursor = request.cursor.clone();
+                let policy = match (
+                    tracedecay_domain::SanitizerRevision::new(
+                        tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
+                    ),
+                    tracedecay_domain::QueryNormalizationRevision::new(
+                        tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
+                    ),
+                    tracedecay_domain::ExactAdmissionRuleRevision::new(
+                        tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
+                    ),
+                    tracedecay_domain::ComponentRevision::new(
+                        tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+                    ),
+                    tracedecay_domain::ScoreDomainId::new(
+                        tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+                    ),
+                ) {
+                    (
+                        Ok(sanitizer_revision),
+                        Ok(normalization_revision),
+                        Ok(exact_rule_revision),
+                        Ok(lexical_profile_revision),
+                        Ok(lexical_score_domain),
+                    ) => code_index_scheduler::query_runtime::QuerySearchExecutionPolicyV1 {
+                        principal: authority.principal,
+                        authorization_revision: authority.authorization_revision,
+                        sanitizer_revision,
+                        normalization_revision,
+                        exact_rule_revision,
+                        lexical_profile_revision,
+                        lexical_score_domain,
+                        fuzzy_budget:
+                            tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+                        graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
+                        graph_max_depth: 1,
+                        page_size: request.limit,
+                        cursor: request.cursor,
+                    },
+                    _ => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                            "invalid_request",
+                        );
+                    }
+                };
+                let project_root = request.project_root;
+                let source_revision = request.source_revision;
+                let source_tree = request.source_tree;
+                let source_reference = request.source_reference;
+                if !code_index_task_support::exact_source_is_complete(
+                    source_reference.as_ref(),
+                    source_revision.as_ref(),
+                    source_tree.as_ref(),
+                ) || (source_revision.is_none()
+                    && request_cursor
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.code_source.is_some()))
+                {
                     return code_index_search_unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
-                        "invalid_request",
+                        "exact_source_binding_required",
                     );
                 }
-            };
-            let project_root = request.project_root;
-            let source_revision = request.source_revision;
-            let source_tree = request.source_tree;
-            let source_reference = request.source_reference;
-            if !code_index_task_support::exact_source_is_complete(
-                source_reference.as_ref(),
-                source_revision.as_ref(),
-                source_tree.as_ref(),
-            ) || (source_revision.is_none()
-                && request_cursor
-                    .as_ref()
-                    .is_some_and(|cursor| cursor.code_source.is_some()))
-            {
-                return code_index_search_unavailable(
-                    code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
-                    "exact_source_binding_required",
-                );
-            }
-            let mode = request.mode;
-            let deadline = request.deadline;
-            let cancellation = request.cancellation;
-            let semantic_mode = match mode {
-                code_search::CodeIndexSearchModeV1::FallbackAllowed => {
-                    tracedecay_query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
+                let mode = request.mode;
+                let deadline = request.deadline;
+                let cancellation = request.cancellation;
+                let semantic_mode = match mode {
+                    code_search::CodeIndexSearchModeV1::FallbackAllowed => {
+                        tracedecay_query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
+                    }
+                    code_search::CodeIndexSearchModeV1::StrictSemantic => {
+                        tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
+                    }
+                };
+                let control = Arc::new(McpSemanticExecutionControlV1 {
+                    started: std::time::Instant::now(),
+                    admission_provider: admission_provider.clone(),
+                    deadline,
+                    cancellation,
+                });
+                if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
+                    return outcome;
                 }
-                code_search::CodeIndexSearchModeV1::StrictSemantic => {
-                    tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
-                }
-            };
-            let control = Arc::new(McpSemanticExecutionControlV1 {
-                started: std::time::Instant::now(),
-                admission_provider: admission_provider.clone(),
-                deadline,
-                cancellation,
-            });
-            if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
-                return outcome;
-            }
-            let execution_permit = match execution_admission.try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    return code_index_search_unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                        "search_capacity_unavailable",
-                    );
-                }
-            };
-            let execution_result = {
-                let execution_schedulers = schedulers.clone();
-                let execution_project_root = project_root.clone();
-                let execution_scope = scope.clone();
-                let execution_control = Arc::clone(&control);
-                let execution_source_revision = source_revision.clone();
-                let execution_source_tree = source_tree.clone();
-                let execution_source_reference = source_reference.clone();
-                let execution_cursor = request_cursor.clone();
-                let execution_request =
-                    code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
-                        request.query,
-                        policy,
-                    );
-                let runtime = tokio::runtime::Handle::current();
-                let execution = tokio::task::spawn_blocking(move || {
-                    let _execution_permit = execution_permit;
-                    runtime.block_on(async move {
+                let execution_permit = match execution_admission.try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                            "search_capacity_unavailable",
+                        );
+                    }
+                };
+                let execution_result = {
+                    let execution_schedulers = schedulers.clone();
+                    let execution_project_root = project_root.clone();
+                    let execution_scope = scope.clone();
+                    let execution_control = Arc::clone(&control);
+                    let execution_source_revision = source_revision.clone();
+                    let execution_source_tree = source_tree.clone();
+                    let execution_source_reference = source_reference.clone();
+                    let execution_cursor = request_cursor.clone();
+                    let execution_request =
+                        code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
+                            request.query,
+                            policy,
+                        );
+                    let runtime = tokio::runtime::Handle::current();
+                    let execution = tokio::task::spawn_blocking(move || {
+                        let _execution_permit = execution_permit;
+                        runtime.block_on(async move {
                         let Some(revision) = execution_source_revision else {
                             return execution_schedulers
                                 .execute_query_with_semantic(
@@ -758,56 +759,59 @@ pub(super) fn code_index_search_executor(
                             semantic,
                         })
                     })
-                });
-                match code_index_task_support::settle_owned_blocking_task(
-                    execution,
-                    std::time::Duration::from_millis(10),
-                    || search_terminated(&control, &admission_provider, None),
-                )
-                .await
-                {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => {
-                        return code_index_search_unavailable(
-                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                            "search_task_failed",
-                        );
-                    }
-                    Err(outcome) => return outcome,
-                }
-            };
-            if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
-                return outcome;
-            }
-            let executed = match execution_result {
-                Ok(executed) => executed,
-                Err(error) => {
-                    use code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1;
-                    use code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1;
-                    tracing::warn!(
-                        project_id = %project_id.as_str(),
-                        error = %error,
-                        "code_index_search_failed"
-                    );
-                    if let QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
-                        generation,
-                        abstention,
-                    } = &error
+                    });
+                    match hotpath::future!(
+                        code_index_task_support::settle_owned_blocking_task(
+                            execution,
+                            std::time::Duration::from_millis(10),
+                            || search_terminated(&control, &admission_provider, None),
+                        ),
+                        label = "daemon.code_index.search_execute"
+                    )
+                    .await
                     {
-                        return code_index_search_unavailable_for_generation(
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) => {
+                            return code_index_search_unavailable(
+                                code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                                "search_task_failed",
+                            );
+                        }
+                        Err(outcome) => return outcome,
+                    }
+                };
+                if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
+                    return outcome;
+                }
+                let executed = match execution_result {
+                    Ok(executed) => executed,
+                    Err(error) => {
+                        use code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1;
+                        use code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1;
+                        tracing::warn!(
+                            project_id = %project_id.as_str(),
+                            error = %error,
+                            "code_index_search_failed"
+                        );
+                        if let QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                            generation,
+                            abstention,
+                        } = &error
+                        {
+                            return code_index_search_unavailable_for_generation(
                             Some(generation.as_str().to_owned()),
                             code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
                             code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
                                 abstention,
                             ),
                         );
-                    }
-                    // The lane reason travels with the failure so a caller can
-                    // tell "this scope has no index" from "the index this
-                    // scope already had is being rebuilt". Only the latter is
-                    // worth retrying, and only the latter leaves the retained
-                    // lexical lane able to answer.
-                    let (reason, lane_reason) = match error {
+                        }
+                        // The lane reason travels with the failure so a caller can
+                        // tell "this scope has no index" from "the index this
+                        // scope already had is being rebuilt". Only the latter is
+                        // worth retrying, and only the latter leaves the retained
+                        // lexical lane able to answer.
+                        let (reason, lane_reason) = match error {
                         QuerySemanticSearchExecutionErrorV1::Query(error) => match error {
                         QuerySearchExecutionErrorV1::AuthorityUnavailable
                         | QuerySearchExecutionErrorV1::Authority(
@@ -863,18 +867,20 @@ pub(super) fn code_index_search_executor(
                             "semantic_unavailable",
                         ),
                     };
-                    return code_index_search_unavailable(reason, lane_reason);
+                        return code_index_search_unavailable(reason, lane_reason);
+                    }
+                };
+                if let Some(outcome) = search_terminated(
+                    &control,
+                    &admission_provider,
+                    Some(executed.query.generation.as_str()),
+                ) {
+                    return outcome;
                 }
-            };
-            if let Some(outcome) = search_terminated(
-                &control,
-                &admission_provider,
-                Some(executed.query.generation.as_str()),
-            ) {
-                return outcome;
-            }
-            let terminal_scope =
-                match project_open_owners::resolved_scope_for_project(&project_root, &project_id) {
+                let terminal_scope = match project_open_owners::resolved_scope_for_project(
+                    &project_root,
+                    &project_id,
+                ) {
                     Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
                     _ => {
                         return code_index_search_unavailable_for_generation(
@@ -884,29 +890,29 @@ pub(super) fn code_index_search_executor(
                         );
                     }
                 };
-            let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
-                Ok(admission) => admission,
-                Err(error) => {
+                let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        return code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            error.reason(),
+                        );
+                    }
+                };
+                let terminal_authority = terminal_admission.search_authority();
+                if terminal_authority != terminal_expected_authority
+                    || terminal_admission
+                        .authorize(&terminal_scope, Some(&terminal_authority))
+                        .is_err()
+                {
                     return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        error.reason(),
+                        "authorization_changed_before_publication",
                     );
                 }
-            };
-            let terminal_authority = terminal_admission.search_authority();
-            if terminal_authority != terminal_expected_authority
-                || terminal_admission
-                    .authorize(&terminal_scope, Some(&terminal_authority))
-                    .is_err()
-            {
-                return code_index_search_unavailable_for_generation(
-                    Some(executed.query.generation.as_str().to_owned()),
-                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    "authorization_changed_before_publication",
-                );
-            }
-            let (semantic, ordered_candidates, mut next_cursor, accepted_semantic_budget) =
+                let (semantic, ordered_candidates, mut next_cursor, accepted_semantic_budget) =
                 match &executed.semantic {
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
                     augmented,
@@ -930,98 +936,101 @@ pub(super) fn code_index_search_executor(
                     None,
                 ),
             };
-            let display_source = if let Some(text) = schedulers
-                .latest_text_serving_for_scope(&terminal_scope)
-                .await
-                .filter(|text| {
-                    text.metadata().manifest().generation_id == executed.query.generation
-                }) {
-                CodeIndexSearchDisplaySourceV1::Text(text)
-            } else {
-                let latest = match generation_for_hydration(
+                let display_source = if let Some(text) = schedulers
+                    .latest_text_serving_for_scope(&terminal_scope)
+                    .await
+                    .filter(|text| {
+                        text.metadata().manifest().generation_id == executed.query.generation
+                    }) {
+                    CodeIndexSearchDisplaySourceV1::Text(text)
+                } else {
+                    let latest = match generation_for_hydration(
+                        &schedulers,
+                        &terminal_scope,
+                        &executed.query.generation,
+                        control.deadline.clone(),
+                        control.cancellation.clone(),
+                    )
+                    .await
+                    {
+                        Ok(latest) => latest,
+                        Err(outcome) => return outcome,
+                    };
+                    let paths =
+                        match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
+                            Ok(paths) => paths,
+                            Err(_) => {
+                                return code_index_search_unavailable_for_generation(
+                                    Some(executed.query.generation.as_str().to_owned()),
+                                    code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                                    "display_path_index_unavailable",
+                                );
+                            }
+                        };
+                    CodeIndexSearchDisplaySourceV1::Complete { latest, paths }
+                };
+                let mut hydration_request = executed.query.sanitized.request().clone();
+                let hydration_budget = code_index_search_hydration_budget(
+                    accepted_semantic_budget,
+                    &hydration_request.budget,
+                );
+                hydration_request.budget = hydration_budget;
+                let authorize =
+                    |request: &tracedecay_domain::RetrievalRequest,
+                     _candidate: &tracedecay_domain::RankedCandidate| {
+                        use tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1;
+
+                        let Ok(current_scope) = project_open_owners::resolved_scope_for_project(
+                            &project_root,
+                            &project_id,
+                        ) else {
+                            return HydrationAuthorizationV1::Denied;
+                        };
+                        if current_scope != terminal_scope
+                            || request.principal != terminal_expected_authority.principal
+                            || request.snapshot.authorization_revision
+                                != terminal_expected_authority.authorization_revision
+                        {
+                            return HydrationAuthorizationV1::Denied;
+                        }
+                        let Ok(current_admission) =
+                            admission_provider.admit_current(&current_scope)
+                        else {
+                            return HydrationAuthorizationV1::Denied;
+                        };
+                        let current_authority = current_admission.search_authority();
+                        if current_authority != terminal_expected_authority
+                            || current_admission
+                                .authorize(&current_scope, Some(&current_authority))
+                                .is_err()
+                        {
+                            HydrationAuthorizationV1::Denied
+                        } else {
+                            HydrationAuthorizationV1::Authorized
+                        }
+                    };
+                let exact_source = source_reference
+                    .as_ref()
+                    .zip(source_revision.as_ref())
+                    .zip(source_tree.as_ref())
+                    .map(|((reference, commit), tree)| {
+                        tracedecay_domain::CodeSourceCursorBindingV1 {
+                            reference: reference.clone(),
+                            commit: commit.clone(),
+                            tree: tree.clone(),
+                            generation: executed.query.generation.clone(),
+                        }
+                    });
+                if let Err(error) = code_index_task_support::bind_exact_source_cursor(
                     &schedulers,
                     &terminal_scope,
-                    &executed.query.generation,
-                    control.deadline.clone(),
-                    control.cancellation.clone(),
+                    next_cursor.as_mut(),
+                    exact_source,
                 )
                 .await
                 {
-                    Ok(latest) => latest,
-                    Err(outcome) => return outcome,
-                };
-                let paths = match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
-                    Ok(paths) => paths,
-                    Err(_) => {
-                        return code_index_search_unavailable_for_generation(
-                            Some(executed.query.generation.as_str().to_owned()),
-                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                            "display_path_index_unavailable",
-                        );
-                    }
-                };
-                CodeIndexSearchDisplaySourceV1::Complete { latest, paths }
-            };
-            let mut hydration_request = executed.query.sanitized.request().clone();
-            let hydration_budget = code_index_search_hydration_budget(
-                accepted_semantic_budget,
-                &hydration_request.budget,
-            );
-            hydration_request.budget = hydration_budget;
-            let authorize =
-                |request: &tracedecay_domain::RetrievalRequest,
-                 _candidate: &tracedecay_domain::RankedCandidate| {
-                    use tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1;
-
-                    let Ok(current_scope) =
-                        project_open_owners::resolved_scope_for_project(&project_root, &project_id)
-                    else {
-                        return HydrationAuthorizationV1::Denied;
-                    };
-                    if current_scope != terminal_scope
-                        || request.principal != terminal_expected_authority.principal
-                        || request.snapshot.authorization_revision
-                            != terminal_expected_authority.authorization_revision
-                    {
-                        return HydrationAuthorizationV1::Denied;
-                    }
-                    let Ok(current_admission) = admission_provider.admit_current(&current_scope)
-                    else {
-                        return HydrationAuthorizationV1::Denied;
-                    };
-                    let current_authority = current_admission.search_authority();
-                    if current_authority != terminal_expected_authority
-                        || current_admission
-                            .authorize(&current_scope, Some(&current_authority))
-                            .is_err()
-                    {
-                        HydrationAuthorizationV1::Denied
-                    } else {
-                        HydrationAuthorizationV1::Authorized
-                    }
-                };
-            let exact_source = source_reference
-                .as_ref()
-                .zip(source_revision.as_ref())
-                .zip(source_tree.as_ref())
-                .map(
-                    |((reference, commit), tree)| tracedecay_domain::CodeSourceCursorBindingV1 {
-                        reference: reference.clone(),
-                        commit: commit.clone(),
-                        tree: tree.clone(),
-                        generation: executed.query.generation.clone(),
-                    },
-                );
-            if let Err(error) = code_index_task_support::bind_exact_source_cursor(
-                &schedulers,
-                &terminal_scope,
-                next_cursor.as_mut(),
-                exact_source,
-            )
-            .await
-            {
-                use code_index_task_support::ExactCursorPublicationErrorV1;
-                return match error {
+                    use code_index_task_support::ExactCursorPublicationErrorV1;
+                    return match error {
                     ExactCursorPublicationErrorV1::AuthorityUnavailable => {
                         code_index_search_unavailable_for_generation(
                             Some(executed.query.generation.as_str().to_owned()),
@@ -1037,8 +1046,8 @@ pub(super) fn code_index_search_executor(
                         )
                     }
                 };
-            }
-            let preflight =
+                }
+                let preflight =
                 |request: &tracedecay_domain::RetrievalRequest,
                  candidate: &tracedecay_domain::RankedCandidate,
                  _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
@@ -1053,7 +1062,7 @@ pub(super) fn code_index_search_executor(
                         Err(reason) => HydrationPreflightOutcomeV1::Unavailable(reason),
                     }
                 };
-            let hydrate =
+                let hydrate =
                 |request: &tracedecay_domain::RetrievalRequest,
                  candidate: &tracedecay_domain::RankedCandidate,
                  _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
@@ -1089,75 +1098,79 @@ pub(super) fn code_index_search_executor(
                         },
                     }
                 };
-            let mut source = CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
-            let hydrated = match tracedecay_query::retrieval::hydrate::CanonicalLateHydration::new(
-                &mut source,
-            )
-            .hydrate_with_control(
-                &hydration_request,
-                ordered_candidates.as_slice(),
-                &hydration_budget,
-                control.as_ref(),
-            ) {
-                Ok(hydrated) => hydrated,
-                Err(error) => {
-                    tracing::warn!(
-                        project_id = %project_id.as_str(),
-                        error = %error,
-                        "code_index_search_hydration_failed"
-                    );
+                let mut source =
+                    CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
+                let hydrated = match hotpath::measure_block!("daemon.code_index.search_hydrate", {
+                    tracedecay_query::retrieval::hydrate::CanonicalLateHydration::new(&mut source)
+                        .hydrate_with_control(
+                            &hydration_request,
+                            ordered_candidates.as_slice(),
+                            &hydration_budget,
+                            control.as_ref(),
+                        )
+                }) {
+                    Ok(hydrated) => hydrated,
+                    Err(error) => {
+                        tracing::warn!(
+                            project_id = %project_id.as_str(),
+                            error = %error,
+                            "code_index_search_hydration_failed"
+                        );
+                        return code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "late_hydration_failed",
+                        );
+                    }
+                };
+                let hydrated_prefix_len = hydrated.results.len();
+                let mut display_by_anchor = HashMap::new();
+                let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
+                for result in hydrated.results {
+                    use tracedecay_query::retrieval::hydrate::{
+                        HydrationOutcomeV1, HydrationUnavailableV1,
+                    };
+
+                    match result.outcome {
+                        HydrationOutcomeV1::Complete(display)
+                        | HydrationOutcomeV1::Partial {
+                            payload: display, ..
+                        } => {
+                            display_by_anchor
+                                .insert(result.ranked.candidate.anchor_id.clone(), display);
+                            hydrated_candidates.push(result.ranked);
+                        }
+                        HydrationOutcomeV1::Unavailable(
+                            HydrationUnavailableV1::AuthorityUnavailable,
+                        ) => {}
+                        HydrationOutcomeV1::Unavailable(_) => {
+                            hydrated_candidates.push(result.ranked);
+                        }
+                    }
+                }
+                hydrated_candidates
+                    .extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
+                let ordered_candidates = hydrated_candidates;
+                if let Some(reason) = control.request_termination() {
                     return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                        "late_hydration_failed",
+                        reason,
+                        reason.as_str(),
                     );
                 }
-            };
-            let hydrated_prefix_len = hydrated.results.len();
-            let mut display_by_anchor = HashMap::new();
-            let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
-            for result in hydrated.results {
-                use tracedecay_query::retrieval::hydrate::{
-                    HydrationOutcomeV1, HydrationUnavailableV1,
-                };
-
-                match result.outcome {
-                    HydrationOutcomeV1::Complete(display)
-                    | HydrationOutcomeV1::Partial {
-                        payload: display, ..
-                    } => {
-                        display_by_anchor
-                            .insert(result.ranked.candidate.anchor_id.clone(), display);
-                        hydrated_candidates.push(result.ranked);
-                    }
-                    HydrationOutcomeV1::Unavailable(
-                        HydrationUnavailableV1::AuthorityUnavailable,
-                    ) => {}
-                    HydrationOutcomeV1::Unavailable(_) => {
-                        hydrated_candidates.push(result.ranked);
-                    }
+                // Not `search_terminated`: this guard reports a distinct revocation
+                // reason because the search already produced results by this point.
+                if !admission_provider.route_is_registered() {
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        "route_revoked_before_publication",
+                    );
                 }
-            }
-            hydrated_candidates.extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
-            let ordered_candidates = hydrated_candidates;
-            if let Some(reason) = control.request_termination() {
-                return code_index_search_unavailable_for_generation(
-                    Some(executed.query.generation.as_str().to_owned()),
-                    reason,
-                    reason.as_str(),
-                );
-            }
-            // Not `search_terminated`: this guard reports a distinct revocation
-            // reason because the search already produced results by this point.
-            if !admission_provider.route_is_registered() {
-                return code_index_search_unavailable_for_generation(
-                    Some(executed.query.generation.as_str().to_owned()),
-                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    "route_revoked_before_publication",
-                );
-            }
-            let publication_scope =
-                match project_open_owners::resolved_scope_for_project(&project_root, &project_id) {
+                let publication_scope = match project_open_owners::resolved_scope_for_project(
+                    &project_root,
+                    &project_id,
+                ) {
                     Ok(publication_scope) if publication_scope == terminal_scope => {
                         publication_scope
                     }
@@ -1169,56 +1182,59 @@ pub(super) fn code_index_search_executor(
                         );
                     }
                 };
-            let publication_admission = match admission_provider.admit_current(&publication_scope) {
-                Ok(admission) => admission,
-                Err(error) => {
-                    return code_index_search_unavailable_for_generation(
+                let publication_admission =
+                    match admission_provider.admit_current(&publication_scope) {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
+                        }
+                    };
+                let publication_authority = publication_admission.search_authority();
+                if publication_authority != terminal_expected_authority
+                    || publication_admission
+                        .authorize(&publication_scope, Some(&publication_authority))
+                        .is_err()
+                {
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        "authorization_changed_during_publication",
+                    );
                 }
-            };
-            let publication_authority = publication_admission.search_authority();
-            if publication_authority != terminal_expected_authority
-                || publication_admission
-                    .authorize(&publication_scope, Some(&publication_authority))
-                    .is_err()
-            {
-                return code_index_search_unavailable_for_generation(
-                    Some(executed.query.generation.as_str().to_owned()),
-                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    "authorization_changed_during_publication",
+                // Additive only: the generation-bound lanes all ran against the
+                // admitted generation here, so warm coverage restates what the
+                // existing candidates already mean. Ranking identity, fallback
+                // bytes, and the cursor are untouched. When query admission had to
+                // fall back to the last complete generation because no current one
+                // was admissible, the same lanes are reported stale against the
+                // generation that actually answered.
+                let coverage = code_search::CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+                    &executed
+                        .query
+                        .authorized
+                        .fallback
+                        .public_fallback_lane_coverage,
+                    executed.query.generation.as_str(),
+                    executed.query.served_stale,
+                    &semantic,
                 );
-            }
-            // Additive only: the generation-bound lanes all ran against the
-            // admitted generation here, so warm coverage restates what the
-            // existing candidates already mean. Ranking identity, fallback
-            // bytes, and the cursor are untouched. When query admission had to
-            // fall back to the last complete generation because no current one
-            // was admissible, the same lanes are reported stale against the
-            // generation that actually answered.
-            let coverage = code_search::CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
-                &executed
-                    .query
-                    .authorized
-                    .fallback
-                    .public_fallback_lane_coverage,
-                executed.query.generation.as_str(),
-                executed.query.served_stale,
-                &semantic,
-            );
-            code_search::CodeIndexSearchOutcomeV1::Complete(
-                code_search::CodeIndexSearchCompletedV1 {
-                    code_generation: executed.query.generation.as_str().to_owned(),
-                    ordered_candidates,
-                    query_fallback: executed.query.authorized.fallback,
-                    display_by_anchor,
-                    semantic,
-                    next_cursor,
-                    coverage,
-                },
-            )
-        })
+                code_search::CodeIndexSearchOutcomeV1::Complete(
+                    code_search::CodeIndexSearchCompletedV1 {
+                        code_generation: executed.query.generation.as_str().to_owned(),
+                        ordered_candidates,
+                        query_fallback: executed.query.authorized.fallback,
+                        display_by_anchor,
+                        semantic,
+                        next_cursor,
+                        coverage,
+                    },
+                )
+            },
+            label = "daemon.code_index.search"
+        ))
     })
 }

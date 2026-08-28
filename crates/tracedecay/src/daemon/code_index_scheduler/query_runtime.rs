@@ -370,7 +370,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.code_index.query.execute", future = true)]
     pub(in crate::daemon) async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
