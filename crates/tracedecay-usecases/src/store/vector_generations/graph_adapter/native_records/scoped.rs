@@ -8,7 +8,6 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphRelation, GraphRelationId,
-    GraphTraversalDirection, TraversalRequest,
 };
 
 use super::super::super::{
@@ -517,34 +516,27 @@ fn read_scope(
     else {
         return Ok(None);
     };
-    let traversal = snapshot
-        .traverse(TraversalRequest {
-            namespace: namespace.clone(),
-            start: owner.clone(),
-            relation_kinds: BTreeSet::from([
-                relation_kind(CONTAINS_KIND)?,
-                relation_kind(BASE_KIND)?,
-            ]),
-            direction: GraphTraversalDirection::Outgoing,
-            max_depth: 1,
-            max_visits: max_records,
-            max_results: max_records,
-            cancellation: Arc::clone(&cancellation),
-        })
+    let relation_kinds = BTreeSet::from([relation_kind(CONTAINS_KIND)?, relation_kind(BASE_KIND)?]);
+    let relation_pages = snapshot
+        .outgoing_relations(
+            &namespace,
+            std::slice::from_ref(&owner),
+            &relation_kinds,
+            max_records,
+            Arc::clone(&cancellation),
+        )
         .map_err(map_graph_error)?;
-    let mut entities = BTreeMap::from([(owner, owner_row)]);
+    let relation_rows = relation_pages.into_iter().next().unwrap_or_default();
+    let mut entities = BTreeMap::from([(owner.clone(), owner_row)]);
     let mut relations = BTreeMap::new();
-    for visit in traversal.visits {
-        let Some(relation_id) = visit.via_relation else {
+    let mut visited_targets = BTreeSet::from([owner.clone()]);
+    for relation in relation_rows {
+        if relation.from != owner || !visited_targets.insert(relation.to.clone()) {
             continue;
-        };
-        let relation = snapshot
-            .relation(&namespace, &relation_id, Arc::clone(&cancellation))
-            .map_err(map_graph_error)?
-            .ok_or_else(|| corrupt("semantic vector scope relation is missing"))?;
+        }
         if relation.kind.as_str() == CONTAINS_KIND {
             let child = snapshot
-                .entity(&namespace, &visit.entity, Arc::clone(&cancellation))
+                .entity(&namespace, &relation.to, Arc::clone(&cancellation))
                 .map_err(map_graph_error)?
                 .ok_or_else(|| corrupt("semantic vector scope child is missing"))?;
             entities.insert(child.identity.clone(), child);
