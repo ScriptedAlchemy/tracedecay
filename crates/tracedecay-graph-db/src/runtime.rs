@@ -116,10 +116,23 @@ impl GraphDb {
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(persistent_store_state)?;
-        let database = GrafeoDB::with_config(validated.config.clone())
-            .map_err(|error| map_open_error(error, validated.preexisting_store))?;
+        // The engine call is where a persistent open pays for corpus size:
+        // grafeo replays the whole serialized LPG block log through the live
+        // mutation path, rebuilds every catalog-listed property index with a
+        // full node scan each, and replays any sidecar WAL an unclean
+        // shutdown left behind. The phases after it are O(labels), not
+        // O(rows), so this span is what a slow open decomposes into first.
+        let database = hotpath::measure_block!(
+            "graph_db.generation.open.engine",
+            GrafeoDB::with_config(validated.config.clone())
+                .map_err(|error| map_open_error(error, validated.preexisting_store))
+        )?;
+        crate::recovery::record_open_corpus_gauges(&database);
         validate_or_initialize_format(&database, &validated)?;
-        let state = FormatState::load(&database)?;
+        let state = hotpath::measure_block!(
+            "graph_db.generation.open.state",
+            FormatState::load(&database)
+        )?;
         let quarantined_projections = load_quarantined_projections(&database)?;
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
@@ -666,7 +679,9 @@ impl GraphDb {
                     .to_owned(),
             });
         };
-        if let Err(error) = database.close() {
+        if let Err(error) =
+            hotpath::measure_block!("graph_db.runtime.close.engine", database.close())
+        {
             self.inner.poisoned.store(true, Ordering::Release);
             return Err(GraphDbError::DurabilityUncertain {
                 message: error.to_string(),
