@@ -644,6 +644,7 @@ impl DaemonLcmAuthority {
         }
     }
 
+    #[hotpath::measure(label = "daemon.lcm.status", future = true)]
     async fn execute_status(
         &self,
         context: &RequestContext,
@@ -679,6 +680,7 @@ impl DaemonLcmAuthority {
         }
     }
 
+    #[hotpath::measure(label = "daemon.lcm.doctor", future = true)]
     async fn execute_doctor(
         &self,
         context: &RequestContext,

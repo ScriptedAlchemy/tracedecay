@@ -100,6 +100,15 @@ impl DaemonLcmEffectService {
 
     pub(crate) async fn compress(
         &self,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        let result = self.compress_phases(request).await;
+        observe_compression_outcome(&result);
+        result
+    }
+
+    async fn compress_phases(
+        &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         // Observation-projected sessions land raw rows without ingest
@@ -168,8 +177,12 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                self.db
-                    .lcm_compress_guarded(request, &execution, move || before_commit.checkpoint()),
+                hotpath::future!(
+                    self.db.lcm_compress_guarded(request, &execution, move || {
+                        before_commit.checkpoint()
+                    }),
+                    label = "daemon.lcm.commit"
+                ),
             )
             .await
     }
@@ -183,10 +196,43 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                self.db
-                    .lcm_session_boundary_guarded(request, move || before_commit.checkpoint()),
+                hotpath::future!(
+                    self.db.lcm_session_boundary_guarded(request, move || {
+                        before_commit.checkpoint()
+                    }),
+                    label = "daemon.lcm.boundary"
+                ),
             )
             .await
+    }
+}
+
+/// Terminal compression outcomes for profiling, including deferrals and
+/// failures: a lane that only counts commits hides exactly the retried and
+/// cancelled work a compaction investigation needs to see.
+fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>) {
+    match result {
+        Ok(response) if response.retry_status.is_some() => {
+            hotpath::gauge!("daemon.lcm.compress.deferred").inc(1.0);
+        }
+        Ok(response) if response.status == "needs_summary" => {
+            hotpath::gauge!("daemon.lcm.compress.needs_summary").inc(1.0);
+        }
+        Ok(response) if response.summary_nodes_created > 0 => {
+            hotpath::gauge!("daemon.lcm.compress.committed").inc(1.0);
+        }
+        Ok(_) => {
+            hotpath::gauge!("daemon.lcm.compress.noop").inc(1.0);
+        }
+        Err(LcmError::Cancelled) => {
+            hotpath::gauge!("daemon.lcm.compress.cancelled").inc(1.0);
+        }
+        Err(LcmError::DeadlineExceeded) => {
+            hotpath::gauge!("daemon.lcm.compress.deadline").inc(1.0);
+        }
+        Err(_) => {
+            hotpath::gauge!("daemon.lcm.compress.failed").inc(1.0);
+        }
     }
 }
 

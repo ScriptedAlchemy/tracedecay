@@ -153,6 +153,7 @@ impl DaemonSessionRetrievalService {
         })
     }
 
+    #[hotpath::measure(label = "daemon.session_retrieval.lcm_describe", future = true)]
     pub(super) async fn execute_lcm_describe_admitted(
         &self,
         context: &RequestContext,
@@ -346,7 +347,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.hydrate")]
+    #[hotpath::measure(label = "daemon.session_retrieval.lcm_expand", future = true)]
     pub(super) async fn execute_lcm_expand_admitted(
         &self,
         context: &RequestContext,
@@ -459,16 +460,18 @@ impl DaemonSessionRetrievalService {
                     ),
                 );
             };
-            match executor
-                .hydrate_lcm_external_payload(
+            match hotpath::future!(
+                executor.hydrate_lcm_external_payload(
                     &result.snapshot,
                     &direct.anchor_id,
                     command.provider(),
                     command.session_id(),
                     payload_ref,
                     max_bytes,
-                )
-                .await
+                ),
+                label = "daemon.session_retrieval.payload_hydrate"
+            )
+            .await
             {
                 Ok(content) => Some(content),
                 Err(error) => {
