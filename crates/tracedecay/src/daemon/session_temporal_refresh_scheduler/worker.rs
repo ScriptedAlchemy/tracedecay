@@ -27,7 +27,6 @@ use crate::store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
-#[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
     state: Arc<SessionTemporalRefreshWakeState>,
@@ -54,7 +53,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             let history_outcome = if history_requested {
                 hotpath::future!(
                     session_history_refresh(&history),
-                    label = "session_temporal_refresh.history"
+                    label = "daemon.scheduler.session_temporal.history"
                 )
                 .await
             } else {
@@ -104,14 +103,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 if projection_requested || state.has_requests() || history_requires_projection {
                     let pass = hotpath::future!(
                         session_projection_refresh(&database, &state, projector.as_ref(), policy),
-                        label = "session_temporal_refresh.projection"
+                        label = "daemon.scheduler.session_temporal.projection"
                     );
                     tokio::pin!(pass);
                     tokio::select! {
                         biased;
                         () = hotpath::future!(
                             state.wait_for_cancellation(),
-                            label = "session_temporal_refresh.cancellation_wait"
+                            label = "daemon.scheduler.session_temporal.cancellation_wait"
                         ) => return,
                         report = &mut pass => report,
                     }
@@ -148,15 +147,15 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 tokio::select! {
                     () = hotpath::future!(
                         state.wait_for_cancellation(),
-                        label = "session_temporal_refresh.cancellation_wait"
+                        label = "daemon.scheduler.session_temporal.cancellation_wait"
                     ) => return,
                     () = hotpath::future!(
                         state.wake.notified(),
-                        label = "session_temporal_refresh.wake_wait"
+                        label = "daemon.scheduler.session_temporal.wake_wait"
                     ) => {}
                     () = hotpath::future!(
                         tokio::time::sleep(retry_delay),
-                        label = "session_temporal_refresh.retry_wait"
+                        label = "daemon.scheduler.session_temporal.retry_wait"
                     ) => {}
                 }
             } else if history_needs_another_pass {
@@ -183,7 +182,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         state.idle.notify_waiters();
         let wake = hotpath::future!(
             state.wake.notified(),
-            label = "session_temporal_refresh.wake_wait"
+            label = "daemon.scheduler.session_temporal.wake_wait"
         );
         if state.has_pending_work() {
             continue;
@@ -192,12 +191,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             tokio::select! {
                 () = hotpath::future!(
                     state.wait_for_cancellation(),
-                    label = "session_temporal_refresh.cancellation_wait"
+                    label = "daemon.scheduler.session_temporal.cancellation_wait"
                 ) => return,
                 () = wake => {}
                 () = hotpath::future!(
                     tokio::time::sleep(Duration::from_millis(250)),
-                    label = "session_temporal_refresh.history_retry_wait"
+                    label = "daemon.scheduler.session_temporal.history_retry_wait"
                 ) => {
                     state.update_history_retry_state(false);
                     state.wake_history();
@@ -207,12 +206,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             tokio::select! {
                 () = hotpath::future!(
                     state.wait_for_cancellation(),
-                    label = "session_temporal_refresh.cancellation_wait"
+                    label = "daemon.scheduler.session_temporal.cancellation_wait"
                 ) => return,
                 () = wake => {}
                 () = hotpath::future!(
                     tokio::time::sleep(HISTORY_IDLE_RECHECK_INTERVAL),
-                    label = "session_temporal_refresh.history_idle_wait"
+                    label = "daemon.scheduler.session_temporal.history_idle_wait"
                 ) => {
                     if history
                         .read()
@@ -302,7 +301,6 @@ fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
     hotpath::gauge!("session_temporal_refresh_last_retry_attempt").set(attempt);
 }
 
-#[hotpath::measure]
 async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
 ) -> Option<SessionHistoricalIngestOutcome> {
@@ -316,7 +314,6 @@ async fn session_history_refresh(
     }
 }
 
-#[hotpath::measure]
 async fn session_projection_refresh(
     database: &RegisteredGlobalDbLeaseV1,
     state: &Arc<SessionTemporalRefreshWakeState>,
@@ -373,7 +370,10 @@ pub(super) async fn process_refresh_begin_requests(
     report.saturated |= state.has_requests();
 }
 
-#[hotpath::measure]
+#[hotpath::measure(
+    label = "daemon.scheduler.session_temporal.begin_admitted",
+    future = true
+)]
 pub(super) async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
     store: &GlobalDbSessionTemporalStore<'_>,
@@ -547,19 +547,19 @@ async fn project_running_refresh(
     let deadline_at = tokio::time::Instant::now() + policy.operation_deadline;
     let projection = hotpath::future!(
         projector.project(database, recovery.clone()),
-        label = "session_temporal_refresh.projector"
+        label = "daemon.scheduler.session_temporal.projector"
     );
     tokio::pin!(projection);
     let deadline = hotpath::future!(
         tokio::time::sleep_until(deadline_at),
-        label = "session_temporal_refresh.operation_deadline"
+        label = "daemon.scheduler.session_temporal.operation_deadline"
     );
     tokio::pin!(deadline);
     let effect = tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
-            label = "session_temporal_refresh.cancellation_wait"
+            label = "daemon.scheduler.session_temporal.cancellation_wait"
         ) => return,
         () = &mut deadline => {
             report.deadline_errors += 1;
@@ -617,14 +617,14 @@ async fn project_running_refresh(
     }
     let deadline = hotpath::future!(
         tokio::time::sleep_until(deadline_at),
-        label = "session_temporal_refresh.operation_deadline"
+        label = "daemon.scheduler.session_temporal.operation_deadline"
     );
     tokio::pin!(deadline);
     tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
-            label = "session_temporal_refresh.cancellation_wait"
+            label = "daemon.scheduler.session_temporal.cancellation_wait"
         ) => {}
         () = &mut deadline => {
             report.deadline_errors += 1;
@@ -642,7 +642,6 @@ fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
     )
 }
 
-#[hotpath::measure]
 pub(super) async fn run_session_temporal_refresh_pass(
     database: &RegisteredGlobalDbLeaseV1,
     state: &Arc<SessionTemporalRefreshWakeState>,

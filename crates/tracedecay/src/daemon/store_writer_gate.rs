@@ -173,13 +173,27 @@ impl StoreWriterGates {
         match scope {
             WriterScope::Daemon => WriterAdmissionGuard {
                 _class: None,
-                _daemon: DaemonGuard::Exclusive(Arc::clone(&self.daemon).write_owned().await),
+                _daemon: DaemonGuard::Exclusive(
+                    hotpath::future!(
+                        Arc::clone(&self.daemon).write_owned(),
+                        label = "daemon.writer_gate.acquire.daemon"
+                    )
+                    .await,
+                ),
                 _gate: None,
             },
             WriterScope::Store { data_root, class } => {
-                let daemon = Arc::clone(&self.daemon).read_owned().await;
+                let daemon = hotpath::future!(
+                    Arc::clone(&self.daemon).read_owned(),
+                    label = "daemon.writer_gate.acquire.store"
+                )
+                .await;
                 let gate = self.store_gate(data_root);
-                let class_guard = gate.class_mutex(*class).lock_owned().await;
+                let class_guard = hotpath::future!(
+                    gate.class_mutex(*class).lock_owned(),
+                    label = "daemon.writer_gate.acquire.class"
+                )
+                .await;
                 WriterAdmissionGuard {
                     _class: Some(class_guard),
                     _daemon: DaemonGuard::Shared(daemon),
@@ -190,6 +204,7 @@ impl StoreWriterGates {
     }
 
     /// Acquires admission only if every level is free right now.
+    #[hotpath::measure(label = "daemon.writer_gate.try_acquire")]
     pub(super) fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {

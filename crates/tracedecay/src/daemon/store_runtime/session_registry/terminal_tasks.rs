@@ -6,6 +6,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.registered_schema_convergence.begin_shutdown();
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.shutdown_terminal", future = true)]
     pub(crate) async fn shutdown_terminal_tasks(&self) -> Result<(), String> {
         self.cancel_terminal_tasks();
         let mut failures = Vec::new();

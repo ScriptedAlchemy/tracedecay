@@ -34,6 +34,7 @@ impl RetainedMemoryTargetV1<'_> {
     }
 }
 
+#[hotpath::measure(label = "daemon.retained.memory.open_target", future = true)]
 pub(crate) async fn open_project_retained_memory_target<'a>(
     cg: &'a TraceDecay,
     registered_root: &Path,

@@ -326,8 +326,14 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 registry,
                 identity,
             } => {
-                let database =
-                    super::bounded_execution(context, registry.profile_sessions()).await?;
+                let database = super::bounded_execution(
+                    context,
+                    hotpath::future!(
+                        registry.profile_sessions(),
+                        label = "daemon.retained.lcm.open_authority"
+                    ),
+                )
+                .await?;
                 let expected_shard = database.binding().shard_id.clone();
                 crate::daemon::lcm_authority::mount_registered_lcm_authority(
                     database,
@@ -355,8 +361,14 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             DirectRetainedLcmAuthority::Profile {
                 registry, identity, ..
             } => {
-                let database =
-                    super::bounded_execution(context, registry.profile_sessions()).await?;
+                let database = super::bounded_execution(
+                    context,
+                    hotpath::future!(
+                        registry.profile_sessions(),
+                        label = "daemon.retained.lcm.open_retrieval"
+                    ),
+                )
+                .await?;
                 let service =
                     DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
                         .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
@@ -368,6 +380,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
+    #[hotpath::measure(label = "daemon.retained.lcm.status", future = true)]
     async fn execute_status(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -449,6 +462,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
+    #[hotpath::measure(label = "daemon.retained.lcm.doctor", future = true)]
     async fn execute_doctor(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,

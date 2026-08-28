@@ -97,8 +97,8 @@ const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 /// registry before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
 /// Deriving it keeps the two ceilings from drifting apart when either input
 /// changes.
-pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize =
-    PROFILE_WIDE_GRAPH_DB_OWNERS + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
+pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
+    + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
 /// Remote Brain node owner ceiling, taken from the credential registry rather
 /// than declared independently.

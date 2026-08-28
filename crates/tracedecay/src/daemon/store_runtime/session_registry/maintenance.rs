@@ -169,56 +169,60 @@ impl RegisteredSchemaConvergenceMaintenance {
         let statuses = Arc::clone(&self.statuses);
         let foreground_project_opens = Arc::clone(&self.foreground_project_opens);
         let task_shard_id = shard_id.clone();
-        let task = tokio::spawn(async move {
-            foreground_project_opens.wait_until_settled().await;
-            #[cfg(test)]
-            if let Some(gate) = gate {
-                gate.block().await;
-            }
-            let result = match convergence {
-                Some(convergence) => database.converge_schema(convergence).await,
-                None => Ok(()),
-            };
-            if let Err(error) = database.release_connection_memory().await {
-                crate::daemon::log_daemon_event(
-                    "registered_schema_convergence_memory_release",
-                    &[
-                        ("outcome", "degraded".to_owned()),
-                        ("database", database.db_path().display().to_string()),
-                        ("shard", format!("{task_shard_id:?}")),
-                        ("error", error.to_string()),
-                    ],
-                );
-            }
-            release_process_allocator_memory();
-            let status = match result {
-                Ok(()) => {
-                    crate::daemon::log_daemon_event(
-                        "registered_schema_convergence",
-                        &[
-                            ("outcome", "complete".to_owned()),
-                            ("database", database.db_path().display().to_string()),
-                            ("shard", format!("{task_shard_id:?}")),
-                        ],
-                    );
-                    RegisteredSchemaConvergenceStatus::Complete
+        let task = tokio::spawn(hotpath::future!(
+            async move {
+                foreground_project_opens.wait_until_settled().await;
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.block().await;
                 }
-                Err(error) => {
-                    let message = error.to_string();
+                let result = match convergence {
+                    Some(convergence) => database.converge_schema(convergence).await,
+                    None => Ok(()),
+                };
+                if let Err(error) = database.release_connection_memory().await {
                     crate::daemon::log_daemon_event(
-                        "registered_schema_convergence",
+                        "registered_schema_convergence_memory_release",
                         &[
                             ("outcome", "degraded".to_owned()),
                             ("database", database.db_path().display().to_string()),
                             ("shard", format!("{task_shard_id:?}")),
-                            ("error", message.clone()),
+                            ("error", error.to_string()),
                         ],
                     );
-                    RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
-            };
-            lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
-        });
+                release_process_allocator_memory();
+                let status = match result {
+                    Ok(()) => {
+                        crate::daemon::log_daemon_event(
+                            "registered_schema_convergence",
+                            &[
+                                ("outcome", "complete".to_owned()),
+                                ("database", database.db_path().display().to_string()),
+                                ("shard", format!("{task_shard_id:?}")),
+                            ],
+                        );
+                        RegisteredSchemaConvergenceStatus::Complete
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        crate::daemon::log_daemon_event(
+                            "registered_schema_convergence",
+                            &[
+                                ("outcome", "degraded".to_owned()),
+                                ("database", database.db_path().display().to_string()),
+                                ("shard", format!("{task_shard_id:?}")),
+                                ("error", message.clone()),
+                            ],
+                        );
+                        RegisteredSchemaConvergenceStatus::Degraded { message }
+                    }
+                };
+                lock_registered_schema_convergence_statuses(&statuses)
+                    .insert(task_shard_id, status);
+            },
+            label = "daemon.session_registry.schema_converge"
+        ));
         tasks.insert(shard_id, task);
     }
 
@@ -335,6 +339,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.long_lived_session_maintenance
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.attach_registered", future = true)]
     pub(super) async fn attach_registered(
         &self,
         runtime: StoreRuntimeClientLease,

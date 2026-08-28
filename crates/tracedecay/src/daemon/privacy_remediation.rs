@@ -74,6 +74,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
     })
 }
 
+#[hotpath::measure(label = "daemon.privacy.remediate", future = true)]
 async fn run_project_memory_privacy_remediation(
     graph: &TraceDecay,
 ) -> Result<ProjectMemoryPrivacyRemediationReceiptV1> {

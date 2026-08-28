@@ -112,16 +112,19 @@ where
     }
 
     fn registered_project_roots(&self) -> impl Future<Output = Option<Vec<PathBuf>>> + Send {
-        async move {
-            let mut roots = self.db().try_list_project_paths().await.ok()?;
-            roots.extend(
-                self.db()
-                    .try_list_code_project_paths(usize::MAX)
-                    .await
-                    .ok()?,
-            );
-            roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
-            Some(roots)
-        }
+        hotpath::future!(
+            async move {
+                let mut roots = self.db().try_list_project_paths().await.ok()?;
+                roots.extend(
+                    self.db()
+                        .try_list_code_project_paths(usize::MAX)
+                        .await
+                        .ok()?,
+                );
+                roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
+                Some(roots)
+            },
+            label = "store.session_ingest.project_roots"
+        )
     }
 }

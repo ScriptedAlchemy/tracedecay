@@ -107,19 +107,22 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
         cancellation: &'a CancellationSignal,
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async move {
-            if cancellation.context().token_id != context.cancellation().token_id {
-                return SessionRetrievalServiceOutcome::Denied;
-            }
-            if cancellation.is_cancelled() {
-                return SessionRetrievalServiceOutcome::Cancelled;
-            }
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => SessionRetrievalServiceOutcome::Cancelled,
-                outcome = self.retrieve_admitted(context, query) => outcome,
-            }
-        })
+        Box::pin(hotpath::future!(
+            async move {
+                if cancellation.context().token_id != context.cancellation().token_id {
+                    return SessionRetrievalServiceOutcome::Denied;
+                }
+                if cancellation.is_cancelled() {
+                    return SessionRetrievalServiceOutcome::Cancelled;
+                }
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => SessionRetrievalServiceOutcome::Cancelled,
+                    outcome = self.retrieve_admitted(context, query) => outcome,
+                }
+            },
+            label = "daemon.session_retrieval.retrieve"
+        ))
     }
 
     fn describe_lcm_admitted<'a>(

@@ -818,7 +818,7 @@ impl SessionTemporalRefreshWake {
         loop {
             let idle = hotpath::future!(
                 enabled_idle_notification(&state),
-                label = "session_temporal_refresh.idle_wait"
+                label = "daemon.scheduler.session_temporal.idle_wait"
             );
             let pass_count = state.pass_count.load(Ordering::Acquire);
             let busy = state.busy.load(Ordering::Acquire);

@@ -25,6 +25,7 @@ use crate::tracedecay::current_timestamp;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
+#[hotpath::measure(label = "daemon.retained.session.sessions_for", future = true)]
 pub(crate) async fn sessions_for(
     database: Option<&RegisteredGlobalDb>,
     request: &SessionsForRequestV1,
@@ -137,6 +138,7 @@ pub(crate) async fn sessions_for(
     Ok(result)
 }
 
+#[hotpath::measure(label = "daemon.retained.session.workflows", future = true)]
 pub(crate) async fn workflows(
     workflow_index: Option<&dyn WorkflowIndexReadPort>,
     request: &WorkflowsRequestV1,
