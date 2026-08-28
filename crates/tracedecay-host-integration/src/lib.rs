@@ -435,6 +435,7 @@ struct ClineFamilyPacketProviderV1 {
 /// Read one provider's admission straight from the root-composed checked-in
 /// evidence packet. Family resemblance, an adapter source file, or a shared
 /// configuration shape never substitutes for the supplied packet.
+#[hotpath::measure(label = "host_integration.evidence.cline_family")]
 pub fn cline_family_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     provider: ClineFamilyProviderV1,
@@ -484,6 +485,7 @@ pub fn cline_family_evidence_from_embedded_assets(
 /// Consume root-composed authentic native fixture bytes. A documented but
 /// uncaptured declaration remains unavailable rather than becoming capture
 /// evidence.
+#[hotpath::measure(label = "host_integration.evidence.native_fixture")]
 pub fn stock_host_native_fixture_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     host: HostKindV1,
@@ -591,6 +593,7 @@ fn fixture_has_native_event(bytes: &[u8], identities: &[&str]) -> bool {
 /// Resolve edit and stop ingress independently. Explicit feedback reads remain
 /// described by [`stock_host_registration_evidence`]; they never upgrade an
 /// absent native boundary into an event the daemon can receive.
+#[hotpath::measure(label = "host_integration.evidence.edit_stop")]
 pub fn host_edit_stop_conformance_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     host: HostKindV1,
@@ -633,6 +636,7 @@ pub fn host_edit_stop_conformance_evidence_from_embedded_assets(
     }
 }
 
+#[hotpath::measure(label = "host_integration.evidence.native_hosts")]
 pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
 ) -> Vec<HostNativeFixtureEvidenceV1> {
@@ -679,6 +683,7 @@ pub struct HostBundleManifestV1 {
 }
 
 impl HostBundleManifestV1 {
+    #[hotpath::measure(label = "host_integration.manifest.validate")]
     pub fn validate_structure(&self) -> Result<(), HostBundleError> {
         if self.schema_version != HOST_BUNDLE_SCHEMA_VERSION {
             return Err(HostBundleError::UnsupportedManifestVersion);
@@ -711,6 +716,7 @@ impl HostBundleManifestV1 {
     }
 
     /// Canonical first-party catalog bytes used for content identity.
+    #[hotpath::measure(label = "host_integration.manifest.canonicalize")]
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, HostBundleError> {
         canonical_json_bytes(&HostBundleCatalogPayloadV1 {
             schema_version: self.schema_version,
@@ -728,6 +734,7 @@ impl HostBundleManifestV1 {
         .map_err(|_| HostBundleError::CanonicalizationFailed)
     }
 
+    #[hotpath::measure(label = "host_integration.manifest.digest")]
     pub fn canonical_digest(&self) -> Result<[u8; 32], HostBundleError> {
         Ok(Sha256::digest(self.canonical_bytes()?).into())
     }
