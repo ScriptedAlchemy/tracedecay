@@ -41,6 +41,7 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::
 /// `initialize` frame to bind canonical local workspace roots; it never
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
+#[hotpath::measure(label = "cli.lsp.stdio_bridge", future = true)]
 async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::Result<()> {
     let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {

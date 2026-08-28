@@ -107,8 +107,6 @@ use super::{
 #[cfg(test)]
 use tracedecay_semantic::SemanticExecutionInterruptionV1;
 
-const EVALUATION_MAX_CONCURRENT_SESSIONS: u32 = 1;
-
 struct SemanticEvaluationGraphCancellationV1 {
     evaluation: Arc<dyn SemanticEvaluationCancellationV1>,
 }
@@ -600,10 +598,11 @@ impl ProductionSemanticRuntimeV1 {
     > {
         let artifact = installed_artifact_member_bytes(&self.lifecycle)
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        Ok(evaluation_target_resource_requirement(
-            self.resources,
-            artifact,
-        ))
+        let requirement = evaluation_target_resource_requirement(self.resources, artifact);
+        if !configured_resource_ceiling_covers(&self.resources, requirement) {
+            return Err(SemanticRuntimeBackendErrorV1::Rejected);
+        }
+        Ok(requirement)
     }
 
     /// Prepare one evaluator generation with a cache retained by the daemon's
@@ -616,10 +615,7 @@ impl ProductionSemanticRuntimeV1 {
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
         let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)?;
-        let execution = SemanticResourceCeilings {
-            max_concurrent_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS,
-            ..self.resources
-        };
+        let execution = self.resources;
         let artifact = LoadedSemanticArtifactV1::from_lifecycle(
             &self.lifecycle,
             generation.manifest(),
@@ -638,10 +634,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             generation.chunks().chunks(),
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: execution.max_concurrent_sessions as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(execution),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&cancellation),
@@ -706,10 +699,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(self.resources),
             current.projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&current.cancellation),
@@ -721,6 +711,10 @@ impl ProductionSemanticRuntimeV1 {
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
+        require_evaluation_request_binds_code_manifest(
+            &prepared.prepared.request.changes.manifest_digest,
+            &generation.projection().request().changes.manifest_digest,
+        )?;
         let mut resources = current.generation_resources();
         resources.incremental_source_generation = generation.manifest().generation_id.clone();
         resources.incremental_source_manifest_digest = generation
@@ -768,8 +762,13 @@ impl ProductionSemanticRuntimeV1 {
             graph_cancellation,
         )
         .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
-        self.measure_evaluation_projection_cases_in_store(&graph, clean, sources)
-            .await
+        let result = self
+            .measure_evaluation_projection_cases_in_store(&graph, clean, sources)
+            .await;
+        match graph.retire() {
+            Ok(()) => result,
+            Err(error) => result.and(Err(SemanticRuntimeScheduleFailureV1::publication(error))),
+        }
     }
 
     async fn measure_evaluation_projection_cases_in_store(
@@ -793,7 +792,7 @@ impl ProductionSemanticRuntimeV1 {
             clean.code.chunks().chunks(),
             &clean_prepared.request,
             None,
-        );
+        )?;
         let clean_retained = graph
             .retained(&clean.source_generation)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
@@ -1068,7 +1067,7 @@ impl ProductionSemanticRuntimeV1 {
             cancellation_artifact,
             cancellation_request.clone(),
             &cancellation_chunks,
-            EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
+            evaluation_projection_resources(self.resources).max_sessions,
             self.resources.max_resident_bytes,
             clean.projection_batch_cache.as_ref(),
             Arc::clone(&clean.cancellation),
@@ -1222,10 +1221,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(self.resources),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(cancellation),
@@ -2153,6 +2149,10 @@ impl PreparedSemanticEvaluationGenerationV1 {
             })
             .ok_or(SemanticRuntimeScheduleFailureV1::Projection)?;
         let source_manifest_digest = code.projection().request().changes.manifest_digest.clone();
+        require_evaluation_request_binds_code_manifest(
+            &prepared.prepared.request.changes.manifest_digest,
+            &source_manifest_digest,
+        )?;
         let source_generation = code.manifest().generation_id.clone();
         let sequence_length = prepared
             .prepared
@@ -2519,6 +2519,15 @@ fn evaluation_target_resource_requirement(
     requirement
 }
 
+fn evaluation_projection_resources(
+    configured: SemanticResourceCeilings,
+) -> SemanticEvaluationProjectionResourcesV1 {
+    SemanticEvaluationProjectionResourcesV1 {
+        max_sessions: configured.max_concurrent_sessions as usize,
+        memory_ceiling_bytes: configured.max_resident_bytes,
+    }
+}
+
 fn canonical_exact_flat_search_index_key()
 -> Result<SemanticSearchIndexKeyV1, SemanticRuntimeBackendErrorV1> {
     SemanticSearchIndexProfileV1::exact_flat_v1()
@@ -2698,7 +2707,19 @@ fn block_on_semantic_evaluation<Output>(
         // Daemon evaluation owns a Tokio blocking worker. Those workers retain
         // the runtime handle even though they are outside an async task, so the
         // handle is the canonical executor for projection-case futures.
-        Ok(runtime) => runtime.block_on(future),
+        // An async task already owns that handle; block_on would panic or
+        // deadlock, so refuse with a typed runtime failure.
+        Ok(runtime) => {
+            // spawn_blocking workers retain a handle and can drive the
+            // future. A live async task panics if it nests block_on; turn
+            // that into a typed runtime refusal instead of aborting the worker.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(future)
+            })) {
+                Ok(result) => result,
+                Err(_) => Err(SemanticRuntimeScheduleFailureV1::Runtime),
+            }
+        }
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3047,19 +3068,44 @@ fn evaluation_projection_plan_from_request(
     if request.changes.to_generation != generation.manifest().generation_id {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
-    Ok(evaluation_projection_plan_from_canonical_chunks(
+    require_evaluation_request_binds_code_manifest(
+        &request.changes.manifest_digest,
+        &generation.projection().request().changes.manifest_digest,
+    )?;
+    evaluation_projection_plan_from_canonical_chunks(
         generation.chunks().chunks(),
         request,
         base_generation,
-    ))
+    )
+}
+
+fn require_evaluation_request_binds_code_manifest(
+    request_digest: &ManifestDigest,
+    code_digest: &ManifestDigest,
+) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+    if request_digest != code_digest {
+        return Err(SemanticRuntimeScheduleFailureV1::projection(
+            "evaluation request is not bound to the code generation manifest",
+        ));
+    }
+    Ok(())
 }
 
 fn evaluation_projection_plan_from_canonical_chunks(
     canonical_chunks: &[CodeSearchChunkV1],
     request: &ProjectionBatchRequestV1,
     base_generation: Option<VectorGenerationIdV1>,
-) -> VectorGenerationPlanV1 {
-    VectorGenerationPlanV1 {
+) -> Result<VectorGenerationPlanV1, SemanticRuntimeScheduleFailureV1> {
+    if let Some(chunk) = canonical_chunks
+        .iter()
+        .find(|chunk| chunk.anchor.generation_id != request.changes.to_generation)
+    {
+        return Err(SemanticRuntimeScheduleFailureV1::projection(format!(
+            "evaluation plan chunk {} is not bound to {}",
+            chunk.id, request.changes.to_generation
+        )));
+    }
+    Ok(VectorGenerationPlanV1 {
         target_projection_key: request.target_projection_key.clone(),
         source_generation: request.changes.to_generation.clone(),
         source_manifest_digest: request.changes.manifest_digest.clone(),
@@ -3068,7 +3114,7 @@ fn evaluation_projection_plan_from_canonical_chunks(
             .map(|chunk| chunk.id.clone())
             .collect(),
         base_generation,
-    }
+    })
 }
 
 fn evaluation_projection_case_store(
@@ -3800,6 +3846,14 @@ mod tests {
         assert_eq!(observed, Ok(7));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_evaluation_refuses_an_async_task_context() {
+        assert_eq!(
+            block_on_semantic_evaluation(async { Ok::<_, SemanticRuntimeScheduleFailureV1>(7) }),
+            Err(SemanticRuntimeScheduleFailureV1::Runtime)
+        );
+    }
+
     #[test]
     fn evaluation_target_uses_exact_artifact_bytes_inside_configured_capacity() {
         let configured = SemanticResourceCeilings {
@@ -3826,6 +3880,52 @@ mod tests {
         assert_eq!(requirement.resident_bytes, configured.max_resident_bytes);
         assert_eq!(requirement.threads, configured.max_threads);
         assert!(configured_resource_ceiling_covers(&configured, requirement));
+    }
+
+    #[test]
+    fn evaluator_projection_inherits_configured_session_width() {
+        let configured = SemanticResourceCeilings {
+            max_model_bytes: 700,
+            max_tokenizer_bytes: 64,
+            max_resident_bytes: 2_048,
+            max_threads: 8,
+            max_concurrent_sessions: 4,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        };
+
+        let resources = evaluation_projection_resources(configured);
+
+        assert_eq!(resources.max_sessions, 4);
+        assert_eq!(resources.memory_ceiling_bytes, 2_048);
+    }
+
+    #[test]
+    fn evaluation_target_does_not_fit_when_artifact_exceeds_configured_capacity() {
+        let configured = SemanticResourceCeilings {
+            max_model_bytes: 100,
+            max_tokenizer_bytes: 64,
+            max_resident_bytes: 2_048,
+            max_threads: 8,
+            max_concurrent_sessions: 4,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        };
+
+        let requirement = evaluation_target_resource_requirement(
+            configured,
+            InstalledArtifactMemberBytesV1 {
+                model: 633,
+                tokenizer: 5,
+            },
+        );
+
+        assert!(
+            !configured_resource_ceiling_covers(&configured, requirement),
+            "an oversized artifact must not be admitted as an evaluation target"
+        );
     }
 
     #[test]
@@ -4339,6 +4439,67 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_plan_uses_canonical_generation_chunk_order() {
+        let source = source_generation('o');
+        let alpha = canonical_chunk(&source, 'a');
+        let beta = canonical_chunk(&source, 'b');
+        let request = projection_request('o');
+
+        let plan = evaluation_projection_plan_from_canonical_chunks(
+            &[alpha.clone(), beta.clone()],
+            &request,
+            None,
+        )
+        .expect("canonical chunks bind the request generation");
+
+        assert_eq!(
+            plan.expected_chunk_ids.as_slice(),
+            &[alpha.id.clone(), beta.id.clone()],
+            "evaluation plans must follow canonical generation order, not prepared-vector order"
+        );
+        assert_eq!(plan.source_generation, request.changes.to_generation);
+        assert_eq!(plan.source_manifest_digest, request.changes.manifest_digest);
+        assert_eq!(plan.target_projection_key, request.target_projection_key);
+        assert!(plan.base_generation.is_none());
+    }
+
+    #[test]
+    fn evaluation_plan_refuses_chunks_from_a_foreign_generation() {
+        let foreign = source_generation('x');
+        let chunk = canonical_chunk(&foreign, 'a');
+        let request = projection_request('o');
+
+        let error = evaluation_projection_plan_from_canonical_chunks(&[chunk], &request, None)
+            .expect_err("foreign generation chunks must not mint an evaluation plan");
+        assert!(
+            error.is_projection(),
+            "foreign chunk binding is a projection refusal, not publication: {error:?}"
+        );
+    }
+
+    #[test]
+    fn evaluation_request_accepts_the_code_generation_manifest() {
+        let digest = test_digest('d');
+        require_evaluation_request_binds_code_manifest(&digest, &digest)
+            .expect("matching manifests bind evaluation resources to the code generation");
+    }
+
+    #[test]
+    fn evaluation_request_refuses_a_foreign_code_manifest() {
+        let error =
+            require_evaluation_request_binds_code_manifest(&test_digest('d'), &test_digest('e'))
+                .expect_err("a foreign request digest must not bind evaluation resources");
+        assert!(
+            error.is_projection(),
+            "manifest mismatch is a projection refusal, not publication: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Projection: evaluation request is not bound to the code generation manifest"
+        );
+    }
+
+    #[test]
     fn symbol_backed_semantic_identity_dedupes_with_lexical_evidence() {
         let source = source_generation('a');
         let mut chunk = canonical_chunk(&source, 'a');
@@ -4381,25 +4542,6 @@ mod tests {
             semantic_source_manifest_digest(&request),
             &request.request_digest,
             "the projection request receipt is not the source manifest identity"
-        );
-    }
-
-    #[test]
-    fn evaluation_plan_uses_canonical_generation_chunk_order() {
-        let source = source_generation('o');
-        let alpha = canonical_chunk(&source, 'a');
-        let beta = canonical_chunk(&source, 'b');
-        let request = projection_request('o');
-
-        let plan = evaluation_projection_plan_from_canonical_chunks(
-            &[alpha.clone(), beta.clone()],
-            &request,
-            None,
-        );
-
-        assert_eq!(
-            plan.expected_chunk_ids.as_slice(),
-            &[alpha.id.clone(), beta.id.clone()]
         );
     }
 

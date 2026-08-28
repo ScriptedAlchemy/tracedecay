@@ -452,14 +452,16 @@ pub async fn execute_temporal_candidate_export(
         }
     }
 
-    let resolved = resolve_temporal_controlled(
-        &records.occurrences,
-        &records.copies,
-        &records.assertions,
-        snapshot.temporal_mode(),
-        snapshot.request().execution_control(),
-    )
-    .map_err(map_port_error)?;
+    let resolved = hotpath::measure_block!("temporal_query.records.resolve", {
+        resolve_temporal_controlled(
+            &records.occurrences,
+            &records.copies,
+            &records.assertions,
+            snapshot.temporal_mode(),
+            snapshot.request().execution_control(),
+        )
+        .map_err(map_port_error)?
+    });
     let mut visible_anchors = resolved
         .iter()
         .map(|resolved| resolved.occurrence.anchor_id.clone())

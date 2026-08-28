@@ -99,12 +99,14 @@ sha256_digest!(
 
 impl GraphCanonicalReplaySourceDigestV1 {
     pub fn for_source(source: &[u8]) -> Self {
-        Self(
-            tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
-                "sha256:",
-                &Sha256::digest(source),
-            ),
-        )
+        hotpath::measure_block!("store.graph_publication.replay.digest", {
+            Self(
+                tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+                    "sha256:",
+                    &Sha256::digest(source),
+                ),
+            )
+        })
     }
 }
 
@@ -212,6 +214,7 @@ impl GraphPublicationReplayV1 {
         Ok(replay)
     }
 
+    #[hotpath::measure(label = "store.graph_publication.replay.validate")]
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         validate_graph_publication_shard(
             &self.key.projection.shard_id,
@@ -336,19 +339,21 @@ fn validate_graph_publication_shard(
 fn encoded_direct_dependency_bytes(
     dependencies: &[GraphDependencyGenerationIdentityV1],
 ) -> Result<usize, StorageRuntimeContractErrorV1> {
-    let encoded = serde_json::to_vec(dependencies).map_err(|_| {
-        StorageRuntimeContractErrorV1::NonCanonical {
-            field: "graph replay direct dependency encoding",
+    hotpath::measure_block!("store.graph_publication.replay.encode_dependencies", {
+        let encoded = serde_json::to_vec(dependencies).map_err(|_| {
+            StorageRuntimeContractErrorV1::NonCanonical {
+                field: "graph replay direct dependency encoding",
+            }
+        })?;
+        if encoded.len() > MAX_GRAPH_REPLAY_DIRECT_DEPENDENCY_BYTES_V1 {
+            return Err(StorageRuntimeContractErrorV1::TooLong {
+                field: "graph replay direct dependency encoding",
+                actual: encoded.len(),
+                max: MAX_GRAPH_REPLAY_DIRECT_DEPENDENCY_BYTES_V1,
+            });
         }
-    })?;
-    if encoded.len() > MAX_GRAPH_REPLAY_DIRECT_DEPENDENCY_BYTES_V1 {
-        return Err(StorageRuntimeContractErrorV1::TooLong {
-            field: "graph replay direct dependency encoding",
-            actual: encoded.len(),
-            max: MAX_GRAPH_REPLAY_DIRECT_DEPENDENCY_BYTES_V1,
-        });
-    }
-    Ok(encoded.len())
+        Ok(encoded.len())
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, ComponentRevision, SemanticSearchIndexProfileV1,
-    VectorGenerationIdV1, canonical_sha256,
+    CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
+    SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -1029,47 +1029,19 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         self.control.checkpoint().map_err(|_| {
             CandidateOutputError::Contract("semantic evaluation was cancelled".to_owned())
         })?;
-        let mismatch = if resources.source_generation != *context.code_generation {
-            Some("source_generation")
-        } else if resources.source_manifest_digest
-            != context.code.projection().request().changes.manifest_digest
-        {
-            Some("source_manifest_digest")
-        } else if resources.incremental_source_generation
-            != context.incremental_code.manifest().generation_id
-        {
-            Some("incremental_source_generation")
-        } else if resources.incremental_source_manifest_digest
-            != context
+        if let Some(mismatch) = semantic_resource_measurement_bind_mismatch(
+            &resources,
+            context.code_generation,
+            &context.code.projection().request().changes.manifest_digest,
+            &context.incremental_code.manifest().generation_id,
+            &context
                 .incremental_code
                 .projection()
                 .request()
                 .changes
-                .manifest_digest
-        {
-            Some("incremental_source_manifest_digest")
-        } else if semantic_resources.is_some() && resources.model_bytes == 0 {
-            Some("model_bytes")
-        } else if semantic_resources.is_some() && resources.tokenizer_bytes == 0 {
-            Some("tokenizer_bytes")
-        } else if semantic_resources.is_some() && resources.threads == 0 {
-            Some("threads")
-        } else if semantic_resources.is_some() && resources.batch_size == 0 {
-            Some("batch_size")
-        } else if semantic_resources.is_some() && resources.sequence_length == 0 {
-            Some("sequence_length")
-        } else if semantic_resources.is_some() && resources.load_deadline_ms == 0 {
-            Some("load_deadline_ms")
-        } else if semantic_resources.is_some() && resources.cold_model_load_micros == 0 {
-            Some("cold_model_load_micros")
-        } else if semantic_resources.is_some() && resources.vector_bytes == 0 {
-            Some("vector_bytes")
-        } else if semantic_resources.is_some() && resources.projection_cases.len() != 7 {
-            Some("projection_cases")
-        } else {
-            None
-        };
-        if let Some(mismatch) = mismatch {
+                .manifest_digest,
+            semantic_resources.is_some(),
+        ) {
             return Err(CandidateOutputError::Contract(format!(
                 "semantic resource measurement is not bound to the exact prepared generation: {mismatch}"
             )));
@@ -1203,7 +1175,11 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
             let evaluated = crate::search_eval::load_default_evaluated_profile_material(
                 &self.candidate.evaluated_profile_id,
             )
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "semantic evaluation profile is not in the packaged workload".to_owned(),
+                )
+            })?;
             self.control.checkpoint()?;
             Ok(SemanticEvaluationPublicationSnapshotV1 {
                 project_root: self.project_root.clone(),
@@ -1333,7 +1309,12 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                     generation,
                 )),
                 (None, None, None) => None,
-                _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+                _ => {
+                    return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "semantic evaluation lifecycle, vector revision, and generation must be supplied together"
+                            .to_owned(),
+                    ));
+                }
             };
             let _vector_lease = match runtime.as_ref() {
                 Some((runtime, _, revision, generation)) => Some(
@@ -1421,6 +1402,47 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     kib.checked_mul(1_024)
+}
+
+fn semantic_resource_measurement_bind_mismatch(
+    resources: &ProductionCandidateNativeGenerationResourcesV1,
+    expected_source_generation: &CodeGenerationId,
+    expected_source_manifest: &ManifestDigest,
+    expected_incremental_generation: &CodeGenerationId,
+    expected_incremental_manifest: &ManifestDigest,
+    require_measured_resources: bool,
+) -> Option<&'static str> {
+    if resources.source_generation != *expected_source_generation {
+        Some("source_generation")
+    } else if resources.source_manifest_digest != *expected_source_manifest {
+        Some("source_manifest_digest")
+    } else if resources.incremental_source_generation != *expected_incremental_generation {
+        Some("incremental_source_generation")
+    } else if resources.incremental_source_manifest_digest != *expected_incremental_manifest {
+        Some("incremental_source_manifest_digest")
+    } else if !require_measured_resources {
+        None
+    } else if resources.model_bytes == 0 {
+        Some("model_bytes")
+    } else if resources.tokenizer_bytes == 0 {
+        Some("tokenizer_bytes")
+    } else if resources.threads == 0 {
+        Some("threads")
+    } else if resources.batch_size == 0 {
+        Some("batch_size")
+    } else if resources.sequence_length == 0 {
+        Some("sequence_length")
+    } else if resources.load_deadline_ms == 0 {
+        Some("load_deadline_ms")
+    } else if resources.cold_model_load_micros == 0 {
+        Some("cold_model_load_micros")
+    } else if resources.vector_bytes == 0 {
+        Some("vector_bytes")
+    } else if resources.projection_cases.len() != 7 {
+        Some("projection_cases")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1711,5 +1733,148 @@ mod tests {
             .expect("Linux quality evaluation records CPU and peak RSS");
 
         assert!(peak_rss_bytes > 0);
+    }
+
+    fn test_generation(value: char) -> CodeGenerationId {
+        CodeGenerationId::new(format!("code-generation.{value}")).expect("generation")
+    }
+
+    fn test_digest(value: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64))).expect("digest")
+    }
+
+    fn measured_resources(
+        source: CodeGenerationId,
+        source_digest: ManifestDigest,
+        incremental: CodeGenerationId,
+        incremental_digest: ManifestDigest,
+    ) -> ProductionCandidateNativeGenerationResourcesV1 {
+        let sample = SemanticProjectionCaseSampleV1 {
+            outcome: crate::search_eval::semantic_native::SemanticProjectionCaseOutcomeV1::Complete,
+            elapsed_micros: 1,
+            input_bytes: 1,
+            chunks_added_or_changed: 1,
+            chunks_deleted: 0,
+            chunks_reused: 0,
+            projection_calls: 1,
+        };
+        ProductionCandidateNativeGenerationResourcesV1 {
+            source_generation: source,
+            source_manifest_digest: source_digest,
+            incremental_source_generation: incremental,
+            incremental_source_manifest_digest: incremental_digest,
+            vector_generation: None,
+            artifact_digest: None,
+            model_bytes: 1,
+            tokenizer_bytes: 1,
+            threads: 1,
+            max_concurrent_sessions: 1,
+            batch_size: 1,
+            sequence_length: 1,
+            load_deadline_ms: 1,
+            cold_model_load_micros: 1,
+            vector_bytes: 1,
+            index_bytes: 1,
+            cache_bytes: 1,
+            clean_projection_build_micros: 1,
+            incremental_rebuild_micros: 1,
+            projection_cases: BTreeMap::from([
+                (SemanticProjectionCaseV1::Clean, sample.clone()),
+                (SemanticProjectionCaseV1::OneSymbol, sample.clone()),
+                (SemanticProjectionCaseV1::Deletion, sample.clone()),
+                (SemanticProjectionCaseV1::NoOp, sample.clone()),
+                (SemanticProjectionCaseV1::IdempotencyReplay, sample.clone()),
+                (SemanticProjectionCaseV1::Cancellation, sample.clone()),
+                (SemanticProjectionCaseV1::IncompatibleState, sample),
+            ]),
+        }
+    }
+
+    #[test]
+    fn bound_resource_measurement_accepts_matching_code_manifests() {
+        let source = test_generation('s');
+        let incremental = test_generation('i');
+        let source_digest = test_digest('s');
+        let incremental_digest = test_digest('i');
+        let resources = measured_resources(
+            source.clone(),
+            source_digest.clone(),
+            incremental.clone(),
+            incremental_digest.clone(),
+        );
+        assert_eq!(
+            semantic_resource_measurement_bind_mismatch(
+                &resources,
+                &source,
+                &source_digest,
+                &incremental,
+                &incremental_digest,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unbound_source_manifest_is_named_before_zero_measured_fields() {
+        let source = test_generation('s');
+        let incremental = test_generation('i');
+        let source_digest = test_digest('s');
+        let incremental_digest = test_digest('i');
+        let mut resources = measured_resources(
+            source.clone(),
+            test_digest('x'),
+            incremental.clone(),
+            incremental_digest.clone(),
+        );
+        resources.model_bytes = 0;
+        assert_eq!(
+            semantic_resource_measurement_bind_mismatch(
+                &resources,
+                &source,
+                &source_digest,
+                &incremental,
+                &incremental_digest,
+                true,
+            ),
+            Some("source_manifest_digest")
+        );
+    }
+
+    #[test]
+    fn missing_projection_cases_are_named_only_when_measurement_is_required() {
+        let source = test_generation('s');
+        let incremental = test_generation('i');
+        let source_digest = test_digest('s');
+        let incremental_digest = test_digest('i');
+        let mut resources = measured_resources(
+            source.clone(),
+            source_digest.clone(),
+            incremental.clone(),
+            incremental_digest.clone(),
+        );
+        resources.projection_cases.clear();
+        assert_eq!(
+            semantic_resource_measurement_bind_mismatch(
+                &resources,
+                &source,
+                &source_digest,
+                &incremental,
+                &incremental_digest,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            semantic_resource_measurement_bind_mismatch(
+                &resources,
+                &source,
+                &source_digest,
+                &incremental,
+                &incremental_digest,
+                true,
+            ),
+            Some("projection_cases")
+        );
     }
 }

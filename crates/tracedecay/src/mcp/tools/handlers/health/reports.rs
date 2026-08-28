@@ -6,6 +6,7 @@ use tracedecay_domain::RelationEdgeKindV1;
 const MAX_GINI_SYMBOLS: usize = 500_000;
 const MAX_GINI_RELATIONS: usize = 2_000_000;
 
+#[hotpath::measure(label = "mcp.tools.gini", future = true)]
 pub(crate) async fn handle_gini(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -222,6 +223,7 @@ fn verified_gini_member_values(
     Ok(members.into_values().collect())
 }
 
+#[hotpath::measure(label = "mcp.tools.dependency_depth", future = true)]
 pub(crate) async fn handle_dependency_depth(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -266,6 +268,7 @@ pub(crate) async fn handle_dependency_depth(
     ))
 }
 
+#[hotpath::measure(label = "mcp.tools.health", future = true)]
 pub(crate) async fn handle_health(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

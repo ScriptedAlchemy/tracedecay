@@ -726,172 +726,181 @@ impl McpServer {
         context
     }
 
-    pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
-        let McpServerConstructionContext {
-            cg,
-            scope_prefix,
-            profile_root,
-            profile_identity,
-            global_db,
-            accounting_db,
-            registry_db,
-            session_db,
-            user_session_db,
-            registered_session_db,
-            registered_user_session_db,
-            session_sync_service,
-            host_admission_broker,
-            project_session_refresh_wake,
-            user_session_refresh_wake,
-            own_project_host_admission_replay,
-            startup_catch_up_enabled,
-            automation_scheduler_reconciler,
-            database_owner_reconciler,
-            dashboard_automation_writer,
-            remote_operational_status,
-            dashboard_doctor_report_reader,
-            dashboard_code_index_freshness_reader,
-            dashboard_explorer_semantic_reader,
-            dashboard_feedback_status_reader,
-            diagnostics_lsp,
-            background_refresh_writer,
-            code_index_hook_sink,
-            code_index_reconcile_sink,
-            code_index_freshness_probe_sink,
-            code_index_publication_identity,
-            code_index_search_executor,
-            code_index_branch_diff_executor,
-            code_graph_projection_read_port,
-            code_graph_read_admission_port,
-            code_index_ignored_dependency_admission,
-            code_index_search_authority,
-            retained_project_server_resolver,
-            project_routes,
-            application_invocation_executor,
-            daemon_invocation_service,
-            delivery_settlement_authority,
-            delivery_settlement_recorder,
-            project_server_live,
-            #[cfg(any(test, feature = "test-transport"))]
-            host_admission_test_runtime,
-        } = context;
-        let file_token_map = HashMap::new();
-        let response_handle_project_root = cg.project_root().to_path_buf();
-        let persisted_tokens_saved = match cg.get_tokens_saved().await {
-            Ok(persisted) => Some(persisted),
-            Err(error) => {
-                tracing::warn!(
+    /// Heap-erase MCP server construction. Call-site `Box::pin` still builds
+    /// this future on the Tokio worker stack; a named `dyn Future` owner
+    /// keeps that construction pointer-sized for the caller.
+    pub(crate) fn new_with_context(
+        context: McpServerConstructionContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Arc<Self>> + Send>> {
+        Box::pin(async move {
+            let McpServerConstructionContext {
+                cg,
+                scope_prefix,
+                profile_root,
+                profile_identity,
+                global_db,
+                accounting_db,
+                registry_db,
+                session_db,
+                user_session_db,
+                registered_session_db,
+                registered_user_session_db,
+                session_sync_service,
+                host_admission_broker,
+                project_session_refresh_wake,
+                user_session_refresh_wake,
+                own_project_host_admission_replay,
+                startup_catch_up_enabled,
+                automation_scheduler_reconciler,
+                database_owner_reconciler,
+                dashboard_automation_writer,
+                remote_operational_status,
+                dashboard_doctor_report_reader,
+                dashboard_code_index_freshness_reader,
+                dashboard_explorer_semantic_reader,
+                dashboard_feedback_status_reader,
+                diagnostics_lsp,
+                background_refresh_writer,
+                code_index_hook_sink,
+                code_index_reconcile_sink,
+                code_index_freshness_probe_sink,
+                code_index_publication_identity,
+                code_index_search_executor,
+                code_index_branch_diff_executor,
+                code_graph_projection_read_port,
+                code_graph_read_admission_port,
+                code_index_ignored_dependency_admission,
+                code_index_search_authority,
+                retained_project_server_resolver,
+                project_routes,
+                application_invocation_executor,
+                daemon_invocation_service,
+                delivery_settlement_authority,
+                delivery_settlement_recorder,
+                project_server_live,
+                #[cfg(any(test, feature = "test-transport"))]
+                host_admission_test_runtime,
+            } = context;
+            let file_token_map = HashMap::new();
+            let response_handle_project_root = cg.project_root().to_path_buf();
+            let persisted_tokens_saved = match cg.get_tokens_saved().await {
+                Ok(persisted) => Some(persisted),
+                Err(error) => {
+                    tracing::warn!(
+                        project_root = %cg.project_root().display(),
+                        %error,
+                        "MCP token accounting is unavailable because its durable baseline could not be read"
+                    );
+                    None
+                }
+            };
+            // Register this project in the global DB with its current tokens.
+            // A failed read must not upsert 0 as if the project saved nothing.
+            if let Some(gdb) = accounting_db.as_ref() {
+                if let Some(persisted) = persisted_tokens_saved {
+                    gdb.upsert(cg.project_root(), persisted).await;
+                }
+            } else if global_db.is_none() {
+                // Name the gap where it is created. Every later savings and
+                // analytics write from this server is a no-op (see
+                // `LedgerSink::NotMounted`); without this, a fixture that forgot
+                // to mount a database only failed much later, as an absent row.
+                tracing::debug!(
                     project_root = %cg.project_root().display(),
-                    %error,
-                    "MCP token accounting is unavailable because its durable baseline could not be read"
+                    "MCP server built with no accounting database; ledger and analytics writes are inert"
                 );
-                None
             }
-        };
-        // Register this project in the global DB with its current tokens.
-        // A failed read must not upsert 0 as if the project saved nothing.
-        if let Some(gdb) = accounting_db.as_ref() {
-            if let Some(persisted) = persisted_tokens_saved {
-                gdb.upsert(cg.project_root(), persisted).await;
-            }
-        } else if global_db.is_none() {
-            // Name the gap where it is created. Every later savings and
-            // analytics write from this server is a no-op (see
-            // `LedgerSink::NotMounted`); without this, a fixture that forgot
-            // to mount a database only failed much later, as an absent row.
-            tracing::debug!(
-                project_root = %cg.project_root().display(),
-                "MCP server built with no accounting database; ledger and analytics writes are inert"
-            );
-        }
 
-        // Detect borrowed-worktree index once at startup so every read
-        // tool can cheaply prefix a heads-up. Two git rev-parse spawns
-        // worst case. spawn_blocking because the underlying
-        // `Command::output()` can sit on slow disks.
-        let worktree_mismatch = {
-            let project_root = cg.project_root().to_path_buf();
-            let scope_prefix = scope_prefix.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::worktree::detect_scoped_worktree_index_mismatch(
-                    &project_root,
-                    scope_prefix.as_deref(),
-                )
-            })
-            .await
-            .ok()
-            .flatten()
-        };
-
-        // `TraceDecay` materializes this from one resolved configuration
-        // snapshot when it opens. Copy it once so catch-up, sync-on-read,
-        // the staleness banner, and telemetry never re-read legacy input,
-        // a database, or IPC per call.
-        let sync_config = cg.get_config().sync.clone();
-        let telemetry_config = cg.get_config().telemetry.clone();
-        let diagnostics_lsp = match diagnostics_lsp {
-            Some(diagnostics_lsp) => diagnostics_lsp,
-            None => {
-                tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
-                    cg.project_root().to_path_buf(),
-                    &cg.store_layout().dashboard_root,
-                )
+            // Detect borrowed-worktree index once at startup so every read
+            // tool can cheaply prefix a heads-up. Two git rev-parse spawns
+            // worst case. spawn_blocking because the underlying
+            // `Command::output()` can sit on slow disks.
+            let worktree_mismatch = {
+                let project_root = cg.project_root().to_path_buf();
+                let scope_prefix = scope_prefix.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::worktree::detect_scoped_worktree_index_mismatch(
+                        &project_root,
+                        scope_prefix.as_deref(),
+                    )
+                })
                 .await
-            }
-        };
-        let active_project_id = cg.store_layout().identity.project_id.clone();
-        let project_session_retrieval_root = match registry_db.as_deref() {
-            Some(registry) => {
-                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(&cg, registry)
+                .ok()
+                .flatten()
+            };
+
+            // `TraceDecay` materializes this from one resolved configuration
+            // snapshot when it opens. Copy it once so catch-up, sync-on-read,
+            // the staleness banner, and telemetry never re-read legacy input,
+            // a database, or IPC per call.
+            let sync_config = cg.get_config().sync.clone();
+            let telemetry_config = cg.get_config().telemetry.clone();
+            let diagnostics_lsp = match diagnostics_lsp {
+                Some(diagnostics_lsp) => diagnostics_lsp,
+                None => {
+                    tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
+                        cg.project_root().to_path_buf(),
+                        &cg.store_layout().dashboard_root,
+                    )
                     .await
-            }
-            None => None,
-        };
-        #[cfg(any(test, feature = "test-transport"))]
-        let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
-            session_db.as_ref().map(|_| {
+                }
+            };
+            let active_project_id = cg.store_layout().identity.project_id.clone();
+            let project_session_retrieval_root = match registry_db.as_deref() {
+                Some(registry) => {
+                    crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(
+                        &cg, registry,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            #[cfg(any(test, feature = "test-transport"))]
+            let project_session_retrieval_root =
+                project_session_retrieval_root.or_else(|| {
+                    session_db.as_ref().map(|_| {
                 crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(&cg)
             })
-        });
-        let project_session_retrieval_root =
-            project_session_retrieval_root.and_then(|root| match profile_identity.as_ref() {
-                Some(identity) => root.with_project_runtime_shard(identity),
-                None => Some(root),
-            });
-        let project_session_store_id = project_session_retrieval_root
-            .as_ref()
-            .map(|root| root.identity().store_id().clone());
-        let project_session_root_id = project_session_retrieval_root
-            .as_ref()
-            .map(|root| root.identity().root_id().clone());
-        let profile_session_retrieval_root =
-            crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile().and_then(
-                |root| match profile_identity.as_ref() {
-                    Some(identity) => root.with_profile_runtime_shard(identity),
+                });
+            let project_session_retrieval_root =
+                project_session_retrieval_root.and_then(|root| match profile_identity.as_ref() {
+                    Some(identity) => root.with_project_runtime_shard(identity),
                     None => Some(root),
-                },
-            );
-        let project_session_refresh_service = session_db
-            .as_ref()
-            .zip(project_session_refresh_wake.as_ref())
-            .zip(active_project_id.clone())
-            .map(|((database, wake), project_id)| {
-                Arc::new(DaemonSessionRefreshService::new(
-                    database.clone(),
-                    wake.clone(),
-                    Some(project_id),
-                )) as Arc<dyn SessionRefreshServicePort>
+                });
+            let project_session_store_id = project_session_retrieval_root
+                .as_ref()
+                .map(|root| root.identity().store_id().clone());
+            let project_session_root_id = project_session_retrieval_root
+                .as_ref()
+                .map(|root| root.identity().root_id().clone());
+            let profile_session_retrieval_root =
+                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile().and_then(
+                    |root| match profile_identity.as_ref() {
+                        Some(identity) => root.with_profile_runtime_shard(identity),
+                        None => Some(root),
+                    },
+                );
+            let project_session_refresh_service = session_db
+                .as_ref()
+                .zip(project_session_refresh_wake.as_ref())
+                .zip(active_project_id.clone())
+                .map(|((database, wake), project_id)| {
+                    Arc::new(DaemonSessionRefreshService::new(
+                        database.clone(),
+                        wake.clone(),
+                        Some(project_id),
+                    )) as Arc<dyn SessionRefreshServicePort>
+                });
+            let project_registry_reads = registry_db.as_ref().map(|registry| {
+                Arc::new(DaemonProjectRegistryReadService::new(registry.clone()))
+                    as Arc<dyn ProjectRegistryReadPort>
             });
-        let project_registry_reads = registry_db.as_ref().map(|registry| {
-            Arc::new(DaemonProjectRegistryReadService::new(registry.clone()))
-                as Arc<dyn ProjectRegistryReadPort>
-        });
-        let project_application_retrieval = session_db
-            .as_ref()
-            .zip(project_session_retrieval_root.clone())
-            .and_then(|(database, root)| {
-                let identity = root.identity().clone();
-                let service = match registered_session_db.as_ref() {
+            let project_application_retrieval = session_db
+                .as_ref()
+                .zip(project_session_retrieval_root.clone())
+                .and_then(|(database, root)| {
+                    let identity = root.identity().clone();
+                    let service = match registered_session_db.as_ref() {
                     Some(registered) => {
                     crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered(
                         database.clone(),
@@ -906,209 +915,211 @@ impl McpServer {
                         project_session_refresh_wake.clone(),
                     ),
                 }?;
-                Some(MountedProjectApplicationRetrievalV1 {
+                    Some(MountedProjectApplicationRetrievalV1 {
                     identity,
                     service: Arc::new(service)
                         as Arc<
                             dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1,
                         >,
                 })
-            });
-        let project_lcm_authority = project_session_retrieval_root
-            .as_ref()
-            .zip(registered_session_db.as_ref())
-            .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    database.clone(),
-                    root.identity().clone(),
-                    root.expected_runtime_shard()?,
-                )
-            });
-        let user_lcm_authority = profile_session_retrieval_root
-            .as_ref()
-            .zip(registered_user_session_db.as_ref())
-            .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    database.clone(),
-                    root.identity().clone(),
-                    root.expected_runtime_shard()?,
-                )
-            });
-        let profile_retained_authority = match profile_identity
-            .as_ref()
-            .zip(profile_session_retrieval_root.as_ref())
-        {
-            Some((identity, root)) => {
-                match crate::daemon::retained_owner::profile_retained_connection_authority(
-                    identity,
-                    root.identity(),
-                ) {
-                    Ok(authority) => Some(authority),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "profile retained connection authority is unavailable"
-                        );
-                        None
+                });
+            let project_lcm_authority = project_session_retrieval_root
+                .as_ref()
+                .zip(registered_session_db.as_ref())
+                .and_then(|(root, database)| {
+                    crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                        database.clone(),
+                        root.identity().clone(),
+                        root.expected_runtime_shard()?,
+                    )
+                });
+            let user_lcm_authority = profile_session_retrieval_root
+                .as_ref()
+                .zip(registered_user_session_db.as_ref())
+                .and_then(|(root, database)| {
+                    crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                        database.clone(),
+                        root.identity().clone(),
+                        root.expected_runtime_shard()?,
+                    )
+                });
+            let profile_retained_authority = match profile_identity
+                .as_ref()
+                .zip(profile_session_retrieval_root.as_ref())
+            {
+                Some((identity, root)) => {
+                    match crate::daemon::retained_owner::profile_retained_connection_authority(
+                        identity,
+                        root.identity(),
+                    ) {
+                        Ok(authority) => Some(authority),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "profile retained connection authority is unavailable"
+                            );
+                            None
+                        }
                     }
                 }
+                None => None,
+            };
+
+            let server = Arc::new_cyclic(|dispatch_server| Self {
+                cg: Arc::new(tokio::sync::RwLock::new(cg)),
+                branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
+                branch_reopen_completions: Arc::new(AtomicU64::new(0)),
+                background_tasks: McpBackgroundTaskOwner::default(),
+                tool_activity_publish_running: Arc::new(AtomicBool::new(false)),
+                stats: ServerStats::new(),
+                method_call_counts: std::sync::Mutex::new(HashMap::new()),
+                resource_read_counts: std::sync::Mutex::new(HashMap::new()),
+                tool_call_counts: std::sync::Mutex::new(HashMap::new()),
+                identical_read_coalescer: IdenticalReadCoalescer::default(),
+                diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
+                diagnostics_lsp,
+                file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
+                tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
+                last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
+                last_flush_at: AtomicI64::new(0),
+                global_db,
+                accounting_db,
+                profile_root,
+                profile_identity,
+                profile_retained_authority,
+                session_db,
+                registry_db,
+                project_registry_reads,
+                user_session_db,
+                registered_session_db,
+                registered_user_session_db,
+                host_admission_broker,
+                project_session_refresh_wake,
+                user_session_refresh_wake,
+                project_session_refresh_service,
+                project_session_store_id,
+                project_session_root_id,
+                session_sync_service,
+                project_application_retrieval,
+                project_lcm_authority,
+                user_lcm_authority,
+                project_host_admission_replay: tokio::sync::Mutex::new(None),
+                automation_scheduler_reconciler,
+                database_owner_reconciler,
+                dashboard_automation_writer,
+                remote_operational_status,
+                dashboard_doctor_report_reader,
+                doctor_report_published: AtomicBool::new(false),
+                dashboard_code_index_freshness_reader,
+                dashboard_explorer_semantic_reader,
+                dashboard_feedback_status_reader,
+                background_refresh_writer,
+                code_index_hook_sink,
+                code_index_reconcile_sink,
+                code_index_freshness_probe_sink,
+                code_index_publication_identity,
+                code_index_search_executor,
+                code_index_branch_diff_executor,
+                code_graph_projection_read_port,
+                code_graph_read_admission_port,
+                code_index_ignored_dependency_admission,
+                generation_census_reader: tokio::sync::OnceCell::new(),
+                source_edit_executor: tokio::sync::OnceCell::new(),
+                source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
+                source_edit_rollback_executor: tokio::sync::OnceCell::new(),
+                code_index_search_authority,
+                retained_project_server_resolver,
+                #[cfg(any(test, feature = "test-transport"))]
+                _host_admission_test_runtime: host_admission_test_runtime,
+                hook_project_routes: project_routes,
+                version_cache: std::sync::Mutex::new(VersionCheckState {
+                    latest: None,
+                    checked_at: None,
+                }),
+                pending_notifications: std::sync::Mutex::new(Vec::new()),
+                scope_prefix,
+                shutdown: connection::McpShutdownCompletion::default(),
+                timings_enabled: AtomicBool::new(telemetry_config.timings),
+                last_staleness_check_at: AtomicI64::new(0),
+                worktree_mismatch,
+                startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
+                background_refresh_running: Arc::new(AtomicBool::new(false)),
+                last_background_refresh_at: AtomicI64::new(0),
+                last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
+                sync_config,
+                ledger_writes_started: Arc::new(AtomicU64::new(0)),
+                ledger_writes_finished: Arc::new(AtomicU64::new(0)),
+                ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
+                span_observation_debounce: std::sync::Mutex::new(
+                    tracedecay_sessions::runtime::git_correlation::SpanObservationDebounce::new(),
+                ),
+                client_name: std::sync::Mutex::new(None),
+                connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
+                application_surface_client: tokio::sync::OnceCell::new(),
+                application_invocation_executor,
+                daemon_invocation_service,
+                delivery_settlement_authority,
+                delivery_settlement_recorder,
+                project_server_live,
+                project_server_lifecycle: ProjectServerResponseLifecycle::default(),
+                dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
+            });
+
+            tokio::task::spawn_blocking(move || {
+                let _ = cleanup_expired_response_handles(
+                    &response_handle_project_root,
+                    crate::tracedecay::current_timestamp(),
+                );
+            });
+            if own_project_host_admission_replay
+                && let Some(broker) = server.host_admission_broker.clone()
+            {
+                let server_for_pass = Arc::downgrade(&server);
+                let pass = Arc::new(move || {
+                    let server = server_for_pass.clone();
+                    Box::pin(async move {
+                        let Some(server) = server.upgrade() else {
+                            return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
+                        };
+                        let outcome = Box::pin(server.replay_host_admission(None)).await;
+                        Self::report_host_admission_outcome(outcome);
+                        outcome
+                    })
+                        as std::pin::Pin<
+                            Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>,
+                        >
+                });
+                let worker = project_host_admission_replay::ProjectHostAdmissionReplayTask::start(
+                    broker, pass,
+                );
+                *server.project_host_admission_replay.lock().await = Some(worker);
             }
-            None => None,
-        };
 
-        let server = Arc::new_cyclic(|dispatch_server| Self {
-            cg: Arc::new(tokio::sync::RwLock::new(cg)),
-            branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
-            branch_reopen_completions: Arc::new(AtomicU64::new(0)),
-            background_tasks: McpBackgroundTaskOwner::default(),
-            tool_activity_publish_running: Arc::new(AtomicBool::new(false)),
-            stats: ServerStats::new(),
-            method_call_counts: std::sync::Mutex::new(HashMap::new()),
-            resource_read_counts: std::sync::Mutex::new(HashMap::new()),
-            tool_call_counts: std::sync::Mutex::new(HashMap::new()),
-            identical_read_coalescer: IdenticalReadCoalescer::default(),
-            diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
-            diagnostics_lsp,
-            file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
-            tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
-            last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
-            last_flush_at: AtomicI64::new(0),
-            global_db,
-            accounting_db,
-            profile_root,
-            profile_identity,
-            profile_retained_authority,
-            session_db,
-            registry_db,
-            project_registry_reads,
-            user_session_db,
-            registered_session_db,
-            registered_user_session_db,
-            host_admission_broker,
-            project_session_refresh_wake,
-            user_session_refresh_wake,
-            project_session_refresh_service,
-            project_session_store_id,
-            project_session_root_id,
-            session_sync_service,
-            project_application_retrieval,
-            project_lcm_authority,
-            user_lcm_authority,
-            project_host_admission_replay: tokio::sync::Mutex::new(None),
-            automation_scheduler_reconciler,
-            database_owner_reconciler,
-            dashboard_automation_writer,
-            remote_operational_status,
-            dashboard_doctor_report_reader,
-            doctor_report_published: AtomicBool::new(false),
-            dashboard_code_index_freshness_reader,
-            dashboard_explorer_semantic_reader,
-            dashboard_feedback_status_reader,
-            background_refresh_writer,
-            code_index_hook_sink,
-            code_index_reconcile_sink,
-            code_index_freshness_probe_sink,
-            code_index_publication_identity,
-            code_index_search_executor,
-            code_index_branch_diff_executor,
-            code_graph_projection_read_port,
-            code_graph_read_admission_port,
-            code_index_ignored_dependency_admission,
-            generation_census_reader: tokio::sync::OnceCell::new(),
-            source_edit_executor: tokio::sync::OnceCell::new(),
-            source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
-            source_edit_rollback_executor: tokio::sync::OnceCell::new(),
-            code_index_search_authority,
-            retained_project_server_resolver,
-            #[cfg(any(test, feature = "test-transport"))]
-            _host_admission_test_runtime: host_admission_test_runtime,
-            hook_project_routes: project_routes,
-            version_cache: std::sync::Mutex::new(VersionCheckState {
-                latest: None,
-                checked_at: None,
-            }),
-            pending_notifications: std::sync::Mutex::new(Vec::new()),
-            scope_prefix,
-            shutdown: connection::McpShutdownCompletion::default(),
-            timings_enabled: AtomicBool::new(telemetry_config.timings),
-            last_staleness_check_at: AtomicI64::new(0),
-            worktree_mismatch,
-            startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
-            background_refresh_running: Arc::new(AtomicBool::new(false)),
-            last_background_refresh_at: AtomicI64::new(0),
-            last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
-            sync_config,
-            ledger_writes_started: Arc::new(AtomicU64::new(0)),
-            ledger_writes_finished: Arc::new(AtomicU64::new(0)),
-            ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
-            span_observation_debounce: std::sync::Mutex::new(
-                tracedecay_sessions::runtime::git_correlation::SpanObservationDebounce::new(),
-            ),
-            client_name: std::sync::Mutex::new(None),
-            connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
-            application_surface_client: tokio::sync::OnceCell::new(),
-            application_invocation_executor,
-            daemon_invocation_service,
-            delivery_settlement_authority,
-            delivery_settlement_recorder,
-            project_server_live,
-            project_server_lifecycle: ProjectServerResponseLifecycle::default(),
-            dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
-        });
+            // Startup catch-up sync. Reconciles changes made while the server
+            // was down (terminal `git pull`, IDE edits before launch, another
+            // tool's writes) so read-only sessions start fresh instead of serving
+            // a stale index forever. `run_startup_catch_up_sync` advances its
+            // state on every exit path, so we spawn it and return immediately.
+            //
+            // Gated on `SyncConfig.session_start_sync` (default true) and single-
+            // flighted by the machine's dispatch claim so it runs at most once
+            // per server even if two `new_with_dbs` paths overlap.
+            //
+            // Claiming dispatch is the transition into `Syncing`, so no waiter
+            // can observe a claimed startup walk as already settled.
+            if startup_catch_up_enabled
+                && server.sync_config.session_start_sync
+                && server.startup_catch_up.try_claim_dispatch()
+            {
+                let s = Arc::clone(&server);
+                let task = tokio::spawn(async move {
+                    s.run_startup_catch_up_sync().await;
+                });
+                server.startup_catch_up.install_sync_task(task);
+            }
 
-        tokio::task::spawn_blocking(move || {
-            let _ = cleanup_expired_response_handles(
-                &response_handle_project_root,
-                crate::tracedecay::current_timestamp(),
-            );
-        });
-        if own_project_host_admission_replay
-            && let Some(broker) = server.host_admission_broker.clone()
-        {
-            let server_for_pass = Arc::downgrade(&server);
-            let pass = Arc::new(move || {
-                let server = server_for_pass.clone();
-                Box::pin(async move {
-                    let Some(server) = server.upgrade() else {
-                        return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
-                    };
-                    let outcome = Box::pin(server.replay_host_admission(None)).await;
-                    Self::report_host_admission_outcome(outcome);
-                    outcome
-                })
-                    as std::pin::Pin<
-                        Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>,
-                    >
-            });
-            let worker =
-                project_host_admission_replay::ProjectHostAdmissionReplayTask::start(broker, pass);
-            *server.project_host_admission_replay.lock().await = Some(worker);
-        }
-
-        // Startup catch-up sync. Reconciles changes made while the server
-        // was down (terminal `git pull`, IDE edits before launch, another
-        // tool's writes) so read-only sessions start fresh instead of serving
-        // a stale index forever. `run_startup_catch_up_sync` advances its
-        // state on every exit path, so we spawn it and return immediately.
-        //
-        // Gated on `SyncConfig.session_start_sync` (default true) and single-
-        // flighted by the machine's dispatch claim so it runs at most once
-        // per server even if two `new_with_dbs` paths overlap.
-        //
-        // Claiming dispatch is the transition into `Syncing`, so no waiter
-        // can observe a claimed startup walk as already settled.
-        if startup_catch_up_enabled
-            && server.sync_config.session_start_sync
-            && server.startup_catch_up.try_claim_dispatch()
-        {
-            let s = Arc::clone(&server);
-            let task = tokio::spawn(async move {
-                s.run_startup_catch_up_sync().await;
-            });
-            server.startup_catch_up.install_sync_task(task);
-        }
-
-        server
+            server
+        })
     }
 
     /// Returns the active scope prefix, if the server was launched from a subdirectory.

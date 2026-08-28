@@ -1343,6 +1343,7 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
 /// every active skill and removes managed files whose skill is no longer
 /// active. Fork- and foreign-safe throughout. A single failing package is
 /// recorded in `report.errors` and never aborts the rest of the sweep.
+#[hotpath::measure(label = "managed_skill_reconcile_scope")]
 pub fn reconcile_scope(
     scope: &MaterializationScope,
     active_skills: &[ManagedSkill],

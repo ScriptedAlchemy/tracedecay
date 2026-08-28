@@ -16,6 +16,7 @@ pub(crate) fn extract_lines(source: &str, start_line: u32, end_line: u32) -> Str
     lines[start..end].join("\n")
 }
 
+#[hotpath::measure(label = "mcp.tools.body", future = true)]
 pub(crate) async fn handle_body(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

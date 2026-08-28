@@ -72,6 +72,7 @@ impl GraphDb {
     /// (folding any write-ahead-log sidecar into the fenced snapshot), the
     /// native full backup is staged and hashed, and the backup directory is
     /// published atomically only after the source store closed durably.
+    #[hotpath::measure(label = "graph_db.backup.create", impl_type = "GraphDb")]
     pub fn create_verified_backup(
         source: &Path,
         destination: &Path,
@@ -152,6 +153,7 @@ impl GraphDb {
     /// written, the fenced epoch is rebuilt into a staging file, the staged
     /// store must open cleanly under the current format authority, and the
     /// destination is published atomically with rollback on failure.
+    #[hotpath::measure(label = "graph_db.backup.restore", impl_type = "GraphDb")]
     pub fn restore_verified_backup(
         backup_root: &Path,
         destination: &Path,
@@ -161,7 +163,9 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         let expected_format = GraphFormatVersion::current();
-        let verified = load_verified(backup_root)?;
+        let verified = hotpath::measure_block!("graph_db.backup.restore.inventory", {
+            load_verified(backup_root)
+        })?;
         if verified.manifest.graph_format_version != expected_format.get() {
             return Err(GraphDbError::ResetRequired {
                 message: format!(
@@ -192,6 +196,7 @@ impl GraphDb {
 
     /// Verifies that the closed graph store at `path` opens cleanly under
     /// the current format authority, then closes it again.
+    #[hotpath::measure(label = "graph_db.backup.verify", impl_type = "GraphDb")]
     pub fn verify_closed_store(
         path: &Path,
         cancellation: &Arc<dyn GraphCancellation>,
@@ -221,15 +226,19 @@ fn create_staged_full(
     create_private_directory(&native)?;
     let guard = database.write_guard()?;
     let engine = guard.as_ref().ok_or(GraphDbError::Closed)?;
-    let segment = engine
-        .backup_full(&native)
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    let segment = hotpath::measure_block!("graph_db.backup.create.native", {
+        engine
+            .backup_full(&native)
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))
+    })?;
     let target_epoch = segment.end_epoch.as_u64();
     drop(guard);
     if cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);
     }
-    let artifacts = collect_artifacts(staging)?;
+    let artifacts = hotpath::measure_block!("graph_db.backup.create.inventory", {
+        collect_artifacts(staging)
+    })?;
     if artifacts.is_empty() {
         return Err(GraphDbError::Corrupt {
             message: "Grafeo full backup produced no artifacts".to_owned(),
@@ -255,13 +264,15 @@ fn restore_to_staging(
     cancellation: &Arc<dyn GraphCancellation>,
     target_epoch: u64,
 ) -> Result<(), GraphDbError> {
-    GrafeoDB::restore_to_epoch(
-        &backup_root.join(NATIVE_SEGMENT_DIR),
-        EpochId::new(target_epoch),
-        staging,
-    )
-    .map_err(|error| GraphDbError::Corrupt {
-        message: format!("Grafeo backup restore failed: {error}"),
+    hotpath::measure_block!("graph_db.backup.restore.native", {
+        GrafeoDB::restore_to_epoch(
+            &backup_root.join(NATIVE_SEGMENT_DIR),
+            EpochId::new(target_epoch),
+            staging,
+        )
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("Grafeo backup restore failed: {error}"),
+        })
     })?;
     if cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);

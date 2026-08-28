@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "mcp.tools.dsm", future = true)]
 pub(crate) async fn handle_dsm(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

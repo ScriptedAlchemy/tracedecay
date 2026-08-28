@@ -174,6 +174,7 @@ impl HookConfigurationFileWriterV1 {
 }
 
 impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
+    #[hotpath::measure(label = "hooks.configuration.publish")]
     fn publish(
         &self,
         snapshot: HookConfigurationSnapshotV1,

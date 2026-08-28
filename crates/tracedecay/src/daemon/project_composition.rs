@@ -522,7 +522,7 @@ pub(super) async fn production_project_server(
     }
     project_open_cancellation_checkpoint(cancellation)?;
     let mcp_construction_started = Instant::now();
-    let core_candidate = crate::mcp::McpServer::new_with_context(core_context).await;
+    let core_candidate = Box::pin(crate::mcp::McpServer::new_with_context(core_context)).await;
     core_candidate
         .install_generation_census_reader(Arc::clone(&generation_census_reader))
         .map_err(|_| TraceDecayError::Config {
@@ -663,7 +663,7 @@ pub(super) async fn production_project_server(
         });
         let session_capabilities_published = AtomicBool::new(false);
         let mut published_full_candidate = None;
-        let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
+        let full_upgrade: Result<Arc<crate::mcp::McpServer>> = Box::pin(async {
             // The core is reachable from here on, so every step below leaves
             // this block with an error instead of returning behind a published
             // route: the funnel around it owns retiring the owner. Retired
@@ -894,7 +894,8 @@ pub(super) async fn production_project_server(
             }
             project_open_cancellation_checkpoint(cancellation)?;
             let full_construction_started = Instant::now();
-            let full_candidate = crate::mcp::McpServer::new_with_context(full_context).await;
+            let full_candidate =
+                Box::pin(crate::mcp::McpServer::new_with_context(full_context)).await;
             full_candidate
                 .install_generation_census_reader(Arc::clone(&generation_census_reader))
                 .map_err(|_| TraceDecayError::Config {
@@ -944,7 +945,7 @@ pub(super) async fn production_project_server(
                     ),
                 ],
             );
-            let full_setup: Result<()> = async {
+            let full_setup: Result<()> = Box::pin(async {
                 let full_setup_started = Instant::now();
                 let log_full_setup_phase = |phase: &'static str| {
                     log_daemon_event(
@@ -1037,7 +1038,7 @@ pub(super) async fn production_project_server(
                     log_full_setup_phase("http_application_mounted");
                 }
                 Ok(())
-            }
+            })
             .await;
             full_setup?;
             if *current_key.lock().await != key {
@@ -1081,7 +1082,7 @@ pub(super) async fn production_project_server(
                 ],
             );
             Ok(full_candidate)
-        }
+        })
         .await;
         match full_upgrade {
             Ok(full_server) => resolved = full_server,

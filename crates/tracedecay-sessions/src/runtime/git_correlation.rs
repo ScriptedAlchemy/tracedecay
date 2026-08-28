@@ -576,6 +576,7 @@ pub fn span_debounce_key(
 /// Parses each message's `metadata_json` once for both commit evidence and
 /// ingest span observations. The repository is discovered only after a
 /// message actually carries commit candidates.
+#[hotpath::measure]
 pub fn transcript_git_evidence(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,

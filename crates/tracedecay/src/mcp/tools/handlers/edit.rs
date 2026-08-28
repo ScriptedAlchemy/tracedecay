@@ -141,6 +141,7 @@ pub(super) struct SourceEditInvocationContext {
     pub(super) cancellation: Option<CancellationSignal>,
 }
 
+#[hotpath::measure(label = "mcp.tools.source_edit.rollback", future = true)]
 pub(super) async fn handle_source_edit_rollback(
     cg: &TraceDecay,
     args: Value,
@@ -203,6 +204,7 @@ pub(super) async fn handle_source_edit_rollback(
     }
 }
 
+#[hotpath::measure(label = "mcp.tools.source_edit.reconcile", future = true)]
 pub(super) async fn handle_source_edit_reconcile(
     cg: &TraceDecay,
     args: Value,
@@ -333,6 +335,7 @@ fn optional_expected_state(args: &Value) -> Result<Option<ManifestDigest>> {
         .transpose()
 }
 
+#[hotpath::measure(label = "mcp.tools.str_replace", future = true)]
 pub(super) async fn handle_str_replace(
     cg: &TraceDecay,
     args: Value,
@@ -359,6 +362,7 @@ pub(super) async fn handle_str_replace(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.multi_str_replace", future = true)]
 pub(super) async fn handle_multi_str_replace(
     cg: &TraceDecay,
     args: Value,
@@ -402,6 +406,7 @@ pub(super) async fn handle_multi_str_replace(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.insert_at", future = true)]
 pub(super) async fn handle_insert_at(
     cg: &TraceDecay,
     args: Value,
@@ -431,6 +436,7 @@ pub(super) async fn handle_insert_at(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.replace_symbol", future = true)]
 pub(super) async fn handle_replace_symbol(
     cg: &TraceDecay,
     args: Value,
@@ -455,6 +461,7 @@ pub(super) async fn handle_replace_symbol(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.insert_at_symbol", future = true)]
 pub(super) async fn handle_insert_at_symbol(
     cg: &TraceDecay,
     args: Value,
@@ -484,6 +491,7 @@ pub(super) async fn handle_insert_at_symbol(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.move_symbol", future = true)]
 pub(super) async fn handle_move_symbol(
     cg: &TraceDecay,
     args: Value,
@@ -512,6 +520,7 @@ pub(super) async fn handle_move_symbol(
     .await
 }
 
+#[hotpath::measure(label = "mcp.tools.rename_symbol", future = true)]
 pub(super) async fn handle_rename_symbol(
     cg: &TraceDecay,
     args: Value,
@@ -582,6 +591,7 @@ fn move_result_md(result: &crate::types::MoveResult) -> String {
     out
 }
 
+#[hotpath::measure(label = "mcp.tools.ast_grep_rewrite", future = true)]
 pub(super) async fn handle_ast_grep_rewrite(
     cg: &TraceDecay,
     args: Value,

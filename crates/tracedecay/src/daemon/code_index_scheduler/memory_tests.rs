@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    process_resident_memory_limit_for_system_v1,
+    detected_process_resident_memory_limit_v1, process_resident_memory_limit_for_system_v1,
 };
 
 use super::{
@@ -48,25 +48,12 @@ fn fixture() -> TempDir {
     root
 }
 
-fn worker_reservation_bytes() -> u64 {
-    let status = tracedecay_code_index::parallelism::install_worker_plan(
-        CodeIndexWorkerSelectionV1::Automatic {},
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
-    )
-    .expect("install automatic worker plan");
-    tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
-        status.effective_workers,
-    ))
-}
-
 #[test]
 fn large_host_authority_admits_worker_scratch_lexical_build_and_snapshot() {
     let host_memory_bytes = 88 * 1024 * 1024 * 1024;
-    let limit = process_resident_memory_limit_for_system_v1(host_memory_bytes).get();
-    let authority = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(limit).expect("derived host authority is nonzero"),
-    ));
-    let worker_scratch_bytes = limit.saturating_sub(limit / 4);
+    let limit = process_resident_memory_limit_for_system_v1(host_memory_bytes);
+    let authority = Arc::new(ProcessResidentMemoryV1::new(limit));
+    let worker_scratch_bytes = preview_worker_reservation_bytes(limit.get());
     let lexical_build_bytes =
         u64::try_from(super::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
             .expect("lexical build budget fits u64");
@@ -78,7 +65,7 @@ fn large_host_authority_admits_worker_scratch_lexical_build_and_snapshot() {
                 .expect("valid component"),
             NonZeroU64::new(worker_scratch_bytes).expect("worker scratch is nonzero"),
         )
-        .expect("host authority admits the maximum automatic worker scratch");
+        .expect("88 GiB host admits automatic worker scratch");
     let _lexical = authority
         .reserve_process_shared(
             ResidentMemoryComponentIdV1::new("test.query.lexical-build").expect("valid component"),
@@ -97,6 +84,28 @@ fn large_host_authority_admits_worker_scratch_lexical_build_and_snapshot() {
         authority.snapshot().used_bytes,
         worker_scratch_bytes + lexical_build_bytes + retained_snapshot_bytes
     );
+}
+
+fn preview_worker_reservation_bytes(available_memory_bytes: u64) -> u64 {
+    let status = tracedecay_code_index::parallelism::preview_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic {},
+        available_memory_bytes,
+    )
+    .expect("preview automatic worker plan");
+    tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
+        status.effective_workers,
+    ))
+}
+
+fn worker_reservation_bytes() -> u64 {
+    let status = tracedecay_code_index::parallelism::install_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic {},
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    )
+    .expect("install automatic worker plan");
+    tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
+        status.effective_workers,
+    ))
 }
 
 #[test]
@@ -130,7 +139,7 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
 }
 
 #[test]
-fn completed_reconcile_retains_the_canonical_snapshot_charge() {
+fn completed_reconcile_releases_snapshot_scratch_after_seal() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -141,18 +150,20 @@ fn completed_reconcile_retains_the_canonical_snapshot_charge() {
     )
     .expect("open scheduler");
     let authority = Arc::new(ProcessResidentMemoryV1::new(
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        detected_process_resident_memory_limit_v1(),
     ));
     scheduler.bind_resident_memory(Arc::clone(&authority));
 
     scheduler.reconcile_now().expect("publish generation");
-    let retained_bytes = scheduler
-        .retained_snapshot_bytes
-        .iter()
-        .map(|bytes| bytes.len() as u64)
-        .sum::<u64>();
-    assert!(retained_bytes > 0);
-    assert_eq!(authority.snapshot().used_bytes, retained_bytes);
+    assert!(
+        scheduler.retained_snapshot_bytes.is_empty(),
+        "sealed generations must not keep a whole-worktree interned copy"
+    );
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        0,
+        "admission is concurrent scratch, not retained project size"
+    );
 
     assert!(matches!(
         scheduler
@@ -160,10 +171,11 @@ fn completed_reconcile_retains_the_canonical_snapshot_charge() {
             .expect("reconcile unchanged source"),
         CodeIndexReconcileOutcomeV1::Noop(_)
     ));
+    assert!(scheduler.retained_snapshot_bytes.is_empty());
     assert_eq!(
         authority.snapshot().used_bytes,
-        retained_bytes,
-        "the no-build path retains only the canonical Arc source charge"
+        0,
+        "the no-build path must not recapture a charged whole-worktree copy"
     );
 }
 

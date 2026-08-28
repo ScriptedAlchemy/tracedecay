@@ -94,6 +94,7 @@ const RERANK_PROFILE: &str = "hybrid-reranked";
 const METRIC_SCALE_PPM: u64 = 1_000_000;
 const REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM: u32 = 1;
 const MAX_PROTECTED_QUALITY_REGRESSION_PPM: u32 = 0;
+const QUALIFIED_SEMANTIC_CALIBRATION_THRESHOLD_PPM: u32 = 700_000;
 const PROTECTED_STRATA: &[&str] = &[
     "config_key",
     "exact_error",
@@ -189,28 +190,104 @@ fn validate_activation_profile_matrix(
     let baseline = profile(QUERY_BASELINE_PROFILE)?;
     let semantic = profile(SEMANTIC_PROFILE)?;
     let rerank = profile(RERANK_PROFILE)?;
-    if baseline.semantic_weight_ppm != 0 || baseline.rerank_weight_ppm != 0 {
-        return Err(SearchEvalError::Contract(
-            "query baseline must disable semantic and rerank lanes".to_owned(),
-        ));
-    }
-    if semantic.semantic_weight_ppm == 0 || semantic.rerank_weight_ppm != 0 {
-        return Err(SearchEvalError::Contract(
-            "semantic comparison profile must enable semantic and disable rerank".to_owned(),
-        ));
-    }
-    if rerank.semantic_weight_ppm != semantic.semantic_weight_ppm
-        || rerank.rerank_weight_ppm == 0
-        || rerank.lexical_weight_ppm != semantic.lexical_weight_ppm
-        || rerank.graph_weight_ppm != semantic.graph_weight_ppm
-        || rerank.calibration_threshold_ppm != semantic.calibration_threshold_ppm
+    if let Some(reason) =
+        query_baseline_lane_mismatch(baseline.semantic_weight_ppm, baseline.rerank_weight_ppm)
     {
-        return Err(SearchEvalError::Contract(
-            "rerank comparison must differ from the semantic profile only by rerank material"
-                .to_owned(),
-        ));
+        return Err(SearchEvalError::Contract(format!(
+            "query baseline must disable semantic and rerank lanes: {reason}"
+        )));
+    }
+    if let Some(reason) =
+        semantic_comparison_lane_mismatch(semantic.semantic_weight_ppm, semantic.rerank_weight_ppm)
+    {
+        return Err(SearchEvalError::Contract(format!(
+            "semantic comparison profile must enable semantic and disable rerank: {reason}"
+        )));
+    }
+    if let Some(reason) = rerank_comparison_material_mismatch(
+        semantic.semantic_weight_ppm,
+        rerank.semantic_weight_ppm,
+        semantic.lexical_weight_ppm,
+        rerank.lexical_weight_ppm,
+        semantic.graph_weight_ppm,
+        rerank.graph_weight_ppm,
+        semantic.calibration_threshold_ppm,
+        rerank.calibration_threshold_ppm,
+        rerank.rerank_weight_ppm,
+    ) {
+        return Err(SearchEvalError::Contract(format!(
+            "rerank comparison must differ from the semantic profile only by rerank material: {reason}"
+        )));
+    }
+    if let Some(reason) = qualified_semantic_threshold_mismatch(semantic.calibration_threshold_ppm)
+    {
+        return Err(SearchEvalError::Contract(format!(
+            "semantic comparison profile calibration threshold is not qualified: {reason}"
+        )));
     }
     Ok(())
+}
+
+fn query_baseline_lane_mismatch(
+    semantic_weight_ppm: u32,
+    rerank_weight_ppm: u32,
+) -> Option<&'static str> {
+    if semantic_weight_ppm != 0 {
+        Some("semantic_weight_ppm")
+    } else if rerank_weight_ppm != 0 {
+        Some("rerank_weight_ppm")
+    } else {
+        None
+    }
+}
+
+fn semantic_comparison_lane_mismatch(
+    semantic_weight_ppm: u32,
+    rerank_weight_ppm: u32,
+) -> Option<&'static str> {
+    if semantic_weight_ppm == 0 {
+        Some("semantic_weight_ppm")
+    } else if rerank_weight_ppm != 0 {
+        Some("rerank_weight_ppm")
+    } else {
+        None
+    }
+}
+
+fn rerank_comparison_material_mismatch(
+    semantic_semantic_weight_ppm: u32,
+    rerank_semantic_weight_ppm: u32,
+    semantic_lexical_weight_ppm: u32,
+    rerank_lexical_weight_ppm: u32,
+    semantic_graph_weight_ppm: u32,
+    rerank_graph_weight_ppm: u32,
+    semantic_calibration_threshold_ppm: u32,
+    rerank_calibration_threshold_ppm: u32,
+    rerank_weight_ppm: u32,
+) -> Option<&'static str> {
+    if rerank_semantic_weight_ppm != semantic_semantic_weight_ppm {
+        Some("semantic_weight_ppm")
+    } else if rerank_weight_ppm == 0 {
+        Some("rerank_weight_ppm")
+    } else if rerank_lexical_weight_ppm != semantic_lexical_weight_ppm {
+        Some("lexical_weight_ppm")
+    } else if rerank_graph_weight_ppm != semantic_graph_weight_ppm {
+        Some("graph_weight_ppm")
+    } else if rerank_calibration_threshold_ppm != semantic_calibration_threshold_ppm {
+        Some("calibration_threshold_ppm")
+    } else {
+        None
+    }
+}
+
+fn qualified_semantic_threshold_mismatch(threshold_ppm: u32) -> Option<&'static str> {
+    if threshold_ppm == QUALIFIED_SEMANTIC_CALIBRATION_THRESHOLD_PPM {
+        None
+    } else if threshold_ppm < QUALIFIED_SEMANTIC_CALIBRATION_THRESHOLD_PPM {
+        Some("below_qualified")
+    } else {
+        Some("above_qualified")
+    }
 }
 
 fn activation_profile_chain(
@@ -1114,57 +1191,87 @@ fn mean_ppm(values: impl Iterator<Item = u32>, support: u64) -> u32 {
 
 #[hotpath::measure]
 fn evaluate_resources(output: &ProductionCandidateOutputV1) -> DirectEvaluationStatusV1 {
-    if output.resources.len() != 2 {
+    if evaluate_resource_catalog_failure_reason(&output.resources, output.queries.len()).is_some() {
         return DirectEvaluationStatusV1::Fail;
     }
-    let Some(current) = output.resources.get("current") else {
-        return DirectEvaluationStatusV1::Fail;
-    };
-    let Some(ten_x) = output.resources.get("10x") else {
-        return DirectEvaluationStatusV1::Fail;
-    };
-    let Some(expected_ten_x_chunks) = current.eligible_chunks.checked_mul(10) else {
-        return DirectEvaluationStatusV1::Fail;
-    };
-    if current.eligible_chunks == 0 || ten_x.eligible_chunks != expected_ten_x_chunks {
-        return DirectEvaluationStatusV1::Fail;
-    }
-    let mut pending = false;
-    for name in ["current", "10x"] {
-        let Some(sample) = output.resources.get(name) else {
-            return DirectEvaluationStatusV1::Fail;
-        };
-        match sample.status {
-            ResourceMeasurementStatusV1::Measured => {
-                if sample.pending_reason.is_some()
-                    || sample.peak_rss_bytes.is_none()
-                    || sample.measured_queries != sample.latency_samples_us.len() as u64
-                    || sample.measured_queries != output.queries.len() as u64
-                    || sample.latency_samples_us.is_empty()
-                {
-                    return DirectEvaluationStatusV1::Fail;
-                }
-            }
-            ResourceMeasurementStatusV1::Pending => {
-                if sample.peak_rss_bytes.is_some()
-                    || sample.measured_queries != 0
-                    || !sample.latency_samples_us.is_empty()
-                    || sample
-                        .pending_reason
-                        .as_deref()
-                        .is_none_or(|reason| reason.trim().is_empty())
-                {
-                    return DirectEvaluationStatusV1::Fail;
-                }
-                pending = true;
-            }
-        }
-    }
+    let pending = ["current", "10x"].iter().any(|name| {
+        output
+            .resources
+            .get(*name)
+            .is_some_and(|sample| sample.status == ResourceMeasurementStatusV1::Pending)
+    });
     if pending {
         DirectEvaluationStatusV1::Pending
     } else {
         DirectEvaluationStatusV1::Pass
     }
+}
+
+pub(crate) fn evaluate_resource_catalog_failure_reason(
+    resources: &BTreeMap<String, candidate_output::ResourceSampleV1>,
+    query_count: usize,
+) -> Option<&'static str> {
+    if resources.len() != 2 {
+        return Some("resource_catalog_size");
+    }
+    let Some(current) = resources.get("current") else {
+        return Some("current");
+    };
+    let Some(ten_x) = resources.get("10x") else {
+        return Some("10x");
+    };
+    let Some(expected_ten_x_chunks) = current.eligible_chunks.checked_mul(10) else {
+        return Some("ten_x_eligible_chunks");
+    };
+    if current.eligible_chunks == 0 {
+        return Some("current_eligible_chunks");
+    }
+    if ten_x.eligible_chunks != expected_ten_x_chunks {
+        return Some("ten_x_eligible_chunks");
+    }
+    for name in ["current", "10x"] {
+        let Some(sample) = resources.get(name) else {
+            return Some(name);
+        };
+        match sample.status {
+            ResourceMeasurementStatusV1::Measured => {
+                if sample.pending_reason.is_some() {
+                    return Some("measured_pending_reason");
+                }
+                if sample.peak_rss_bytes.is_none() {
+                    return Some("peak_rss_bytes");
+                }
+                if sample.measured_queries != sample.latency_samples_us.len() as u64 {
+                    return Some("latency_sample_count");
+                }
+                if sample.measured_queries != query_count as u64 {
+                    return Some("measured_queries");
+                }
+                if sample.latency_samples_us.is_empty() {
+                    return Some("latency_samples_us");
+                }
+            }
+            ResourceMeasurementStatusV1::Pending => {
+                if sample.peak_rss_bytes.is_some() {
+                    return Some("pending_peak_rss_bytes");
+                }
+                if sample.measured_queries != 0 {
+                    return Some("pending_measured_queries");
+                }
+                if !sample.latency_samples_us.is_empty() {
+                    return Some("pending_latency_samples_us");
+                }
+                if sample
+                    .pending_reason
+                    .as_deref()
+                    .is_none_or(|reason| reason.trim().is_empty())
+                {
+                    return Some("pending_reason");
+                }
+            }
+        }
+    }
+    None
 }
 
 const fn pass_if(condition: bool) -> DirectEvaluationStatusV1 {
@@ -1311,14 +1418,19 @@ fn pairwise_candidate_evaluation(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        QUERY_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE, activation_profile_chain,
-        aggregate_profile_status, aggregate_quality, evaluate_query,
-        load_authoritative_default_workload, ratio_metric,
+        QUALIFIED_SEMANTIC_CALIBRATION_THRESHOLD_PPM, QUERY_BASELINE_PROFILE, RERANK_PROFILE,
+        SEMANTIC_PROFILE, aggregate_profile_status, aggregate_quality,
+        evaluate_query, evaluate_resource_catalog_failure_reason,
+        load_authoritative_default_workload, qualified_semantic_threshold_mismatch,
+        query_baseline_lane_mismatch, ratio_metric, rerank_comparison_material_mismatch,
+        semantic_comparison_lane_mismatch,
     };
     use crate::candidate_output::{
         HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-        QueryCandidateRowV1, RankedCandidateRowV1, WorkloadQueryV1,
+        QueryCandidateRowV1, RankedCandidateRowV1, ResourceSampleV1, WorkloadQueryV1,
     };
 
     fn ranked(anchor: &str) -> RankedCandidateRowV1 {
@@ -1414,30 +1526,102 @@ mod tests {
     }
 
     #[test]
-    fn activation_profile_chain_is_closed_and_ordered() {
-        let assets = load_authoritative_default_workload().expect("authoritative workload");
-        let workload = assets.workload();
+    fn query_baseline_names_semantic_weight_before_a_enabled_rerank_lane() {
+        assert_eq!(
+            query_baseline_lane_mismatch(1, 1),
+            Some("semantic_weight_ppm")
+        );
+        assert_eq!(
+            query_baseline_lane_mismatch(0, 1),
+            Some("rerank_weight_ppm")
+        );
+        assert_eq!(query_baseline_lane_mismatch(0, 0), None);
+    }
 
+    #[test]
+    fn semantic_comparison_names_a_disabled_semantic_lane_before_rerank() {
         assert_eq!(
-            activation_profile_chain(workload, QUERY_BASELINE_PROFILE).expect("query chain"),
-            vec![QUERY_BASELINE_PROFILE.to_owned()]
+            semantic_comparison_lane_mismatch(0, 1),
+            Some("semantic_weight_ppm")
         );
         assert_eq!(
-            activation_profile_chain(workload, SEMANTIC_PROFILE).expect("semantic chain"),
-            vec![
-                QUERY_BASELINE_PROFILE.to_owned(),
-                SEMANTIC_PROFILE.to_owned()
-            ]
+            semantic_comparison_lane_mismatch(250_000, 1),
+            Some("rerank_weight_ppm")
+        );
+        assert_eq!(semantic_comparison_lane_mismatch(250_000, 0), None);
+    }
+
+    #[test]
+    fn rerank_comparison_accepts_shared_lane_weights_with_rerank_enabled() {
+        assert_eq!(
+            rerank_comparison_material_mismatch(
+                250_000, 250_000, 1_000_000, 1_000_000, 250_000, 250_000, 700_000, 700_000,
+                250_000,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rerank_comparison_names_semantic_weight_before_a_disabled_rerank_lane() {
+        assert_eq!(
+            rerank_comparison_material_mismatch(
+                250_000, 200_000, 1_000_000, 1_000_000, 250_000, 250_000, 700_000, 700_000, 0,
+            ),
+            Some("semantic_weight_ppm")
+        );
+    }
+
+    #[test]
+    fn rerank_comparison_names_a_disabled_rerank_lane() {
+        assert_eq!(
+            rerank_comparison_material_mismatch(
+                250_000, 250_000, 1_000_000, 1_000_000, 250_000, 250_000, 700_000, 700_000, 0,
+            ),
+            Some("rerank_weight_ppm")
+        );
+    }
+
+    #[test]
+    fn qualified_semantic_threshold_accepts_the_restored_pin() {
+        assert_eq!(
+            qualified_semantic_threshold_mismatch(QUALIFIED_SEMANTIC_CALIBRATION_THRESHOLD_PPM),
+            None
+        );
+    }
+
+    #[test]
+    fn qualified_semantic_threshold_names_a_measured_admission_below_the_pin() {
+        assert_eq!(
+            qualified_semantic_threshold_mismatch(690_000),
+            Some("below_qualified")
         );
         assert_eq!(
-            activation_profile_chain(workload, RERANK_PROFILE).expect("rerank chain"),
-            vec![
-                QUERY_BASELINE_PROFILE.to_owned(),
-                SEMANTIC_PROFILE.to_owned(),
-                RERANK_PROFILE.to_owned()
-            ]
+            qualified_semantic_threshold_mismatch(400_000),
+            Some("below_qualified")
         );
-        assert!(activation_profile_chain(workload, "caller-authored").is_err());
+        assert_eq!(
+            qualified_semantic_threshold_mismatch(635_000),
+            Some("below_qualified")
+        );
+        assert_eq!(
+            qualified_semantic_threshold_mismatch(700_001),
+            Some("above_qualified")
+        );
+    }
+
+    #[test]
+    fn authoritative_workload_names_the_landed_cosine_pin_below_qualified() {
+        let error = match load_authoritative_default_workload() {
+            Ok(_) => panic!("400_000 cosine pin is below the qualified floor"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("calibration threshold is not qualified: below_qualified"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1551,8 +1735,15 @@ mod tests {
         let candidate = passing_profile(SEMANTIC_PROFILE, 600_000, 900_000);
 
         assert_eq!(
-            aggregate_profile_status(&[baseline, candidate]),
+            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
             super::DirectEvaluationStatusV1::Fail
+        );
+        let expected = format!(
+            "pairwise candidate quality failed: profile={SEMANTIC_PROFILE} partition=validation stratum=exact_symbol metric=mean_reciprocal_rank_ppm baseline=1000000 candidate=900000 maximum_regression=0"
+        );
+        assert_eq!(
+            super::pairwise_candidate_failure_diagnostic(&[baseline, candidate]).as_deref(),
+            Some(expected.as_str())
         );
     }
 
@@ -1574,6 +1765,58 @@ mod tests {
         assert_eq!(
             aggregate_profile_status(&[baseline, candidate]),
             super::DirectEvaluationStatusV1::Pass
+        );
+    }
+
+    fn measured_sample(eligible_chunks: u64, query_count: usize) -> ResourceSampleV1 {
+        ResourceSampleV1 {
+            status: super::ResourceMeasurementStatusV1::Measured,
+            eligible_chunks,
+            peak_rss_bytes: Some(1),
+            latency_samples_us: vec![1; query_count],
+            measured_queries: query_count as u64,
+            pending_reason: None,
+        }
+    }
+
+    #[test]
+    fn resource_catalog_accepts_large_measurements_without_size_caps() {
+        let resources = BTreeMap::from([
+            ("current".to_owned(), measured_sample(2, 1)),
+            ("10x".to_owned(), {
+                let mut sample = measured_sample(20, 1);
+                sample.peak_rss_bytes = Some(u64::MAX);
+                sample.latency_samples_us = vec![u64::MAX];
+                sample
+            }),
+        ]);
+        assert_eq!(
+            evaluate_resource_catalog_failure_reason(&resources, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn resource_catalog_names_a_missing_current_scale() {
+        let resources = BTreeMap::from([
+            ("10x".to_owned(), measured_sample(20, 1)),
+            ("other".to_owned(), measured_sample(2, 1)),
+        ]);
+        assert_eq!(
+            evaluate_resource_catalog_failure_reason(&resources, 1),
+            Some("current")
+        );
+    }
+
+    #[test]
+    fn resource_catalog_names_a_ten_x_chunk_mismatch() {
+        let resources = BTreeMap::from([
+            ("current".to_owned(), measured_sample(2, 1)),
+            ("10x".to_owned(), measured_sample(19, 1)),
+        ]);
+        assert_eq!(
+            evaluate_resource_catalog_failure_reason(&resources, 1),
+            Some("ten_x_eligible_chunks")
         );
     }
 }

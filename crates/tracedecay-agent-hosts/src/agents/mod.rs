@@ -1795,6 +1795,7 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
 /// [`load_jsonc_file_strict`]): a config that exists but cannot be parsed is
 /// an error rather than a silent overwrite. `agent_label` names the host in
 /// the directory-creation error.
+#[hotpath::measure(label = "mcp_server_entry_install")]
 pub fn install_mcp_server_entry(
     config_path: &Path,
     root_key: &str,

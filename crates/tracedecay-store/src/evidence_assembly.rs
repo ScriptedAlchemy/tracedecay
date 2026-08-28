@@ -1289,6 +1289,7 @@ pub struct EvidenceAssemblyWriteV1 {
 }
 
 impl EvidenceAssemblyWriteV1 {
+    #[hotpath::measure(label = "store.evidence_assembly.validate")]
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
         validate_member_count(self.occurrences.len())?;
@@ -1417,7 +1418,9 @@ impl EvidenceAssemblyWriteV1 {
         {
             return Err(invalid("evidence assembly cross-record binding"));
         }
-        let expected_digest = self.compute_assembly_digest()?;
+        let expected_digest = hotpath::measure_block!("store.evidence_assembly.digest", {
+            self.compute_assembly_digest()?
+        });
         if self.receipt.assembly_digest != expected_digest {
             return Err(invalid("evidence assembly digest"));
         }

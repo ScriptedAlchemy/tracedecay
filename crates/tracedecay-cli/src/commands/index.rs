@@ -69,6 +69,7 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "cli.init.run", future = true)]
 pub(crate) async fn handle_init(
     path: Option<String>,
     skip_folders: Vec<String>,
@@ -479,6 +480,7 @@ mod init_bootstrap_tests {
     }
 }
 
+#[hotpath::measure(label = "cli.sync.run", future = true)]
 pub(crate) async fn handle_sync(
     path: Option<String>,
     force: bool,

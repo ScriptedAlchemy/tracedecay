@@ -79,15 +79,29 @@ fn prewarm_static_daemon_bootstrap_catalog() {
 }
 
 #[cfg(unix)]
-pub async fn run_foreground(
+pub fn run_foreground(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
-) -> Result<()> {
-    run_foreground_unix(socket_path, remote_tls).await
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(hotpath::future!(
+        run_foreground_unix(socket_path, remote_tls),
+        label = "daemon.bootstrap.run_foreground"
+    ))
 }
 
 #[cfg(not(unix))]
-pub async fn run_foreground(
+pub fn run_foreground(
+    socket_path: PathBuf,
+    remote_tls: Option<RemoteBrainTlsConfig>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(hotpath::future!(
+        run_foreground_loopback(socket_path, remote_tls),
+        label = "daemon.bootstrap.run_foreground"
+    ))
+}
+
+#[cfg(not(unix))]
+async fn run_foreground_loopback(
     _socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
@@ -889,6 +903,19 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 mod tests {
     #[cfg(unix)]
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_bootstrap_future_is_heap_bounded() {
+        let future = run_foreground(PathBuf::from("/tmp/unused-tracedecay.sock"), None);
+
+        assert_eq!(
+            std::mem::size_of_val(&future),
+            std::mem::size_of::<
+                std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
+            >(),
+        );
+    }
 
     #[cfg(unix)]
     #[test]

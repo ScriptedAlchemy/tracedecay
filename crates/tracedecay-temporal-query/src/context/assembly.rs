@@ -124,25 +124,28 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
     order_context_omissions(&mut bundle.omissions, unavailable);
 
     let policy = estimator.token_policy();
-    let prepared = prepare_admission(
-        available,
-        grain,
-        &bundle,
-        &summary_omissions,
-        &budget.estimator_version,
-        policy,
-        control,
-    )?;
-    let decision = choose_admission(
-        &prepared,
-        &bundle,
-        &summary_omissions,
-        &budget,
-        policy,
-        control,
-    )?;
-    materialize_admission(&mut bundle, available, grain, &prepared, decision, control)?;
-    validate_bundle(&bundle)?;
+    let (prepared, decision) = hotpath::measure_block!("temporal_query.context.admit", {
+        let prepared = prepare_admission(
+            available,
+            grain,
+            &bundle,
+            &summary_omissions,
+            &budget.estimator_version,
+            policy,
+            control,
+        )?;
+        let decision = choose_admission(
+            &prepared,
+            &bundle,
+            &summary_omissions,
+            &budget,
+            policy,
+            control,
+        )?;
+        materialize_admission(&mut bundle, available, grain, &prepared, decision, control)?;
+        validate_bundle(&bundle)?;
+        (prepared, decision)
+    });
 
     let measurement = measure_context(
         &bundle,
@@ -157,15 +160,17 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
             "compact context admission accounting drifted".to_string(),
         ));
     }
-    let rendered = render_exact(
-        &bundle,
-        &summary_omissions,
-        &available[..decision.admitted],
-        &budget.estimator_version,
-        policy,
-        measurement.bytes,
-        control,
-    )?;
+    let rendered = hotpath::measure_block!("temporal_query.context.render", {
+        render_exact(
+            &bundle,
+            &summary_omissions,
+            &available[..decision.admitted],
+            &budget.estimator_version,
+            policy,
+            measurement.bytes,
+            control,
+        )?
+    });
     Ok(CompactContext {
         accounted_bytes: measurement.bytes,
         rendered,

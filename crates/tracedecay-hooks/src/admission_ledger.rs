@@ -168,6 +168,7 @@ impl Drop for HookAdmissionLedgerV1 {
 
 impl HookAdmissionLedgerV1 {
     /// Open (and bounded-recover) the ledger for one host.
+    #[hotpath::measure(label = "hooks.admission.ledger_open")]
     pub fn open(
         root: impl Into<PathBuf>,
         host: HookHostV1,

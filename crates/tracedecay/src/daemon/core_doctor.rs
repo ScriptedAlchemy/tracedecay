@@ -193,9 +193,12 @@ async fn doctor_runtime_value(
     startup_health_only: bool,
     git_watcher_health: Option<serde_json::Value>,
 ) -> serde_json::Value {
-    let mut value =
-        doctor_runtime_value_inner(handshake, Some(store_administration), startup_health_only)
-            .await;
+    let mut value = Box::pin(doctor_runtime_value_inner(
+        handshake,
+        Some(store_administration),
+        startup_health_only,
+    ))
+    .await;
     value["git_watcher"] = git_watcher_health.unwrap_or_else(|| {
         json!({
             "status": "unavailable",
@@ -231,8 +234,7 @@ async fn doctor_runtime_value_inner(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.to_path_buf());
-    let graph = store_administration
-        .mounted_project_graphs()
+    let graph = Box::pin(store_administration.mounted_project_graphs())
         .await
         .into_iter()
         .find(|graph| {
@@ -268,7 +270,7 @@ async fn doctor_runtime_value_inner(
     let (quick_check_ok, quick_check_error) = if route_live {
         (None, None)
     } else {
-        match graph.quick_check_report().await {
+        match Box::pin(graph.quick_check_report()).await {
             Ok(None) => (Some(true), None),
             Ok(Some(problem)) => (Some(false), Some(problem)),
             Err(_) => {
@@ -279,7 +281,7 @@ async fn doctor_runtime_value_inner(
     let page_counts = if route_live {
         None
     } else {
-        graph.storage_page_counts().await.ok()
+        Box::pin(graph.storage_page_counts()).await.ok()
     };
     let db_size_bytes = match page_counts {
         Some((page_size, page_count, _)) => Some(page_size.saturating_mul(page_count)),
@@ -295,10 +297,12 @@ async fn doctor_runtime_value_inner(
         // Doctor snapshot deliberately does not re-read the schema pragma.
         None
     } else {
-        match graph
-            .db()
-            .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version")
-            .await
+        match Box::pin(
+            graph
+                .db()
+                .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version"),
+        )
+        .await
         {
             Ok(version) => Some(version),
             Err(_) => {
@@ -340,18 +344,19 @@ async fn doctor_runtime_value_inner(
         return value;
     }
 
-    let registry = store_administration
-        .registered_profile_database()
+    let registry = Box::pin(store_administration.registered_profile_database())
         .await
         .ok();
     // Doctor asked for the exhaustive observation-authority audit, so run it.
     // A retained registry handle only proves the schema contract held at
     // publication; it is not evidence that the invariant pass ran now.
     let (authority_ok, authority_reason, authority_detail) = match registry.as_ref() {
-        Some(registry) => match registry.read_snapshot().await {
+        Some(registry) => match Box::pin(registry.read_snapshot()).await {
             Ok(snapshot) => {
-                match crate::global_db::schema_stages::validate_observation_authority_connection(
-                    &snapshot,
+                match Box::pin(
+                    crate::global_db::schema_stages::validate_observation_authority_connection(
+                        &snapshot,
+                    ),
                 )
                 .await
                 {
@@ -385,8 +390,7 @@ async fn doctor_runtime_value_inner(
     let canonical_session_path = session_path
         .canonicalize()
         .unwrap_or_else(|_| session_path.clone());
-    let session_db = store_administration
-        .mounted_registered_session_databases()
+    let session_db = Box::pin(store_administration.mounted_registered_session_databases())
         .await
         .into_iter()
         .find(|database| {
@@ -399,12 +403,12 @@ async fn doctor_runtime_value_inner(
     if let Some(db) = session_db.as_ref() {
         let health_budget = Duration::from_secs(8);
         let (temporal, cursor_ingest, placeholder_paths) = tokio::join!(
-            timeout(health_budget, db.session_temporal_doctor_health()),
-            timeout(health_budget, db.cursor_session_ingest_health()),
-            timeout(
+            Box::pin(timeout(health_budget, db.session_temporal_doctor_health())),
+            Box::pin(timeout(health_budget, db.cursor_session_ingest_health())),
+            Box::pin(timeout(
                 health_budget,
                 doctor_literal_workspace_placeholder_paths(db, 10)
-            ),
+            )),
         );
         value["session_temporal_health"] = match temporal {
             Ok(report) => doctor_runtime_temporal_report(report),
@@ -444,10 +448,7 @@ async fn doctor_runtime_value_inner(
         });
         value["cursor_session_placeholder_paths"] = json!([]);
     }
-    let semantic_configuration = graph
-        .configuration_runtime()
-        .client()
-        .current()
+    let semantic_configuration = Box::pin(graph.configuration_runtime().client().current())
         .await
         .ok()
         .and_then(|pinned| {
@@ -522,12 +523,12 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
-    let mut value = doctor_runtime_value(
+    let mut value = Box::pin(doctor_runtime_value(
         handshake,
         store_administration,
         request.startup_health_only,
         git_watcher_health,
-    )
+    ))
     .await;
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
         value["doctor_report"] = json!({
@@ -537,7 +538,11 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
         });
     }
     let result = doctor_runtime_tool_result(value);
-    write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
+    Box::pin(write_json_rpc_response(
+        transport,
+        &JsonRpcResponse::success(request.id, result),
+    ))
+    .await
 }
 
 /// Serve a Doctor runtime request from the daemon core while the routed
@@ -565,7 +570,7 @@ where
         return Ok(Some(setup_activity));
     };
     let report_ready = if request.doctor_report_requested() {
-        doctor_report_ready().await?
+        Box::pin(doctor_report_ready()).await?
     } else {
         false
     };
@@ -573,13 +578,13 @@ where
         return Ok(Some(setup_activity));
     }
     drop(setup_activity);
-    write_doctor_runtime_response(
+    Box::pin(write_doctor_runtime_response(
         transport,
         handshake,
         store_administration,
         request,
         git_watcher_health,
-    )
+    ))
     .await?;
     Ok(None)
 }

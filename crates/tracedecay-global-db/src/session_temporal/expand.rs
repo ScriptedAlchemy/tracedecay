@@ -112,6 +112,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
+    #[hotpath::measure]
     pub async fn retrieve_session_temporal_page_result(
         &self,
         request: SessionTemporalRetrievalRequestV1,
@@ -174,9 +175,11 @@ impl RegisteredGlobalDb {
         };
         let fetch_limit = i64::try_from(request.page_size().saturating_add(1))
             .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut rows = read
-            .query(
-                "SELECT occurrence_id, source_observation_id,
+        let (occurrences, occurrence_anchors, has_more) =
+            hotpath::measure_block!("session_temporal.expand.scan", {
+                let mut rows = read
+                    .query(
+                        "SELECT occurrence_id, source_observation_id,
                         projection_output_ordinal, retrieval_anchor_id,
                         thread_id, thread_grouping_json,
                         turn_id, turn_grouping_json, message_id, agent_id,
@@ -221,59 +224,63 @@ impl RegisteredGlobalDb {
                    )
                  ORDER BY occurrence.knowledge_at, occurrence.occurrence_id
                  LIMIT ?8",
-                params![
-                    request.session_id().as_str(),
-                    generation,
-                    after_knowledge,
-                    after_occurrence,
-                    request.temporal_mode().as_str(),
-                    cutoff,
-                    request.grain().as_str(),
-                    fetch_limit,
-                ],
+                        params![
+                            request.session_id().as_str(),
+                            generation,
+                            after_knowledge,
+                            after_occurrence,
+                            request.temporal_mode().as_str(),
+                            cutoff,
+                            request.grain().as_str(),
+                            fetch_limit,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| storage(EXPAND_OPERATION, error))?;
+                let mut occurrences = Vec::with_capacity(request.page_size());
+                let mut occurrence_anchors = Vec::with_capacity(request.page_size());
+                let mut has_more = false;
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|error| storage(EXPAND_OPERATION, error))?
+                {
+                    if occurrences.len() == request.page_size() {
+                        has_more = true;
+                        break;
+                    }
+                    let occurrence = occurrence_from_row(&row, request.session_id())?;
+                    occurrence_anchors.push((
+                        occurrence.occurrence_id.clone(),
+                        occurrence.retrieval_anchor_id.clone(),
+                    ));
+                    occurrences.push(occurrence);
+                }
+                drop(rows);
+                (occurrences, occurrence_anchors, has_more)
+            });
+
+        let (copies, assertions) = hotpath::measure_block!("session_temporal.expand.hydrate", {
+            let mut remaining =
+                MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE.saturating_sub(occurrences.len());
+            let copies = if remaining == 0 {
+                Vec::new()
+            } else {
+                relation_logical_copies(self, &request, &occurrence_anchors, remaining)?
+            };
+            remaining = remaining.saturating_sub(copies.len());
+            let assertions = assertions_for_anchors(
+                &read,
+                request.session_id(),
+                generation,
+                &occurrence_anchors,
+                request.temporal_mode().as_str(),
+                cutoff,
+                remaining,
             )
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut occurrences = Vec::with_capacity(request.page_size());
-        let mut occurrence_anchors = Vec::with_capacity(request.page_size());
-        let mut has_more = false;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?
-        {
-            if occurrences.len() == request.page_size() {
-                has_more = true;
-                break;
-            }
-            let occurrence = occurrence_from_row(&row, request.session_id())?;
-            occurrence_anchors.push((
-                occurrence.occurrence_id.clone(),
-                occurrence.retrieval_anchor_id.clone(),
-            ));
-            occurrences.push(occurrence);
-        }
-        drop(rows);
-
-        let mut remaining =
-            MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE.saturating_sub(occurrences.len());
-        let copies = if remaining == 0 {
-            Vec::new()
-        } else {
-            relation_logical_copies(self, &request, &occurrence_anchors, remaining)?
-        };
-        remaining = remaining.saturating_sub(copies.len());
-
-        let assertions = assertions_for_anchors(
-            &read,
-            request.session_id(),
-            generation,
-            &occurrence_anchors,
-            request.temporal_mode().as_str(),
-            cutoff,
-            remaining,
-        )
-        .await?;
+            .await?;
+            (copies, assertions)
+        });
 
         let next_after_occurrence_id = has_more
             .then(|| occurrences.last().map(|item| item.occurrence_id.clone()))
@@ -513,6 +520,7 @@ async fn summary_anchors_for(
     Ok(anchors)
 }
 
+#[hotpath::measure]
 async fn retrieve_summary_page(
     db: &RegisteredGlobalDb,
     read: &DatabaseEngineReadSnapshot,
@@ -531,9 +539,10 @@ async fn retrieve_summary_page(
     };
     let fetch_limit = i64::try_from(request.page_size().saturating_add(1))
         .map_err(|error| storage(EXPAND_OPERATION, error))?;
-    let mut rows = read
-        .query(
-            "SELECT node.summary_id, node.summary_anchor_id,
+    let summary_seeds = hotpath::measure_block!("session_temporal.expand.summary.scan", {
+        let mut rows = read
+            .query(
+                "SELECT node.summary_id, node.summary_anchor_id,
                     node.source_horizon_json, node.created_at,
                     node.publication_json
              FROM session_summary_nodes AS node
@@ -546,97 +555,101 @@ async fn retrieve_summary_page(
                AND (?3 <> 'as_of' OR node.created_at <= ?4)
              ORDER BY node.created_at, node.summary_id
              LIMIT ?5",
-            params![
-                request.session_id().as_str(),
-                generation,
-                request.temporal_mode().as_str(),
-                cutoff,
-                fetch_limit
-            ],
-        )
-        .await
-        .map_err(|error| storage(EXPAND_OPERATION, error))?;
-    let mut summary_seeds = Vec::with_capacity(request.page_size());
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(EXPAND_OPERATION, error))?
-    {
-        if summary_seeds.len() == request.page_size() {
-            return Err(storage_message(
-                EXPAND_OPERATION,
-                "summary page exceeds the transitional store cursor capacity",
-            ));
+                params![
+                    request.session_id().as_str(),
+                    generation,
+                    request.temporal_mode().as_str(),
+                    cutoff,
+                    fetch_limit
+                ],
+            )
+            .await
+            .map_err(|error| storage(EXPAND_OPERATION, error))?;
+        let mut summary_seeds = Vec::with_capacity(request.page_size());
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(EXPAND_OPERATION, error))?
+        {
+            if summary_seeds.len() == request.page_size() {
+                return Err(storage_message(
+                    EXPAND_OPERATION,
+                    "summary page exceeds the transitional store cursor capacity",
+                ));
+            }
+            let summary_id = decode_text::<SessionSummaryIdV1>(row_get(&row, 0)?)?;
+            let summary_anchor_id = decode_text::<RetrievalAnchorId>(row_get(&row, 1)?)?;
+            let source_horizon = decode_json_str::<SummarySourceHorizonV1>(row_get(&row, 2)?)?;
+            let created_at = UtcMicros(row_get(&row, 3)?);
+            let publication = row_get::<Option<String>>(&row, 4)?;
+            summary_seeds.push(SummarySeed {
+                summary_id,
+                summary_anchor_id,
+                source_horizon,
+                created_at,
+                publication: publication
+                    .as_deref()
+                    .map(decode_summary_publication)
+                    .transpose()?,
+            });
         }
-        let summary_id = decode_text::<SessionSummaryIdV1>(row_get(&row, 0)?)?;
-        let summary_anchor_id = decode_text::<RetrievalAnchorId>(row_get(&row, 1)?)?;
-        let source_horizon = decode_json_str::<SummarySourceHorizonV1>(row_get(&row, 2)?)?;
-        let created_at = UtcMicros(row_get(&row, 3)?);
-        let publication = row_get::<Option<String>>(&row, 4)?;
-        summary_seeds.push(SummarySeed {
-            summary_id,
-            summary_anchor_id,
-            source_horizon,
-            created_at,
-            publication: publication
-                .as_deref()
-                .map(decode_summary_publication)
-                .transpose()?,
-        });
-    }
-    drop(rows);
+        drop(rows);
+        summary_seeds
+    });
 
-    let summary_ids = summary_seeds
-        .iter()
-        .map(|seed| seed.summary_id.as_str().to_owned())
-        .collect::<Vec<_>>();
-    let relations = relation_summary_relations(db, request, &summary_ids)?;
-    if relations.len() != summary_seeds.len() {
-        return Err(map_session_relation_error(SessionRelationError::Corrupt));
-    }
-    let referenced_summary_ids = relations
-        .iter()
-        .flat_map(|relation| relation.sources.iter())
-        .filter_map(|source| match source {
-            SummarySourceRef::Summary { summary_id } => Some(summary_id.clone()),
-            SummarySourceRef::Anchor { .. } => None,
-        })
-        .collect::<BTreeSet<_>>();
-    let summary_anchors =
-        summary_anchors_for(read, request.session_id(), &referenced_summary_ids).await?;
-    let mut summaries = Vec::with_capacity(summary_seeds.len());
-    for (seed, relation) in summary_seeds.into_iter().zip(relations) {
-        if relation.summary_id != seed.summary_id.as_str() {
+    let summaries = hotpath::measure_block!("session_temporal.expand.summary.hydrate", {
+        let summary_ids = summary_seeds
+            .iter()
+            .map(|seed| seed.summary_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let relations = relation_summary_relations(db, request, &summary_ids)?;
+        if relations.len() != summary_seeds.len() {
             return Err(map_session_relation_error(SessionRelationError::Corrupt));
         }
-        let mut source_anchors = Vec::new();
-        for source in relation.sources {
-            match source {
-                SummarySourceRef::Anchor { anchor_id } => source_anchors.push(anchor_id),
-                SummarySourceRef::Summary { summary_id } => source_anchors.push(
-                    summary_anchors
-                        .get(&summary_id)
-                        .cloned()
-                        .ok_or_else(|| map_session_relation_error(SessionRelationError::Corrupt))?,
-                ),
+        let referenced_summary_ids = relations
+            .iter()
+            .flat_map(|relation| relation.sources.iter())
+            .filter_map(|source| match source {
+                SummarySourceRef::Summary { summary_id } => Some(summary_id.clone()),
+                SummarySourceRef::Anchor { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let summary_anchors =
+            summary_anchors_for(read, request.session_id(), &referenced_summary_ids).await?;
+        let mut summaries = Vec::with_capacity(summary_seeds.len());
+        for (seed, relation) in summary_seeds.into_iter().zip(relations) {
+            if relation.summary_id != seed.summary_id.as_str() {
+                return Err(map_session_relation_error(SessionRelationError::Corrupt));
             }
+            let mut source_anchors = Vec::new();
+            for source in relation.sources {
+                match source {
+                    SummarySourceRef::Anchor { anchor_id } => source_anchors.push(anchor_id),
+                    SummarySourceRef::Summary { summary_id } => {
+                        source_anchors.push(summary_anchors.get(&summary_id).cloned().ok_or_else(
+                            || map_session_relation_error(SessionRelationError::Corrupt),
+                        )?)
+                    }
+                }
+            }
+            let mut summary = SessionSummaryRecordV1::new(
+                seed.summary_id,
+                request.session_id().clone(),
+                seed.summary_anchor_id,
+                source_anchors,
+                seed.source_horizon,
+                seed.created_at,
+            )?;
+            if let Some(predecessor) = relation.predecessor_summary_id {
+                summary = summary.with_predecessor(decode_text(predecessor)?)?;
+            }
+            if let Some(publication) = seed.publication {
+                summary = summary.with_publication(publication)?;
+            }
+            summaries.push(summary);
         }
-        let mut summary = SessionSummaryRecordV1::new(
-            seed.summary_id,
-            request.session_id().clone(),
-            seed.summary_anchor_id,
-            source_anchors,
-            seed.source_horizon,
-            seed.created_at,
-        )?;
-        if let Some(predecessor) = relation.predecessor_summary_id {
-            summary = summary.with_predecessor(decode_text(predecessor)?)?;
-        }
-        if let Some(publication) = seed.publication {
-            summary = summary.with_publication(publication)?;
-        }
-        summaries.push(summary);
-    }
+        summaries
+    });
     let visible = u64::try_from(summaries.len()).unwrap_or(u64::MAX);
     SessionRetrievalPageV1::new(
         request.snapshot().clone(),

@@ -595,47 +595,51 @@ impl ProjectMemoryFactRetrievalReceiptV1 {
         recall: bool,
         replayed: bool,
     ) -> FactStoreResult<Self> {
-        owner.validate()?;
-        operation_id.validate()?;
-        if input_digest.len() != 64
-            || !input_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "project memory fact retrieval input digest",
-            }));
-        }
-        if fact_ids.is_empty() || fact_ids.len() > MAX_CURRENT_LIMIT {
-            return Err(FactStoreError::InvalidQueryLimit {
-                limit: fact_ids.len(),
-                max: MAX_CURRENT_LIMIT,
-            });
-        }
-        if fact_ids.iter().any(|fact_id| fact_id.owner() != &owner) {
-            return Err(FactStoreError::OwnerMismatch);
-        }
-        if fact_ids.iter().enumerate().any(|(index, fact_id)| {
-            fact_ids[..index]
-                .iter()
-                .any(|previous| previous.fact_id() == fact_id.fact_id())
-        }) {
-            return Err(FactStoreError::Contract(DomainError::DuplicateId {
-                field: "project memory fact retrieval receipt fact ids",
-            }));
-        }
+        hotpath::measure_block!("store.memory.retrieval.validate", {
+            owner.validate()?;
+            operation_id.validate()?;
+            if input_digest.len() != 64
+                || !input_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "project memory fact retrieval input digest",
+                }));
+            }
+            if fact_ids.is_empty() || fact_ids.len() > MAX_CURRENT_LIMIT {
+                return Err(FactStoreError::InvalidQueryLimit {
+                    limit: fact_ids.len(),
+                    max: MAX_CURRENT_LIMIT,
+                });
+            }
+            if fact_ids.iter().any(|fact_id| fact_id.owner() != &owner) {
+                return Err(FactStoreError::OwnerMismatch);
+            }
+            if fact_ids.iter().enumerate().any(|(index, fact_id)| {
+                fact_ids[..index]
+                    .iter()
+                    .any(|previous| previous.fact_id() == fact_id.fact_id())
+            }) {
+                return Err(FactStoreError::Contract(DomainError::DuplicateId {
+                    field: "project memory fact retrieval receipt fact ids",
+                }));
+            }
+        });
         let durable_fact_ids = fact_ids
             .iter()
             .map(ProjectMemoryFactIdV1::fact_id)
             .collect::<Vec<_>>();
-        let committed_state_digest = canonical_sha256(&(
-            "tracedecay.project-memory.fact-retrieval-receipt.committed-state.v1",
-            &owner,
-            &operation_id,
-            &input_digest,
-            durable_fact_ids,
-            recall,
-        ))?;
+        let committed_state_digest = hotpath::measure_block!("store.memory.retrieval.digest", {
+            canonical_sha256(&(
+                "tracedecay.project-memory.fact-retrieval-receipt.committed-state.v1",
+                &owner,
+                &operation_id,
+                &input_digest,
+                durable_fact_ids,
+                recall,
+            ))?
+        });
         Ok(Self {
             owner,
             operation_id,

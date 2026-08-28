@@ -585,6 +585,221 @@ where
     })
 }
 
+/// Heap-erase the first MCP/status request so constructing it cannot inflate
+/// the broker state machine. `Box::pin(async { ... })` still builds that
+/// future on the worker stack; a named owner plus `dyn Future` keeps the
+/// caller pointer-sized.
+#[cfg(unix)]
+fn serve_first_mcp_request<A, P>(
+    mut transport: BrokerStreamTransport,
+    engine: DaemonEngine,
+    mut handshake: DaemonHandshake,
+    first_request_line: String,
+    setup_activity: A,
+    initialize_route: Option<InitializeRouteMetadata>,
+    _per_client_permit: P,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+where
+    A: Send + 'static,
+    P: Send + 'static,
+{
+    Box::pin(async move {
+        let bootstrap_handled = Box::pin(async {
+            if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+                let initialized_project_server_ready =
+                    matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                        && handshake.project_path.is_some()
+                        && engine.cached_project_server(&handshake).await?.is_some();
+                let project_node_count =
+                    if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                        if handshake.project_path.is_some() {
+                            cached_project_node_count(&engine.store_administration, &handshake)
+                                .await
+                        } else {
+                            Some(0)
+                        }
+                    } else {
+                        None
+                    };
+                if !initialized_project_server_ready
+                    && let Some(mut response) = daemon_bootstrap_response(
+                        &request,
+                        initialize_route.as_ref(),
+                        project_node_count,
+                    )
+                {
+                    let project_open_error = if handshake.project_path.is_some()
+                        && matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize | McpMethod::ToolsList
+                        ) {
+                        match engine.cached_project_open_failure(&handshake).await {
+                            Ok(Some(failure)) => Some(failure.to_error()),
+                            Ok(None)
+                                if matches!(
+                                    classify_mcp_method(&request.method),
+                                    McpMethod::Initialize
+                                ) =>
+                            {
+                                Box::pin(engine.schedule_project_server_warmup(
+                                    handshake.clone(),
+                                    request.clone(),
+                                ))
+                                .await
+                                .err()
+                            }
+                            Ok(None) => None,
+                            Err(error) => Some(error),
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(error) = project_open_error {
+                        response = request
+                            .id
+                            .clone()
+                            .map(|id| project_open_error_response(id, &error));
+                    }
+                    // Keep catalog-refresh bookkeeping consistent with the regular MCP
+                    // server path. Only a warming `tools/list` (no published node count)
+                    // or an initialize answered while a project graph is still opening
+                    // is provisional. `project_node_count` is computed only for
+                    // `tools/list`, so treating every `None` as provisional also
+                    // skipped projectless initialize (must mark current) and
+                    // `notifications/initialized` (must emit a pending refresh).
+                    let catalog_is_provisional = match classify_mcp_method(&request.method) {
+                        McpMethod::ToolsList => project_node_count.is_none(),
+                        McpMethod::Initialize => handshake.project_path.is_some(),
+                        _ => false,
+                    };
+                    if let Some(key) = engine
+                        .claim_catalog_refresh(
+                            &handshake,
+                            &first_request_line,
+                            catalog_is_provisional,
+                        )
+                        .await
+                        && let Err(error) =
+                            write_tool_list_changed_notification(&mut transport).await
+                    {
+                        engine.release_catalog_refresh(key).await;
+                        return Err(error);
+                    }
+                    if let Some(response) = response {
+                        write_json_rpc_response(&mut transport, &response).await?;
+                    }
+                    return Ok::<_, TraceDecayError>(true);
+                }
+            }
+            Ok(false)
+        })
+        .await?;
+        if bootstrap_handled {
+            drop(setup_activity);
+            return Ok(());
+        }
+
+        let user_session_request = projectless_user_session_request(&first_request_line);
+        let project_owner = Box::pin(async {
+            if handshake.project_path.is_some() && !user_session_request {
+                match await_project_owner_or_disconnect(
+                    &mut transport,
+                    engine.project_server_for_request(
+                        &handshake,
+                        project_server_requirement(&first_request_line),
+                    ),
+                )
+                .await
+                {
+                    Ok(Some((server, pending_lines))) => Ok(Some((Some(server), pending_lines))),
+                    Ok(None) => Ok(None),
+                    Err(error) => {
+                        write_project_open_error(
+                            &mut transport,
+                            &first_request_line,
+                            &handshake.client_instance_id,
+                            &error,
+                        )
+                        .await?;
+                        Ok(None)
+                    }
+                }
+            } else {
+                Ok::<_, TraceDecayError>(Some((None, VecDeque::new())))
+            }
+        })
+        .await?;
+        drop(setup_activity);
+        let Some((server, pending_project_open_lines)) = project_owner else {
+            return Ok(());
+        };
+        if !engine.lifecycle.accepting() {
+            return Ok(());
+        }
+
+        // The stdio proxy creates one daemon connection per request. The request
+        // was peeked above so initialize-root routing happens before project open.
+        if let Some(key) = engine
+            .claim_catalog_refresh(&handshake, &first_request_line, false)
+            .await
+            && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+        {
+            engine.release_catalog_refresh(key).await;
+            return Err(error);
+        }
+        if let Some(server) = server {
+            if is_mcp_initialize_request(&first_request_line) {
+                #[cfg(test)]
+                tests::record_mcp_route(
+                    &handshake.client_instance_id,
+                    tests::ObservedMcpRoute::Rmcp,
+                );
+                Box::pin(serve_routed_rmcp_connection(
+                    server,
+                    transport,
+                    first_request_line,
+                    pending_project_open_lines,
+                    initialize_route,
+                    handshake.timings,
+                    &engine.lifecycle,
+                ))
+                .await?;
+            } else {
+                #[cfg(test)]
+                tests::record_mcp_route(
+                    &handshake.client_instance_id,
+                    tests::ObservedMcpRoute::Legacy,
+                );
+                let mut transport = ReplayTransport::new(transport);
+                transport.push_replay(first_request_line)?;
+                for line in pending_project_open_lines {
+                    transport.push_replay(line)?;
+                }
+                Box::pin(server.run_daemon_connection_with_timings(
+                    &mut transport,
+                    handshake.timings,
+                    &engine.lifecycle,
+                ))
+                .await?;
+            }
+        } else {
+            let mut transport = ReplayTransport::new(transport);
+            transport.push_replay(first_request_line)?;
+            for line in pending_project_open_lines {
+                transport.push_replay(line)?;
+            }
+            Box::pin(serve_projectless_client(
+                &mut transport,
+                &handshake.client_identity,
+                &engine.lifecycle,
+                &engine.store_administration,
+            ))
+            .await?;
+        }
+        Ok(())
+    })
+}
+
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.transport.broker", future = true)]
 async fn serve_broker_socket_client(
@@ -606,15 +821,23 @@ fn serve_broker_socket_client_inner(
     // Erase the deeply nested broker connection future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let mut transport = BrokerStreamTransport::new(stream);
-        if let Some(expected_token) = auth_token.as_deref() {
-            let preface_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(()),
-            };
-            let Some(preface_line) = preface_line else {
-                return Ok(());
-            };
+        let Some((
+            mut transport,
+            engine,
+            mut handshake,
+            first_request_line,
+            setup_activity,
+            _per_client_permit,
+        )) = Box::pin(async move {
+            let mut transport = BrokerStreamTransport::new(stream);
+            if let Some(expected_token) = auth_token.as_deref() {
+                let preface_line = tokio::select! {
+                    result = read_line_handling_wire_oversized(&mut transport) => result?,
+                    () = engine.lifecycle.wait_for_draining() => return Ok(None),
+                };
+                let Some(preface_line) = preface_line else {
+                    return Ok(None);
+                };
             let preface = DaemonAuthPreface::from_line(&preface_line).map_err(|_| {
                 TraceDecayError::Config {
                     message: "daemon client authentication failed".to_string(),
@@ -628,29 +851,29 @@ fn serve_broker_socket_client_inner(
         }
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
-            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
         };
         let Some(line) = line else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(setup_activity) = engine.lifecycle.try_enter() else {
-            return Ok(());
+            return Ok(None);
         };
         let mut handshake = DaemonHandshake::from_line(&line)?;
         let peer_full_close = transport.peer_fully_closed_after_eof();
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
             result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
-            () = &mut peer_full_close => return Ok(()),
+            () = &mut peer_full_close => return Ok(None),
         };
         let mut engine = engine;
         engine.store_administration = store_administration;
         let first_request_line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
-            () = engine.lifecycle.wait_for_draining() => return Ok(()),
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
         };
         let Some(first_request_line) = first_request_line else {
-            return Ok(());
+            return Ok(None);
         };
         let reserved_control_request = is_reserved_control_request(&first_request_line);
         if admission_class == DaemonClientAdmissionClass::ReservedControl
@@ -663,7 +886,7 @@ fn serve_broker_socket_client_inner(
                 MAX_CONCURRENT_DAEMON_CLIENTS,
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
             match engine
@@ -674,12 +897,36 @@ fn serve_broker_socket_client_inner(
                 Err(response) => {
                     drop(setup_activity);
                     reject_admitted_request(&mut transport, &first_request_line, response).await?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         } else {
             None
         };
+            Ok::<_, TraceDecayError>(Some((
+                transport,
+                engine,
+                handshake,
+                first_request_line,
+                setup_activity,
+                _per_client_permit,
+            )))
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+
+        Box::pin(async move {
+        let Some((
+            mut transport,
+            engine,
+            mut handshake,
+            first_request_line,
+            setup_activity,
+            _per_client_permit,
+            initialize_route,
+        )) = Box::pin(async move {
         if let Some(cancellation) =
             crate::daemon_contract::parse_daemon_invocation_cancellation_request(
                 &first_request_line,
@@ -689,41 +936,41 @@ fn serve_broker_socket_client_inner(
                 crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
             });
             drop(setup_activity);
-            return Ok(());
+            return Ok(None);
         }
         let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
             Some(
-                engine
-                    .git_watcher_health(handshake.project_path.as_deref())
-                    .await,
+                Box::pin(engine.git_watcher_health(handshake.project_path.as_deref())).await,
             )
         } else {
             None
         };
-        let Some(setup_activity) = serve_core_doctor_runtime_request(
+        let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &engine.store_administration,
             setup_activity,
             &first_request_line,
             git_watcher_health,
-            || async {
-                Ok(engine
-                    .cached_project_server(&handshake)
-                    .await?
-                    .is_some_and(|server| server.doctor_report_ready()))
+            || {
+                Box::pin(async {
+                    Ok(engine
+                        .cached_project_server(&handshake)
+                        .await?
+                        .is_some_and(|server| server.doctor_report_ready()))
+                })
             },
-        )
+        ))
         .await?
         else {
-            return Ok(());
+            return Ok(None);
         };
-        engine.log_client_version_skew(&handshake).await;
+        Box::pin(engine.log_client_version_skew(&handshake)).await;
         report_profile_host_admission_bootstrap_status(
-            schedule_user_profile_host_admission_replay_for_identity(
+            Box::pin(schedule_user_profile_host_admission_replay_for_identity(
                 &engine.store_administration,
                 &handshake.client_identity,
-            )
+            ))
             .await,
         );
         // Resolve initialize roots only after authentication and inside daemon
@@ -732,26 +979,42 @@ fn serve_broker_socket_client_inner(
         // are answered as typed responses: dropping the connection here would
         // surface as a hard host failure and leave the client without the
         // retryable state the deferral carries.
-        let initialize_route = match apply_daemon_initialize_route(
+        let initialize_route = match Box::pin(apply_daemon_initialize_route(
             &mut handshake,
             &first_request_line,
             &engine.store_administration,
-        )
+        ))
         .await
         {
             Ok(route) => route,
             Err(error) => {
                 drop(setup_activity);
-                write_project_open_error(
+                Box::pin(write_project_open_error(
                     &mut transport,
                     &first_request_line,
                     &handshake.client_instance_id,
                     &error,
-                )
+                ))
                 .await?;
-                return Ok(());
+                return Ok(None);
             }
         };
+            Ok::<_, TraceDecayError>(Some((
+                transport,
+                engine,
+                handshake,
+                first_request_line,
+                setup_activity,
+                _per_client_permit,
+                initialize_route,
+            )))
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+
+        Box::pin(async move {
         if let Some(request) = parse_branch_admin_request(&first_request_line) {
             let result = match request.action.clone() {
                 Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -789,10 +1052,16 @@ fn serve_broker_socket_client_inner(
             return Ok(());
         }
         if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
+            return Box::pin(async move {
             let mut invocation = invocation;
             let mut owned_lsp_sessions = HashMap::new();
             let mut pending_line = None;
-            let result = async {
+            // Keep the retained invocation loop out of the broker connection
+            // future's inline state. With Hotpath enabled the surrounding
+            // transport wrapper is polled on Tokio's ordinary worker stack;
+            // embedding this loop there makes construction alone exceed that
+            // stack before the first request can be served.
+            let result = Box::pin(async {
                 loop {
                     let delivery = invocation.as_ref().ok().and_then(|request| {
                         DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
@@ -987,20 +1256,73 @@ fn serve_broker_socket_client_inner(
                     };
                     invocation = next_invocation;
                 }
-            }
+            })
             .await;
             cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
-            return result;
+            result
+            })
+            .await;
         }
+        serve_first_mcp_request(
+            transport,
+            engine,
+            handshake,
+            first_request_line,
+            setup_activity,
+            initialize_route,
+            _per_client_permit,
+        )
+        .await
+        })
+        .await
+        })
+        .await
+    })
+}
+
+/// Heap-erase the portable first MCP/status request. Same owning-boundary
+/// rule as [`serve_first_mcp_request`]: construct the deep future inside a
+/// named `dyn Future` owner so the Hotpath-measured dispatcher stays thin.
+#[cfg(any(not(unix), test))]
+#[allow(clippy::too_many_arguments)]
+fn serve_first_portable_mcp_request<'a, A>(
+    mut transport: BrokerStreamTransport,
+    mut handshake: DaemonHandshake,
+    first_request_line: String,
+    setup_activity: A,
+    initialize_route: Option<InitializeRouteMetadata>,
+    store_administration: StoreAdministration,
+    lifecycle: &'a DaemonLifecycle,
+    project_open_gates: std::sync::Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    #[cfg(test)] project_open_attempts: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+where
+    A: Send + 'a,
+{
+    Box::pin(async move {
         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
             let initialized_project_server_ready =
-                matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                     && handshake.project_path.is_some()
-                    && engine.cached_project_server(&handshake).await?.is_some();
+                {
+                    let (project_path, _) = project_route_for_handshake(&handshake)?;
+                    portable_cached_project_server(
+                        &store_administration,
+                        &project_path,
+                        &handshake,
+                        ProjectServerRequirement::Core,
+                    )
+                    .await?
+                    .is_some()
+                } else {
+                    false
+                };
             let project_node_count =
                 if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
                     if handshake.project_path.is_some() {
-                        cached_project_node_count(&engine.store_administration, &handshake).await
+                        cached_project_node_count(&store_administration, &handshake).await
                     } else {
                         Some(0)
                     }
@@ -1019,7 +1341,12 @@ fn serve_broker_socket_client_inner(
                         classify_mcp_method(&request.method),
                         McpMethod::Initialize | McpMethod::ToolsList
                     ) {
-                    match engine.cached_project_open_failure(&handshake).await {
+                    match portable_cached_project_open_failure(
+                        project_open_gates.as_ref(),
+                        &handshake,
+                    )
+                    .await
+                    {
                         Ok(Some(failure)) => Some(failure.to_error()),
                         Ok(None)
                             if matches!(
@@ -1027,12 +1354,17 @@ fn serve_broker_socket_client_inner(
                                 McpMethod::Initialize
                             ) =>
                         {
-                            Box::pin(
-                                engine.schedule_project_server_warmup(
-                                    handshake.clone(),
-                                    request.clone(),
-                                ),
-                            )
+                            Box::pin(schedule_portable_project_server_warmup(
+                                lifecycle.clone(),
+                                store_administration.clone(),
+                                Arc::clone(&project_open_gates),
+                                invocation.clone(),
+                                http_application_registry.clone(),
+                                handshake.clone(),
+                                request.clone(),
+                                #[cfg(test)]
+                                project_open_attempts.clone(),
+                            ))
                             .await
                             .err()
                         }
@@ -1048,26 +1380,6 @@ fn serve_broker_socket_client_inner(
                         .clone()
                         .map(|id| project_open_error_response(id, &error));
                 }
-                // Keep catalog-refresh bookkeeping consistent with the regular MCP
-                // server path. Only a warming `tools/list` (no published node count)
-                // or an initialize answered while a project graph is still opening
-                // is provisional. `project_node_count` is computed only for
-                // `tools/list`, so treating every `None` as provisional also
-                // skipped projectless initialize (must mark current) and
-                // `notifications/initialized` (must emit a pending refresh).
-                let catalog_is_provisional = match classify_mcp_method(&request.method) {
-                    McpMethod::ToolsList => project_node_count.is_none(),
-                    McpMethod::Initialize => handshake.project_path.is_some(),
-                    _ => false,
-                };
-                if let Some(key) = engine
-                    .claim_catalog_refresh(&handshake, &first_request_line, catalog_is_provisional)
-                    .await
-                    && let Err(error) = write_tool_list_changed_notification(&mut transport).await
-                {
-                    engine.release_catalog_refresh(key).await;
-                    return Err(error);
-                }
                 drop(setup_activity);
                 if let Some(response) = response {
                     write_json_rpc_response(&mut transport, &response).await?;
@@ -1076,21 +1388,24 @@ fn serve_broker_socket_client_inner(
             }
         }
         let user_session_request = projectless_user_session_request(&first_request_line);
-        let mut pending_project_open_lines = VecDeque::new();
-        let server = if handshake.project_path.is_some() && !user_session_request {
-            match await_project_owner_or_disconnect(
+        if handshake.project_path.is_some() && !user_session_request {
+            let server = match await_project_owner_or_disconnect(
                 &mut transport,
-                engine.project_server_for_request(
+                portable_project_server_for_request(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    Arc::clone(&project_open_gates),
+                    invocation.clone(),
+                    http_application_registry,
                     &handshake,
                     project_server_requirement(&first_request_line),
+                    #[cfg(test)]
+                    project_open_attempts.clone(),
                 ),
             )
             .await
             {
-                Ok(Some((server, pending_lines))) => {
-                    pending_project_open_lines = pending_lines;
-                    Some(server)
-                }
+                Ok(Some(server)) => server,
                 Ok(None) => {
                     drop(setup_activity);
                     return Ok(());
@@ -1106,26 +1421,9 @@ fn serve_broker_socket_client_inner(
                     .await?;
                     return Ok(());
                 }
-            }
-        } else {
-            None
-        };
-        drop(setup_activity);
-        if !engine.lifecycle.accepting() {
-            return Ok(());
-        }
-
-        // The stdio proxy creates one daemon connection per request. The request
-        // was peeked above so initialize-root routing happens before project open.
-        if let Some(key) = engine
-            .claim_catalog_refresh(&handshake, &first_request_line, false)
-            .await
-            && let Err(error) = write_tool_list_changed_notification(&mut transport).await
-        {
-            engine.release_catalog_refresh(key).await;
-            return Err(error);
-        }
-        if let Some(server) = server {
+            };
+            drop(setup_activity);
+            let (server, pending_lines) = server;
             if is_mcp_initialize_request(&first_request_line) {
                 #[cfg(test)]
                 tests::record_mcp_route(
@@ -1136,10 +1434,10 @@ fn serve_broker_socket_client_inner(
                     server,
                     transport,
                     first_request_line,
-                    pending_project_open_lines,
+                    pending_lines,
                     initialize_route,
                     handshake.timings,
-                    &engine.lifecycle,
+                    lifecycle,
                 )
                 .await?;
             } else {
@@ -1150,28 +1448,26 @@ fn serve_broker_socket_client_inner(
                 );
                 let mut transport = ReplayTransport::new(transport);
                 transport.push_replay(first_request_line)?;
-                for line in pending_project_open_lines {
+                for line in pending_lines {
                     transport.push_replay(line)?;
                 }
                 Box::pin(server.run_daemon_connection_with_timings(
                     &mut transport,
                     handshake.timings,
-                    &engine.lifecycle,
+                    lifecycle,
                 ))
                 .await?;
             }
         } else {
+            drop(setup_activity);
             let mut transport = ReplayTransport::new(transport);
             transport.push_replay(first_request_line)?;
-            for line in pending_project_open_lines {
-                transport.push_replay(line)?;
-            }
-            serve_projectless_client(
+            Box::pin(serve_projectless_client(
                 &mut transport,
                 &handshake.client_identity,
-                &engine.lifecycle,
-                &engine.store_administration,
-            )
+                lifecycle,
+                &store_administration,
+            ))
             .await?;
         }
         Ok(())
@@ -1632,166 +1928,21 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
         return result;
     }
-    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
-        let initialized_project_server_ready =
-            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                && handshake.project_path.is_some()
-            {
-                let (project_path, _) = project_route_for_handshake(&handshake)?;
-                portable_cached_project_server(
-                    &store_administration,
-                    &project_path,
-                    &handshake,
-                    ProjectServerRequirement::Core,
-                )
-                .await?
-                .is_some()
-            } else {
-                false
-            };
-        let project_node_count =
-            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
-                if handshake.project_path.is_some() {
-                    cached_project_node_count(&store_administration, &handshake).await
-                } else {
-                    Some(0)
-                }
-            } else {
-                None
-            };
-        if !initialized_project_server_ready
-            && let Some(mut response) =
-                daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
-        {
-            let project_open_error = if handshake.project_path.is_some()
-                && matches!(
-                    classify_mcp_method(&request.method),
-                    McpMethod::Initialize | McpMethod::ToolsList
-                ) {
-                match portable_cached_project_open_failure(project_open_gates.as_ref(), &handshake)
-                    .await
-                {
-                    Ok(Some(failure)) => Some(failure.to_error()),
-                    Ok(None)
-                        if matches!(
-                            classify_mcp_method(&request.method),
-                            McpMethod::Initialize
-                        ) =>
-                    {
-                        Box::pin(schedule_portable_project_server_warmup(
-                            lifecycle.clone(),
-                            store_administration.clone(),
-                            Arc::clone(&project_open_gates),
-                            invocation.clone(),
-                            http_application_registry.clone(),
-                            handshake.clone(),
-                            request.clone(),
-                            #[cfg(test)]
-                            project_open_attempts.clone(),
-                        ))
-                        .await
-                        .err()
-                    }
-                    Ok(None) => None,
-                    Err(error) => Some(error),
-                }
-            } else {
-                None
-            };
-            if let Some(error) = project_open_error {
-                response = request
-                    .id
-                    .clone()
-                    .map(|id| project_open_error_response(id, &error));
-            }
-            drop(setup_activity);
-            if let Some(response) = response {
-                write_json_rpc_response(&mut transport, &response).await?;
-            }
-            return Ok(());
-        }
-    }
-    let user_session_request = projectless_user_session_request(&first_request_line);
-    if handshake.project_path.is_some() && !user_session_request {
-        let server = match await_project_owner_or_disconnect(
-            &mut transport,
-            portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry,
-                &handshake,
-                project_server_requirement(&first_request_line),
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            ),
-        )
-        .await
-        {
-            Ok(Some(server)) => server,
-            Ok(None) => {
-                drop(setup_activity);
-                return Ok(());
-            }
-            Err(error) => {
-                drop(setup_activity);
-                write_project_open_error(
-                    &mut transport,
-                    &first_request_line,
-                    &handshake.client_instance_id,
-                    &error,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        drop(setup_activity);
-        let (server, pending_lines) = server;
-        if is_mcp_initialize_request(&first_request_line) {
-            #[cfg(test)]
-            tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
-            serve_routed_rmcp_connection(
-                server,
-                transport,
-                first_request_line,
-                pending_lines,
-                initialize_route,
-                handshake.timings,
-                lifecycle,
-            )
-            .await?;
-        } else {
-            #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Legacy,
-            );
-            let mut transport = ReplayTransport::new(transport);
-            transport.push_replay(first_request_line)?;
-            for line in pending_lines {
-                transport.push_replay(line)?;
-            }
-            Box::pin(server.run_daemon_connection_with_timings(
-                &mut transport,
-                handshake.timings,
-                lifecycle,
-            ))
-            .await?;
-        }
-    } else {
-        drop(setup_activity);
-        let mut transport = ReplayTransport::new(transport);
-        transport.push_replay(first_request_line)?;
-        Box::pin(serve_projectless_client(
-            &mut transport,
-            &handshake.client_identity,
-            lifecycle,
-            &store_administration,
-        ))
-        .await?;
-    }
-    Ok(())
+    serve_first_portable_mcp_request(
+        transport,
+        handshake,
+        first_request_line,
+        setup_activity,
+        initialize_route,
+        store_administration,
+        lifecycle,
+        project_open_gates,
+        invocation,
+        http_application_registry,
+        #[cfg(test)]
+        project_open_attempts,
+    )
+    .await
 }
 
 #[cfg(test)]

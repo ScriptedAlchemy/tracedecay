@@ -3820,10 +3820,14 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::SemanticSchedule(_)
             | Self::PublicationConflict(_)
             | Self::IgnoredDependency(_)
-            | Self::WorkerMemoryAdmission(_)
-            | Self::SnapshotMemoryAdmission(_)
-            | Self::SnapshotMemoryCapacityUnavailable
             | Self::WorkerPlan(_) => false,
+            // Concurrent live-scratch pressure is temporary when another
+            // holder can release enough. A single request larger than the
+            // whole process authority cannot succeed by waiting.
+            Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
+                failure.requested_bytes <= failure.limit_bytes
+            }
+            Self::SnapshotMemoryCapacityUnavailable => true,
             #[cfg(not(test))]
             Self::WorkerPlanNotInstalled => false,
         }
@@ -3831,11 +3835,6 @@ impl CodeIndexSchedulerErrorV1 {
 
     pub(super) fn is_graph_activation_refusal(&self) -> bool {
         matches!(self, Self::GraphActivationRefused(_))
-            || matches!(
-                self,
-                Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
-                    if budget == "resident_memory"
-            )
     }
 
     /// A refusal that is transient *by construction*: this pass was turned away
@@ -3923,7 +3922,9 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// request admission must fail closed and schedule background truth.
     freshness_unknown: bool,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    /// Keeps the current snapshot's interned bytes alive in the shared pool.
+    /// Live interned source only while a capture is in flight. After a
+    /// generation seals or is proven unchanged, these pages are released so
+    /// admission stays concurrent scratch, not whole-project size.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
     /// Holds the measured source-byte charges for
     /// `retained_snapshot_bytes`; worker scratch is admitted separately only
@@ -4243,8 +4244,33 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     fn finish_snapshot_build_memory(
-        _reservations: &mut [ResidentMemoryReservationV1],
+        reservations: Vec<ResidentMemoryReservationV1>,
+        retained_bytes: Vec<Arc<[u8]>>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let released_bytes = reservations
+            .iter()
+            .map(ResidentMemoryReservationV1::reserved_bytes)
+            .sum::<u64>();
+        // Capture is concurrent live scratch. After the sealed generation is
+        // published or proven unchanged, interned whole-worktree pages are
+        // not serving state and must not occupy admission.
+        hotpath::gauge!("code_index.snapshot.released_bytes").set(released_bytes as f64);
+        hotpath::gauge!("code_index.snapshot.released_charges").set(reservations.len() as f64);
+        hotpath::gauge!("code_index.snapshot.retained_bytes").set(0.0);
+        hotpath::gauge!("code_index.snapshot.retained_charges").set(0.0);
+        drop(reservations);
+        drop(retained_bytes);
+        Ok(())
+    }
+
+    fn release_snapshot_live_scratch(
+        &mut self,
+        reservations: Vec<ResidentMemoryReservationV1>,
+        retained_bytes: Vec<Arc<[u8]>>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        Self::finish_snapshot_build_memory(reservations, retained_bytes)?;
+        self.retained_snapshot_bytes.clear();
+        self._retained_snapshot_memory.clear();
         Ok(())
     }
 
@@ -4576,9 +4602,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 },
                 &control,
             )?;
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+            self.release_snapshot_live_scratch(
+                std::mem::take(&mut captured.retained_reservations),
+                std::mem::take(&mut captured.retained_bytes),
+            )?;
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
             let repository_parse_identity_digest =
@@ -4630,9 +4657,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(Some(outcome));
         }
         drop(std::mem::take(&mut captured.captured_files));
-        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+        self.release_snapshot_live_scratch(
+            std::mem::take(&mut captured.retained_reservations),
+            std::mem::take(&mut captured.retained_bytes),
+        )?;
         let snapshot_content_identity = captured.snapshot.content_identity;
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         self.mark_reconciled_state(sampled_metadata.clone(), Some(sampled_signature.clone()));
@@ -4963,10 +4991,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 && unchanged_source
             {
                 drop(std::mem::take(&mut captured.captured_files));
-                Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                self._retained_snapshot_memory =
-                    std::mem::take(&mut captured.retained_reservations);
+                self.release_snapshot_live_scratch(
+                    std::mem::take(&mut captured.retained_reservations),
+                    std::mem::take(&mut captured.retained_bytes),
+                )?;
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(sampled_metadata, sampled_signature);
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -5010,10 +5038,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
-                    Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                    self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                    self._retained_snapshot_memory =
-                        std::mem::take(&mut captured.retained_reservations);
+                    self.release_snapshot_live_scratch(
+                        std::mem::take(&mut captured.retained_reservations),
+                        std::mem::take(&mut captured.retained_bytes),
+                    )?;
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(sampled_metadata, sampled_signature);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -5023,9 +5051,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
+            self.release_snapshot_live_scratch(
+                std::mem::take(&mut captured.retained_reservations),
+                std::mem::take(&mut captured.retained_bytes),
+            )?;
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(sampled_metadata, sampled_signature);
 

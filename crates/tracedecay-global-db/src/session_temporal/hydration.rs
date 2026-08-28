@@ -553,27 +553,29 @@ impl GlobalDbHydrationBackend<'_> {
                 session_id,
                 summary_id,
             } => {
-                let mut rows = self
-                    .read
-                    .query(
-                        "SELECT summary_text
+                let content = hotpath::measure_block!("session_temporal.hydration.summary.scan", {
+                    let mut rows = self
+                        .read
+                        .query(
+                            "SELECT summary_text
                              FROM session_summary_nodes
                              WHERE session_id = ?1 AND summary_id = ?2
                                AND length(CAST(summary_text AS BLOB)) <= ?3",
-                        params![
-                            session_id.as_str(),
-                            summary_id.as_str(),
-                            i64::try_from(max_bytes).unwrap_or(i64::MAX)
-                        ],
-                    )
-                    .await
-                    .map_err(hydration_failure)?;
-                let row = rows
-                    .next()
-                    .await
-                    .map_err(hydration_failure)?
-                    .ok_or(HydrationError::Unavailable)?;
-                let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
+                            params![
+                                session_id.as_str(),
+                                summary_id.as_str(),
+                                i64::try_from(max_bytes).unwrap_or(i64::MAX)
+                            ],
+                        )
+                        .await
+                        .map_err(hydration_failure)?;
+                    let row = rows
+                        .next()
+                        .await
+                        .map_err(hydration_failure)?
+                        .ok_or(HydrationError::Unavailable)?;
+                    Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?)
+                });
                 bounded_copy(content.as_bytes(), max_bytes, control)
             }
             PayloadSource::External {
@@ -634,28 +636,33 @@ async fn read_occurrence_content(
     control: &ExecutionControl,
 ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
     control.checkpoint()?;
-    let mut rows = conn
-        .query(
-            "SELECT observation_json
+    let observation_json = hotpath::measure_block!("session_temporal.hydration.occurrence.scan", {
+        let mut rows = conn
+            .query(
+                "SELECT observation_json
              FROM observations
              WHERE observation_id = ?1
              LIMIT 2",
-            [source_observation_id],
-        )
-        .await
-        .map_err(hydration_failure)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(hydration_failure)?
-        .ok_or(HydrationError::Unavailable)?;
-    let observation_json: String = row.get(0).map_err(hydration_failure)?;
-    if rows.next().await.map_err(hydration_failure)?.is_some() {
-        return Err(HydrationError::Unavailable);
-    }
+                [source_observation_id],
+            )
+            .await
+            .map_err(hydration_failure)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(hydration_failure)?
+            .ok_or(HydrationError::Unavailable)?;
+        let observation_json: String = row.get(0).map_err(hydration_failure)?;
+        if rows.next().await.map_err(hydration_failure)?.is_some() {
+            return Err(HydrationError::Unavailable);
+        }
+        observation_json
+    });
     control.checkpoint()?;
-    let observation: DurableObservationV1 =
-        serde_json::from_str(&observation_json).map_err(hydration_failure)?;
+    let observation: DurableObservationV1 = hotpath::measure_block!(
+        "session_temporal.hydration.occurrence.hydrate",
+        serde_json::from_str(&observation_json).map_err(hydration_failure)
+    )?;
     if observation.observation_id().as_str() != source_observation_id
         || observation.source().provider().as_str() != provider
         || observation.source().session_id().as_str() != session_id
@@ -669,10 +676,13 @@ async fn read_occurrence_content(
         return bounded_copy(message.text.as_bytes(), max_bytes, control);
     }
 
-    let raw_payload = raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
-        .await
-        .map_err(hydration_failure)?
-        .ok_or(HydrationError::Unavailable)?;
+    let raw_payload = hotpath::measure_block!(
+        "session_temporal.hydration.occurrence.hydrate",
+        raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
+            .await
+            .map_err(hydration_failure)
+    )?
+    .ok_or(HydrationError::Unavailable)?;
     match raw_payload.storage_kind {
         LcmStorageKind::Inline
             if content_matches_descriptor(raw_payload.content.as_bytes(), descriptor) =>

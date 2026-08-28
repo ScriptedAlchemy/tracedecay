@@ -425,7 +425,7 @@ impl<P> MemoryApplication<P> {
 }
 
 impl<P: CommitFactPort> MemoryApplication<P> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.memory.commit", future = true)]
     pub async fn commit_fact(
         &self,
         command: MemoryCommitFactCommand<P::Command>,
@@ -447,6 +447,7 @@ impl<P: CommitFactPort> MemoryApplication<P> {
 }
 
 impl<P: CurrentFactsPort> MemoryApplication<P> {
+    #[hotpath::measure(label = "application.memory.query_current", future = true)]
     pub async fn query_current_facts(
         &self,
         query: MemoryCurrentFactsQuery<P::Query>,
@@ -489,6 +490,7 @@ impl<P: CurrentFactsPort> MemoryApplication<P> {
 }
 
 impl<P: FactAsOfPort> MemoryApplication<P> {
+    #[hotpath::measure(label = "application.memory.query_as_of", future = true)]
     pub async fn query_fact_as_of(
         &self,
         query: MemoryFactAsOfQuery<P::Query>,
@@ -520,6 +522,7 @@ impl<P: FactAsOfPort> MemoryApplication<P> {
 }
 
 impl<P: FactCurrentPort> MemoryApplication<P> {
+    #[hotpath::measure(label = "application.memory.query_current_fact", future = true)]
     pub async fn query_fact_current(
         &self,
         query: MemoryFactCurrentQuery<P::Query>,
@@ -550,6 +553,7 @@ impl<P: FactCurrentPort> MemoryApplication<P> {
 }
 
 impl<P: FactLineagePort> MemoryApplication<P> {
+    #[hotpath::measure(label = "application.memory.query_lineage", future = true)]
     pub async fn query_fact_lineage(
         &self,
         query: MemoryFactLineageQuery<P::Query>,
@@ -592,6 +596,7 @@ impl<P: FactLineagePort> MemoryApplication<P> {
 }
 
 impl<P: RetrievalAnchorPort> MemoryApplication<P> {
+    #[hotpath::measure(label = "application.memory.get_anchor", future = true)]
     pub async fn get_retrieval_anchor(
         &self,
         query: MemoryRetrievalAnchorQuery<P::Query>,

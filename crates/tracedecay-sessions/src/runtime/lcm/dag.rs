@@ -171,7 +171,11 @@ async fn expand_summary_nodes_with_content(
     if node_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let requested = load_summary_nodes_by_ids(conn, node_ids, include_content).await?;
+    let requested = hotpath::future!(
+        load_summary_nodes_by_ids(conn, node_ids, include_content),
+        label = "lcm.expand.summary.fetch"
+    )
+    .await?;
 
     // Resolve every requested node up front so the source closure below is the
     // union of the whole page, then hydrate that union once.
@@ -195,21 +199,31 @@ async fn expand_summary_nodes_with_content(
         summaries.push(summary);
     }
 
-    let raw_sources = load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content).await?;
-    let child_sources = load_summary_nodes_by_ids(conn, &child_node_ids, include_content).await?;
+    let raw_sources = hotpath::future!(
+        load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content),
+        label = "lcm.expand.summary.hydrate"
+    )
+    .await?;
+    let child_sources = hotpath::future!(
+        load_summary_nodes_by_ids(conn, &child_node_ids, include_content),
+        label = "lcm.expand.summary.fetch"
+    )
+    .await?;
 
-    let mut expansions = Vec::with_capacity(summaries.len());
-    for summary in summaries {
-        expansions.push(assemble_summary_expansion(
-            summary,
-            provider,
-            session_id,
-            include_content,
-            &raw_sources,
-            &child_sources,
-        )?);
-    }
-    Ok(expansions)
+    hotpath::measure_block!("lcm.expand.summary.assemble", {
+        let mut expansions = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            expansions.push(assemble_summary_expansion(
+                summary,
+                provider,
+                session_id,
+                include_content,
+                &raw_sources,
+                &child_sources,
+            )?);
+        }
+        Ok::<_, LcmError>(expansions)
+    })
 }
 
 /// Assembles one expansion from an already-hydrated source closure. Pure: it
@@ -453,40 +467,55 @@ async fn load_raw_messages_by_store_ids(
     } else {
         raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
     };
-    let mut out = BTreeMap::new();
-    for chunk in unique_store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
-        if chunk.is_empty() {
-            continue;
+    let fetched = hotpath::future!(
+        async {
+            let mut fetched = Vec::new();
+            for chunk in unique_store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let sql = format!(
+                    "SELECT {select_columns}
+                     FROM lcm_raw_messages
+                     WHERE store_id IN ({})",
+                    util::sql_in_placeholders(chunk.len())
+                );
+                let mut rows = conn
+                    .query(
+                        &sql,
+                        chunk
+                            .iter()
+                            .map(|store_id| Value::Integer(*store_id))
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?;
+                while let Some(row) = rows.next().await? {
+                    fetched.push(row);
+                }
+            }
+            Ok::<_, LcmError>(fetched)
+        },
+        label = "lcm.hydrate.fetch"
+    )
+    .await?;
+
+    if include_content {
+        hotpath::measure_block!("lcm.hydrate.redact", {
+            let mut out = BTreeMap::new();
+            for row in fetched {
+                let raw = raw::verified_raw_message_from_row(&row)?;
+                out.insert(raw.store_id, RawMessageRow::Hydrated(raw));
+            }
+            Ok::<_, LcmError>(out)
+        })
+    } else {
+        let mut out = BTreeMap::new();
+        for row in fetched {
+            let raw = raw::raw_message_metadata_from_row(&row)?;
+            out.insert(raw.store_id, RawMessageRow::Metadata(raw));
         }
-        let sql = format!(
-            "SELECT {select_columns}
-             FROM lcm_raw_messages
-             WHERE store_id IN ({})",
-            util::sql_in_placeholders(chunk.len())
-        );
-        let mut rows = conn
-            .query(
-                &sql,
-                chunk
-                    .iter()
-                    .map(|store_id| Value::Integer(*store_id))
-                    .collect::<Vec<_>>(),
-            )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            let raw = if include_content {
-                RawMessageRow::Hydrated(raw::verified_raw_message_from_row(&row)?)
-            } else {
-                RawMessageRow::Metadata(raw::raw_message_metadata_from_row(&row)?)
-            };
-            let store_id = match &raw {
-                RawMessageRow::Hydrated(raw) => raw.store_id,
-                RawMessageRow::Metadata(raw) => raw.store_id,
-            };
-            out.insert(store_id, raw);
-        }
+        Ok(out)
     }
-    Ok(out)
 }
 
 async fn load_summary_nodes_by_ids(

@@ -286,6 +286,28 @@ fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_dat
     assert_eq!(data["retryable"], true);
 }
 
+#[test]
+fn saturated_dispatch_is_fail_closed_and_named_on_the_wire() {
+    let error = crate::errors::TraceDecayError::project_route(
+        "tool_dispatch_saturated",
+        false,
+        "MCP retained dispatch capacity is exhausted",
+    );
+
+    let response = tool_error_response(serde_json::json!(11), "tracedecay_grep", &error);
+    let rpc_error = response.error.expect("JSON-RPC error");
+    assert_eq!(
+        rpc_error.message,
+        "tool project route failed: reason_code=tool_dispatch_saturated retryable=false: MCP retained dispatch capacity is exhausted"
+    );
+    let data = rpc_error.data.expect("structured project-route data");
+    assert_eq!(data["reason_code"], "tool_dispatch_saturated");
+    assert_eq!(data["retryable"], false);
+    assert_eq!(data["kind"], "saturated");
+    assert_eq!(data["code"], "tool_dispatch_saturated");
+    assert_eq!(data["tool"], "tracedecay_grep");
+}
+
 // ---- ledger settle is bounded when a recorder task wedges ---------
 
 // A dedicated multi-thread runtime keeps the timer driver off the worker that

@@ -74,7 +74,7 @@ use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
 mod noop_reconcile_tests;
@@ -3395,7 +3395,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
     // An adequate authority admits the build and holds the reader charge
     // for as long as the artifact owners serve.
     let adequate = Arc::new(ProcessResidentMemoryV1::new(
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        detected_process_resident_memory_limit_v1(),
     ));
     {
         // A fresh scheduler restores the durable generation; the unchanged
@@ -5190,6 +5190,54 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         .is_retryable_activation(),
         "payload corruption stays terminal so reconcile can rebuild"
     );
+}
+
+/// Temporary concurrent scratch pressure must throttle and retry. It must not
+/// permanently refuse the project the way configuration-disabled graph does.
+#[test]
+fn resident_memory_pressure_throttles_instead_of_refusing_the_project() {
+    use crate::code_index::graph_projection::CodeGraphProjectionError;
+    use tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1;
+
+    let pressure = super::CodeIndexSchedulerErrorV1::GraphProjection(
+        CodeGraphProjectionError::BudgetExhausted {
+            budget: "resident_memory".to_owned(),
+            limit: 66 * 1024 * 1024 * 1024,
+        },
+    );
+    assert!(
+        pressure.is_retryable_activation(),
+        "graph activation must retry after holders release live scratch"
+    );
+    assert!(
+        pressure.is_transient_capacity_failure(),
+        "memory pressure is a bounded shared-resource delay"
+    );
+    assert!(
+        !pressure.is_graph_activation_refusal(),
+        "memory pressure must not permanently disable native graph"
+    );
+
+    let held =
+        super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(ResidentMemoryAdmissionFailureV1 {
+            used_bytes: 4 * 1024 * 1024 * 1024,
+            requested_bytes: 128 * 1024 * 1024,
+            limit_bytes: 66 * 1024 * 1024 * 1024,
+        });
+    assert!(held.is_retryable_activation());
+    assert!(held.is_transient_capacity_failure());
+
+    let oversized =
+        super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(ResidentMemoryAdmissionFailureV1 {
+            used_bytes: 0,
+            requested_bytes: 80 * 1024 * 1024 * 1024,
+            limit_bytes: 66 * 1024 * 1024 * 1024,
+        });
+    assert!(
+        !oversized.is_retryable_activation(),
+        "a request larger than the whole host authority cannot succeed by waiting"
+    );
+    assert!(!oversized.is_transient_capacity_failure());
 }
 
 /// The serving gates are relaxed on `reference` only. A different repository
@@ -7193,6 +7241,13 @@ impl IsolatedSemanticVectorGraphProviderV1 {
 }
 
 #[cfg(feature = "semantic-fastembed")]
+impl Drop for IsolatedSemanticVectorGraphProviderV1 {
+    fn drop(&mut self) {
+        let _ = self.graph.retire();
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
 impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
     fn graph_for_generation<'a>(
         &'a self,
@@ -7202,7 +7257,7 @@ impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
         Box::pin(async move {
             self.graph
                 .retained(&generation.manifest().generation_id)
-                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
+                .map_err(SemanticVectorGraphErrorV1::from)
         })
     }
 
@@ -7213,7 +7268,7 @@ impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
         Box::pin(async move {
             self.graph
                 .retained(&self.current)
-                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
+                .map_err(SemanticVectorGraphErrorV1::from)
         })
     }
 }
@@ -10151,9 +10206,9 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
 }
 
 /// A verified sealed generation is independently useful to the exact and
-/// lexical lanes. Refusing the optional native graph under the process memory
-/// ceiling must therefore degrade only graph capability instead of withholding
-/// the generation from every query surface.
+/// lexical lanes. Temporary live-scratch pressure must degrade only native
+/// graph capability for this pass — never withhold the generation, and never
+/// permanently refuse the project.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -10824,7 +10879,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
     );
 
     let adequate = Arc::new(ProcessResidentMemoryV1::new(
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        detected_process_resident_memory_limit_v1(),
     ));
     scheduler.bind_resident_memory(Arc::clone(&adequate));
     let outcome = scheduler

@@ -40,7 +40,7 @@ fn ensure_background_cpu_authority() {
 
     use std::sync::{Arc, OnceLock};
     use tracedecay_runtime_core::resident_memory::{
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+        detected_process_resident_memory_limit_v1, ProcessResidentMemoryV1,
     };
 
     static BENCHMARK_RESIDENT_MEMORY: OnceLock<Arc<ProcessResidentMemoryV1>> = OnceLock::new();
@@ -62,7 +62,7 @@ fn ensure_background_cpu_authority() {
     // authority" }` until preparation resources are configured.
     let memory = Arc::clone(BENCHMARK_RESIDENT_MEMORY.get_or_init(|| {
         Arc::new(ProcessResidentMemoryV1::new(
-            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            detected_process_resident_memory_limit_v1(),
         ))
     }));
     let _ = tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()

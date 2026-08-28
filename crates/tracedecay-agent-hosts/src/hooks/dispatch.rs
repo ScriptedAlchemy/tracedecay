@@ -83,6 +83,7 @@ pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8
         .map(|project_id| domain_hash16(project_id, "project"))
 }
 
+#[hotpath::measure(label = "hosts.hooks.publish_bindings")]
 pub fn publish_daemon_bindings(layout: &crate::storage::StoreLayout) -> crate::errors::Result<()> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
         crate::errors::TraceDecayError::Config {
@@ -448,6 +449,7 @@ pub(crate) async fn dispatch_for_scope(
     }
 }
 
+#[hotpath::measure(future = true, label = "hosts.hooks.dispatch_profile")]
 async fn dispatch_profile_scoped(
     host: HookHostV1,
     event_json: &str,
@@ -579,6 +581,7 @@ struct PreparedBoundHook {
     prepared_at: UtcMicros,
 }
 
+#[hotpath::measure(label = "hosts.hooks.prepare_bound")]
 fn prepare_bound_hook(
     host: HookHostV1,
     event_json: &str,

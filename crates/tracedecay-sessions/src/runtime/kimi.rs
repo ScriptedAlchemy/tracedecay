@@ -348,6 +348,7 @@ impl KimiSource {
     }
 }
 
+#[hotpath::measure]
 pub async fn capture_kimi_observations(
     facade: &dyn HostAdmission,
     source: &KimiSource,

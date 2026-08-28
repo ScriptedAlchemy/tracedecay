@@ -26,6 +26,11 @@ pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
 pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES";
 
 /// Derive the concurrent resident-allocation authority for a known host size.
+///
+/// One quarter of physical RAM stays outside modeled scratch for the OS,
+/// agent hosts, and allocations that do not yet participate. The remaining
+/// three quarters throttle simultaneous live scratch, never repository bytes
+/// on disk and never the project's total size.
 #[must_use]
 pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> NonZeroU64 {
     NonZeroU64::new(total_memory_bytes.saturating_sub(total_memory_bytes / 4))
@@ -48,7 +53,7 @@ fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
 ///
 /// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
 /// so operators can raise or lower the authority without rebuilding. Otherwise
-/// TraceDecay retains one quarter of physical RAM outside its modeled
+/// `TraceDecay` retains one quarter of physical RAM outside its modeled
 /// concurrent allocations for the OS, agent hosts, and allocations that do
 /// not yet participate in this authority. The remaining authority throttles
 /// simultaneous scratch ownership; it never limits repository bytes on disk.

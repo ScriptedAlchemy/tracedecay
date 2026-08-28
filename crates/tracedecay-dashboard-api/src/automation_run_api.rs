@@ -84,11 +84,16 @@ pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    match find_run_record(&state.dashboard_root, &run_id).await {
+    match hotpath::measure_block!(
+        "dashboard.automation.run_record",
+        find_run_record(&state.dashboard_root, &run_id).await
+    ) {
         Ok(Some(record)) => {
             let count = record.artifacts.len();
-            let integrity =
-                read_published_artifact_chain(&state.dashboard_root, &run_id, None).await;
+            let integrity = hotpath::measure_block!(
+                "dashboard.automation.artifact_chain",
+                read_published_artifact_chain(&state.dashboard_root, &run_id, None).await
+            );
             let (integrity_status, integrity_verified) = match integrity {
                 Ok(Some(published)) if published == record.artifacts => ("verified", true),
                 Ok(Some(_)) => ("ledger_publication_mismatch", false),
@@ -119,7 +124,10 @@ pub async fn artifact_payload(
     State(state): State<DashboardState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    let record = match find_run_record(&state.dashboard_root, &run_id).await {
+    let record = match hotpath::measure_block!(
+        "dashboard.automation.run_record",
+        find_run_record(&state.dashboard_root, &run_id).await
+    ) {
         Ok(Some(record)) => record,
         Ok(None) => {
             return not_found(&format!("automation run '{run_id}' not found"));
@@ -133,7 +141,10 @@ pub async fn artifact_payload(
             "automation run artifact '{kind}' not found for run '{run_id}'"
         ));
     };
-    match read_run_artifact_payload(&state.dashboard_root, &run_id, artifact).await {
+    match hotpath::measure_block!(
+        "dashboard.automation.artifact_payload",
+        read_run_artifact_payload(&state.dashboard_root, &run_id, artifact).await
+    ) {
         Ok(payload) => (
             StatusCode::OK,
             Json(json!({

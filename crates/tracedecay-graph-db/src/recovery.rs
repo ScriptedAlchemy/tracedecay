@@ -45,17 +45,22 @@ pub(crate) fn projection_mismatch(
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.recover.open")]
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    let recovered = GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
-        GraphDbError::DurabilityUncertain {
-            message: format!(
-                "Grafeo reopen failed during recovered projection verification: {error}"
-            ),
-        }
+    let recovered = hotpath::measure_block!("graph_db.generation.recover.open.engine", {
+        GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
+            GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo reopen failed during recovered projection verification: {error}"
+                ),
+            }
+        })
     })?;
-    if let Err(error) = validate_or_initialize_format(&recovered, reopen) {
+    if let Err(error) = hotpath::measure_block!("graph_db.generation.recover.open.format", {
+        validate_or_initialize_format(&recovered, reopen)
+    }) {
         return close_recovered_after_error("validate recovered graph format", recovered, error);
     }
     let state = match FormatState::load(&recovered) {
@@ -164,17 +169,20 @@ fn close_recovered_after_error<T>(
     }
 }
 
+#[hotpath::measure(label = "graph_db.generation.recover.checkpoint")]
 pub(crate) fn checkpoint_recovered_database(
     recovered: GrafeoDB,
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    recovered
-        .close()
-        .map_err(|error| GraphDbError::DurabilityUncertain {
-            message: format!(
-                "Grafeo close failed while checkpointing projection quarantine: {error}"
-            ),
-        })?;
+    hotpath::measure_block!("graph_db.generation.recover.checkpoint.close", {
+        recovered
+            .close()
+            .map_err(|error| GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo close failed while checkpointing projection quarantine: {error}"
+                ),
+            })
+    })?;
     open_recovered_database(reopen)
 }
 

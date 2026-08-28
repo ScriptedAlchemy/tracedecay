@@ -228,7 +228,7 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
         Self { port, scope }
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "application.historical.query")]
     pub fn query(
         &self,
         authorization: Option<&HistoricalSourceAuthorizationV1>,
@@ -468,7 +468,6 @@ fn validate_path(path: &str) -> Result<(), HistoricalQueryError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn term_anchors(bytes: &[u8], terms: &[String]) -> Vec<HistoricalTermAnchorV1> {
     terms
         .iter()

@@ -124,28 +124,32 @@ impl SessionRetrievalPageV1 {
             return Err(SessionStoreError::CursorKeyRequired);
         }
 
-        for occurrence in &occurrences {
-            occurrence.validate()?;
-            if &occurrence.session_id != snapshot.session_id() {
-                return Err(SessionStoreError::SessionMismatch {
-                    context: "retrieval occurrence",
-                });
+        hotpath::measure_block!("store.session.retrieval.validate_occurrences", {
+            for occurrence in &occurrences {
+                occurrence.validate()?;
+                if &occurrence.session_id != snapshot.session_id() {
+                    return Err(SessionStoreError::SessionMismatch {
+                        context: "retrieval occurrence",
+                    });
+                }
             }
-        }
-        for summary in &summaries {
-            if summary.session_id() != snapshot.session_id() {
-                return Err(SessionStoreError::SessionMismatch {
-                    context: "retrieval summary",
-                });
+            for summary in &summaries {
+                if summary.session_id() != snapshot.session_id() {
+                    return Err(SessionStoreError::SessionMismatch {
+                        context: "retrieval summary",
+                    });
+                }
             }
-        }
+        });
 
-        for copy in &copies {
-            copy.validate()?;
-        }
-        for assertion in &assertions {
-            assertion.validate()?;
-        }
+        hotpath::measure_block!("store.session.retrieval.validate_copies", {
+            for copy in &copies {
+                copy.validate()?;
+            }
+            for assertion in &assertions {
+                assertion.validate()?;
+            }
+        });
 
         Ok(Self {
             snapshot,

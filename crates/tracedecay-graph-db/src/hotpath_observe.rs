@@ -142,17 +142,40 @@ pub(crate) fn record_grafeo_memory(database: &grafeo_engine::GrafeoDB, phase: Gr
         .set(usage.buffer_manager.allocated_bytes as f64);
 }
 
+/// Hydration observation counters for tests.
+///
+/// These are **thread-local**, not process-global. Every hydration site in this
+/// crate records synchronously on the calling thread (the only `thread::spawn`
+/// calls in the crate live inside `#[cfg(test)]` modules), so a thread-local
+/// tally observes exactly the work the observing thread performed.
+///
+/// Process-global statics would be wrong here: `libtest` runs each test on its
+/// own thread, so a shared tally lets any concurrently running test's
+/// publication bleed into another test's `take()`. That made
+/// `no_change_recover_does_not_reread_full_generation` fail roughly 3 runs in 10
+/// at `--test-threads=16` while passing in isolation — the assertion was
+/// correct, the counter was not isolated.
 #[cfg(any(test, feature = "test-helpers"))]
 mod counters {
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::cell::Cell;
 
     use super::HydrationSource;
 
-    static NODES: AtomicU64 = AtomicU64::new(0);
-    static EDGES: AtomicU64 = AtomicU64::new(0);
-    static REPLAY_ROWS: AtomicU64 = AtomicU64::new(0);
-    static GENERATION_BYTES: AtomicU64 = AtomicU64::new(0);
-    static LAST_SOURCE: AtomicU8 = AtomicU8::new(0);
+    thread_local! {
+        static NODES: Cell<u64> = const { Cell::new(0) };
+        static EDGES: Cell<u64> = const { Cell::new(0) };
+        static REPLAY_ROWS: Cell<u64> = const { Cell::new(0) };
+        static GENERATION_BYTES: Cell<u64> = const { Cell::new(0) };
+        static LAST_SOURCE: Cell<u8> = const { Cell::new(0) };
+    }
+
+    fn add(cell: &'static std::thread::LocalKey<Cell<u64>>, amount: usize) {
+        cell.with(|value| value.set(value.get().saturating_add(amount as u64)));
+    }
+
+    fn take_u64(cell: &'static std::thread::LocalKey<Cell<u64>>) -> u64 {
+        cell.with(|value| value.replace(0))
+    }
 
     fn source_code(source: HydrationSource) -> u8 {
         match source {
@@ -186,23 +209,23 @@ mod counters {
     }
 
     pub(super) fn record(nodes: usize, edges: usize, replay_rows: usize, generation_bytes: usize) {
-        NODES.fetch_add(nodes as u64, Ordering::Relaxed);
-        EDGES.fetch_add(edges as u64, Ordering::Relaxed);
-        REPLAY_ROWS.fetch_add(replay_rows as u64, Ordering::Relaxed);
-        GENERATION_BYTES.fetch_add(generation_bytes as u64, Ordering::Relaxed);
+        add(&NODES, nodes);
+        add(&EDGES, edges);
+        add(&REPLAY_ROWS, replay_rows);
+        add(&GENERATION_BYTES, generation_bytes);
     }
 
     pub(super) fn record_source(source: HydrationSource) {
-        LAST_SOURCE.store(source_code(source), Ordering::Relaxed);
+        LAST_SOURCE.with(|value| value.set(source_code(source)));
     }
 
     pub(crate) fn take() -> crate::GraphDbHydrationCounters {
         crate::GraphDbHydrationCounters {
-            nodes: NODES.swap(0, Ordering::Relaxed),
-            edges: EDGES.swap(0, Ordering::Relaxed),
-            replay_rows: REPLAY_ROWS.swap(0, Ordering::Relaxed),
-            generation_bytes: GENERATION_BYTES.swap(0, Ordering::Relaxed),
-            hydration_source: source_from_code(LAST_SOURCE.swap(0, Ordering::Relaxed)),
+            nodes: take_u64(&NODES),
+            edges: take_u64(&EDGES),
+            replay_rows: take_u64(&REPLAY_ROWS),
+            generation_bytes: take_u64(&GENERATION_BYTES),
+            hydration_source: source_from_code(LAST_SOURCE.with(|value| value.replace(0))),
         }
     }
 }

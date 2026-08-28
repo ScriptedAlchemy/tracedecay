@@ -18,6 +18,7 @@ struct PortOrderSymbol<'a> {
     start_line: u32,
 }
 
+#[hotpath::measure(label = "mcp.tools.port_order", future = true)]
 pub(crate) async fn handle_port_order(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

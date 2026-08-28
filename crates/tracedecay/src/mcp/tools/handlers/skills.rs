@@ -87,6 +87,7 @@ fn json_by_skill<T: Serialize>(
         .collect()
 }
 
+#[hotpath::measure(label = "mcp.tools.skill_list", future = true)]
 pub(super) async fn handle_skill_list(
     cg: &TraceDecay,
     args: Value,
@@ -148,6 +149,7 @@ pub(super) async fn handle_skill_list(
     ))
 }
 
+#[hotpath::measure(label = "mcp.tools.skill_view", future = true)]
 pub(super) async fn handle_skill_view(
     cg: &TraceDecay,
     args: Value,
@@ -220,6 +222,7 @@ pub(super) async fn handle_skill_view(
     ))
 }
 
+#[hotpath::measure(label = "mcp.tools.automation_run_artifact_view", future = true)]
 pub(super) async fn handle_automation_run_artifact_view(
     cg: &TraceDecay,
     args: Value,
@@ -269,6 +272,7 @@ async fn sync_project_skill_analytics(
     .map(|_| ())
 }
 
+#[hotpath::measure(label = "mcp.tools.hermes_skill_bridge")]
 pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let snapshot = load_standard_hermes_skill_bridge(HermesSkillBridgeOptions {
         include_skill_bodies: optional_bool(args, "include_skill_bodies", false),

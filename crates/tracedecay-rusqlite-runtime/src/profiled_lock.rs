@@ -12,7 +12,10 @@
 //! collapse every lock in the crate onto one source location. Pass a `label`
 //! as well, since that is what the `mutexes` report keys on.
 
-#[cfg(feature = "hotpath")]
+// Unconditional on purpose: `hotpath::mutex!` expands by the *hotpath
+// crate's* feature state, which Cargo unifies workspace-wide - a sibling
+// crate enabling profiling flips the macro's return type even when this
+// crate's own `hotpath` feature is off. Aliasing through the same crate
+// (`hotpath::mutexes::Mutex` is `std::sync::Mutex` in the no-op build)
+// keeps the alias and the macro in lockstep under any feature unification.
 pub(crate) type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-pub(crate) type ProfiledMutex<T> = std::sync::Mutex<T>;

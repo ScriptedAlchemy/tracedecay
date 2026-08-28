@@ -76,6 +76,7 @@ fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
     Some(parent_no_generics.trim().to_string())
 }
 
+#[hotpath::measure(label = "mcp.tools.port_status", future = true)]
 pub(crate) async fn handle_port_status(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

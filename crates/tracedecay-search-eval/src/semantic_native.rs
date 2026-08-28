@@ -973,7 +973,7 @@ impl SemanticNativeResourceSampleV1 {
         if self.provenance.threads == 0 {
             return Some("threads");
         }
-        if self.provenance.max_concurrent_sessions != 1 {
+        if self.provenance.max_concurrent_sessions == 0 {
             return Some("max_concurrent_sessions");
         }
         if self.provenance.batch_size == 0 {
@@ -1453,8 +1453,12 @@ mod tests {
         assert!(!sample.is_complete());
         assert_eq!(sample.incomplete_reason(), Some("threads"));
 
+        let mut wider = complete_resource_sample();
+        wider.provenance.max_concurrent_sessions = 2;
+        assert!(wider.is_complete());
+
         let mut sample = complete_resource_sample();
-        sample.provenance.max_concurrent_sessions = 2;
+        sample.provenance.max_concurrent_sessions = 0;
         assert!(!sample.is_complete());
         assert_eq!(sample.incomplete_reason(), Some("max_concurrent_sessions"));
     }

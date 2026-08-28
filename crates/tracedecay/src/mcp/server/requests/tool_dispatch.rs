@@ -6,6 +6,7 @@ use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_
 use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
+    #[hotpath::measure(label = "mcp.project_route.resolve", future = true)]
     pub(super) async fn route_tool_arguments(
         &self,
         id: &Value,
@@ -323,21 +324,62 @@ impl McpServer {
         );
         if let Some(read_flight) = read_flight {
             match read_flight {
-                ReadFlightClaim::Leader(leader) => match dispatch.await {
-                    Ok(result) => Ok(leader.complete(result)),
-                    Err(error) => Err(error),
-                },
-                ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok(hotpath::measure_block!(
-                        "mcp.server.read_coalescing.result_clone",
-                        (*result).clone()
-                    )),
-                    None => dispatch.await,
-                },
+                ReadFlightClaim::Leader(leader) => {
+                    let _leaders = IdenticalReadLeaderGuard::enter();
+                    match hotpath::future!(dispatch, label = "mcp.identical_read.leader").await {
+                        Ok(result) => Ok(leader.complete(result)),
+                        Err(error) => Err(error),
+                    }
+                }
+                ReadFlightClaim::Follower(follower) => {
+                    let _followers = IdenticalReadFollowerGuard::enter();
+                    match hotpath::future!(
+                        follower.wait(),
+                        label = "mcp.identical_read.follower_wait"
+                    )
+                    .await
+                    {
+                        Some(result) => Ok(hotpath::measure_block!(
+                            "mcp.server.read_coalescing.result_clone",
+                            (*result).clone()
+                        )),
+                        None => dispatch.await,
+                    }
+                }
             }
         } else {
             dispatch.await
         }
+    }
+}
+
+struct IdenticalReadLeaderGuard;
+
+impl IdenticalReadLeaderGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.identical_read.leaders").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for IdenticalReadLeaderGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.identical_read.leaders").dec(1_u64);
+    }
+}
+
+struct IdenticalReadFollowerGuard;
+
+impl IdenticalReadFollowerGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.identical_read.followers").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for IdenticalReadFollowerGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.identical_read.followers").dec(1_u64);
     }
 }
 

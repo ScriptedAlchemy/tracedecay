@@ -123,19 +123,31 @@ pub async fn load_raw_message_by_identity(
          ORDER BY store_id
          LIMIT 2"
     );
-    let mut rows = conn
-        .query(&sql, params![provider, session_id, message_id])
-        .await?;
-    let Some(row) = rows.next().await? else {
+    let fetched = hotpath::future!(
+        async {
+            let mut rows = conn
+                .query(&sql, params![provider, session_id, message_id])
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok::<_, LcmError>(None);
+            };
+            let duplicate = rows.next().await?.is_some();
+            Ok(Some((row, duplicate)))
+        },
+        label = "lcm.hydrate.fetch"
+    )
+    .await?;
+    let Some((row, duplicate)) = fetched else {
         return Ok(None);
     };
-    let message = verified_raw_message_from_row(&row)?;
-    if rows.next().await?.is_some() {
+    if duplicate {
         return Err(LcmError::Db(
             "duplicate raw messages for exact provider/session/message identity".to_string(),
         ));
     }
-    Ok(Some(message))
+    hotpath::measure_block!("lcm.hydrate.redact", {
+        verified_raw_message_from_row(&row).map(Some)
+    })
 }
 
 pub async fn load_raw_message_by_store_id(
@@ -147,12 +159,19 @@ pub async fn load_raw_message_by_store_id(
          FROM lcm_raw_messages
          WHERE store_id = ?1"
     );
-    let mut rows = conn.query(&sql, params![store_id]).await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    verified_raw_message_from_row(&row)
+    let row = hotpath::future!(
+        async {
+            let mut rows = conn.query(&sql, params![store_id]).await?;
+            rows.next()
+                .await?
+                .ok_or(LcmError::SummarySourceNotOwnedBySession)
+        },
+        label = "lcm.hydrate.fetch"
+    )
+    .await?;
+    hotpath::measure_block!("lcm.hydrate.redact", {
+        verified_raw_message_from_row(&row)
+    })
 }
 
 pub struct RawMessageUpsert {

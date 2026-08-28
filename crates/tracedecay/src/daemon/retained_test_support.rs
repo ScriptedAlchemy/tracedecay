@@ -121,7 +121,7 @@ pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
     })?;
     let resident_memory = Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
-            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
         ),
     );
     let service = DaemonInvocationService::with_code_index_schedulers(

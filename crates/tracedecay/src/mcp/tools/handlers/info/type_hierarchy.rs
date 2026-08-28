@@ -3,6 +3,7 @@
 use super::*;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
+#[hotpath::measure(label = "mcp.tools.type_hierarchy", future = true)]
 pub(crate) async fn handle_type_hierarchy(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

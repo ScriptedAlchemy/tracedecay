@@ -7,8 +7,8 @@ use tracedecay_domain::canonical_sha256;
 
 use crate::candidate_output::{
     CandidateWorkloadV1, EvaluationExecutionContractV1, GenerateCandidateOutputsResultV1,
-    OptionalStageMeasurementsV1, ProductionCandidateOutputV1, compute_corpus_digest,
-    compute_workload_digest,
+    OptionalStageMeasurementsV1, ProductionCandidateOutputV1, ResourceSampleV1,
+    compute_corpus_digest, compute_workload_digest,
 };
 use crate::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
 use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus};
@@ -32,22 +32,21 @@ pub(crate) fn pairwise_query_pairs<'a>(
     candidate: &'a [DirectQueryEvaluationV1],
     baseline: &'a [DirectQueryEvaluationV1],
 ) -> Vec<(&'a DirectQueryEvaluationV1, &'a DirectQueryEvaluationV1)> {
-    let mut pairs = candidate
+    let mut pairs: Vec<_> = candidate
         .iter()
-        .filter(|query| {
-            query
-                .strata
-                .iter()
-                .any(|stratum| stratum == "natural_language")
-        })
         .filter_map(|query| {
             baseline
                 .iter()
                 .find(|baseline_query| baseline_query.query_id == query.query_id)
                 .map(|baseline_query| (query, baseline_query))
         })
-        .collect::<Vec<_>>();
-    pairs.sort_by_key(|(_, baseline_query)| baseline_query.first_useful_rank == Some(1));
+        .collect();
+    pairs.sort_by_key(|(query, baseline_query)| {
+        (
+            query.first_useful_rank == Some(1),
+            baseline_query.first_useful_rank == Some(1),
+        )
+    });
     pairs
 }
 
@@ -56,19 +55,20 @@ pub(crate) fn semantic_distance_summary(distances: impl IntoIterator<Item = i64>
     distances.sort_unstable();
     let top_distance = distances.first().copied();
     let second_distance = distances.get(1).copied();
-    let top_margin = top_distance
-        .zip(second_distance)
-        .map(|(top, second)| u64::try_from(i128::from(second) - i128::from(top)).unwrap_or(0));
     let display =
-        |value: Option<i64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
-    let display_margin =
-        |value: Option<u64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+        |value: Option<i64>| value.map_or_else(|| "absent".to_owned(), |value| value.to_string());
+    let top_margin = match (top_distance, second_distance) {
+        (Some(top), Some(second)) => u64::try_from(i128::from(second) - i128::from(top))
+            .map(|margin| margin.to_string())
+            .unwrap_or_else(|_| "overflow".to_owned()),
+        _ => "absent".to_owned(),
+    };
     format!(
         "semantic_candidates={},top_distance={},second_distance={},top_margin={}",
         distances.len(),
         display(top_distance),
         display(second_distance),
-        display_margin(top_margin),
+        top_margin,
     )
 }
 
@@ -324,33 +324,38 @@ impl DirectEvaluationReportV1 {
                         output.profile_id, output.partition
                     )));
                 };
-                if sample.provenance.workload_digest != self.workload_digest
-                    || sample.provenance.corpus_digest != self.corpus_digest
-                    || sample.eligible_chunks != expected_eligible_chunks
-                    || sample.measured_queries != output.queries.len() as u64
-                    || sample
-                        .provenance
-                        .artifact_digest
-                        .as_deref()
-                        .is_none_or(str::is_empty)
-                {
+                if let Some(reason) = native_resource_report_bind_mismatch(
+                    &sample.provenance.workload_digest,
+                    &self.workload_digest,
+                    &sample.provenance.corpus_digest,
+                    &self.corpus_digest,
+                    sample.eligible_chunks,
+                    expected_eligible_chunks,
+                    sample.measured_queries,
+                    output.queries.len() as u64,
+                    sample.provenance.artifact_digest.as_deref(),
+                ) {
                     return Err(SearchEvalError::Contract(format!(
-                        "{}:{} native {scale} resource provenance is incomplete or unbound",
+                        "{}:{} native {scale} resource provenance is unbound: {reason}",
                         output.profile_id, output.partition
                     )));
                 }
-                if !vector_generation_evidence
-                    .accepts(sample.provenance.vector_generation_id.as_deref())
-                {
+                if let Some(reason) = native_vector_generation_retention_mismatch(
+                    vector_generation_evidence,
+                    sample.provenance.vector_generation_id.as_deref(),
+                ) {
                     return Err(SearchEvalError::Contract(format!(
-                        "{}:{} native {scale} vector-generation provenance has the wrong retention state",
+                        "{}:{} native {scale} vector-generation provenance has the wrong retention state: {reason}",
                         output.profile_id, output.partition
                     )));
                 }
                 validate_native_measurement_method(&sample.provenance.measurement_method)?;
-                if output.resources.get(scale) != sample.as_existing_evaluator_sample().as_ref() {
+                if let Some(reason) = native_evaluated_resource_mismatch(
+                    output.resources.get(scale),
+                    sample.as_existing_evaluator_sample(),
+                ) {
                     return Err(SearchEvalError::Contract(format!(
-                        "{}:{} native {scale} evidence does not match its evaluated resource sample",
+                        "{}:{} native {scale} evidence does not match its evaluated resource sample: {reason}",
                         output.profile_id, output.partition
                     )));
                 }
@@ -362,9 +367,13 @@ impl DirectEvaluationReportV1 {
                         output.profile_id, output.partition, query.query_id
                     ))
                 })?;
-                if native.profile_id != output.profile_id || !native.fallback_bytes_unchanged {
+                if let Some(reason) = native_query_provenance_mismatch(
+                    &native.profile_id,
+                    &output.profile_id,
+                    native.fallback_bytes_unchanged,
+                ) {
                     return Err(SearchEvalError::Contract(format!(
-                        "{}:{} query {} has invalid native provenance",
+                        "{}:{} query {} has invalid native provenance: {reason}",
                         output.profile_id, output.partition, query.query_id
                     )));
                 }
@@ -471,9 +480,24 @@ impl DirectEvaluationReportV1 {
                 );
             }
             if profile.resource_status == DirectEvaluationStatusV1::Fail {
-                return format!(
-                    "{}:{} resource budget failed",
-                    profile.profile_id, profile.partition
+                let reason = self
+                    .raw_outputs
+                    .iter()
+                    .find(|output| {
+                        output.profile_id == profile.profile_id
+                            && output.partition == profile.partition
+                    })
+                    .and_then(|output| {
+                        crate::evaluate_resource_catalog_failure_reason(
+                            &output.resources,
+                            output.queries.len(),
+                        )
+                    })
+                    .unwrap_or("resource_catalog");
+                return resource_catalog_failure_diagnostic(
+                    &profile.profile_id,
+                    &profile.partition,
+                    Some(reason),
                 );
             }
             return format!(
@@ -499,97 +523,71 @@ impl DirectEvaluationReportV1 {
             profile.profile_id == crate::SEMANTIC_PROFILE
                 || profile.profile_id == crate::RERANK_PROFILE
         }) {
-            let baseline = self.profiles.iter().find(|profile| {
+            let Some(baseline) = self.profiles.iter().find(|profile| {
                 profile.profile_id == crate::QUERY_BASELINE_PROFILE
                     && profile.partition == candidate.partition
-            })?;
-            let baseline_natural = baseline
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language")?;
-            let candidate_natural = candidate
-                .quality
-                .strata
-                .iter()
-                .find(|stratum| stratum.stratum == "natural_language")?;
-            if candidate_natural
-                .ndcg_at_10_ppm
-                .saturating_sub(baseline_natural.ndcg_at_10_ppm)
-                >= crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
-            {
+            }) else {
                 continue;
-            }
-            let output = self.raw_outputs.iter().find(|output| {
+            };
+            let Some(output) = self.raw_outputs.iter().find(|output| {
                 output.profile_id == candidate.profile_id && output.partition == candidate.partition
-            })?;
-            let details = pairwise_query_pairs(&candidate.queries, &baseline.queries)
-                .into_iter()
-                .filter_map(|(query, baseline_query)| {
-                    let raw = output
-                        .queries
-                        .iter()
-                        .find(|raw| raw.query_id == query.query_id)?;
-                    let native = raw.native.as_ref()?;
-                    let semantic_candidates = match &native.measurements.semantic {
-                        SemanticNativeStageResultV1::Complete(measurement) => {
-                            measurement.output_candidates.to_string()
-                        }
-                        SemanticNativeStageResultV1::NotRequested => "not_requested".to_owned(),
-                        SemanticNativeStageResultV1::Pending { .. } => "pending".to_owned(),
-                    };
-                    let relevant_anchor = query
-                        .first_useful_rank
-                        .and_then(|rank| usize::try_from(rank.saturating_sub(1)).ok())
-                        .and_then(|index| raw.ranked.get(index))
-                        .map(|ranked| ranked.anchor.as_str());
-                    let (oracle_hits, top_distance, relevant_distance) =
-                        match &native.exact_flat_oracle {
-                            SemanticNativeStageResultV1::Complete(oracle) => (
-                                oracle.hits.len().to_string(),
-                                oracle
-                                    .hits
-                                    .first()
-                                    .map(|hit| hit.evidence.distance.micros().to_string())
-                                    .unwrap_or_else(|| "none".to_owned()),
-                                relevant_anchor
-                                    .and_then(|anchor| {
-                                        oracle.hits.iter().find(|hit| {
-                                            hit.candidate.anchor_id.as_str() == anchor
-                                        })
-                                    })
-                                    .map(|hit| hit.evidence.distance.micros().to_string())
-                                    .unwrap_or_else(|| "none".to_owned()),
-                            ),
-                        SemanticNativeStageResultV1::NotRequested => {
-                            (
-                                "not_requested".to_owned(),
-                                "none".to_owned(),
-                                "none".to_owned(),
-                            )
-                        }
-                        SemanticNativeStageResultV1::Pending { .. } => {
-                            (
-                                "pending".to_owned(),
-                                "none".to_owned(),
-                                "none".to_owned(),
-                            )
-                        }
-                    };
-                    Some(format!(
-                        "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={},relevant_distance={}",
-                        query.query_id,
-                        baseline_query.first_useful_rank,
-                        query.first_useful_rank,
-                        semantic_candidates,
-                        oracle_hits,
-                        top_distance,
-                        relevant_distance,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            if !details.is_empty() {
-                return Some(details.join(";"));
+            }) else {
+                continue;
+            };
+            if let (Some(baseline_natural), Some(candidate_natural)) = (
+                baseline
+                    .quality
+                    .strata
+                    .iter()
+                    .find(|stratum| stratum.stratum == "natural_language"),
+                candidate
+                    .quality
+                    .strata
+                    .iter()
+                    .find(|stratum| stratum.stratum == "natural_language"),
+            ) {
+                if candidate_natural
+                    .ndcg_at_10_ppm
+                    .saturating_sub(baseline_natural.ndcg_at_10_ppm)
+                    < crate::REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
+                {
+                    let details = pairwise_query_evidence_lines(
+                        candidate,
+                        baseline,
+                        output,
+                        "natural_language",
+                    );
+                    if !details.is_empty() {
+                        return Some(details.join(";"));
+                    }
+                }
+            }
+            for baseline_stratum in baseline
+                .quality
+                .strata
+                .iter()
+                .filter(|stratum| stratum.protected)
+            {
+                let Some(candidate_stratum) = candidate
+                    .quality
+                    .strata
+                    .iter()
+                    .find(|stratum| stratum.stratum == baseline_stratum.stratum)
+                else {
+                    continue;
+                };
+                if !protected_stratum_regressed(baseline_stratum, candidate_stratum) {
+                    continue;
+                }
+                let details = pairwise_query_evidence_lines(
+                    candidate,
+                    baseline,
+                    output,
+                    &baseline_stratum.stratum,
+                );
+                if !details.is_empty() {
+                    return Some(details.join(";"));
+                }
             }
         }
         None
@@ -658,16 +656,30 @@ impl DirectEvaluationReportV1 {
                         ));
                     }
                 }
-                resident_bytes = resident_bytes.max(
-                    sample
-                        .peak_rss_bytes
-                        .filter(|bytes| *bytes != 0)
-                        .ok_or_else(|| {
-                            SearchEvalError::Contract(
-                                "activation resource sample lacks peak RSS".to_owned(),
-                            )
-                        })?,
-                );
+                // VmHWM remains whole-process diagnostic evidence. It includes
+                // every daemon service plus evaluator-only 10x scratch, so
+                // binding it to the accepted semantic profile permanently
+                // inflates the requirement and can reject an admissible runtime.
+                let sample_resident_bytes = match semantic_activation_resident_bytes(
+                    sample.model_bytes,
+                    sample.tokenizer_bytes,
+                    sample.vector_bytes,
+                    sample.index_bytes,
+                    sample.cache_bytes,
+                ) {
+                    SemanticActivationResidentEvidence::Bound(bytes) => bytes,
+                    SemanticActivationResidentEvidence::Incomplete(field) => {
+                        return Err(SearchEvalError::Contract(format!(
+                            "activation semantic resident evidence is incomplete: {field}"
+                        )));
+                    }
+                    SemanticActivationResidentEvidence::Overflowed => {
+                        return Err(SearchEvalError::Contract(
+                            "activation semantic resident evidence overflowed".to_owned(),
+                        ));
+                    }
+                };
+                resident_bytes = resident_bytes.max(sample_resident_bytes);
             }
         }
         let (
@@ -688,14 +700,16 @@ impl DirectEvaluationReportV1 {
                 "activation resource evidence lacks exact artifact bytes".to_owned(),
             ));
         };
-        if output_count != 2
-            || sample_count != 4
-            || resident_bytes < model_bytes
-            || resident_bytes < tokenizer_bytes
-        {
-            return Err(SearchEvalError::Contract(
-                "activation resource evidence is incomplete or internally inconsistent".to_owned(),
-            ));
+        if let Some(reason) = activation_resource_consistency_mismatch(
+            output_count,
+            sample_count,
+            resident_bytes,
+            model_bytes,
+            tokenizer_bytes,
+        ) {
+            return Err(SearchEvalError::Contract(format!(
+                "activation resource evidence is internally inconsistent: {reason}"
+            )));
         }
         Ok(SemanticActivationResourcePinsV1 {
             model_bytes,
@@ -707,6 +721,46 @@ impl DirectEvaluationReportV1 {
             sequence_length,
             load_deadline_ms,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticActivationResidentEvidence {
+    Bound(u64),
+    Incomplete(&'static str),
+    Overflowed,
+}
+
+fn semantic_activation_resident_bytes(
+    model_bytes: Option<u64>,
+    tokenizer_bytes: Option<u64>,
+    vector_bytes: Option<u64>,
+    index_bytes: Option<u64>,
+    cache_bytes: Option<u64>,
+) -> SemanticActivationResidentEvidence {
+    let Some(model_bytes) = model_bytes else {
+        return SemanticActivationResidentEvidence::Incomplete("model_bytes");
+    };
+    let Some(tokenizer_bytes) = tokenizer_bytes else {
+        return SemanticActivationResidentEvidence::Incomplete("tokenizer_bytes");
+    };
+    let Some(vector_bytes) = vector_bytes else {
+        return SemanticActivationResidentEvidence::Incomplete("vector_bytes");
+    };
+    let Some(index_bytes) = index_bytes else {
+        return SemanticActivationResidentEvidence::Incomplete("index_bytes");
+    };
+    let Some(cache_bytes) = cache_bytes else {
+        return SemanticActivationResidentEvidence::Incomplete("cache_bytes");
+    };
+    match cache_bytes
+        .max(model_bytes)
+        .max(tokenizer_bytes)
+        .checked_add(vector_bytes)
+        .and_then(|bytes| bytes.checked_add(index_bytes))
+    {
+        Some(bytes) => SemanticActivationResidentEvidence::Bound(bytes),
+        None => SemanticActivationResidentEvidence::Overflowed,
     }
 }
 
@@ -724,12 +778,17 @@ enum NativeVectorGenerationEvidence {
     Redacted,
 }
 
-impl NativeVectorGenerationEvidence {
-    fn accepts(self, value: Option<&str>) -> bool {
-        match self {
-            Self::Recorded => value.is_some_and(|value| !value.is_empty()),
-            Self::Redacted => value.is_none(),
-        }
+fn native_vector_generation_retention_mismatch(
+    evidence: NativeVectorGenerationEvidence,
+    value: Option<&str>,
+) -> Option<&'static str> {
+    match evidence {
+        NativeVectorGenerationEvidence::Recorded => match value {
+            Some(value) if !value.is_empty() => None,
+            Some(_) => Some("empty"),
+            None => Some("missing"),
+        },
+        NativeVectorGenerationEvidence::Redacted => value.map(|_| "present"),
     }
 }
 
@@ -746,6 +805,20 @@ pub(super) fn validate_native_measurement_method(
     Ok(())
 }
 
+fn required_native_stage_mismatch<T>(
+    requested: bool,
+    stage: &SemanticNativeStageResultV1<T>,
+) -> Option<&'static str> {
+    match (requested, stage) {
+        (true, SemanticNativeStageResultV1::Complete(_))
+        | (false, SemanticNativeStageResultV1::NotRequested) => None,
+        (true, SemanticNativeStageResultV1::NotRequested) => Some("not_requested"),
+        (true, SemanticNativeStageResultV1::Pending { .. })
+        | (false, SemanticNativeStageResultV1::Pending { .. }) => Some("pending"),
+        (false, SemanticNativeStageResultV1::Complete(_)) => Some("complete"),
+    }
+}
+
 fn validate_required_stage<T>(
     requested: bool,
     stage: &SemanticNativeStageResultV1<T>,
@@ -754,17 +827,60 @@ fn validate_required_stage<T>(
     partition: &str,
     query_id: &str,
 ) -> Result<(), SearchEvalError> {
-    let valid = if requested {
-        matches!(stage, SemanticNativeStageResultV1::Complete(_))
+    match required_native_stage_mismatch(requested, stage) {
+        None => Ok(()),
+        Some(reason) => Err(SearchEvalError::Contract(format!(
+            "{profile_id}:{partition} query {query_id} has incomplete {stage_name} evidence: {reason}"
+        ))),
+    }
+}
+
+fn native_evaluated_resource_mismatch(
+    evaluated: Option<&ResourceSampleV1>,
+    native: Option<ResourceSampleV1>,
+) -> Option<&'static str> {
+    match (evaluated, native.as_ref()) {
+        (None, None) => None,
+        (None, Some(_)) => Some("evaluated_missing"),
+        (Some(_), None) => Some("native_projection"),
+        (Some(evaluated), Some(native)) if evaluated == native => None,
+        (Some(evaluated), Some(native)) => {
+            if evaluated.status != native.status {
+                Some("status")
+            } else if evaluated.eligible_chunks != native.eligible_chunks {
+                Some("eligible_chunks")
+            } else if evaluated.peak_rss_bytes != native.peak_rss_bytes {
+                Some("peak_rss_bytes")
+            } else if evaluated.latency_samples_us != native.latency_samples_us {
+                Some("latency_samples_us")
+            } else if evaluated.measured_queries != native.measured_queries {
+                Some("measured_queries")
+            } else if evaluated.pending_reason != native.pending_reason {
+                Some("pending_reason")
+            } else {
+                Some("resource_sample")
+            }
+        }
+    }
+}
+
+fn activation_resource_consistency_mismatch(
+    output_count: u8,
+    sample_count: u8,
+    resident_bytes: u64,
+    model_bytes: u64,
+    tokenizer_bytes: u64,
+) -> Option<&'static str> {
+    if output_count != 2 {
+        Some("output_count")
+    } else if sample_count != 4 {
+        Some("sample_count")
+    } else if resident_bytes < model_bytes {
+        Some("resident_bytes_below_model")
+    } else if resident_bytes < tokenizer_bytes {
+        Some("resident_bytes_below_tokenizer")
     } else {
-        matches!(stage, SemanticNativeStageResultV1::NotRequested)
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(SearchEvalError::Contract(format!(
-            "{profile_id}:{partition} query {query_id} has incomplete {stage_name} evidence"
-        )))
+        None
     }
 }
 
@@ -787,6 +903,535 @@ pub(super) fn profile_material_digests(
         }
     }
     Ok(digests)
+}
+
+fn protected_stratum_regressed(
+    baseline: &DirectStratumQualityV1,
+    candidate: &DirectStratumQualityV1,
+) -> bool {
+    [
+        baseline
+            .recall_at_10
+            .ppm
+            .saturating_sub(candidate.recall_at_10.ppm),
+        baseline
+            .mean_reciprocal_rank_ppm
+            .saturating_sub(candidate.mean_reciprocal_rank_ppm),
+        baseline
+            .ndcg_at_10_ppm
+            .saturating_sub(candidate.ndcg_at_10_ppm),
+    ]
+    .into_iter()
+    .any(|regression| regression > crate::MAX_PROTECTED_QUALITY_REGRESSION_PPM)
+}
+
+fn pairwise_relevant_distance_label(
+    relevant_anchor: Option<&str>,
+    oracle_distance_micros: Option<i64>,
+) -> String {
+    match (relevant_anchor, oracle_distance_micros) {
+        (None, _) => "missing_anchor".to_owned(),
+        (Some(_), None) => "absent".to_owned(),
+        (Some(_), Some(micros)) => micros.to_string(),
+    }
+}
+
+fn pairwise_query_evidence_lines(
+    candidate: &DirectProfileEvaluationV1,
+    baseline: &DirectProfileEvaluationV1,
+    output: &ProductionCandidateOutputV1,
+    stratum: &str,
+) -> Vec<String> {
+    pairwise_query_pairs(&candidate.queries, &baseline.queries)
+        .into_iter()
+        .filter(|(query, _)| query.strata.iter().any(|query_stratum| query_stratum == stratum))
+        .filter_map(|(query, baseline_query)| {
+            let raw = output
+                .queries
+                .iter()
+                .find(|raw| raw.query_id == query.query_id)?;
+            let native = raw.native.as_ref()?;
+            let semantic_candidates = match &native.measurements.semantic {
+                SemanticNativeStageResultV1::Complete(measurement) => {
+                    measurement.output_candidates.to_string()
+                }
+                SemanticNativeStageResultV1::NotRequested => "not_requested".to_owned(),
+                SemanticNativeStageResultV1::Pending { .. } => "pending".to_owned(),
+            };
+            let relevant_anchor = query
+                .first_useful_rank
+                .and_then(|rank| usize::try_from(rank.saturating_sub(1)).ok())
+                .and_then(|index| raw.ranked.get(index))
+                .map(|ranked| ranked.anchor.as_str());
+            let (oracle_hits, top_distance, relevant_distance) = match &native.exact_flat_oracle {
+                SemanticNativeStageResultV1::Complete(oracle) => (
+                    oracle.hits.len().to_string(),
+                    oracle
+                        .hits
+                        .first()
+                        .map(|hit| hit.evidence.distance.micros().to_string())
+                        .unwrap_or_else(|| "none".to_owned()),
+                    pairwise_relevant_distance_label(
+                        relevant_anchor,
+                        relevant_anchor.and_then(|anchor| {
+                            oracle.hits.iter().find_map(|hit| {
+                                (hit.candidate.anchor_id.as_str() == anchor)
+                                    .then(|| hit.evidence.distance.micros())
+                            })
+                        }),
+                    ),
+                ),
+                SemanticNativeStageResultV1::NotRequested => (
+                    "not_requested".to_owned(),
+                    "none".to_owned(),
+                    "none".to_owned(),
+                ),
+                SemanticNativeStageResultV1::Pending { .. } => {
+                    ("pending".to_owned(), "none".to_owned(), "none".to_owned())
+                }
+            };
+            Some(format!(
+                "{}:baseline_rank={:?},candidate_rank={:?},semantic_candidates={},oracle_hits={},top_distance={},relevant_distance={}",
+                query.query_id,
+                baseline_query.first_useful_rank,
+                query.first_useful_rank,
+                semantic_candidates,
+                oracle_hits,
+                top_distance,
+                relevant_distance,
+            ))
+        })
+        .collect()
+}
+
+fn native_query_provenance_mismatch(
+    native_profile_id: &str,
+    output_profile_id: &str,
+    fallback_bytes_unchanged: bool,
+) -> Option<&'static str> {
+    if native_profile_id != output_profile_id {
+        Some("profile_id")
+    } else if !fallback_bytes_unchanged {
+        Some("fallback_bytes_unchanged")
+    } else {
+        None
+    }
+}
+
+fn native_resource_report_bind_mismatch(
+    sample_workload_digest: &str,
+    report_workload_digest: &str,
+    sample_corpus_digest: &str,
+    report_corpus_digest: &str,
+    sample_eligible_chunks: u64,
+    expected_eligible_chunks: u64,
+    sample_measured_queries: u64,
+    expected_measured_queries: u64,
+    artifact_digest: Option<&str>,
+) -> Option<&'static str> {
+    if sample_workload_digest != report_workload_digest {
+        Some("workload_digest")
+    } else if sample_corpus_digest != report_corpus_digest {
+        Some("corpus_digest")
+    } else if sample_eligible_chunks != expected_eligible_chunks {
+        Some("eligible_chunks")
+    } else if sample_measured_queries != expected_measured_queries {
+        Some("measured_queries")
+    } else if artifact_digest.is_none_or(str::is_empty) {
+        Some("artifact_digest")
+    } else {
+        None
+    }
+}
+
+fn resource_catalog_failure_diagnostic(
+    profile_id: &str,
+    partition: &str,
+    reason: Option<&str>,
+) -> String {
+    format!(
+        "{profile_id}:{partition} resource catalog failed: {}",
+        reason.unwrap_or("resource_catalog")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1, DirectStratumQualityV1,
+        NativeVectorGenerationEvidence, SemanticActivationResidentEvidence,
+        activation_resource_consistency_mismatch, native_evaluated_resource_mismatch,
+        native_query_provenance_mismatch, native_resource_report_bind_mismatch,
+        native_vector_generation_retention_mismatch, pairwise_query_pairs,
+        pairwise_relevant_distance_label, protected_stratum_regressed,
+        required_native_stage_mismatch, resource_catalog_failure_diagnostic,
+        semantic_activation_resident_bytes,
+    };
+    use crate::DirectEvaluationStatusV1;
+    use crate::candidate_output::{ResourceMeasurementStatusV1, ResourceSampleV1};
+    use crate::semantic_native::SemanticNativeStageResultV1;
+
+    #[test]
+    fn resource_catalog_diagnostic_names_the_failed_field() {
+        assert_eq!(
+            resource_catalog_failure_diagnostic(
+                "semantic",
+                "validation",
+                Some("ten_x_eligible_chunks")
+            ),
+            "semantic:validation resource catalog failed: ten_x_eligible_chunks"
+        );
+    }
+
+    #[test]
+    fn resource_catalog_diagnostic_does_not_call_a_removed_size_budget() {
+        let diagnostic = resource_catalog_failure_diagnostic("semantic", "validation", None);
+        assert!(
+            !diagnostic.contains("budget"),
+            "size-cap budgets were removed; the diagnostic must name the catalog: {diagnostic}"
+        );
+        assert_eq!(
+            diagnostic,
+            "semantic:validation resource catalog failed: resource_catalog"
+        );
+    }
+
+    #[test]
+    fn native_report_bind_accepts_matching_digests_and_artifact() {
+        assert_eq!(
+            native_resource_report_bind_mismatch(
+                "wl",
+                "wl",
+                "co",
+                "co",
+                2,
+                2,
+                3,
+                3,
+                Some("sha256:artifact"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_report_bind_names_workload_before_missing_artifact() {
+        assert_eq!(
+            native_resource_report_bind_mismatch(
+                "sample-wl",
+                "report-wl",
+                "co",
+                "co",
+                2,
+                2,
+                3,
+                3,
+                None,
+            ),
+            Some("workload_digest")
+        );
+    }
+
+    #[test]
+    fn native_report_bind_names_a_missing_artifact() {
+        assert_eq!(
+            native_resource_report_bind_mismatch("wl", "wl", "co", "co", 2, 2, 3, 3, None),
+            Some("artifact_digest")
+        );
+    }
+
+    fn stratum(mrr_ppm: u32) -> DirectStratumQualityV1 {
+        let perfect = DirectRatioMetricV1 {
+            numerator: 1,
+            denominator: 1,
+            ppm: 1_000_000,
+        };
+        DirectStratumQualityV1 {
+            stratum: "exact_symbol".to_owned(),
+            protected: true,
+            query_count: 1,
+            relevant_query_count: 1,
+            recall_at_10: perfect.clone(),
+            precision_at_10: perfect,
+            mean_reciprocal_rank_ppm: mrr_ppm,
+            ndcg_at_10_ppm: mrr_ppm,
+            duplicate_rate: DirectRatioMetricV1 {
+                numerator: 0,
+                denominator: 1,
+                ppm: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn protected_stratum_regression_is_detected_for_query_evidence() {
+        assert!(!protected_stratum_regressed(
+            &stratum(1_000_000),
+            &stratum(1_000_000)
+        ));
+        assert!(protected_stratum_regressed(
+            &stratum(1_000_000),
+            &stratum(900_000)
+        ));
+    }
+
+    #[test]
+    fn native_query_provenance_accepts_matching_profile_and_unchanged_fallback() {
+        assert_eq!(
+            native_query_provenance_mismatch("hybrid-conservative", "hybrid-conservative", true),
+            None
+        );
+    }
+
+    #[test]
+    fn native_query_provenance_names_profile_before_changed_fallback() {
+        assert_eq!(
+            native_query_provenance_mismatch("hybrid-reranked", "hybrid-conservative", false),
+            Some("profile_id")
+        );
+    }
+
+    #[test]
+    fn native_query_provenance_names_changed_fallback_bytes() {
+        assert_eq!(
+            native_query_provenance_mismatch("hybrid-conservative", "hybrid-conservative", false),
+            Some("fallback_bytes_unchanged")
+        );
+    }
+
+    #[test]
+    fn relevant_distance_names_a_missing_ranked_anchor() {
+        assert_eq!(
+            pairwise_relevant_distance_label(None, None),
+            "missing_anchor"
+        );
+    }
+
+    #[test]
+    fn relevant_distance_names_an_absent_oracle_hit() {
+        assert_eq!(
+            pairwise_relevant_distance_label(Some("wanted"), None),
+            "absent"
+        );
+    }
+
+    #[test]
+    fn relevant_distance_prints_the_oracle_micros() {
+        assert_eq!(
+            pairwise_relevant_distance_label(Some("wanted"), Some(42)),
+            "42"
+        );
+    }
+
+    #[test]
+    fn required_native_stage_accepts_complete_when_requested() {
+        assert_eq!(
+            required_native_stage_mismatch(true, &SemanticNativeStageResultV1::Complete(())),
+            None
+        );
+        assert_eq!(
+            required_native_stage_mismatch(false, &SemanticNativeStageResultV1::<()>::NotRequested),
+            None
+        );
+    }
+
+    #[test]
+    fn required_native_stage_names_not_requested_before_pending() {
+        assert_eq!(
+            required_native_stage_mismatch(true, &SemanticNativeStageResultV1::<()>::NotRequested),
+            Some("not_requested")
+        );
+    }
+
+    #[test]
+    fn required_native_stage_names_complete_when_the_stage_was_not_requested() {
+        assert_eq!(
+            required_native_stage_mismatch(false, &SemanticNativeStageResultV1::Complete(())),
+            Some("complete")
+        );
+    }
+
+    #[test]
+    fn recorded_vector_generation_names_missing_before_empty() {
+        assert_eq!(
+            native_vector_generation_retention_mismatch(
+                NativeVectorGenerationEvidence::Recorded,
+                None
+            ),
+            Some("missing")
+        );
+        assert_eq!(
+            native_vector_generation_retention_mismatch(
+                NativeVectorGenerationEvidence::Recorded,
+                Some("")
+            ),
+            Some("empty")
+        );
+        assert_eq!(
+            native_vector_generation_retention_mismatch(
+                NativeVectorGenerationEvidence::Recorded,
+                Some("gen-1")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn redacted_vector_generation_names_a_present_id() {
+        assert_eq!(
+            native_vector_generation_retention_mismatch(
+                NativeVectorGenerationEvidence::Redacted,
+                Some("gen-1")
+            ),
+            Some("present")
+        );
+        assert_eq!(
+            native_vector_generation_retention_mismatch(
+                NativeVectorGenerationEvidence::Redacted,
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn activation_resource_consistency_names_the_first_failed_pin() {
+        assert_eq!(
+            activation_resource_consistency_mismatch(1, 4, 8, 4, 2),
+            Some("output_count")
+        );
+        assert_eq!(
+            activation_resource_consistency_mismatch(2, 3, 8, 4, 2),
+            Some("sample_count")
+        );
+        assert_eq!(
+            activation_resource_consistency_mismatch(2, 4, 3, 4, 2),
+            Some("resident_bytes_below_model")
+        );
+        assert_eq!(
+            activation_resource_consistency_mismatch(2, 4, 3, 2, 4),
+            Some("resident_bytes_below_tokenizer")
+        );
+        assert_eq!(
+            activation_resource_consistency_mismatch(2, 4, 8, 4, 2),
+            None
+        );
+    }
+
+    #[test]
+    fn semantic_activation_resident_bytes_exclude_process_lifetime_peak() {
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(600), Some(20), Some(100), Some(10), Some(750)),
+            SemanticActivationResidentEvidence::Bound(860)
+        );
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(600), Some(20), Some(100), Some(0), Some(0)),
+            SemanticActivationResidentEvidence::Bound(700)
+        );
+        assert_eq!(
+            semantic_activation_resident_bytes(Some(u64::MAX), Some(1), Some(1), Some(0), Some(0)),
+            SemanticActivationResidentEvidence::Overflowed
+        );
+        assert_eq!(
+            semantic_activation_resident_bytes(None, Some(20), Some(100), Some(10), Some(750)),
+            SemanticActivationResidentEvidence::Incomplete("model_bytes")
+        );
+    }
+
+    fn measured_sample(eligible_chunks: u64, measured_queries: u64) -> ResourceSampleV1 {
+        ResourceSampleV1 {
+            status: ResourceMeasurementStatusV1::Measured,
+            eligible_chunks,
+            peak_rss_bytes: Some(8),
+            latency_samples_us: vec![1],
+            measured_queries,
+            pending_reason: None,
+        }
+    }
+
+    #[test]
+    fn native_evaluated_resource_accepts_matching_samples() {
+        let sample = measured_sample(2, 3);
+        assert_eq!(
+            native_evaluated_resource_mismatch(Some(&sample), Some(sample.clone())),
+            None
+        );
+    }
+
+    #[test]
+    fn native_evaluated_resource_names_eligible_chunks_before_query_count() {
+        let evaluated = measured_sample(2, 3);
+        let native = measured_sample(9, 1);
+        assert_eq!(
+            native_evaluated_resource_mismatch(Some(&evaluated), Some(native)),
+            Some("eligible_chunks")
+        );
+    }
+
+    fn pairwise_query_pair(query_id: &str, first_useful_rank: u32) -> DirectQueryEvaluationV1 {
+        let zero = DirectRatioMetricV1 {
+            numerator: 0,
+            denominator: 0,
+            ppm: 0,
+        };
+        DirectQueryEvaluationV1 {
+            query_id: query_id.to_owned(),
+            strata: vec!["natural_language".to_owned()],
+            protected: false,
+            first_useful_rank: Some(first_useful_rank),
+            returned_candidates: 2,
+            wrong_scope_hits: 0,
+            forbidden_hits: 0,
+            expected_no_result: false,
+            quality: DirectQueryQualityV1 {
+                recall_at_10: zero.clone(),
+                precision_at_10: zero.clone(),
+                reciprocal_rank_ppm: 0,
+                ndcg_at_10_ppm: 0,
+                duplicate_rate: zero,
+            },
+            status: DirectEvaluationStatusV1::Pass,
+        }
+    }
+
+    #[test]
+    fn pairwise_query_pairs_prioritize_queries_with_improvement_headroom() {
+        let candidate = vec![
+            pairwise_query_pair("already-perfect", 1),
+            pairwise_query_pair("can-improve", 2),
+        ];
+        let baseline = candidate.clone();
+        let ordered = pairwise_query_pairs(&candidate, &baseline);
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].0.query_id, "can-improve");
+        assert_eq!(ordered[1].0.query_id, "already-perfect");
+    }
+
+    #[test]
+    fn pairwise_query_pairs_keep_candidate_headroom_ahead_of_a_perfect_baseline() {
+        let candidate = vec![
+            pairwise_query_pair("regressed", 2),
+            pairwise_query_pair("both-perfect", 1),
+        ];
+        let mut baseline = candidate.clone();
+        baseline[0].first_useful_rank = Some(1);
+        let ordered = pairwise_query_pairs(&candidate, &baseline);
+        assert_eq!(ordered[0].0.query_id, "regressed");
+        assert_eq!(ordered[1].0.query_id, "both-perfect");
+    }
+
+    #[test]
+    fn native_evaluated_resource_names_a_missing_projection() {
+        let evaluated = measured_sample(2, 3);
+        assert_eq!(
+            native_evaluated_resource_mismatch(Some(&evaluated), None),
+            Some("native_projection")
+        );
+        assert_eq!(
+            native_evaluated_resource_mismatch(None, Some(evaluated)),
+            Some("evaluated_missing")
+        );
+    }
 }
 
 pub(super) fn raw_output_digest(

@@ -30,13 +30,49 @@ use tracedecay_store::{
 use tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::errors::TraceDecayError;
 use tracedecay_usecases::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticRuntimeFuture,
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 
-use super::{CodeIndexSchedulerRegistryV1, registry::CodeIndexServingScopeV1};
+use super::{
+    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, registry::CodeIndexServingScopeV1,
+};
+
+fn semantic_vector_graph_error_from_scheduler(
+    error: CodeIndexSchedulerErrorV1,
+) -> SemanticVectorGraphErrorV1 {
+    if error.is_retryable_activation() {
+        SemanticVectorGraphErrorV1::Unavailable(error.to_string())
+    } else {
+        SemanticVectorGraphErrorV1::Rejected(error.to_string())
+    }
+}
+
+fn semantic_vector_graph_error_from_retain(error: TraceDecayError) -> SemanticVectorGraphErrorV1 {
+    if retain_error_is_temporary_pressure(&error) {
+        SemanticVectorGraphErrorV1::Unavailable(error.to_string())
+    } else {
+        SemanticVectorGraphErrorV1::Rejected(error.to_string())
+    }
+}
+
+/// Live-scratch and retirement pressure must throttle semantic retain, not
+/// permanently refuse the project. Identity and contract failures stay rejected.
+fn retain_error_is_temporary_pressure(error: &TraceDecayError) -> bool {
+    let TraceDecayError::Database { message, operation } = error else {
+        return false;
+    };
+    operation == "retain exact code graph authority"
+        && (message.starts_with("ProjectCodeBudgetExhausted {")
+            || message.starts_with("RuntimeEvictionInProgress {")
+            || message.starts_with("RuntimeRetirementInProgress {")
+            || message.starts_with("GraphLeaseCountExhausted {")
+            || message.starts_with("GraphOwnerAttachmentRetiring {")
+            || message.starts_with("OpenTaskAbandoned {"))
+}
 
 mod retention_inventory;
 use retention_inventory::{
@@ -541,7 +577,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
                     "code generation replay authority is not mounted".to_owned(),
                 )
             })?
-            .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
+            .map_err(semantic_vector_graph_error_from_scheduler)?;
         let retained = self
             .runtime
             .retain_code_graph_runtime(
@@ -557,13 +593,13 @@ impl DaemonSemanticVectorGraphProviderV1 {
                 None,
             )
             .await
-            .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
+            .map_err(semantic_vector_graph_error_from_retain)?;
         let cancellation: Arc<dyn GraphCancellation> = Arc::new(SchedulerGraphCancellationV1 {
             shutting_down: Arc::clone(&scope.shutting_down),
         });
         let (project, repository, worktree, source_generation, source_dependency) = retained
             .semantic_vector_identity()
-            .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
+            .map_err(SemanticVectorGraphErrorV1::from)?;
         let semantic_scope = SemanticVectorGraphScopeV1::new(
             project,
             repository,
@@ -577,7 +613,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
             .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?,
             source_dependency,
         )
-        .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
+        .map_err(SemanticVectorGraphErrorV1::from)?;
         let (source_scope, binding) = retained.semantic_vector_staging_binding();
         let runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> =
             Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1 {
@@ -886,5 +922,66 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
             })?;
             self.retain(&scope, generation.as_ref()).await
         })
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn retryable_scheduler_pressure_is_unavailable_not_rejected() {
+        let error = semantic_vector_graph_error_from_scheduler(
+            CodeIndexSchedulerErrorV1::GraphActivation("saturated".to_owned()),
+        );
+        assert!(
+            matches!(
+                error,
+                SemanticVectorGraphErrorV1::Unavailable(ref message)
+                    if message.contains("saturated")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn permanent_activation_refusal_stays_rejected() {
+        let error = semantic_vector_graph_error_from_scheduler(
+            CodeIndexSchedulerErrorV1::GraphActivationRefused(
+                "code graph activation was refused by project configuration",
+            ),
+        );
+        assert!(
+            matches!(error, SemanticVectorGraphErrorV1::Rejected(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn retain_scratch_pressure_is_unavailable_not_rejected() {
+        let error = semantic_vector_graph_error_from_retain(TraceDecayError::Database {
+            operation: "retain exact code graph authority".to_owned(),
+            message: "ProjectCodeBudgetExhausted { limit: 4 }".to_owned(),
+        });
+        assert!(
+            matches!(
+                error,
+                SemanticVectorGraphErrorV1::Unavailable(ref message)
+                    if message.contains("ProjectCodeBudgetExhausted")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn retain_identity_mismatch_stays_rejected() {
+        let error = semantic_vector_graph_error_from_retain(TraceDecayError::Database {
+            operation: "retain exact code graph authority".to_owned(),
+            message: "LocatorIdentityMismatch { key: .., locator: .. }".to_owned(),
+        });
+        assert!(
+            matches!(error, SemanticVectorGraphErrorV1::Rejected(_)),
+            "{error:?}"
+        );
     }
 }

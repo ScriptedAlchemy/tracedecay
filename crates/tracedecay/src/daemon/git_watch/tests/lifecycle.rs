@@ -74,8 +74,8 @@ async fn linked_worktree_registration_reconciles_its_pinned_timing() {
     assert!(watcher.shutdown().await.is_clean());
 }
 
-#[test]
-fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
+#[tokio::test]
+async fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
     let (_container, primary, linked) = linked_worktree_fixture();
     let common = crate::worktree::git_common_dir(&primary).expect("git common directory");
     let primary_root = primary.canonicalize().expect("primary root");
@@ -101,7 +101,7 @@ fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
         },
     );
     {
-        let mut dirty = state.dirty.blocking_lock();
+        let mut dirty = state.dirty.lock().await;
         assert_eq!(dirty.affected_roots, BTreeSet::from([linked_root]));
         assert!(!dirty.reconcile_metadata);
         assert!(dirty.take());
@@ -116,7 +116,7 @@ fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
         },
     );
     assert!(
-        state.dirty.blocking_lock().reconcile_metadata,
+        state.dirty.lock().await.reconcile_metadata,
         "shared refs truthfully widen to every mounted sibling"
     );
 }

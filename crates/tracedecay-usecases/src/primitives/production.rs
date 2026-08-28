@@ -541,7 +541,9 @@ fn test_annotation_evidence(
     {
         return Ok(cached.clone());
     }
-    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
+    let symbols = hotpath::measure_block!("usecases.test_map.symbols", {
+        all_code_graph_symbols(graph, Arc::clone(&cancellation))
+    })?;
     let occurrences = symbols
         .iter()
         .map(|symbol| symbol.occurrence.clone())
@@ -551,14 +553,16 @@ fn test_annotation_evidence(
         .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
         .map(|symbol| symbol.occurrence.clone())
         .collect::<std::collections::HashSet<_>>();
-    let edges = graph
-        .edges_among(
-            &occurrences,
-            &[tracedecay_domain::RelationEdgeKindV1::Annotates],
-            2_000_000,
-            cancellation,
-        )
-        .map_err(|_| ())?;
+    let edges = hotpath::measure_block!("usecases.test_map.edges", {
+        graph
+            .edges_among(
+                &occurrences,
+                &[tracedecay_domain::RelationEdgeKindV1::Annotates],
+                2_000_000,
+                cancellation,
+            )
+            .map_err(|_| ())
+    })?;
     let evidence = edges
         .into_iter()
         .filter(|edge| markers.contains(&edge.edge.from_occurrence))
@@ -639,14 +643,17 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 context_lines: request.context_lines as usize,
                 max_results: request.window.limit as usize,
             };
-            let scan = match run_bounded_source_search(
-                context.request.deadline(),
-                context.request.cancellation(),
-                move |cancelled| {
-                    lexical_search_tree_with_cancel(&project_root, &query, || {
-                        cancelled.load(std::sync::atomic::Ordering::Acquire)
-                    })
-                },
+            let scan = match hotpath::future!(
+                run_bounded_source_search(
+                    context.request.deadline(),
+                    context.request.cancellation(),
+                    move |cancelled| {
+                        lexical_search_tree_with_cancel(&project_root, &query, || {
+                            cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        })
+                    },
+                ),
+                label = "usecases.lexical_grep.search"
             )
             .await
             {
@@ -696,46 +703,51 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
             // page reports itself incomplete rather than attributing the hit
             // to nothing.
             let mut unread_enclosing_symbols = false;
-            for hit in scan.hits {
-                if context.request.cancellation().is_cancelled() {
-                    return PrimitiveOutcomeV1::Cancelled;
-                }
-                if !symbols_by_file.contains_key(&hit.file)
-                    && let Ok(symbols) =
-                        logical_file_symbols(&reader, Arc::clone(&graph_cancellation), &hit.file)
-                {
-                    symbols_by_file.insert(hit.file.clone(), symbols);
-                }
-                let enclosing = match symbols_by_file
-                    .get(&hit.file)
-                    .ok_or(())
-                    .and_then(|symbols| symbol_at_line(symbols, hit.line))
-                {
-                    Ok(enclosing) => enclosing,
-                    Err(()) => {
-                        unread_enclosing_symbols = true;
-                        None
+            hotpath::measure_block!("usecases.lexical_grep.hydrate", {
+                for hit in scan.hits {
+                    if context.request.cancellation().is_cancelled() {
+                        return PrimitiveOutcomeV1::Cancelled;
                     }
-                };
-                matches.push(GrepHitV1 {
-                    file: hit.file,
-                    line: hit.line,
-                    text: hit.text,
-                    before: hit.before,
-                    after: hit.after,
-                    symbol: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.simple_name.clone()),
-                    node_id: enclosing
-                        .as_ref()
-                        .map(|node| node.occurrence.as_str().to_owned()),
-                    kind: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.kind.clone()),
-                });
-            }
+                    if !symbols_by_file.contains_key(&hit.file)
+                        && let Ok(symbols) = logical_file_symbols(
+                            &reader,
+                            Arc::clone(&graph_cancellation),
+                            &hit.file,
+                        )
+                    {
+                        symbols_by_file.insert(hit.file.clone(), symbols);
+                    }
+                    let enclosing = match symbols_by_file
+                        .get(&hit.file)
+                        .ok_or(())
+                        .and_then(|symbols| symbol_at_line(symbols, hit.line))
+                    {
+                        Ok(enclosing) => enclosing,
+                        Err(()) => {
+                            unread_enclosing_symbols = true;
+                            None
+                        }
+                    };
+                    matches.push(GrepHitV1 {
+                        file: hit.file,
+                        line: hit.line,
+                        text: hit.text,
+                        before: hit.before,
+                        after: hit.after,
+                        symbol: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.simple_name.clone()),
+                        node_id: enclosing
+                            .as_ref()
+                            .map(|node| node.occurrence.as_str().to_owned()),
+                        kind: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.kind.clone()),
+                    });
+                }
+            });
             let returned = matches.len() as u64;
             let incomplete = truncated || unread_enclosing_symbols;
             let page = PrimitivePageV1 {
@@ -854,81 +866,85 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             let mut uncovered = Vec::new();
             let mut test_files = std::collections::BTreeSet::new();
             let mut unread_symbols = false;
-            for node in source_nodes {
-                let Some(metadata) = node.metadata.as_ref() else {
-                    unread_symbols = true;
-                    continue;
-                };
-                let Some(file_path) = node
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.logical_path.as_deref())
-                else {
-                    unread_symbols = true;
-                    continue;
-                };
-                if !NodeKind::from_str(&metadata.kind).is_some_and(|kind| kind.is_callable_kind()) {
-                    continue;
+            hotpath::measure_block!("usecases.test_map.impact", {
+                for node in source_nodes {
+                    let Some(metadata) = node.metadata.as_ref() else {
+                        unread_symbols = true;
+                        continue;
+                    };
+                    let Some(file_path) = node
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.logical_path.as_deref())
+                    else {
+                        unread_symbols = true;
+                        continue;
+                    };
+                    if !NodeKind::from_str(&metadata.kind)
+                        .is_some_and(|kind| kind.is_callable_kind())
+                    {
+                        continue;
+                    }
+                    // A caller or annotation read that fails leaves this symbol
+                    // unmeasured. Listing it as uncovered would report a tested
+                    // function as untested, so it is omitted and the page reports
+                    // itself partial.
+                    let Ok(callers) = reader.impact(
+                        std::slice::from_ref(&node.occurrence),
+                        &[tracedecay_domain::RelationEdgeKindV1::Calls],
+                        3,
+                        50_000,
+                        200_000,
+                        Arc::clone(&cancellation),
+                    ) else {
+                        unread_symbols = true;
+                        continue;
+                    };
+                    if !callers.complete {
+                        unread_symbols = true;
+                        continue;
+                    }
+                    let tests: Vec<TestReferenceV1> = callers
+                        .impacted
+                        .into_iter()
+                        .filter_map(|caller| {
+                            let caller_metadata = caller.summary.metadata.as_ref()?.clone();
+                            let caller_file = caller
+                                .summary
+                                .binding
+                                .as_ref()
+                                .and_then(|binding| binding.logical_path.clone())?;
+                            (tracedecay_code_index::is_test_file(&caller_file)
+                                || test_evidence.contains(&caller.summary.occurrence))
+                            .then_some((caller_metadata, caller_file))
+                        })
+                        .map(|(metadata, caller_file)| {
+                            test_files.insert(caller_file.clone());
+                            TestReferenceV1 {
+                                test_name: metadata.simple_name,
+                                test_file: caller_file,
+                                test_line: metadata.start_line as usize,
+                            }
+                        })
+                        .collect();
+                    if tests.is_empty() {
+                        uncovered.push(UncoveredSourceV1 {
+                            id: node.occurrence.as_str().to_owned(),
+                            name: metadata.simple_name.clone(),
+                            file: file_path.to_owned(),
+                            line: metadata.start_line as usize,
+                        });
+                    } else {
+                        coverage_map.push(TestMapCoverageV1 {
+                            source_name: metadata.simple_name.clone(),
+                            source_id: node.occurrence.as_str().to_owned(),
+                            source_file: file_path.to_owned(),
+                            source_line: metadata.start_line as usize,
+                            tests,
+                        });
+                    }
                 }
-                // A caller or annotation read that fails leaves this symbol
-                // unmeasured. Listing it as uncovered would report a tested
-                // function as untested, so it is omitted and the page reports
-                // itself partial.
-                let Ok(callers) = reader.impact(
-                    std::slice::from_ref(&node.occurrence),
-                    &[tracedecay_domain::RelationEdgeKindV1::Calls],
-                    3,
-                    50_000,
-                    200_000,
-                    Arc::clone(&cancellation),
-                ) else {
-                    unread_symbols = true;
-                    continue;
-                };
-                if !callers.complete {
-                    unread_symbols = true;
-                    continue;
-                }
-                let tests: Vec<TestReferenceV1> = callers
-                    .impacted
-                    .into_iter()
-                    .filter_map(|caller| {
-                        let caller_metadata = caller.summary.metadata.as_ref()?.clone();
-                        let caller_file = caller
-                            .summary
-                            .binding
-                            .as_ref()
-                            .and_then(|binding| binding.logical_path.clone())?;
-                        (tracedecay_code_index::is_test_file(&caller_file)
-                            || test_evidence.contains(&caller.summary.occurrence))
-                        .then_some((caller_metadata, caller_file))
-                    })
-                    .map(|(metadata, caller_file)| {
-                        test_files.insert(caller_file.clone());
-                        TestReferenceV1 {
-                            test_name: metadata.simple_name,
-                            test_file: caller_file,
-                            test_line: metadata.start_line as usize,
-                        }
-                    })
-                    .collect();
-                if tests.is_empty() {
-                    uncovered.push(UncoveredSourceV1 {
-                        id: node.occurrence.as_str().to_owned(),
-                        name: metadata.simple_name.clone(),
-                        file: file_path.to_owned(),
-                        line: metadata.start_line as usize,
-                    });
-                } else {
-                    coverage_map.push(TestMapCoverageV1 {
-                        source_name: metadata.simple_name.clone(),
-                        source_id: node.occurrence.as_str().to_owned(),
-                        source_file: file_path.to_owned(),
-                        source_line: metadata.start_line as usize,
-                        tests,
-                    });
-                }
-            }
+            });
             let covered_symbols = coverage_map.len();
             let uncovered_symbols = uncovered.len();
             let result = TestMapPrimitiveResultV1 {

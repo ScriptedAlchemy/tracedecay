@@ -19,13 +19,16 @@ fn host_capacity_reserves_one_quarter_without_a_universal_ceiling() {
         process_resident_memory_limit_for_system_v1(8 * 1024 * 1024 * 1024).get(),
         6 * 1024 * 1024 * 1024
     );
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(88 * 1024 * 1024 * 1024).get(),
-        66 * 1024 * 1024 * 1024
-    );
+    let large_host = process_resident_memory_limit_for_system_v1(88 * 1024 * 1024 * 1024).get();
+    assert_eq!(large_host, 66 * 1024 * 1024 * 1024);
     assert_eq!(
         process_resident_memory_limit_for_system_v1(0),
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
+    );
+    let leftover = large_host / 4;
+    assert!(
+        leftover >= 1536 * 1024 * 1024 + 64 * 1024 * 1024,
+        "88 GiB leftover must still admit one lexical build and a bounded snapshot: leftover={leftover}"
     );
 }
 

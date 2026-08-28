@@ -903,4 +903,29 @@ mod tests {
             Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable)
         );
     }
+
+    #[test]
+    fn daemon_qualification_write_fails_closed_on_corrupt_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("qualification.json");
+        let error = write_daemon_native_qualification(&output, b"not-json")
+            .expect_err("corrupt bytes must not publish");
+        assert!(error.to_string().contains("corrupt"), "got {error}");
+        assert!(
+            !output.exists(),
+            "a contract refusal must not leave a qualification file"
+        );
+    }
+
+    #[test]
+    fn daemon_qualification_write_fails_closed_on_non_canonical_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("qualification.json");
+        // Parses as JSON but not as the packaged document, so the write
+        // must refuse before touching the destination.
+        let error = write_daemon_native_qualification(&output, b"{\"schema_version\":1}")
+            .expect_err("incomplete document must not publish");
+        assert!(error.to_string().contains("corrupt"), "got {error}");
+        assert!(!output.exists());
+    }
 }

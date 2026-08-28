@@ -289,6 +289,7 @@ async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedSc
     })
 }
 
+#[hotpath::measure(label = "mcp.tools.analytics", future = true)]
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,

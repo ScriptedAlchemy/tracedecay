@@ -793,6 +793,11 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
+/// Prepare and step are the only rusqlite phases this helper owns.
+///
+/// Hotpath 0.24 has no rusqlite adapter, so a single function span cannot
+/// separate a `prepare_cached` miss from VM work. Commit is timed at the
+/// transaction boundary, not here.
 #[hotpath::measure]
 fn execute_statement(
     connection: &Connection,
@@ -802,12 +807,16 @@ fn execute_statement(
         .params
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
-    let mut prepared = connection
-        .prepare_cached(&statement.sql)
-        .map_err(|error| sqlite_error("prepare execute", error))?;
-    let changed_rows = prepared
-        .execute(params_from_iter(values))
-        .map_err(|error| sqlite_error("execute", error))?;
+    let mut prepared = hotpath::measure_block!("rusqlite.prepare", {
+        connection
+            .prepare_cached(&statement.sql)
+            .map_err(|error| sqlite_error("prepare execute", error))
+    })?;
+    let changed_rows = hotpath::measure_block!("rusqlite.step", {
+        prepared
+            .execute(params_from_iter(values))
+            .map_err(|error| sqlite_error("execute", error))
+    })?;
     crate::telemetry::observe_statement(&prepared);
     Ok(ExactSqlExecuteResult {
         changed_rows,
@@ -907,9 +916,11 @@ fn execute_query_unchecked(
     connection: &Connection,
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
-    let mut statement = connection
-        .prepare_cached(&request.sql)
-        .map_err(|error| sqlite_error("prepare query", error))?;
+    let mut statement = hotpath::measure_block!("rusqlite.prepare", {
+        connection
+            .prepare_cached(&request.sql)
+            .map_err(|error| sqlite_error("prepare query", error))
+    })?;
     let columns = statement
         .column_names()
         .into_iter()
@@ -917,10 +928,6 @@ fn execute_query_unchecked(
         .collect::<Vec<_>>();
     let column_count = columns.len();
     let values = request.params.into_iter().map(ExactSqlValue::into_rusqlite);
-    let mut query = statement
-        .query(params_from_iter(values))
-        .map_err(|error| sqlite_error("start query", error))?;
-    let mut rows = Vec::new();
     let mut materialized_bytes = columns
         .iter()
         .try_fold(std::mem::size_of::<Vec<String>>(), |total, column| {
@@ -929,41 +936,48 @@ fn execute_query_unchecked(
                 .and_then(|total| total.checked_add(column.len()))
         })
         .ok_or(ExactSqlError::QueryLimitExceeded)?;
-    while let Some(row) = query
-        .next()
-        .map_err(|error| sqlite_error("advance query", error))?
-    {
-        if rows.len() >= MAX_QUERY_ROWS {
-            return Err(ExactSqlError::QueryLimitExceeded);
-        }
-        materialized_bytes = materialized_bytes
-            .checked_add(ROW_ALLOCATION_OVERHEAD)
-            .and_then(|total| {
-                CELL_ALLOCATION_OVERHEAD
-                    .checked_mul(column_count)
-                    .and_then(|cells| total.checked_add(cells))
-            })
-            .ok_or(ExactSqlError::QueryLimitExceeded)?;
-        if materialized_bytes > MAX_QUERY_BYTES {
-            return Err(ExactSqlError::QueryLimitExceeded);
-        }
-        let mut values = Vec::with_capacity(column_count);
-        for index in 0..column_count {
-            let value = ExactSqlValue::from_rusqlite(
-                row.get_ref(index)
-                    .map_err(|error| sqlite_error("read query value", error))?,
-            )?;
+    let rows = hotpath::measure_block!("rusqlite.step", {
+        let mut query = statement
+            .query(params_from_iter(values))
+            .map_err(|error| sqlite_error("start query", error))?;
+        let mut rows = Vec::new();
+        while let Some(row) = query
+            .next()
+            .map_err(|error| sqlite_error("advance query", error))?
+        {
+            if rows.len() >= MAX_QUERY_ROWS {
+                return Err(ExactSqlError::QueryLimitExceeded);
+            }
             materialized_bytes = materialized_bytes
-                .checked_add(value.materialized_bytes())
+                .checked_add(ROW_ALLOCATION_OVERHEAD)
+                .and_then(|total| {
+                    CELL_ALLOCATION_OVERHEAD
+                        .checked_mul(column_count)
+                        .and_then(|cells| total.checked_add(cells))
+                })
                 .ok_or(ExactSqlError::QueryLimitExceeded)?;
             if materialized_bytes > MAX_QUERY_BYTES {
                 return Err(ExactSqlError::QueryLimitExceeded);
             }
-            values.push(value);
+            let mut values = Vec::with_capacity(column_count);
+            for index in 0..column_count {
+                let value = ExactSqlValue::from_rusqlite(
+                    row.get_ref(index)
+                        .map_err(|error| sqlite_error("read query value", error))?,
+                )?;
+                materialized_bytes = materialized_bytes
+                    .checked_add(value.materialized_bytes())
+                    .ok_or(ExactSqlError::QueryLimitExceeded)?;
+                if materialized_bytes > MAX_QUERY_BYTES {
+                    return Err(ExactSqlError::QueryLimitExceeded);
+                }
+                values.push(value);
+            }
+            rows.push(ExactSqlRow { values });
         }
-        rows.push(ExactSqlRow { values });
-    }
-    drop(query);
+        drop(query);
+        rows
+    });
     crate::telemetry::observe_statement(&statement);
     Ok(ExactSqlRows { columns, rows })
 }

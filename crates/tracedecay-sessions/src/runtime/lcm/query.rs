@@ -97,23 +97,29 @@ pub async fn expand_query(
                     end_time: None,
                     git_filter: crate::runtime::git_correlation::GitScopeFilter::default(),
                 };
-                let summary_hits = summary_grep_hits(
-                    conn,
-                    &grep_request,
-                    &LcmGrepFilters::default(),
-                    Some(&request.session_id),
-                    grep::LcmGitScopeSessions::Unscoped,
-                    &query_plan,
-                    max_results,
+                let summary_hits = hotpath::future!(
+                    summary_grep_hits(
+                        conn,
+                        &grep_request,
+                        &LcmGrepFilters::default(),
+                        Some(&request.session_id),
+                        grep::LcmGitScopeSessions::Unscoped,
+                        &query_plan,
+                        max_results,
+                    ),
+                    label = "lcm.expand_query.search"
                 )
                 .await?;
                 for hit in summary_hits {
                     if let Some(node_id) = hit.node_id.as_deref() {
-                        let expansion = dag::expand_summary_node(
-                            conn,
-                            &request.provider,
-                            &request.session_id,
-                            node_id,
+                        let expansion = hotpath::future!(
+                            dag::expand_summary_node(
+                                conn,
+                                &request.provider,
+                                &request.session_id,
+                                node_id,
+                            ),
+                            label = "lcm.expand_query.hydrate"
                         )
                         .await?;
                         matches.push(expand_query_match_from_hit(&hit));
@@ -123,14 +129,17 @@ pub async fn expand_query(
 
                 if selected_summaries.len() < max_results {
                     let remaining = max_results - selected_summaries.len();
-                    let raw_hits = raw_grep_hits(
-                        conn,
-                        &grep_request,
-                        &LcmGrepFilters::default(),
-                        Some(&request.session_id),
-                        grep::LcmGitScopeSessions::Unscoped,
-                        &query_plan,
-                        remaining,
+                    let raw_hits = hotpath::future!(
+                        raw_grep_hits(
+                            conn,
+                            &grep_request,
+                            &LcmGrepFilters::default(),
+                            Some(&request.session_id),
+                            grep::LcmGitScopeSessions::Unscoped,
+                            &query_plan,
+                            remaining,
+                        ),
+                        label = "lcm.expand_query.search"
                     )
                     .await?;
                     for hit in raw_hits {
@@ -152,11 +161,14 @@ pub async fn expand_query(
             .take(max_results)
             .cloned()
             .collect::<Vec<_>>();
-        let expansions = dag::expand_summary_nodes(
-            conn,
-            &request.provider,
-            &request.session_id,
-            &requested_node_ids,
+        let expansions = hotpath::future!(
+            dag::expand_summary_nodes(
+                conn,
+                &request.provider,
+                &request.session_id,
+                &requested_node_ids,
+            ),
+            label = "lcm.expand_query.hydrate"
         )
         .await?;
         for expansion in expansions {
@@ -191,29 +203,55 @@ pub async fn expand_query(
         });
     }
 
-    let mut assembler = ExpandQueryAssembler::new(context_max_chars);
-    let mut node_ids = Vec::new();
-    for expansion in selected_summaries {
-        node_ids.push(expansion.summary.node_id.clone());
-        assembler.add_summary_expansion(expansion);
-    }
+    let mut hydrated_raws = Vec::new();
     for store_id in selected_raw_store_ids {
-        let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
+        let raw = hotpath::future!(
+            raw::load_raw_message_by_store_id(conn, store_id),
+            label = "lcm.expand_query.hydrate"
+        )
+        .await?;
         if raw.provider == request.provider && raw.session_id == request.session_id {
-            assembler.add_raw_message(raw, None);
+            hydrated_raws.push(raw);
         }
     }
 
-    let used_chars = assembler.used_chars();
-    let context_blocks = assembler.context_blocks;
-    let context_pagination = assembler.context_pagination;
-    let context_truncated = !context_pagination.is_empty();
+    let (
+        node_ids,
+        used_chars,
+        context_blocks,
+        context_pagination,
+        context_truncated,
+        synthesis_prompt,
+    ) = hotpath::measure_block!("lcm.expand_query.assemble", {
+        let mut assembler = ExpandQueryAssembler::new(context_max_chars);
+        let mut node_ids = Vec::new();
+        for expansion in selected_summaries {
+            node_ids.push(expansion.summary.node_id.clone());
+            assembler.add_summary_expansion(expansion);
+        }
+        for raw in hydrated_raws {
+            assembler.add_raw_message(raw, None);
+        }
+        let used_chars = assembler.used_chars();
+        let context_blocks = assembler.context_blocks;
+        let context_pagination = assembler.context_pagination;
+        let context_truncated = !context_pagination.is_empty();
+        let synthesis_prompt =
+            expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
+        (
+            node_ids,
+            used_chars,
+            context_blocks,
+            context_pagination,
+            context_truncated,
+            synthesis_prompt,
+        )
+    });
+
     let context_budget = LcmExpandQueryBudget {
         requested_max_chars: context_max_chars,
         used_chars,
     };
-    let synthesis_prompt =
-        expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
 
     crate::runtime::pipeline_metrics::record_lcm_retrieval(matches.len());
     Ok(LcmExpandQueryResponse {

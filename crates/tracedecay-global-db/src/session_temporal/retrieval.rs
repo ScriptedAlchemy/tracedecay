@@ -320,8 +320,11 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         {
             return Ok(true);
         }
-        self.candidate_observations_match(candidate, filter, request)
-            .await
+        hotpath::measure_block!(
+            "session_temporal.retrieval.candidates.hydrate",
+            self.candidate_observations_match(candidate, filter, request)
+                .await
+        )
     }
 
     async fn session_matches_filter(
@@ -988,6 +991,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         .await
     }
 
+    #[hotpath::measure]
     async fn produce_candidates_from_request(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1033,35 +1037,38 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                     .saturating_sub(sink.len())
                     .saturating_add(1)
                     .max(FILTER_SCAN_PAGE_ITEMS);
-                let mut rows = if matches!(
-                    (scope, clause.channel),
-                    (
-                        TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-                        CandidateChannel::Scope
-                    )
-                ) {
-                    self.query_root_scope_candidates(
-                        snapshot_request,
-                        &scan_cursor,
-                        query_limit,
-                        request,
-                        root_project_key.ok_or(TemporalPortError::UnauthorizedSnapshot)?,
-                    )
-                    .await?
-                } else {
-                    query_candidate_clause(
-                        &self.read,
-                        scope,
-                        snapshot_request,
-                        session_generation,
-                        clause,
-                        &scan_cursor,
-                        query_limit,
-                        request,
-                        root_project_key,
-                    )
-                    .await?
-                };
+                let mut rows = hotpath::measure_block!(
+                    "session_temporal.retrieval.candidates.scan",
+                    if matches!(
+                        (scope, clause.channel),
+                        (
+                            TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+                            CandidateChannel::Scope
+                        )
+                    ) {
+                        self.query_root_scope_candidates(
+                            snapshot_request,
+                            &scan_cursor,
+                            query_limit,
+                            request,
+                            root_project_key.ok_or(TemporalPortError::UnauthorizedSnapshot)?,
+                        )
+                        .await
+                    } else {
+                        query_candidate_clause(
+                            &self.read,
+                            scope,
+                            snapshot_request,
+                            session_generation,
+                            clause,
+                            &scan_cursor,
+                            query_limit,
+                            request,
+                            root_project_key,
+                        )
+                        .await
+                    }
+                )?;
                 let mut scanned = 0usize;
                 while let Some(row) = rows
                     .next()
@@ -1133,6 +1140,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Ok(PageStatus::Complete)
     }
 
+    #[hotpath::measure]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1204,14 +1212,17 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                     "mounted session relation graph is unavailable",
                 )
             })?;
-            let relations = load_record_relations(
-                &relation_authority.store,
-                relation_authority.scope,
-                scope,
-                snapshot,
-                window,
-                cursor.candidate,
-                request,
+            let relations = hotpath::measure_block!(
+                "session_temporal.retrieval.records.hydrate",
+                load_record_relations(
+                    &relation_authority.store,
+                    relation_authority.scope,
+                    scope,
+                    snapshot,
+                    window,
+                    cursor.candidate,
+                    request,
+                )
             )?;
             let query = build_record_query_with_relations(
                 scope,
@@ -1223,40 +1234,44 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 request,
                 &relations,
             )?;
-            let mut rows = self
-                .read
-                .query(&query.sql, query.params)
-                .await
-                .map_err(|error| read_error(RECORD_OPERATION, error))?;
+            let mut rows = hotpath::measure_block!(
+                "session_temporal.retrieval.records.scan",
+                self.read.query(&query.sql, query.params).await
+            )
+            .map_err(|error| read_error(RECORD_OPERATION, error))?;
             control.checkpoint()?;
-            let mut extra = false;
-            let mut last_emitted = None;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| read_error(RECORD_OPERATION, error))?
-            {
-                control.checkpoint()?;
-                let row_cursor = RecordCursor::from_row(&row)?;
-                if sink.len() == bounds.items {
-                    extra = true;
-                    break;
-                }
-                let record = temporal_record_from_row(&row)?;
-                let encoded = record.measured_encoded_bytes()?;
-                if !fits_bytes(page_bytes, encoded, bounds, request.max_item_bytes()) {
-                    if sink.is_empty() {
-                        return Err(TemporalPortError::BudgetExceeded {
-                            resource: "record bytes",
-                        });
+            let (extra, last_emitted) =
+                hotpath::measure_block!("session_temporal.retrieval.records.page", {
+                    let mut extra = false;
+                    let mut last_emitted = None;
+                    while let Some(row) = rows
+                        .next()
+                        .await
+                        .map_err(|error| read_error(RECORD_OPERATION, error))?
+                    {
+                        control.checkpoint()?;
+                        let row_cursor = RecordCursor::from_row(&row)?;
+                        if sink.len() == bounds.items {
+                            extra = true;
+                            break;
+                        }
+                        let record = temporal_record_from_row(&row)?;
+                        let encoded = record.measured_encoded_bytes()?;
+                        if !fits_bytes(page_bytes, encoded, bounds, request.max_item_bytes()) {
+                            if sink.is_empty() {
+                                return Err(TemporalPortError::BudgetExceeded {
+                                    resource: "record bytes",
+                                });
+                            }
+                            extra = true;
+                            break;
+                        }
+                        page_bytes += encoded;
+                        last_emitted = Some(row_cursor);
+                        sink.push(record)?;
                     }
-                    extra = true;
-                    break;
-                }
-                page_bytes += encoded;
-                last_emitted = Some(row_cursor);
-                sink.push(record)?;
-            }
+                    (extra, last_emitted)
+                });
             if extra {
                 let continuation = last_emitted.unwrap_or(cursor);
                 sink.set_continuation_key(continuation.encode(request.max_key_bytes())?)?;

@@ -58,20 +58,23 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
             let path_glob = request.path_glob.clone();
             let max_results = request.window.limit as usize;
             let scope_prefix = context.scope_prefix.map(str::to_owned);
-            let search = match super::support::run_bounded_source_search(
-                context.request.deadline(),
-                context.request.cancellation(),
-                move |cancelled| {
-                    search_tree_scoped_with_cancel(
-                        &project_root,
-                        &pattern,
-                        lang.as_deref(),
-                        path_glob.as_deref(),
-                        max_results,
-                        scope_prefix.as_deref(),
-                        || cancelled.load(std::sync::atomic::Ordering::Acquire),
-                    )
-                },
+            let search = match hotpath::future!(
+                super::support::run_bounded_source_search(
+                    context.request.deadline(),
+                    context.request.cancellation(),
+                    move |cancelled| {
+                        search_tree_scoped_with_cancel(
+                            &project_root,
+                            &pattern,
+                            lang.as_deref(),
+                            path_glob.as_deref(),
+                            max_results,
+                            scope_prefix.as_deref(),
+                            || cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        )
+                    },
+                ),
+                label = "usecases.ast_grep.search"
             )
             .await
             {
@@ -134,42 +137,44 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
             let truncated = search.truncated;
             let mut incomplete_symbol_evidence = false;
             let mut matches = Vec::with_capacity(search.matches.len());
-            for item in search.matches {
-                if context.request.cancellation().is_cancelled() {
-                    return PrimitiveOutcomeV1::Cancelled;
-                }
-                let enclosing = match symbol_at_location(
-                    &reader,
-                    Arc::clone(&graph_cancellation),
-                    &item.file,
-                    item.line,
-                ) {
-                    Ok(enclosing) => enclosing,
-                    Err(()) => {
-                        incomplete_symbol_evidence = true;
-                        None
+            hotpath::measure_block!("usecases.ast_grep.hydrate", {
+                for item in search.matches {
+                    if context.request.cancellation().is_cancelled() {
+                        return PrimitiveOutcomeV1::Cancelled;
                     }
-                };
-                matches.push(AstGrepHitV1 {
-                    file: item.file,
-                    line: item.line,
-                    column: item.column,
-                    lang: item.lang,
-                    matched_text: item.matched_text,
-                    line_text: item.line_text,
-                    symbol: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.simple_name.clone()),
-                    node_id: enclosing
-                        .as_ref()
-                        .map(|node| node.occurrence.as_str().to_owned()),
-                    kind: enclosing
-                        .as_ref()
-                        .and_then(|node| node.metadata.as_ref())
-                        .map(|metadata| metadata.kind.clone()),
-                });
-            }
+                    let enclosing = match symbol_at_location(
+                        &reader,
+                        Arc::clone(&graph_cancellation),
+                        &item.file,
+                        item.line,
+                    ) {
+                        Ok(enclosing) => enclosing,
+                        Err(()) => {
+                            incomplete_symbol_evidence = true;
+                            None
+                        }
+                    };
+                    matches.push(AstGrepHitV1 {
+                        file: item.file,
+                        line: item.line,
+                        column: item.column,
+                        lang: item.lang,
+                        matched_text: item.matched_text,
+                        line_text: item.line_text,
+                        symbol: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.simple_name.clone()),
+                        node_id: enclosing
+                            .as_ref()
+                            .map(|node| node.occurrence.as_str().to_owned()),
+                        kind: enclosing
+                            .as_ref()
+                            .and_then(|node| node.metadata.as_ref())
+                            .map(|metadata| metadata.kind.clone()),
+                    });
+                }
+            });
 
             let returned = count(matches.len());
             let partial = truncated || incomplete_symbol_evidence;
@@ -250,14 +255,16 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                 Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
             };
             let cancellation = crate::graph::request_graph_cancellation(context.request);
-            let verified = match self
-                .code_graph
-                .open(crate::graph::CodeGraphReadRequest::new(
-                    context.request,
-                    context.observed_at,
-                    Arc::clone(&cancellation),
-                ))
-                .await
+            let verified = match hotpath::future!(
+                self.code_graph
+                    .open(crate::graph::CodeGraphReadRequest::new(
+                        context.request,
+                        context.observed_at,
+                        Arc::clone(&cancellation),
+                    )),
+                label = "usecases.graph.dependency_depth.open"
+            )
+            .await
             {
                 Ok(read) => read,
                 Err(error) => {
@@ -278,9 +285,11 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                     ));
                 }
             };
-            let adjacency = match GraphQueryManager::new(&reader, cancellation)
-                .build_file_adjacency(path.as_deref())
-                .await
+            let adjacency = match hotpath::future!(
+                GraphQueryManager::new(&reader, cancellation).build_file_adjacency(path.as_deref()),
+                label = "usecases.graph.dependency_depth.adjacency"
+            )
+            .await
             {
                 Ok(adjacency) => adjacency,
                 Err(error) => {

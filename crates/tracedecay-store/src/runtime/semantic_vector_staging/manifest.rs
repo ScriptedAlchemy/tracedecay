@@ -58,13 +58,15 @@ impl SemanticVectorChunkManifestAccumulator {
                 max: MAX_SEMANTIC_VECTOR_STAGE_CHUNKS,
             });
         }
-        let encoded = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.semantic-vector-chunk-manifest-member",
-            member,
-        ))
-        .map_err(|_| StorageRuntimeContractErrorV1::NonCanonical {
-            field: "semantic vector chunk manifest member",
-        })?;
+        let encoded = hotpath::measure_block!("store.semantic_vector.manifest.encode", {
+            tracedecay_domain::canonical_sha256(&(
+                "tracedecay.semantic-vector-chunk-manifest-member",
+                member,
+            ))
+            .map_err(|_| StorageRuntimeContractErrorV1::NonCanonical {
+                field: "semantic vector chunk manifest member",
+            })?
+        });
         let next_bytes = self
             .bytes
             .checked_add(member.chunk_id.as_str().len())
@@ -114,9 +116,11 @@ impl Default for SemanticVectorChunkManifestAccumulator {
 pub fn semantic_vector_chunk_manifest_digest(
     sorted_members: &[SemanticVectorChunkManifestMember],
 ) -> Result<SemanticVectorChunkManifestDigest, StorageRuntimeContractErrorV1> {
-    let mut accumulator = SemanticVectorChunkManifestAccumulator::new();
-    for member in sorted_members {
-        accumulator.push(member)?;
-    }
-    accumulator.finish()
+    hotpath::measure_block!("store.semantic_vector.manifest.digest", {
+        let mut accumulator = SemanticVectorChunkManifestAccumulator::new();
+        for member in sorted_members {
+            accumulator.push(member)?;
+        }
+        accumulator.finish()
+    })
 }

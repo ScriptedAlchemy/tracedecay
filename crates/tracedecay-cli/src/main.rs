@@ -309,10 +309,14 @@ fn hotpath_output_path_is_valid(output_path: Option<&OsStr>) -> bool {
 
 #[cfg(any(feature = "hotpath", test))]
 fn hotpath_focus_is_valid(focus: Option<&OsStr>) -> bool {
-    let Some(focus) = focus.and_then(OsStr::to_str) else {
-        // Hotpath also uses `std::env::var`, so non-Unicode focus is treated
-        // as absent rather than parsed.
+    let Some(focus) = focus else {
         return true;
+    };
+    // Hotpath reads focus through `std::env::var`. A present non-Unicode value
+    // is not "unset": treating it as valid lets the runtime drop the filter
+    // and profile every label. Fail closed instead.
+    let Some(focus) = focus.to_str() else {
+        return false;
     };
     focus
         .strip_prefix('/')
@@ -344,9 +348,16 @@ fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
         ));
     }
     if !hook_protocol && !valid_focus {
-        return Err(format!(
-            "{HOTPATH_FOCUS_ENV} contains an invalid /regular expression/"
-        ));
+        return Err(
+            if focus
+                .as_deref()
+                .is_some_and(|value| value.to_str().is_none())
+            {
+                format!("{HOTPATH_FOCUS_ENV} must be Unicode text")
+            } else {
+                format!("{HOTPATH_FOCUS_ENV} contains an invalid /regular expression/")
+            },
+        );
     }
     if hook_protocol && !valid_focus {
         // Hotpath compiles /regex/ focus lazily from the first measurement
@@ -615,8 +626,8 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<CommandOutcome> {
         }
     };
 
-    run_startup_preamble(&command).await;
-    dispatch_command(command, host_bundle).await
+    Box::pin(run_startup_preamble(&command)).await;
+    Box::pin(dispatch_command(command, host_bundle)).await
 }
 
 #[hotpath::measure(label = "cli.startup.preamble", future = true)]
@@ -1187,10 +1198,15 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 remote_tls_cert.map(PathBuf::from),
                 remote_tls_key.map(PathBuf::from),
             )?;
-            hotpath::future!(
+            // Boxed on purpose: `run_foreground` is the daemon's entire
+            // bootstrap state machine, and `hotpath::future!` wraps by value -
+            // unboxed, the whole machine inlines into this dispatch future and
+            // overflows the main thread's stack at startup (same class as the
+            // 37MB serve_broker_socket_client machine).
+            Box::pin(hotpath::future!(
                 tracedecay::daemon::run_foreground(socket_path, remote_tls),
                 label = "cli.daemon.run"
-            )
+            ))
             .await?;
         }
         DaemonAction::InstallService {

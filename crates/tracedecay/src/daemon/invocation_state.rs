@@ -97,6 +97,18 @@ impl DaemonInvocationState {
             database, profile_id,
         )
         .await?;
+        self.install_worker_selection(configured)
+    }
+
+    /// Charge one already-resolved worker selection against this daemon's own
+    /// resident-memory authority. Keeping the arithmetic here means the
+    /// persisted-profile path and any other admitted caller install the exact
+    /// same plan for the same selection instead of re-deriving the available
+    /// byte budget from a second estimator.
+    pub(crate) fn install_worker_selection(
+        &self,
+        configured: tracedecay_domain::configuration::CodeIndexWorkerSelectionV1,
+    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
         let resident_memory = self.code_index_schedulers.process_resident_memory();
         let resident_snapshot = resident_memory.snapshot();
         tracedecay_code_index::parallelism::install_worker_plan(
@@ -1029,7 +1041,7 @@ mod resident_memory_tests {
         assert_eq!(
             state_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
-                .get()
+                .get(),
         );
     }
 }

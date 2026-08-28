@@ -104,6 +104,7 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         // cancellation nor a timeout may claim the effect did not happen, so
         // this is its own terminal rather than a flavour of the two above.
         "tool_dispatch_effect_unknown" => Some("effect_unknown"),
+        "tool_dispatch_saturated" => Some("saturated"),
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),

@@ -68,105 +68,109 @@ impl FactWriteBatch {
         referenced_anchor_ids: Vec<RetrievalAnchorId>,
         expected_last_event_id: Option<FactEventId>,
     ) -> FactStoreResult<Self> {
-        fact_id.validate()?;
-        owner.validate()?;
-        validate_owned_fact_id(&fact_id, &owner)?;
-        if let Some(event_id) = &expected_last_event_id {
-            event_id.validate()?;
-        }
-        if events.is_empty() {
-            return Err(FactStoreError::EmptyBatch);
-        }
-        if events.len() > MAX_FACT_WRITE_BATCH_EVENTS {
-            return Err(FactStoreError::BatchLimitExceeded {
-                field: "fact write batch events",
-                count: events.len(),
-                max: MAX_FACT_WRITE_BATCH_EVENTS,
-            });
-        }
-        if new_anchors.len() > MAX_FACT_WRITE_BATCH_NEW_ANCHORS {
-            return Err(FactStoreError::BatchLimitExceeded {
-                field: "fact write batch new anchors",
-                count: new_anchors.len(),
-                max: MAX_FACT_WRITE_BATCH_NEW_ANCHORS,
-            });
-        }
+        hotpath::measure_block!("store.memory.admit.validate", {
+            fact_id.validate()?;
+            owner.validate()?;
+            validate_owned_fact_id(&fact_id, &owner)?;
+            if let Some(event_id) = &expected_last_event_id {
+                event_id.validate()?;
+            }
+            if events.is_empty() {
+                return Err(FactStoreError::EmptyBatch);
+            }
+            if events.len() > MAX_FACT_WRITE_BATCH_EVENTS {
+                return Err(FactStoreError::BatchLimitExceeded {
+                    field: "fact write batch events",
+                    count: events.len(),
+                    max: MAX_FACT_WRITE_BATCH_EVENTS,
+                });
+            }
+            if new_anchors.len() > MAX_FACT_WRITE_BATCH_NEW_ANCHORS {
+                return Err(FactStoreError::BatchLimitExceeded {
+                    field: "fact write batch new anchors",
+                    count: new_anchors.len(),
+                    max: MAX_FACT_WRITE_BATCH_NEW_ANCHORS,
+                });
+            }
 
-        if let Some(assertion) = &assertion {
-            if assertion.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
-            }
-            if assertion.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
-            }
-            let has_recording_event = events.iter().any(|event| {
-                matches!(
-                    event.kind(),
-                    FactLineageEventKindV1::AssertionRecorded { assertion_id }
-                        if assertion_id == assertion.assertion_id()
-                )
-            });
-            if !has_recording_event {
-                return Err(FactStoreError::MissingAssertionEvent {
-                    assertion_id: assertion.assertion_id().clone(),
+            if let Some(assertion) = &assertion {
+                if assertion.fact_id() != &fact_id {
+                    return Err(FactStoreError::FactMismatch);
+                }
+                if assertion.owner() != &owner {
+                    return Err(FactStoreError::OwnerMismatch);
+                }
+                let has_recording_event = events.iter().any(|event| {
+                    matches!(
+                        event.kind(),
+                        FactLineageEventKindV1::AssertionRecorded { assertion_id }
+                            if assertion_id == assertion.assertion_id()
+                    )
                 });
-            }
-        }
-
-        let mut event_ids = BTreeSet::new();
-        let mut previous_event: Option<&FactLineageEventV1> = None;
-        for event in &events {
-            if event.fact_id() != &fact_id {
-                return Err(FactStoreError::FactMismatch);
-            }
-            if event.owner() != &owner {
-                return Err(FactStoreError::OwnerMismatch);
-            }
-            if !event_ids.insert(event.event_id()) {
-                return Err(FactStoreError::DuplicateEventId {
-                    event_id: event.event_id().clone(),
-                });
-            }
-            if previous_event.is_some_and(|previous| {
-                (previous.occurred_at(), previous.event_id())
-                    > (event.occurred_at(), event.event_id())
-            }) {
-                return Err(FactStoreError::EventsOutOfOrder);
-            }
-            previous_event = Some(event);
-        }
-        validate_normalized_tag_curation(assertion.as_ref(), &events)?;
-
-        let mut available_anchor_ids = BTreeSet::new();
-        for anchor_id in &referenced_anchor_ids {
-            anchor_id.validate()?;
-            if !available_anchor_ids.insert(anchor_id) {
-                return Err(FactStoreError::DuplicateAnchorId {
-                    anchor_id: anchor_id.clone(),
-                });
-            }
-        }
-        for anchor in &new_anchors {
-            anchor.validate()?;
-            if FactOwnerV1::from(anchor.owner().clone()) != owner {
-                return Err(FactStoreError::OwnerMismatch);
-            }
-            if !available_anchor_ids.insert(anchor.anchor_id()) {
-                return Err(FactStoreError::DuplicateAnchorId {
-                    anchor_id: anchor.anchor_id().clone(),
-                });
-            }
-        }
-        validate_anchor_lineage(&new_anchors, &referenced_anchor_ids)?;
-        if let Some(assertion) = &assertion {
-            for evidence in assertion.evidence() {
-                if !available_anchor_ids.contains(evidence.anchor_id()) {
-                    return Err(FactStoreError::MissingEvidenceAnchor {
-                        anchor_id: evidence.anchor_id().clone(),
+                if !has_recording_event {
+                    return Err(FactStoreError::MissingAssertionEvent {
+                        assertion_id: assertion.assertion_id().clone(),
                     });
                 }
             }
-        }
+
+            let mut event_ids = BTreeSet::new();
+            let mut previous_event: Option<&FactLineageEventV1> = None;
+            for event in &events {
+                if event.fact_id() != &fact_id {
+                    return Err(FactStoreError::FactMismatch);
+                }
+                if event.owner() != &owner {
+                    return Err(FactStoreError::OwnerMismatch);
+                }
+                if !event_ids.insert(event.event_id()) {
+                    return Err(FactStoreError::DuplicateEventId {
+                        event_id: event.event_id().clone(),
+                    });
+                }
+                if previous_event.is_some_and(|previous| {
+                    (previous.occurred_at(), previous.event_id())
+                        > (event.occurred_at(), event.event_id())
+                }) {
+                    return Err(FactStoreError::EventsOutOfOrder);
+                }
+                previous_event = Some(event);
+            }
+            validate_normalized_tag_curation(assertion.as_ref(), &events)?;
+        });
+
+        let mut available_anchor_ids = BTreeSet::new();
+        hotpath::measure_block!("store.memory.admit.anchor_lineage", {
+            for anchor_id in &referenced_anchor_ids {
+                anchor_id.validate()?;
+                if !available_anchor_ids.insert(anchor_id) {
+                    return Err(FactStoreError::DuplicateAnchorId {
+                        anchor_id: anchor_id.clone(),
+                    });
+                }
+            }
+            for anchor in &new_anchors {
+                anchor.validate()?;
+                if FactOwnerV1::from(anchor.owner().clone()) != owner {
+                    return Err(FactStoreError::OwnerMismatch);
+                }
+                if !available_anchor_ids.insert(anchor.anchor_id()) {
+                    return Err(FactStoreError::DuplicateAnchorId {
+                        anchor_id: anchor.anchor_id().clone(),
+                    });
+                }
+            }
+            validate_anchor_lineage(&new_anchors, &referenced_anchor_ids)?;
+            if let Some(assertion) = &assertion {
+                for evidence in assertion.evidence() {
+                    if !available_anchor_ids.contains(evidence.anchor_id()) {
+                        return Err(FactStoreError::MissingEvidenceAnchor {
+                            anchor_id: evidence.anchor_id().clone(),
+                        });
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             fact_id,
@@ -373,33 +377,38 @@ impl FactCommitReceipt {
         last_event_id: FactEventId,
         active_assertion_id: Option<FactAssertionId>,
     ) -> FactStoreResult<Self> {
-        fact_id.validate()?;
-        owner.validate()?;
-        validate_owned_fact_id(&fact_id, &owner)?;
-        last_event_id.validate()?;
-        if committed_event_ids.is_empty() || committed_event_ids.last() != Some(&last_event_id) {
-            return Err(FactStoreError::InvalidCommitReceipt);
-        }
-        let mut seen = BTreeSet::new();
-        for event_id in &committed_event_ids {
-            event_id.validate()?;
-            if !seen.insert(event_id) {
-                return Err(FactStoreError::DuplicateEventId {
-                    event_id: event_id.clone(),
-                });
+        hotpath::measure_block!("store.memory.commit.validate", {
+            fact_id.validate()?;
+            owner.validate()?;
+            validate_owned_fact_id(&fact_id, &owner)?;
+            last_event_id.validate()?;
+            if committed_event_ids.is_empty() || committed_event_ids.last() != Some(&last_event_id)
+            {
+                return Err(FactStoreError::InvalidCommitReceipt);
             }
-        }
-        if let Some(assertion_id) = &active_assertion_id {
-            assertion_id.validate()?;
-        }
-        let committed_state_digest = canonical_sha256(&(
-            "tracedecay.fact-commit-receipt.committed-state.v1",
-            &fact_id,
-            &owner,
-            &committed_event_ids,
-            &last_event_id,
-            &active_assertion_id,
-        ))?;
+            let mut seen = BTreeSet::new();
+            for event_id in &committed_event_ids {
+                event_id.validate()?;
+                if !seen.insert(event_id) {
+                    return Err(FactStoreError::DuplicateEventId {
+                        event_id: event_id.clone(),
+                    });
+                }
+            }
+            if let Some(assertion_id) = &active_assertion_id {
+                assertion_id.validate()?;
+            }
+        });
+        let committed_state_digest = hotpath::measure_block!("store.memory.commit.digest", {
+            canonical_sha256(&(
+                "tracedecay.fact-commit-receipt.committed-state.v1",
+                &fact_id,
+                &owner,
+                &committed_event_ids,
+                &last_event_id,
+                &active_assertion_id,
+            ))?
+        });
         Ok(Self {
             fact_id,
             owner,

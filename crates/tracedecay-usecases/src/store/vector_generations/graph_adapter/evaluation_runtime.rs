@@ -20,9 +20,9 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
-    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationDependency,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch, NeverCancelled,
-    VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRetirementOutcome,
+    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch,
+    NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter,
@@ -35,13 +35,15 @@ use tracedecay_rusqlite_runtime::{
 };
 use tracedecay_store::{
     AdmissionConfigV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationInputDigestV1, GraphPublicationOperationContextV1, GraphPublicationStoreV1,
-    GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, RetainedGraphStoreLeaseV1,
-    RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+    GraphPublicationInputDigestV1, GraphPublicationOperationContextV1,
+    GraphPublicationReplayLookupV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
+    GraphVerifiedHeadV1, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorPublicationAuthority,
     SemanticVectorPublishedGenerationKey, SemanticVectorPublishedGenerationLookup,
-    SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
+    SemanticVectorStageBatchReceipt, SemanticVectorStageBeginOutcome,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageIncomplete, SemanticVectorStageKey,
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
     SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStageState,
@@ -125,6 +127,12 @@ struct EvaluationSqlWriteAuthorityV1 {
     active: AtomicBool,
 }
 
+impl EvaluationSqlWriteAuthorityV1 {
+    fn close(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
 impl ExactSqlWriteAuthority for EvaluationSqlWriteAuthorityV1 {
     fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
         if self.active.load(Ordering::Acquire) {
@@ -175,7 +183,7 @@ impl RuntimeRequestProbeV1 for EvaluationOperationProbeV1 {
 
 pub struct IsolatedSemanticEvaluationGraphV1 {
     registry: GraphDbRegistry,
-    _graph_owner: GraphDbOwnerAttachmentV1,
+    graph_owner: Mutex<Option<GraphDbOwnerAttachmentV1>>,
     lease: Arc<EvaluationGraphLeaseV1>,
     binding: StoreRuntimeBindingV1,
     source_scope: StoreShardIdV1,
@@ -189,7 +197,7 @@ pub struct IsolatedSemanticEvaluationGraphV1 {
     write_authority: Arc<EvaluationSqlWriteAuthorityV1>,
     _writer: Mutex<PersistentWriter>,
     _readers: ReaderPool<ExactSqlOnlyReaderV1>,
-    _root: tempfile::TempDir,
+    _root: Option<tempfile::TempDir>,
 }
 
 struct IsolatedSemanticEvaluationRuntimeV1 {
@@ -207,7 +215,19 @@ impl std::ops::Deref for IsolatedSemanticEvaluationRuntimeV1 {
 
 impl Drop for IsolatedSemanticEvaluationGraphV1 {
     fn drop(&mut self) {
-        self.write_authority.active.store(false, Ordering::Release);
+        self.write_authority.close();
+        // Close the native owner while the tempdir still exists. Field drop
+        // order would otherwise unlink `_root` under a live registry entry.
+        // If retirement fails, leak the directory rather than unlinking it
+        // under a still-mounted owner.
+        let retired_ok = match self.graph_owner.lock() {
+            Ok(mut owner) => match owner.take() {
+                Some(owner) => retire_evaluation_graph_runtime(&self.registry, &owner).is_ok(),
+                None => true,
+            },
+            Err(_) => false,
+        };
+        dispose_evaluation_root(self._root.take(), retired_ok);
     }
 }
 
@@ -219,10 +239,37 @@ pub fn isolated_semantic_evaluation_graph(
 }
 
 impl IsolatedSemanticEvaluationGraphV1 {
+    pub fn retire(&self) -> Result<(), GraphDbError> {
+        let owner = self
+            .graph_owner
+            .lock()
+            .map_err(|_| {
+                GraphDbError::unavailable("semantic evaluation graph owner lock is poisoned")
+            })?
+            .take();
+        let Some(owner) = owner else {
+            self.write_authority.close();
+            return Ok(());
+        };
+        match retire_evaluation_graph_runtime(&self.registry, &owner) {
+            Ok(_) => {
+                self.write_authority.close();
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(mut slot) = self.graph_owner.lock() {
+                    *slot = Some(owner);
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn retained(
         self: &Arc<Self>,
         generation: &CodeGenerationId,
     ) -> Result<RetainedSemanticVectorGraphV1, GraphDbError> {
+        self.require_mounted_owner()?;
         let dependency = self.source_dependencies.get(generation).ok_or_else(|| {
             GraphDbError::invalid(
                 "semantic evaluation requested a source generation outside its projected corpus",
@@ -263,6 +310,10 @@ impl IsolatedSemanticEvaluationGraphV1 {
             Arc::clone(&self.cancellation),
         ))
     }
+
+    fn require_mounted_owner(&self) -> Result<(), GraphDbError> {
+        require_mounted_evaluation_owner(&self.graph_owner)
+    }
 }
 
 fn mount_evaluation_graph_runtime(
@@ -280,6 +331,188 @@ fn mount_evaluation_graph_runtime(
         },
         authority_attachment: Box::new(EvaluationGraphOwnerAttachmentV1 { operation }),
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvaluationRootDisposal {
+    Released,
+    LeakedUntilProcessExit,
+}
+
+fn dispose_evaluation_root(
+    root: Option<tempfile::TempDir>,
+    retired_ok: bool,
+) -> EvaluationRootDisposal {
+    match root {
+        Some(root) if !retired_ok => {
+            std::mem::forget(root);
+            EvaluationRootDisposal::LeakedUntilProcessExit
+        }
+        Some(_) | None => EvaluationRootDisposal::Released,
+    }
+}
+
+fn require_mounted_evaluation_owner(
+    graph_owner: &Mutex<Option<GraphDbOwnerAttachmentV1>>,
+) -> Result<(), GraphDbError> {
+    let owner = graph_owner.lock().map_err(|_| {
+        GraphDbError::unavailable("semantic evaluation graph owner lock is poisoned")
+    })?;
+    if owner.is_none() {
+        return Err(GraphDbError::unavailable(
+            "semantic evaluation graph owner has been retired",
+        ));
+    }
+    Ok(())
+}
+
+fn retire_evaluation_graph_runtime(
+    registry: &GraphDbRegistry,
+    owner: &GraphDbOwnerAttachmentV1,
+) -> Result<GraphDbRetirementOutcome, GraphDbError> {
+    let mut reservation = registry
+        .reserve_retirement_batch(vec![owner.retirement_target()])
+        .map_err(|refusal| refusal.into_parts().0)?;
+    let commit = reservation
+        .commit(
+            Arc::new(NeverCancelled),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .map_err(|refusal| refusal.into_parts().0)?;
+    match commit.outcomes() {
+        [outcome] => match outcome {
+            GraphDbRetirementOutcome::Closed(_) => Ok(outcome.clone()),
+            GraphDbRetirementOutcome::DurabilityUncertain { message, .. } => {
+                Err(GraphDbError::DurabilityUncertain {
+                    message: message.clone(),
+                })
+            }
+            GraphDbRetirementOutcome::Failed { error, .. } => Err(error.clone()),
+        },
+        outcomes => Err(GraphDbError::unavailable(format!(
+            "evaluation graph retirement expected one outcome, got {}",
+            outcomes.len()
+        ))),
+    }
+}
+
+fn isolated_stage_reuses_the_same_semantic_generation(
+    existing: &SemanticVectorStagePlan,
+    requested: &SemanticVectorStagePlan,
+) -> bool {
+    existing.key.projection == requested.key.projection
+        && existing.semantic_generation_id == requested.semantic_generation_id
+        && existing.base_generation == requested.base_generation
+        && existing.source_scope == requested.source_scope
+        && existing.source_generation == requested.source_generation
+        && existing.source_dependency == requested.source_dependency
+        && existing.recipe == requested.recipe
+        && existing.expected_chunk_count == requested.expected_chunk_count
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedNativePrepareGate {
+    Conflict,
+    Cancelled,
+    ExactReplay,
+    Incomplete,
+}
+
+fn isolated_native_prepare_gate(
+    record_key_matches: bool,
+    state: SemanticVectorStageState,
+) -> IsolatedNativePrepareGate {
+    if !record_key_matches || state == SemanticVectorStageState::Published {
+        IsolatedNativePrepareGate::Conflict
+    } else if state == SemanticVectorStageState::Cancelled {
+        IsolatedNativePrepareGate::Cancelled
+    } else if state == SemanticVectorStageState::ReadyToPublish {
+        IsolatedNativePrepareGate::ExactReplay
+    } else {
+        IsolatedNativePrepareGate::Incomplete
+    }
+}
+
+fn isolated_pending_prepare_incomplete(
+    record: &SemanticVectorStageRecord,
+) -> SemanticVectorStageIncomplete {
+    SemanticVectorStageIncomplete {
+        expected_chunks: record.plan.expected_chunk_count,
+        recorded_chunks: record.recorded_chunk_count,
+        pending_batches: record
+            .plan
+            .expected_chunk_count
+            .saturating_sub(record.recorded_chunk_count),
+        failed_batches: 0,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedNativePublishGate {
+    Conflict,
+    IsolatedLocal,
+}
+
+fn isolated_native_publish_gate(
+    record_key_matches: bool,
+    state: SemanticVectorStageState,
+) -> IsolatedNativePublishGate {
+    if !record_key_matches {
+        IsolatedNativePublishGate::Conflict
+    } else if state == SemanticVectorStageState::Published
+        || state == SemanticVectorStageState::ReadyToPublish
+    {
+        IsolatedNativePublishGate::IsolatedLocal
+    } else {
+        IsolatedNativePublishGate::Conflict
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedNativeSettleGate {
+    Conflict,
+    IsolatedLocal,
+}
+
+fn isolated_native_settle_gate(state: SemanticVectorStageState) -> IsolatedNativeSettleGate {
+    if state == SemanticVectorStageState::Cancelled || state == SemanticVectorStageState::Pending {
+        IsolatedNativeSettleGate::Conflict
+    } else {
+        IsolatedNativeSettleGate::IsolatedLocal
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedNativeRecoverGate {
+    Conflict,
+    IsolatedLocal,
+}
+
+fn isolated_native_recover_publication_gate(projection_matches: bool) -> IsolatedNativeRecoverGate {
+    if projection_matches {
+        IsolatedNativeRecoverGate::IsolatedLocal
+    } else {
+        IsolatedNativeRecoverGate::Conflict
+    }
+}
+
+fn isolated_pending_stage_cancel_is_blocked(
+    replay: &GraphPublicationReplayLookupV1,
+    verified_head_matches_publication: bool,
+) -> bool {
+    !matches!(replay, GraphPublicationReplayLookupV1::Missing) || verified_head_matches_publication
+}
+
+fn require_evaluation_recovery_replay(
+    lookup: GraphPublicationReplayLookupV1,
+) -> Result<(), GraphDbError> {
+    match lookup {
+        GraphPublicationReplayLookupV1::Active(_) => Ok(()),
+        GraphPublicationReplayLookupV1::Retired(_) => Err(GraphDbError::Conflict),
+        GraphPublicationReplayLookupV1::Missing => Err(GraphDbError::Corrupt {
+            message: "exact verified graph generation has no durable active replay".to_owned(),
+        }),
+    }
 }
 
 impl IsolatedSemanticEvaluationGraphV1 {
@@ -377,7 +610,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
         )?;
         let runtime = Self {
             registry,
-            _graph_owner: graph_owner,
+            graph_owner: Mutex::new(Some(graph_owner)),
             lease,
             binding,
             source_scope,
@@ -391,7 +624,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
             write_authority,
             _writer: Mutex::new(writer),
             _readers: readers,
-            _root: root,
+            _root: Some(root),
         };
         let mut runtime = runtime;
         for generation in generations {
@@ -572,6 +805,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
             &GraphPublicationOperationContextV1<'_>,
         ) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
+        self.require_mounted_owner()?;
         let deadline = evaluation_operation_deadline(deadline);
         let sequence = self.operation_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let cancellation_identity = RuntimeCancellationIdentityV1 {
@@ -642,15 +876,26 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.deadline(),
             "recover-current",
             |registration, context| {
-                if authority
+                let Some(head) = authority
                     .verified_head(&projection, context)
                     .map_err(map_publication_error)?
-                    .is_none()
-                {
+                else {
                     return Ok(None);
+                };
+                match isolated_native_recover_publication_gate(head.key.projection == projection) {
+                    IsolatedNativeRecoverGate::Conflict => return Err(GraphDbError::Conflict),
+                    IsolatedNativeRecoverGate::IsolatedLocal => {}
                 }
+                require_evaluation_recovery_replay(
+                    authority
+                        .replay(&head.key, context)
+                        .map_err(map_publication_error)?,
+                )?;
+                // Isolated recover must bind the Isolated-local replay, not
+                // reinstall a sealed generation into Grafeo. That replay is
+                // what made production graph.activate take ~10 minutes.
                 self.registry
-                    .recover_verified_snapshot(registration, &mut *authority, context, &projection)
+                    .verified_generation_snapshot(registration, &mut *authority, context, &head.key)
                     .map(Some)
             },
         )
@@ -661,12 +906,22 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
         publication: &tracedecay_store::GraphPublicationKeyV1,
         execution: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        let expected = self.relational_projection(self.scope.projection())?;
         let mut authority = self.authority()?;
         self.with_operation(
             execution.cancellation(),
             execution.deadline(),
             "recover-generation",
             |registration, context| {
+                match isolated_native_recover_publication_gate(publication.projection == expected) {
+                    IsolatedNativeRecoverGate::Conflict => return Err(GraphDbError::Conflict),
+                    IsolatedNativeRecoverGate::IsolatedLocal => {}
+                }
+                require_evaluation_recovery_replay(
+                    authority
+                        .replay(publication, context)
+                        .map_err(map_publication_error)?,
+                )?;
                 self.registry.verified_generation_snapshot(
                     registration,
                     &mut *authority,
@@ -709,13 +964,38 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-begin",
-            |registration, context| {
-                self.registry.begin_verified_generation(
-                    registration,
-                    &mut *authority,
-                    context,
-                    plan,
-                )
+            |_registration, context| {
+                if plan.key.projection.shard_id != self.binding.shard_id
+                    || plan.publication_key.projection.shard_id != self.binding.shard_id
+                {
+                    return Err(GraphDbError::Conflict);
+                }
+                plan.validate()
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                match authority
+                    .begin_stage(plan, context)
+                    .map_err(map_staging_error)?
+                {
+                    SemanticVectorStageBeginOutcome::Begun(record)
+                    | SemanticVectorStageBeginOutcome::ExactReplay(record) => {
+                        if record.plan != *plan {
+                            return Err(GraphDbError::Conflict);
+                        }
+                        Ok(record)
+                    }
+                    SemanticVectorStageBeginOutcome::Published { record, .. } => {
+                        if !isolated_stage_reuses_the_same_semantic_generation(&record.plan, plan) {
+                            return Err(GraphDbError::Conflict);
+                        }
+                        Ok(*record)
+                    }
+                    SemanticVectorStageBeginOutcome::InputConflict { .. }
+                    | SemanticVectorStageBeginOutcome::SemanticGenerationConflict { .. }
+                    | SemanticVectorStageBeginOutcome::PublicationConflict
+                    | SemanticVectorStageBeginOutcome::PriorVerifiedHeadConflict { .. } => {
+                        Err(GraphDbError::Conflict)
+                    }
+                }
             },
         )
     }
@@ -730,9 +1010,70 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-resume",
-            |registration, context| {
-                self.registry
-                    .resume_generation_stage(registration, &mut *authority, context, stage)
+            |_registration, context| {
+                let Some(record) = authority.stage(stage, context).map_err(map_staging_error)?
+                else {
+                    return Ok(SemanticVectorStageResumeOutcome::Missing);
+                };
+                if record.plan.key != *stage {
+                    return Err(GraphDbError::Conflict);
+                }
+                match record.state {
+                    SemanticVectorStageState::Published => {
+                        let key = SemanticVectorPublishedGenerationKey {
+                            projection: record.plan.key.projection.clone(),
+                            semantic_generation_id: record.plan.semantic_generation_id.clone(),
+                        };
+                        match authority
+                            .published_semantic_generation(&key, context)
+                            .map_err(map_staging_error)?
+                        {
+                            SemanticVectorPublishedGenerationLookup::Published {
+                                record: verified_record,
+                                verified_head,
+                            } if *verified_record == record => {
+                                Ok(SemanticVectorStageResumeOutcome::Published {
+                                    record: verified_record,
+                                    verified_head,
+                                })
+                            }
+                            SemanticVectorPublishedGenerationLookup::Published { .. }
+                            | SemanticVectorPublishedGenerationLookup::Missing => {
+                                Err(GraphDbError::Conflict)
+                            }
+                        }
+                    }
+                    SemanticVectorStageState::Cancelled => {
+                        Ok(SemanticVectorStageResumeOutcome::Cancelled(record))
+                    }
+                    SemanticVectorStageState::Pending
+                    | SemanticVectorStageState::ReadyToPublish => {
+                        let pending = authority
+                            .pending_stage(&stage.projection, context)
+                            .map_err(map_staging_error)?;
+                        if pending.as_ref() != Some(&record) {
+                            return Err(GraphDbError::Conflict);
+                        }
+                        match record.state {
+                            SemanticVectorStageState::Pending => {
+                                Ok(SemanticVectorStageResumeOutcome::Pending(record))
+                            }
+                            SemanticVectorStageState::ReadyToPublish => {
+                                require_evaluation_recovery_replay(
+                                    authority
+                                        .replay(&record.plan.publication_key, context)
+                                        .map_err(map_publication_error)?,
+                                )?;
+                                Ok(SemanticVectorStageResumeOutcome::Ready(record))
+                            }
+                            SemanticVectorStageState::Published
+                            | SemanticVectorStageState::Cancelled => Err(GraphDbError::Corrupt {
+                                message: "terminal semantic vector stage changed during resume"
+                                    .to_owned(),
+                            }),
+                        }
+                    }
+                }
             },
         )
     }
@@ -747,13 +1088,13 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "published-generation",
-            |registration, context| {
-                self.registry.published_semantic_generation(
-                    registration,
-                    &mut *authority,
-                    context,
-                    key,
-                )
+            |_registration, context| {
+                if self.binding.shard_id != key.projection.shard_id {
+                    return Err(GraphDbError::Conflict);
+                }
+                authority
+                    .published_semantic_generation(key, context)
+                    .map_err(map_staging_error)
             },
         )
     }
@@ -764,6 +1105,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
         batch: GraphWriteBatch,
         execution: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGenerationBatchCommit, GraphDbError> {
+        let expected = self.relational_projection(self.scope.projection())?;
         let mut authority = self.authority()?;
         self.with_operation(
             execution.cancellation(),
@@ -793,6 +1135,21 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.deadline(),
             "stage-apply",
             |registration, context| {
+                let record = authority
+                    .stage(&receipt.key.stage, context)
+                    .map_err(map_staging_error)?
+                    .ok_or_else(|| GraphDbError::ResetRequired {
+                        message: "semantic evaluation stage is missing".to_owned(),
+                    })?;
+                match isolated_native_recover_publication_gate(
+                    record.plan.key.projection == expected,
+                ) {
+                    IsolatedNativeRecoverGate::Conflict => return Err(GraphDbError::Conflict),
+                    IsolatedNativeRecoverGate::IsolatedLocal => {}
+                }
+                if record.state == SemanticVectorStageState::Cancelled {
+                    return Err(GraphDbError::Conflict);
+                }
                 self.registry.apply_verified_generation_batch(
                     registration,
                     &mut *authority,
@@ -813,6 +1170,16 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                 settlement.deadline(),
                 "stage-settle-batch",
                 |registration, context| {
+                    let record = authority
+                        .stage(&receipt.key.stage, context)
+                        .map_err(map_staging_error)?
+                        .ok_or_else(|| GraphDbError::ResetRequired {
+                            message: "semantic evaluation stage is missing".to_owned(),
+                        })?;
+                    match isolated_native_settle_gate(record.state) {
+                        IsolatedNativeSettleGate::Conflict => return Err(GraphDbError::Conflict),
+                        IsolatedNativeSettleGate::IsolatedLocal => {}
+                    }
                     self.registry.settle_verified_generation_batch(
                         registration,
                         &mut *authority,
@@ -858,16 +1225,17 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                 if record.state != SemanticVectorStageState::Pending {
                     return Ok(SemanticVectorStageCancelOutcome::ReadyToPublish(record));
                 }
-                if !matches!(
-                    authority
-                        .replay(&record.plan.publication_key, context)
-                        .map_err(map_publication_error)?,
-                    tracedecay_store::GraphPublicationReplayLookupV1::Missing
-                ) || authority
+                let replay = authority
+                    .replay(&record.plan.publication_key, context)
+                    .map_err(map_publication_error)?;
+                let head = authority
                     .verified_head(&record.plan.key.projection, context)
-                    .map_err(map_publication_error)?
-                    .is_some_and(|head| head.key == record.plan.publication_key)
-                {
+                    .map_err(map_publication_error)?;
+                if isolated_pending_stage_cancel_is_blocked(
+                    &replay,
+                    head.as_ref()
+                        .is_some_and(|head| head.key == record.plan.publication_key),
+                ) {
                     return Err(GraphDbError::Conflict);
                 }
                 authority
@@ -887,13 +1255,28 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-ready",
-            |registration, context| {
-                self.registry.prepare_publication_from_staged_native(
-                    registration,
-                    &mut *authority,
-                    context,
-                    stage,
-                )
+            |_registration, context| {
+                let Some(record) = authority.stage(stage, context).map_err(map_staging_error)?
+                else {
+                    return Err(GraphDbError::ResetRequired {
+                        message: "semantic vector stage is missing before Isolated prepare"
+                            .to_owned(),
+                    });
+                };
+                match isolated_native_prepare_gate(record.plan.key == *stage, record.state) {
+                    IsolatedNativePrepareGate::Conflict => Err(GraphDbError::Conflict),
+                    IsolatedNativePrepareGate::Cancelled => Ok(
+                        SemanticVectorStagePublicationPrepareOutcome::Cancelled(record),
+                    ),
+                    IsolatedNativePrepareGate::ExactReplay => Ok(
+                        SemanticVectorStagePublicationPrepareOutcome::ExactReplay(record),
+                    ),
+                    IsolatedNativePrepareGate::Incomplete => {
+                        Ok(SemanticVectorStagePublicationPrepareOutcome::Incomplete(
+                            isolated_pending_prepare_incomplete(&record),
+                        ))
+                    }
+                }
             },
         )
     }
@@ -909,9 +1292,32 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.deadline(),
             "stage-publish",
             |registration, context| {
-                self.registry
-                    .publish_ready_generation(registration, &mut *authority, context, stage)
-                    .map(|commit| commit.snapshot)
+                let record = authority
+                    .stage(stage, context)
+                    .map_err(map_staging_error)?
+                    .ok_or_else(|| GraphDbError::ResetRequired {
+                        message: "ready semantic vector stage is missing".to_owned(),
+                    })?;
+                match isolated_native_publish_gate(record.plan.key == *stage, record.state) {
+                    IsolatedNativePublishGate::Conflict => Err(GraphDbError::Conflict),
+                    IsolatedNativePublishGate::IsolatedLocal => {
+                        require_evaluation_recovery_replay(
+                            authority
+                                .replay(&record.plan.publication_key, context)
+                                .map_err(map_publication_error)?,
+                        )?;
+                        // Isolated publish binds Isolated-local replay. It
+                        // must not run native Grafeo publish/install — that
+                        // replay path is what made production activate take
+                        // ~10 minutes and what CompactStore is replacing.
+                        self.registry.verified_generation_snapshot(
+                            registration,
+                            &mut *authority,
+                            context,
+                            &record.plan.publication_key,
+                        )
+                    }
+                }
             },
         )
     }
@@ -933,6 +1339,10 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
                     .ok_or_else(|| GraphDbError::ResetRequired {
                         message: "published semantic evaluation stage is missing".to_owned(),
                     })?;
+                match isolated_native_settle_gate(record.state) {
+                    IsolatedNativeSettleGate::Conflict => return Err(GraphDbError::Conflict),
+                    IsolatedNativeSettleGate::IsolatedLocal => {}
+                }
                 authority
                     .settle_published(settlement, &record.plan.writer_fence, context)
                     .map_err(map_staging_error)
@@ -1091,6 +1501,294 @@ mod settlement_tests {
                 deadline: Instant::now() + Duration::from_secs(30),
             })
             .expect("registered evaluation operation");
+    }
+
+    #[test]
+    fn evaluation_graph_refuses_registered_operations_without_an_owner() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        let graph_path = root
+            .path()
+            .canonicalize()
+            .expect("canonical evaluation root")
+            .join("evaluation.grafeo");
+        let binding = evaluation_binding().expect("evaluation binding");
+        let operation = Arc::new(EvaluationGraphLeaseV1 {
+            locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&graph_path).expect("graph locator digest"),
+            ),
+            binding,
+            canonical_path: graph_path,
+        });
+        let registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("registry");
+        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = operation;
+
+        let error = registry
+            .resolve(GraphDbRegistration {
+                authority_lease,
+                lifecycle_cancellation: Arc::clone(&cancellation),
+                cancellation,
+                deadline: Instant::now() + Duration::from_secs(30),
+            })
+            .expect_err("evaluation operations must not register without an owner");
+        assert_eq!(
+            error,
+            GraphDbError::unavailable("graph runtime is not mounted by its owner attachment"),
+            "missing owner is a typed mount refusal, not a transient interrupt"
+        );
+    }
+
+    #[test]
+    fn evaluation_graph_retirement_unmounts_owner_and_releases_capacity() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        let graph_path = root
+            .path()
+            .canonicalize()
+            .expect("canonical evaluation root")
+            .join("evaluation.grafeo");
+        let binding = evaluation_binding().expect("evaluation binding");
+        let operation = Arc::new(EvaluationGraphLeaseV1 {
+            locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&graph_path).expect("graph locator digest"),
+            ),
+            binding,
+            canonical_path: graph_path,
+        });
+        let registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("registry");
+        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+        let owner = mount_evaluation_graph_runtime(
+            &registry,
+            Arc::clone(&operation),
+            Arc::clone(&cancellation),
+        )
+        .expect("owner-mounted evaluation graph");
+        assert_eq!(
+            registry.capacity().expect("mounted capacity").occupied,
+            1,
+            "mounted evaluation graph occupies registry capacity"
+        );
+
+        let outcome = retire_evaluation_graph_runtime(&registry, &owner)
+            .expect("evaluation graph retirement");
+        assert!(
+            matches!(outcome, GraphDbRetirementOutcome::Closed(_)),
+            "successful evaluation retirement must close the exact owner: {outcome:?}"
+        );
+        drop(owner);
+
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = operation;
+        let registration = GraphDbRegistration {
+            authority_lease,
+            lifecycle_cancellation: Arc::clone(&cancellation),
+            cancellation,
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        assert_eq!(
+            registry.status(&registration).expect("retired status"),
+            None,
+            "successful retirement must remove the registry entry"
+        );
+        assert_eq!(
+            registry.capacity().expect("retired capacity").occupied,
+            0,
+            "successful retirement must release occupied capacity"
+        );
+        assert_eq!(
+            registry
+                .resolve(registration)
+                .expect_err("retired evaluation graph must not stay mounted"),
+            GraphDbError::unavailable("graph runtime is not mounted by its owner attachment")
+        );
+    }
+
+    #[test]
+    fn retired_evaluation_owner_refuses_new_retains() {
+        let error = require_mounted_evaluation_owner(&Mutex::new(None))
+            .expect_err("retired owner must not mint a new retain");
+        assert_eq!(
+            error,
+            GraphDbError::unavailable("semantic evaluation graph owner has been retired"),
+            "retired Isolated graphs must refuse new retains, not leak a live handle"
+        );
+    }
+
+    #[test]
+    fn failed_retirement_leaks_tempdir_instead_of_unlinking_under_a_live_owner() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        assert_eq!(
+            dispose_evaluation_root(Some(root), false),
+            EvaluationRootDisposal::LeakedUntilProcessExit
+        );
+    }
+
+    #[test]
+    fn successful_retirement_releases_the_tempdir() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        assert_eq!(
+            dispose_evaluation_root(Some(root), true),
+            EvaluationRootDisposal::Released
+        );
+    }
+
+    #[test]
+    fn closed_evaluation_write_authority_denies_metadata_writes() {
+        let authority = EvaluationSqlWriteAuthorityV1 {
+            active: AtomicBool::new(true),
+        };
+        authority
+            .verify(ExactSqlWriteIntent::Execute)
+            .expect("live Isolated metadata writes must be admitted");
+        authority.close();
+        let error = authority
+            .verify(ExactSqlWriteIntent::Execute)
+            .expect_err("retired Isolated graphs must not keep metadata writes live");
+        assert!(
+            matches!(
+                error,
+                ExactSqlError::AuthorityDenied(ref message)
+                    if message.contains("isolated semantic evaluation authority is closed")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn isolated_pending_cancel_is_blocked_when_publication_already_exists() {
+        assert!(
+            isolated_pending_stage_cancel_is_blocked(
+                &GraphPublicationReplayLookupV1::Missing,
+                true
+            ),
+            "a verified head bound to the stage publication must block Isolated cancel"
+        );
+        assert!(
+            !isolated_pending_stage_cancel_is_blocked(
+                &GraphPublicationReplayLookupV1::Missing,
+                false
+            ),
+            "a pending Isolated stage with no replay and no matching head may cancel"
+        );
+    }
+
+    #[test]
+    fn isolated_prepare_skips_native_finalization_when_the_stage_is_cancelled() {
+        assert_eq!(
+            isolated_native_prepare_gate(true, SemanticVectorStageState::Cancelled),
+            IsolatedNativePrepareGate::Cancelled
+        );
+        assert_eq!(
+            isolated_native_prepare_gate(false, SemanticVectorStageState::Pending),
+            IsolatedNativePrepareGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_prepare_gate(true, SemanticVectorStageState::Pending),
+            IsolatedNativePrepareGate::Incomplete
+        );
+        assert_eq!(
+            isolated_native_prepare_gate(true, SemanticVectorStageState::ReadyToPublish),
+            IsolatedNativePrepareGate::ExactReplay
+        );
+        assert_eq!(
+            isolated_native_prepare_gate(true, SemanticVectorStageState::Published),
+            IsolatedNativePrepareGate::Conflict
+        );
+    }
+
+    #[test]
+    fn isolated_publish_refuses_cancelled_or_pending_stages() {
+        assert_eq!(
+            isolated_native_publish_gate(true, SemanticVectorStageState::Cancelled),
+            IsolatedNativePublishGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_publish_gate(true, SemanticVectorStageState::Pending),
+            IsolatedNativePublishGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_publish_gate(true, SemanticVectorStageState::ReadyToPublish),
+            IsolatedNativePublishGate::IsolatedLocal
+        );
+        assert_eq!(
+            isolated_native_publish_gate(true, SemanticVectorStageState::Published),
+            IsolatedNativePublishGate::IsolatedLocal
+        );
+        assert_eq!(
+            isolated_native_publish_gate(false, SemanticVectorStageState::Published),
+            IsolatedNativePublishGate::Conflict
+        );
+    }
+
+    #[test]
+    fn isolated_recover_and_apply_refuse_a_foreign_projection() {
+        assert_eq!(
+            isolated_native_recover_publication_gate(false),
+            IsolatedNativeRecoverGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_recover_publication_gate(true),
+            IsolatedNativeRecoverGate::IsolatedLocal
+        );
+    }
+
+    #[test]
+    fn isolated_settle_refuses_a_cancelled_stage() {
+        assert_eq!(
+            isolated_native_settle_gate(SemanticVectorStageState::Cancelled),
+            IsolatedNativeSettleGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_settle_gate(SemanticVectorStageState::Pending),
+            IsolatedNativeSettleGate::Conflict
+        );
+        assert_eq!(
+            isolated_native_settle_gate(SemanticVectorStageState::Published),
+            IsolatedNativeSettleGate::IsolatedLocal
+        );
+    }
+
+    #[test]
+    fn mounted_evaluation_owner_allows_retain() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        let graph_path = root
+            .path()
+            .canonicalize()
+            .expect("canonical evaluation root")
+            .join("evaluation.grafeo");
+        let binding = evaluation_binding().expect("evaluation binding");
+        let operation = Arc::new(EvaluationGraphLeaseV1 {
+            locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&graph_path).expect("graph locator digest"),
+            ),
+            binding,
+            canonical_path: graph_path,
+        });
+        let registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("registry");
+        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+        let owner = mount_evaluation_graph_runtime(&registry, operation, cancellation)
+            .expect("owner-mounted evaluation graph");
+        require_mounted_evaluation_owner(&Mutex::new(Some(owner)))
+            .expect("mounted owner must still admit Isolated retains");
+    }
+
+    #[test]
+    fn evaluation_recovery_refuses_missing_replay_before_exact_recovery() {
+        let error = require_evaluation_recovery_replay(GraphPublicationReplayLookupV1::Missing)
+            .expect_err("missing replay must not enter exact recovery");
+        assert_eq!(
+            error,
+            GraphDbError::Corrupt {
+                message: "exact verified graph generation has no durable active replay".to_owned(),
+            }
+        );
     }
 
     #[test]

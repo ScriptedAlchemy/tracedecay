@@ -39,13 +39,28 @@ pub async fn load_session(
          ORDER BY store_id
          LIMIT ?"
     );
-    let mut rows = conn.query(&sql, values).await?;
-
-    let mut messages = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let raw = raw::verified_raw_message_from_row(&row)?;
-        messages.push(load_message_from_raw(raw, request.content_slice));
-    }
+    let fetched = hotpath::future!(
+        async {
+            let mut rows = conn.query(&sql, values).await?;
+            let mut fetched = Vec::new();
+            while let Some(row) = rows.next().await? {
+                fetched.push(row);
+            }
+            Ok::<_, LcmError>(fetched)
+        },
+        label = "lcm.hydrate.fetch"
+    )
+    .await?;
+    let raws = hotpath::measure_block!("lcm.hydrate.redact", {
+        fetched
+            .iter()
+            .map(raw::verified_raw_message_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let mut messages = raws
+        .into_iter()
+        .map(|raw| load_message_from_raw(raw, request.content_slice))
+        .collect::<Vec<_>>();
 
     let has_more = messages.len() > limit;
     if has_more {

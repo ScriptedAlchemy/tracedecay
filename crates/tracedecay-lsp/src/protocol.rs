@@ -147,6 +147,10 @@ where
 
     /// Admits one bridge-owned frame without ambiguous post-dispatch
     /// backpressure. A consumed frame is never reported as retryable.
+    #[hotpath::measure(
+        label = "lsp_protocol_admit_client_payload",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub fn try_handle_client_payload(
         &mut self,
         payload: &[u8],

@@ -210,43 +210,51 @@ async fn canonical_occurrence_projection(
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
 ) -> SessionStoreResult<CanonicalOccurrenceProjection> {
-    let (source_sequence, observation) =
-        read_observation(conn, &occurrence.source_observation_id).await?;
-    if source_sequence > batch.watermarks().source_frontier() {
-        return Err(SessionStoreError::FrozenWatermarkMismatch);
-    }
-    let mut authority_rows = conn
-        .query(
-            "SELECT output_count FROM session_temporal_observation_effects
+    let (observation, output_count) =
+        hotpath::measure_block!("session_temporal.persistence.occurrence.scan", {
+            let (source_sequence, observation) =
+                read_observation(conn, &occurrence.source_observation_id).await?;
+            if source_sequence > batch.watermarks().source_frontier() {
+                return Err(SessionStoreError::FrozenWatermarkMismatch);
+            }
+            let mut authority_rows = conn
+                .query(
+                    "SELECT output_count FROM session_temporal_observation_effects
              WHERE observation_id = ?1 AND observation_sequence = ?2
                AND session_id = ?3 AND output_count > 0",
-            params![
-                occurrence.source_observation_id.as_str(),
-                frontier_i64(source_sequence, PERSIST_OPERATION)?,
-                batch.session_id().as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output_count = authority_rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                "canonical observation has no atomically recorded temporal effect",
-            )
-        })?
-        .get::<i64>(0)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output_count =
-        usize::try_from(output_count).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let projection =
-        derive_projection(&observation).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let envelope = observation_envelope(&observation)?;
-    let mut outputs = projection.messages().cloned().collect::<Vec<_>>();
-    outputs.sort_unstable_by_key(SessionMessageProjection::output_ordinal);
+                    params![
+                        occurrence.source_observation_id.as_str(),
+                        frontier_i64(source_sequence, PERSIST_OPERATION)?,
+                        batch.session_id().as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let output_count = authority_rows
+                .next()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        PERSIST_OPERATION,
+                        "canonical observation has no atomically recorded temporal effect",
+                    )
+                })?
+                .get::<i64>(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let output_count =
+                usize::try_from(output_count).map_err(|error| storage(PERSIST_OPERATION, error))?;
+            (observation, output_count)
+        });
+    let (envelope, outputs) =
+        hotpath::measure_block!("session_temporal.persistence.occurrence.hydrate", {
+            let projection = derive_projection(&observation)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let envelope = observation_envelope(&observation)?;
+            let mut outputs = projection.messages().cloned().collect::<Vec<_>>();
+            outputs.sort_unstable_by_key(SessionMessageProjection::output_ordinal);
+            (envelope, outputs)
+        });
     if outputs.len() != output_count
         || outputs
             .iter()

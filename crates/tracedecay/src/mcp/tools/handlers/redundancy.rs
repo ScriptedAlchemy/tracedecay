@@ -17,6 +17,7 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::decode_primitive_request;
 
+#[hotpath::measure(label = "mcp.tools.redundancy", future = true)]
 pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

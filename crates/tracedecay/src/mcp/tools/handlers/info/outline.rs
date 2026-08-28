@@ -3,6 +3,7 @@
 use super::*;
 
 /// Flat symbol map for a file with optional `kinds` filter.
+#[hotpath::measure(label = "mcp.tools.outline", future = true)]
 pub(crate) async fn handle_outline(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

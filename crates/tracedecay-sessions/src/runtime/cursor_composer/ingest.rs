@@ -290,6 +290,7 @@ impl CursorComposerSource {
         Ok(outcome.finished(byte_budget.consumed(), byte_budget.deferred()))
     }
 
+    #[hotpath::measure]
     async fn ingest_state_vscdb(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -759,6 +760,7 @@ impl CursorComposerSource {
         }
     }
 
+    #[hotpath::measure]
     async fn ingest_one_store_db(
         &self,
         context: &ComposerIngestContext<'_, '_>,

@@ -60,6 +60,7 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     )
 }
 
+#[hotpath::measure(label = "mcp.tools.project_list", future = true)]
 pub(crate) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,

@@ -85,6 +85,22 @@ impl std::fmt::Display for SemanticVectorGraphErrorV1 {
 
 impl std::error::Error for SemanticVectorGraphErrorV1 {}
 
+impl From<GraphDbError> for SemanticVectorGraphErrorV1 {
+    fn from(error: GraphDbError) -> Self {
+        match error {
+            GraphDbError::Unavailable { message } => Self::Unavailable(message),
+            GraphDbError::Cancelled => {
+                Self::Unavailable("semantic vector graph cancelled".to_owned())
+            }
+            GraphDbError::Closed => Self::Unavailable("semantic vector graph closed".to_owned()),
+            GraphDbError::DeadlineExceeded => {
+                Self::Unavailable("semantic vector graph deadline exceeded".to_owned())
+            }
+            error => Self::Rejected(error.to_string()),
+        }
+    }
+}
+
 /// Complete configuration liveness authorization for one reserved semantic
 /// vector generation.
 ///
@@ -392,4 +408,38 @@ pub trait SemanticVectorGraphProviderV1: Send + Sync {
     fn graph_for_current(
         &self,
     ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_or_unmounted_graph_is_unavailable_not_rejected() {
+        assert_eq!(
+            SemanticVectorGraphErrorV1::from(GraphDbError::unavailable(
+                "graph runtime is not mounted by its owner attachment"
+            )),
+            SemanticVectorGraphErrorV1::Unavailable(
+                "graph runtime is not mounted by its owner attachment".to_owned()
+            )
+        );
+        assert_eq!(
+            SemanticVectorGraphErrorV1::from(GraphDbError::Closed),
+            SemanticVectorGraphErrorV1::Unavailable("semantic vector graph closed".to_owned())
+        );
+    }
+
+    #[test]
+    fn identity_mismatch_stays_a_typed_rejection() {
+        assert_eq!(
+            SemanticVectorGraphErrorV1::from(GraphDbError::invalid(
+                "semantic evaluation requested a source generation outside its projected corpus"
+            )),
+            SemanticVectorGraphErrorV1::Rejected(
+                "invalid graph database request: semantic evaluation requested a source generation outside its projected corpus"
+                    .to_owned()
+            )
+        );
+    }
 }

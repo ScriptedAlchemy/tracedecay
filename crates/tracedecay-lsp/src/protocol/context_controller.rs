@@ -207,6 +207,10 @@ where
         }
     }
 
+    #[hotpath::measure(
+        label = "lsp_session_context_request",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(super) fn start_context_request(
         &mut self,
         response_id: Value,
@@ -280,6 +284,10 @@ where
         }
     }
 
+    #[hotpath::measure(
+        label = "lsp_session_context_expansion",
+        impl_type = "DaemonLspProtocolSession"
+    )]
     pub(super) fn start_context_expansion(
         &mut self,
         response_id: Value,

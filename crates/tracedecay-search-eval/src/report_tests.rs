@@ -70,7 +70,7 @@ fn semantic_distance_summary_exposes_absolute_confidence_and_ambiguity() {
     );
     assert_eq!(
         crate::report::semantic_distance_summary(std::iter::empty()),
-        "semantic_candidates=0,top_distance=none,second_distance=none,top_margin=none"
+        "semantic_candidates=0,top_distance=absent,second_distance=absent,top_margin=absent"
     );
 }
 

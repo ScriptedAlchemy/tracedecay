@@ -65,6 +65,18 @@ fn hotpath_output_path_and_focus_validation_match_the_pinned_runtime() {
 
 #[cfg(unix)]
 #[test]
+fn non_unicode_hotpath_focus_fails_closed_instead_of_profiling_everything() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let focus = std::ffi::OsString::from_vec(vec![0xff]);
+    assert!(
+        !hotpath_focus_is_valid(Some(focus.as_os_str())),
+        "a present non-Unicode HOTPATH_FOCUS must not be treated as unset"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn non_unicode_hotpath_output_path_cannot_authorize_hook_stdout_output() {
     use std::os::unix::ffi::OsStringExt as _;
 

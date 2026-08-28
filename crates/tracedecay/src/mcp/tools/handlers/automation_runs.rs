@@ -68,6 +68,7 @@ fn run_summary(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
+#[hotpath::measure(label = "mcp.tools.automation_run_list", future = true)]
 pub(super) async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let limit = parse_limit(&args);
     let page = load_run_records_page(&cg.store_layout().dashboard_root, limit)

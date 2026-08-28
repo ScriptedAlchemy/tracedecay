@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -110,6 +110,8 @@ fn dispatch_capacity_for_host() -> usize {
 }
 
 struct ActiveDispatch {
+    tool_name: Arc<str>,
+    admitted_at: tokio::time::Instant,
     cancellation: tracedecay_application::CancellationSignal,
     live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
@@ -180,9 +182,25 @@ impl RetainedDispatchRegistry {
         }
     }
 
+    #[cfg(test)]
+    fn with_capacity_for_test(capacity: usize) -> Self {
+        Self {
+            accepting: AtomicBool::new(true),
+            capacity,
+            state: hotpath::mutex!(
+                tokio::sync::Mutex::new(RetainedDispatchState {
+                    tasks: tokio::task::JoinSet::new(),
+                    active: HashMap::new(),
+                }),
+                label = "mcp.server.dispatch.registry"
+            ),
+        }
+    }
+
     #[hotpath::measure(label = "mcp.server.dispatch.admission", future = true)]
     async fn spawn<T, F>(
         &self,
+        tool_name: Arc<str>,
         cancellation: tracedecay_application::CancellationSignal,
         live_cancellable: bool,
         future: F,
@@ -202,10 +220,10 @@ impl RetainedDispatchRegistry {
             return Err(dispatch_shutdown_error());
         }
         if state.active.len() >= self.capacity {
-            return Err(TraceDecayError::project_route(
-                "tool_dispatch_saturated",
-                true,
-                "MCP retained dispatch capacity is exhausted",
+            return Err(dispatch_saturated_error(
+                &tool_name,
+                self.capacity,
+                &state.active,
             ));
         }
 
@@ -222,6 +240,8 @@ impl RetainedDispatchRegistry {
         state.active.insert(
             task.id(),
             ActiveDispatch {
+                tool_name,
+                admitted_at: tokio::time::Instant::now(),
                 cancellation,
                 live_cancellable,
                 settlement: Arc::clone(&settlement),
@@ -536,7 +556,12 @@ impl DispatchControl {
         }
 
         let (mut result, settlement) = match registry
-            .spawn(self.cancellation.clone(), self.live_cancellable, future)
+            .spawn(
+                Arc::clone(&self.tool_name),
+                self.cancellation.clone(),
+                self.live_cancellable,
+                future,
+            )
             .await
         {
             Ok(admitted) => admitted,
@@ -678,6 +703,75 @@ fn dispatch_shutdown_error() -> TraceDecayError {
         true,
         "MCP server is shutting down and cannot admit another tool dispatch",
     )
+}
+
+/// Capacity exhaustion is fail-closed: queuing another worker would hide the
+/// cause behind unbounded admission wait. Gauges stay on static keys; the
+/// error detail names the refused tool and a bounded holder census so the
+/// operator can see *what* filled the slots without putting IDs in labels.
+fn dispatch_saturated_error(
+    denied_tool: &str,
+    capacity: usize,
+    active: &HashMap<tokio::task::Id, ActiveDispatch>,
+) -> TraceDecayError {
+    let now = tokio::time::Instant::now();
+    let mut settling = 0_u64;
+    let mut not_started = 0_u64;
+    let mut oldest_holder_micros = 0_u64;
+    let mut holder_counts = BTreeMap::<&str, usize>::new();
+    for holder in active.values() {
+        match holder.settlement.snapshot() {
+            DispatchSettlement::NotStarted => not_started += 1,
+            DispatchSettlement::Settling | DispatchSettlement::Joined => settling += 1,
+        }
+        let age = now
+            .checked_duration_since(holder.admitted_at)
+            .unwrap_or_default()
+            .as_micros();
+        oldest_holder_micros = oldest_holder_micros.max(u64::try_from(age).unwrap_or(u64::MAX));
+        *holder_counts.entry(holder.tool_name.as_ref()).or_insert(0) += 1;
+    }
+    hotpath::gauge!("mcp.server.dispatch.saturated_total").inc(1_u64);
+    hotpath::gauge!("mcp.server.dispatch.saturated_active").set(active.len() as u64);
+    hotpath::gauge!("mcp.server.dispatch.saturated_capacity").set(capacity as u64);
+    hotpath::gauge!("mcp.server.dispatch.saturated_settling").set(settling);
+    hotpath::gauge!("mcp.server.dispatch.saturated_not_started").set(not_started);
+    hotpath::gauge!("mcp.server.dispatch.saturated_oldest_holder_micros").set(oldest_holder_micros);
+    TraceDecayError::project_route(
+        "tool_dispatch_saturated",
+        false,
+        format!(
+            "MCP retained dispatch capacity is exhausted (active={} capacity={capacity} settling={settling} oldest_holder_micros={oldest_holder_micros}); refusing {denied_tool}; holding {}",
+            active.len(),
+            format_holder_census(&holder_counts),
+        ),
+    )
+}
+
+fn format_holder_census(counts: &BTreeMap<&str, usize>) -> String {
+    const UNIQUE_LIMIT: usize = 16;
+    let mut parts: Vec<String> = counts
+        .iter()
+        .take(UNIQUE_LIMIT)
+        .map(|(name, count)| {
+            if *count == 1 {
+                (*name).to_string()
+            } else {
+                format!("{name}×{count}")
+            }
+        })
+        .collect();
+    if counts.len() > UNIQUE_LIMIT {
+        parts.push(format!(
+            "+{} more unique tools",
+            counts.len() - UNIQUE_LIMIT
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 #[cfg(test)]
@@ -838,5 +932,91 @@ mod tests {
         worker_release.notify_one();
         registry.shutdown().await;
         assert_eq!(settlement.snapshot(), DispatchSettlement::Joined);
+    }
+
+    #[tokio::test]
+    async fn exhausted_dispatch_capacity_fails_closed_without_queuing() {
+        let registry = Arc::new(RetainedDispatchRegistry::with_capacity_for_test(1));
+        let holder_cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.saturated-holder")
+                .expect("holder cancellation");
+        let holder = DispatchControl::new(
+            "tracedecay_search",
+            deadline_after(std::time::Duration::from_mins(1)),
+            holder_cancellation,
+        )
+        .expect("holder control");
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let holder_registry = Arc::clone(&registry);
+        let holder_task = tokio::spawn(async move {
+            holder
+                .run_retained(&holder_registry, async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok::<_, crate::errors::TraceDecayError>("held")
+                })
+                .await
+        });
+
+        worker_started.notified().await;
+        assert_eq!(registry.active_count_for_test().await, 1);
+
+        let denied_cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.saturated-denied")
+                .expect("denied cancellation");
+        let denied = DispatchControl::new(
+            "tracedecay_grep",
+            deadline_after(std::time::Duration::from_mins(1)),
+            denied_cancellation,
+        )
+        .expect("denied control");
+        let denied_registry = Arc::clone(&registry);
+        let denied_outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            denied.run_retained(&denied_registry, async {
+                Ok::<_, crate::errors::TraceDecayError>("must not admit")
+            }),
+        )
+        .await
+        .expect("saturation must refuse immediately instead of queueing");
+        let settlement = denied_outcome.settlement();
+        let failure = denied_outcome
+            .result
+            .expect_err("capacity exhaustion is a typed denial");
+        let (reason_code, retryable, detail) = failure
+            .project_route_context()
+            .expect("saturation is a named project-route denial");
+        assert_eq!(reason_code, "tool_dispatch_saturated");
+        assert!(
+            !retryable,
+            "saturation is fail-closed and never a blind retry"
+        );
+        assert!(
+            detail.contains("active=1") && detail.contains("capacity=1"),
+            "denial must report the bound that fired: {detail}"
+        );
+        assert!(
+            detail.contains("refusing tracedecay_grep"),
+            "denial must name the refused tool: {detail}"
+        );
+        assert!(
+            detail.contains("holding tracedecay_search"),
+            "denial must name the holder that filled the slot: {detail}"
+        );
+        assert_eq!(
+            settlement,
+            DispatchSettlement::NotStarted,
+            "a refused worker must not cross admission"
+        );
+        assert_eq!(registry.active_count_for_test().await, 1);
+
+        worker_release.notify_one();
+        let held = holder_task.await.expect("holder task");
+        assert_eq!(held.result.expect("holder completed"), "held");
+        registry.shutdown().await;
+        assert_eq!(registry.active_count_for_test().await, 0);
     }
 }

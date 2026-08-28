@@ -800,6 +800,10 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
+    // Without this, a foreign test thread can cache `Interest::never()` for the
+    // dispatch callsite and make the `runtime_commands == 0` assertions below
+    // pass vacuously; see the helper's documentation.
+    crate::tests::harness::install_tracing_callsite_keepalive();
     let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
     let first_dispatch = Dispatch::new(ObservationDispatchSubscriber {
         trace: Arc::clone(&first_dispatch_trace),

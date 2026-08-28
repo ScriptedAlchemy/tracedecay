@@ -41,6 +41,7 @@ fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
     None
 }
 
+#[hotpath::measure(label = "mcp.tools.todos", future = true)]
 pub(crate) async fn handle_todos(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

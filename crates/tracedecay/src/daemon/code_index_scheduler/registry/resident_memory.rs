@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 pub(super) use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
+#[cfg(test)]
+use tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1;
 
 use super::CodeIndexSchedulerRegistryV1;
 
@@ -14,7 +14,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::with_resident_memory_and_progress_producer_incarnation(
             max_worktrees,
             Arc::new(ProcessResidentMemoryV1::new(
-                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+                detected_process_resident_memory_limit_v1(),
             )),
             1,
         )

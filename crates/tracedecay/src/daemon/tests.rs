@@ -199,6 +199,20 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
         .expect("load test profile identity");
     let engine = DaemonEngine::default().with_profile_identity(profile_identity);
+    // Daemon bootstrap installs the profile worker plan before it publishes any
+    // transport endpoint (`bootstrap::install_profile_worker_plan`), and project
+    // open refuses outright without it. A freshly created test profile always
+    // initializes its persisted `ProfileSessions` selection to the default, so
+    // charging that default against this engine's own resident-memory authority
+    // installs exactly the plan production would have computed. Leaving it out
+    // made every engine test depend on some *other* test in the same binary
+    // winning the process-wide `OnceLock` first.
+    engine
+        .invocation
+        .install_worker_selection(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+        )
+        .expect("install test daemon profile worker plan");
     engine
         .store_administration
         .install_remote_recovery_project_lifecycle(

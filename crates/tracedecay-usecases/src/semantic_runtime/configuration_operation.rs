@@ -33,6 +33,10 @@ use tracedecay_search_eval::{
 
 use super::accepted_profile_authority::SemanticEvaluationPublicationIdentityV1;
 
+fn rejected_detail(detail: &'static str) -> SemanticActivationCoordinationErrorV1 {
+    SemanticActivationCoordinationErrorV1::RejectedDetail(detail.to_owned())
+}
+
 /// Unevaluated fusion material. No evaluation-result anchor is accepted from
 /// the caller; production derives it from the genuine direct-evaluator PASS.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +238,11 @@ impl SemanticEvaluationAuthorityPublicationV1 {
         let report = self.evidence.into_report();
         self.accepted_profile
             .executable_under(&self.runtime)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                rejected_detail(
+                    "accepted semantic profile is not executable under the publication runtime",
+                )
+            })?;
         let bootstrap_query = self.accepted_profile.is_exact_query_fallback();
         let profile_digest = self.accepted_profile.profile_digest().clone();
         self.accepted_profiles
@@ -390,7 +398,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             .current_profile_state()
             .await?
             .into_state()
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| rejected_detail("semantic activation profile state is invalid"))?;
         let expected = RetrievalProfileCasV1 {
             expected_configuration_revision: state.configuration_revision().clone(),
             expected_active_digest: state.active().profile_digest().clone(),
@@ -424,7 +432,9 @@ impl ProductionSemanticConfigurationOperationV1 {
                 })
                 != Some(request.selected_profile.artifact_digest.as_str())
         {
-            return Err(SemanticActivationCoordinationErrorV1::Rejected);
+            return Err(rejected_detail(
+                "selected semantic profile digest or artifact does not match accepted authority",
+            ));
         }
         if expected.expected_rollback_digest.as_ref()
             == Some(&request.selected_profile.accepted_profile_digest)
@@ -451,7 +461,9 @@ impl ProductionSemanticConfigurationOperationV1 {
                     expected.expected_configuration_revision,
                 )
                 .await
-                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+                .map_err(|_| {
+                    rejected_detail("semantic configuration mutation was rejected for the already-active profile")
+                })?;
             return Ok(SemanticAppliedActivationV1 {
                 configuration_receipt: receipt,
             });
@@ -463,7 +475,9 @@ impl ProductionSemanticConfigurationOperationV1 {
             .map_err(map_authority_error)?;
         let base_configuration = current_configuration_state(&self.configuration).await?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                rejected_detail("semantic configuration pin cannot be derived from current state")
+            })?;
         let preview = coordinator
             .preview_central_mutation(
                 &request.authority,
@@ -502,7 +516,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             .current_profile_state()
             .await?
             .into_state()
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| rejected_detail("semantic activation profile state is invalid"))?;
         let expected = RetrievalProfileCasV1 {
             expected_configuration_revision: state.configuration_revision().clone(),
             expected_active_digest: state.active().profile_digest().clone(),
@@ -527,7 +541,11 @@ impl ProductionSemanticConfigurationOperationV1 {
                     expected.expected_configuration_revision,
                 )
                 .await
-                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+                .map_err(|_| {
+                    rejected_detail(
+                        "semantic configuration mutation was rejected for lexical rollback",
+                    )
+                })?;
             return Ok(SemanticAppliedRollbackV1 {
                 configuration_receipt: receipt,
             });
@@ -535,7 +553,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         let restored_digest = expected
             .expected_rollback_digest
             .as_ref()
-            .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
+            .ok_or_else(|| rejected_detail("semantic rollback has no restored profile digest"))?;
         let restored = self
             .accepted_profiles
             .resolve(restored_digest)
@@ -543,7 +561,9 @@ impl ProductionSemanticConfigurationOperationV1 {
             .map_err(map_authority_error)?;
         let base_configuration = current_configuration_state(&self.configuration).await?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                rejected_detail("semantic configuration pin cannot be derived from current state")
+            })?;
         let preview = coordinator
             .preview_central_mutation(
                 &request.authority,
@@ -597,11 +617,9 @@ fn native_qualification_expectations(
     snapshot: &SemanticEvaluationPublicationSnapshotV1,
     candidate: &SemanticEvaluationProfileCandidateV1,
 ) -> Result<NativeQualificationExpectationsV1, SemanticActivationCoordinationErrorV1> {
-    let semantic = snapshot
-        .runtime
-        .semantic
-        .as_ref()
-        .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
+    let semantic = snapshot.runtime.semantic.as_ref().ok_or_else(|| {
+        rejected_detail("native qualification requires a verified semantic runtime snapshot")
+    })?;
     let runtime = NativeQualificationRuntimeKeyV1 {
         implementation_revision: semantic.implementation_revision.clone(),
         fusion_revision: semantic.fusion_revision.clone(),
@@ -647,7 +665,7 @@ fn map_packaged_qualification_error(
         | PackagedNativeQualificationErrorV1::InvalidRawOutputEvidence
         | PackagedNativeQualificationErrorV1::IncompleteNativeEvidence
         | PackagedNativeQualificationErrorV1::FailedQualification => {
-            SemanticActivationCoordinationErrorV1::Rejected
+            SemanticActivationCoordinationErrorV1::RejectedDetail(error.to_string())
         }
     }
 }
@@ -659,7 +677,9 @@ fn prepare_semantic_activation_publication(
 ) -> Result<PreparedSemanticActivationPublicationV1, SemanticActivationCoordinationErrorV1> {
     let (report, evaluated_material) = evidence.report_and_material();
     if !candidate_matches_evaluated_material(candidate, &evaluated_material) {
-        return Err(SemanticActivationCoordinationErrorV1::Rejected);
+        return Err(rejected_detail(
+            "semantic evaluation candidate does not match the packaged evaluator material",
+        ));
     }
     let mut compatibility = candidate.compatibility.clone();
     if let Some(semantic) = compatibility.semantic.as_mut() {
@@ -669,7 +689,9 @@ fn prepare_semantic_activation_publication(
     let accepted_runtime = runtime_with_accepted_resources(&snapshot.runtime, &compatibility)?;
     let passing_evaluation =
         PassingRetrievalEvaluationV1::from_report(&report, &candidate.evaluated_profile_id)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                rejected_detail("semantic evaluation report is not a passing activation result")
+            })?;
     let evaluation_anchor = passing_evaluation.evaluation_anchor().clone();
     let evaluated_profile = evaluated_material.profile;
     let profile = FusionProfile {
@@ -712,10 +734,16 @@ fn prepare_semantic_activation_publication(
         compatibility,
         passing_evaluation,
     )
-    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    .map_err(|_| {
+        rejected_detail("accepted semantic profile cannot be constructed from the evaluation")
+    })?;
     accepted_profile
         .executable_under(&accepted_runtime)
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            rejected_detail(
+                "accepted semantic profile is not executable under the snapshot runtime",
+            )
+        })?;
     Ok(PreparedSemanticActivationPublicationV1 {
         report,
         accepted_profile,
@@ -729,7 +757,9 @@ fn semantic_resource_requirement_from_report(
 ) -> Result<SemanticResourceRequirementV1, SemanticActivationCoordinationErrorV1> {
     let measured = report
         .semantic_activation_resource_pins(evaluated_profile_id)
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            rejected_detail("semantic evaluation report does not pin measured resource limits")
+        })?;
     Ok(SemanticResourceRequirementV1 {
         model_bytes: measured.model_bytes,
         tokenizer_bytes: measured.tokenizer_bytes,
@@ -751,14 +781,20 @@ fn runtime_with_accepted_resources(
         (Some(observed), Some(accepted)) => {
             observed.resources = accepted.resources;
             if observed != accepted {
-                return Err(SemanticActivationCoordinationErrorV1::Rejected);
+                return Err(rejected_detail(
+                    "accepted semantic resources do not match the observed runtime after applying measured pins",
+                ));
             }
             // Keep the runtime-observed configured ceiling. The accepted
             // profile's canonical `executable_under` validation below proves
             // measured report resources fit within this actual ceiling.
         }
         (None, None) => {}
-        _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+        _ => {
+            return Err(rejected_detail(
+                "semantic runtime and accepted profile pins must both be present or both be absent",
+            ));
+        }
     }
     runtime.semantic = accepted.semantic.clone();
     Ok(runtime)
@@ -927,7 +963,7 @@ fn map_authority_error(
             SemanticActivationCoordinationErrorV1::Unavailable
         }
         SemanticAcceptedProfileAuthorityErrorV1::Rejected => {
-            SemanticActivationCoordinationErrorV1::Rejected
+            rejected_detail("accepted semantic profile authority rejected the request")
         }
     }
 }
@@ -1383,7 +1419,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation project or profile selection does not match the mounted authority"
         ));
         assert_eq!(authority.calls(), (1, 0, 0));
     }
@@ -1407,7 +1444,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation vector, lifecycle, or runtime pins do not match the verified snapshot"
         ));
         assert_eq!(authority.calls(), (1, 0, 0));
     }
@@ -1424,7 +1462,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation candidate runtime does not match the verified snapshot"
         ));
         assert_eq!(authority.calls(), (1, 0, 0));
         assert_eq!(authority.published_snapshot(), None);
@@ -1443,7 +1482,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SemanticActivationCoordinationErrorV1::Rejected)
+            Err(SemanticActivationCoordinationErrorV1::RejectedDetail(detail))
+                if detail == "semantic evaluation candidate runtime does not match the verified snapshot"
         ));
         assert_eq!(authority.calls(), (1, 0, 0));
         assert_eq!(authority.published_snapshot(), None);

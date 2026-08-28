@@ -256,14 +256,17 @@ pub fn normalize_prepared_observation_record_v1(
         return Err(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope);
     }
     let canonical_provider = envelope.provider().clone();
-    let canonical_bytes = serde_json::to_vec(&envelope)
-        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-    if canonical_bytes.len() > limits.record_bytes {
-        return Err(ClaudeRecordParseErrorV1::CanonicalEnvelopeTooLarge);
-    }
-    let value = serde_json::from_slice(&canonical_bytes)
-        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-    let structure = validate_structure(&value, limits)?;
+    let (value, structure) = hotpath::measure_block!("capture.normalize.persist", {
+        let canonical_bytes = serde_json::to_vec(&envelope)
+            .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        if canonical_bytes.len() > limits.record_bytes {
+            return Err(ClaudeRecordParseErrorV1::CanonicalEnvelopeTooLarge);
+        }
+        let value = serde_json::from_slice(&canonical_bytes)
+            .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        let structure = validate_structure(&value, limits)?;
+        (value, structure)
+    });
     Ok(ParsedObservationRecordV1 {
         value,
         source_range: prepared.source_range,

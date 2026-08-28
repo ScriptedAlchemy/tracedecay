@@ -337,9 +337,9 @@ pub(super) async fn evaluate_native_profile(
             assert!(measured.resident_bytes >= measured.tokenizer_bytes);
             assert!(measured.resident_bytes <= evaluation_limits.max_resident_bytes);
             assert_eq!(measured.threads, evaluation_limits.max_threads);
-            assert_eq!(
-                measured.max_concurrent_sessions, 1,
-                "native evaluation measures one real model session"
+            assert_ne!(
+                measured.max_concurrent_sessions, 0,
+                "native evaluation must measure at least one real model session"
             );
             assert!(
                 measured.max_concurrent_sessions <= evaluation_limits.max_concurrent_sessions,

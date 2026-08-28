@@ -654,14 +654,16 @@ where
             let Ok(seed) = SymbolOccurrenceId::new(request.node_id.clone()) else {
                 return failed(context, "impact seed identity was invalid");
             };
-            let Ok(impact) = graph.reader.impact(
-                &[seed],
-                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                request.maximum_depth,
-                MAX_COMPATIBILITY_RESULTS,
-                MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
-                Arc::clone(&graph.cancellation),
-            ) else {
+            let Ok(impact) = hotpath::measure_block!("usecases.symbol_graph.impact", {
+                graph.reader.impact(
+                    &[seed],
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                    request.maximum_depth,
+                    MAX_COMPATIBILITY_RESULTS,
+                    MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
+                    Arc::clone(&graph.cancellation),
+                )
+            }) else {
                 return failed(context, "impact traversal failed");
             };
             let edge_count = impact.impacted.len() as u64;
@@ -696,6 +698,7 @@ struct OpenSymbolGraph {
     cancellation: Arc<dyn GraphCancellation>,
 }
 
+#[hotpath::measure(label = "usecases.symbol_graph.open", future = true)]
 async fn open_graph(
     port: &Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,
@@ -722,6 +725,7 @@ async fn open_graph(
     })
 }
 
+#[hotpath::measure(label = "usecases.symbol_graph.scan")]
 fn all_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -773,14 +777,16 @@ pub(super) fn trait_implementations(
             )
         })
     }) {
-        let edges = graph
-            .callers(
-                std::slice::from_ref(&trait_node.occurrence),
-                &[RelationEdgeKindV1::Implements],
-                MAX_GRAPH_SCAN,
-                Arc::clone(&cancellation),
-            )
-            .map_err(|_| ())?;
+        let edges = hotpath::measure_block!("usecases.symbol_graph.implementations.edges", {
+            graph
+                .callers(
+                    std::slice::from_ref(&trait_node.occurrence),
+                    &[RelationEdgeKindV1::Implements],
+                    MAX_GRAPH_SCAN,
+                    Arc::clone(&cancellation),
+                )
+                .map_err(|_| ())
+        })?;
         for edge in edges.into_iter().flatten() {
             let implementation = edge.neighbor;
             if !in_scope(&implementation, scope) {
@@ -867,6 +873,7 @@ fn signature_is_async(signature: Option<&str>) -> bool {
     })
 }
 
+#[hotpath::measure(label = "usecases.symbol_graph.traverse")]
 fn relation_traversal(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -924,6 +931,7 @@ fn relation_traversal(
     Ok(records)
 }
 
+#[hotpath::measure(label = "usecases.symbol_graph.trait_dispatch")]
 fn trait_dispatch_targets(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
