@@ -58,7 +58,8 @@ pub use native_qualification::{
     PortableNativeQualificationEvidenceV1, encode_daemon_native_qualification_blob,
     encode_packaged_native_qualification, load_packaged_native_qualification_from_bytes,
     packaged_native_qualification_bytes, qualified_default_activation_candidate,
-    write_daemon_native_qualification, write_packaged_native_qualification,
+    validate_packaged_native_activation_report, write_daemon_native_qualification,
+    write_packaged_native_qualification,
 };
 
 /// Returns the nearest-rank percentile from an ascending sample.
