@@ -264,7 +264,9 @@ impl DaemonEngine {
                 tokio::task::JoinSet::<crate::errors::Result<()>>::new(),
                 owner_phases,
                 move |project_server_deadline| async move {
-                    server_engine.shutdown_servers(project_server_deadline).await
+                    server_engine
+                        .shutdown_servers(project_server_deadline)
+                        .await
                 },
             )
             .with_terminal_owner_phases(vec![vec![terminal_owner]])

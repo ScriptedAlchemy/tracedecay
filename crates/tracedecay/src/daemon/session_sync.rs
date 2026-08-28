@@ -283,9 +283,7 @@ impl DaemonSessionSyncService {
                 }
             };
             match hotpath::future!(
-                context
-                    .registry
-                    .insert_session_sync_journal(&key, &encoded),
+                context.registry.insert_session_sync_journal(&key, &encoded),
                 label = "daemon.session_sync.journal.write"
             )
             .await
@@ -343,9 +341,7 @@ impl DaemonSessionSyncService {
             }
         };
         match hotpath::future!(
-            context
-                .registry
-                .insert_session_sync_journal(&key, &encoded),
+            context.registry.insert_session_sync_journal(&key, &encoded),
             label = "daemon.session_sync.journal.write"
         )
         .await

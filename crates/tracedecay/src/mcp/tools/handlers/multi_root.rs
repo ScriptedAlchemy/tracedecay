@@ -71,44 +71,49 @@ pub(super) async fn handle_multi_root(
     if let Some(map) = body.as_object_mut() {
         map.remove("__mcp_request_id");
     }
-    let invocation = hotpath::measure_block!("mcp.multi_root.decode", match operation {
-        MultiRootApplicationOperation::ScopeSetRead => {
-            let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
-                return invalid_request(operation, request_id);
-            };
-            DaemonInvocationRequest::multi_root_scope_set_read(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline.clone(),
-                cancellation.context(),
-            )
+    let invocation = hotpath::measure_block!(
+        "mcp.multi_root.decode",
+        match operation {
+            MultiRootApplicationOperation::ScopeSetRead => {
+                let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body)
+                else {
+                    return invalid_request(operation, request_id);
+                };
+                DaemonInvocationRequest::multi_root_scope_set_read(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                )
+            }
+            MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
+                let Ok(request) = serde_json::from_value::<MultiRootScopeSetCasRequestV1>(body)
+                else {
+                    return invalid_request(operation, request_id);
+                };
+                DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                )
+            }
+            MultiRootApplicationOperation::Execute => {
+                let Ok(request) = serde_json::from_value::<MultiRootExecuteRequestV1>(body) else {
+                    return invalid_request(operation, request_id);
+                };
+                DaemonInvocationRequest::multi_root_execute(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                )
+            }
         }
-        MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
-            let Ok(request) = serde_json::from_value::<MultiRootScopeSetCasRequestV1>(body) else {
-                return invalid_request(operation, request_id);
-            };
-            DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline.clone(),
-                cancellation.context(),
-            )
-        }
-        MultiRootApplicationOperation::Execute => {
-            let Ok(request) = serde_json::from_value::<MultiRootExecuteRequestV1>(body) else {
-                return invalid_request(operation, request_id);
-            };
-            DaemonInvocationRequest::multi_root_execute(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline.clone(),
-                cancellation.context(),
-            )
-        }
-    });
+    );
     let policy = match operation {
         MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
             InvocationCancellationPolicy::AuthoritativeEffect

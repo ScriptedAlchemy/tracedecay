@@ -769,6 +769,64 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     provider
         .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
         .expect_err("a foreign sealed digest must never be served from the offer");
+
+    // Both consumers above were served from the one offer, which is exactly why
+    // the offer is not taken on first read. Its lifetime bound is retirement.
+    assert_eq!(
+        provider.retained_decoded_offer_count(),
+        1,
+        "the offer survives its consumers so the predecessor path can reuse it"
+    );
+    let census_bytes = provider.retained_decoded_offer_bytes();
+    assert!(
+        census_bytes > 0,
+        "a retained offer reports the sealed source census it holds"
+    );
+
+    // Retirement releases it. Before this, nothing removed an offer at all.
+    let retirement_shard = owner.shard_id.clone();
+    assert_eq!(
+        provider.release_decoded_offer(&retirement_shard),
+        census_bytes
+    );
+    assert_eq!(provider.retained_decoded_offer_count(), 0);
+    assert_eq!(provider.retained_decoded_offer_bytes(), 0);
+    provider
+        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
+        .expect_err("a released offer falls back to the canonical seal, which is unreadable here");
+
+    // Pressure backstop, driven by an injected measured-RSS series on an
+    // isolated cell: no `/proc` read, and no interference with other cases.
+    let pressure = std::sync::Arc::new(
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        ),
+    );
+    let pressured = DaemonCodeGraphManifestProviderV1::with_pressure(&pressure);
+    pressured
+        .offer_decoded_code_generation(
+            retirement_shard.clone(),
+            generation_id.clone(),
+            sealed_state_digest.clone(),
+            Arc::clone(&decoded),
+        )
+        .expect("offer the decoded generation to the pressured provider");
+    assert_eq!(pressured.retained_decoded_offer_count(), 1);
+
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert_eq!(
+        pressured.retained_decoded_offer_count(),
+        1,
+        "nominal measured RSS keeps the accelerator"
+    );
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    assert_eq!(
+        pressured.retained_decoded_offer_count(),
+        0,
+        "measured RSS over the high watermark drops the retained decode"
+    );
+    assert_eq!(pressured.retained_decoded_offer_bytes(), 0);
 }
 
 /// The per-shard publication gate is one shared cell across retained runtime
@@ -799,7 +857,10 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     )
     .expect("project source");
     git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "concurrent publication fixture"]);
+    git(
+        &project_root,
+        &["commit", "-qm", "concurrent publication fixture"],
+    );
     let project_id = ProjectId::new("project.concurrent-code-publication").expect("project id");
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
@@ -919,7 +980,9 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         });
         (
             seat_worker.join().expect("join the seat publisher"),
-            reconcile_worker.join().expect("join the reconcile publisher"),
+            reconcile_worker
+                .join()
+                .expect("join the reconcile publisher"),
         )
     });
     let seat_snapshot = seat_outcome.expect("seat publication");

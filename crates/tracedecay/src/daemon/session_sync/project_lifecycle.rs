@@ -446,10 +446,7 @@ impl DaemonSessionSyncService {
             .cloned()
     }
 
-    #[hotpath::measure(
-        label = "daemon.session_sync.lifecycle.execute_request",
-        future = true
-    )]
+    #[hotpath::measure(label = "daemon.session_sync.lifecycle.execute_request", future = true)]
     pub(super) async fn execute_request(
         &self,
         request: SessionSyncRequestV1,
