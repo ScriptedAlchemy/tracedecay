@@ -62,9 +62,10 @@ use crate::{
             CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
             CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-            SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageBatchBoundsV1,
-            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
+            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+            VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -1132,36 +1133,30 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         #[cfg(feature = "hotpath")]
         let _decode = GenerationDecodeObservationV1::enter();
-        let bytes = hotpath::measure_block!("code_index.generation.decode.file_read", {
-            std::fs::read(path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Self::corruption("durable code-generation index target disappeared during read")
-                } else {
-                    Self::unavailable(error)
-                }
-            })
+        let expected_digest = ManifestDigest::new(entry.state_digest.clone()).map_err(|error| {
+            Self::corruption(format!(
+                "durable code-generation digest is not canonical: {error}"
+            ))
+        })?;
+        let mut file = File::open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Self::corruption("durable code-generation index target disappeared during read")
+            } else {
+                Self::unavailable(error)
+            }
         })?;
         #[cfg(feature = "hotpath")]
-        if let Ok(bytes_read) = u64::try_from(bytes.len()) {
-            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
-        }
-        let actual_size = u64::try_from(bytes.len()).map_err(Self::unavailable)?;
-        if actual_size != entry.size_bytes {
-            return Err(Self::corruption(
-                "indexed code-generation byte size does not match its durable entry",
-            ));
-        }
-        let state_digest = hotpath::measure_block!(
-            "code_index.generation.decode.file_digest",
-            Self::state_digest(&bytes)
-        );
-        if state_digest != entry.state_digest {
-            return Err(Self::corruption(
-                "indexed code-generation bytes do not match their sealed digest",
-            ));
-        }
-        let Some(generation) = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&bytes)
-            .map_err(Self::corruption)?
+        hotpath::gauge!("code_index.generation.decode.bytes_total").inc(entry.size_bytes);
+        let Some(generation) = hotpath::measure_block!(
+            "code_index.generation.decode.file_read",
+            CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+                &mut file,
+                entry.size_bytes,
+                Some(&expected_digest),
+                &UninterruptibleCodeIndexControlV1,
+            )
+        )
+        .map_err(Self::corruption)?
         else {
             return Ok(None);
         };
@@ -1330,32 +1325,31 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         #[cfg(feature = "hotpath")]
         let _decode = GenerationDecodeObservationV1::enter();
-        let generation_bytes =
-            hotpath::measure_block!("code_index.generation.decode.file_read", {
-                std::fs::read(path).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        Self::corruption("active code-generation target is missing")
-                    } else {
-                        Self::unavailable(error)
-                    }
-                })
+        let expected_digest =
+            ManifestDigest::new(pointer.state_digest.clone()).map_err(|error| {
+                Self::corruption(format!(
+                    "active code-generation digest is not canonical: {error}"
+                ))
             })?;
+        let mut file = File::open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Self::corruption("active code-generation target is missing")
+            } else {
+                Self::unavailable(error)
+            }
+        })?;
         #[cfg(feature = "hotpath")]
-        if let Ok(bytes_read) = u64::try_from(generation_bytes.len()) {
-            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
-        }
-        let state_digest = hotpath::measure_block!(
-            "code_index.generation.decode.file_digest",
-            Self::state_digest(&generation_bytes)
-        );
-        if state_digest != pointer.state_digest {
-            return Err(Self::corruption(
-                "sealed code-generation bytes do not match the active pointer digest",
-            ));
-        }
-        let Some(generation) =
-            CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&generation_bytes)
-                .map_err(Self::corruption)?
+        hotpath::gauge!("code_index.generation.decode.bytes_total").inc(metadata.len());
+        let Some(generation) = hotpath::measure_block!(
+            "code_index.generation.decode.file_read",
+            CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+                &mut file,
+                metadata.len(),
+                Some(&expected_digest),
+                &UninterruptibleCodeIndexControlV1,
+            )
+        )
+        .map_err(Self::corruption)?
         else {
             return Ok(None);
         };
@@ -1372,7 +1366,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation pointer does not match the sealed generation",
             ));
         }
-        let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
+        let encoded_bytes = metadata.len();
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
         hotpath::gauge!("daemon.code_index.generation.decode.bytes").set(encoded_bytes);

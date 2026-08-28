@@ -1798,9 +1798,9 @@ struct AdmittedSealedLexicalFileV1 {
     next_file_offset: u64,
 }
 
-struct SealedLexicalLayoutV1 {
-    state_digest: ManifestDigest,
-    format_revision: u32,
+pub(super) struct SealedLexicalLayoutV1 {
+    pub(super) state_digest: ManifestDigest,
+    pub(super) format_revision: u32,
     file_count: u64,
     first_file_offset: u64,
     files_end_offset: u64,
@@ -1814,7 +1814,7 @@ struct SealedLexicalLayoutV1 {
 }
 
 #[hotpath::measure(label = "code_index.restore.scan")]
-fn scan_layout<R: Read + Seek>(
+pub(super) fn scan_layout<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
     expected_file_digest: Option<&ManifestDigest>,

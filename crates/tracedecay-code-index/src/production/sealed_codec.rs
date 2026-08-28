@@ -1,11 +1,15 @@
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::fmt;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
+use super::lexical_page_source::scan_layout;
 use super::*;
 
 /// The sealed-generation envelope revision this build writes.
@@ -114,6 +118,174 @@ impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
     }
 }
 
+/// One file page restored from the sealed `files` array. The persist page is
+/// moved into the published artifact; the next page is not read until this
+/// one has been dropped from the deserializer.
+struct StreamingRestoredFilesV1 {
+    files: Vec<Arc<FileGenerationArtifactsV1>>,
+}
+
+impl<'de> Deserialize<'de> for StreamingRestoredFilesV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FilesVisitor;
+
+        impl<'de> Visitor<'de> for FilesVisitor {
+            type Value = StreamingRestoredFilesV1;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a sealed generation files array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut files = Vec::new();
+                if let Some(hint) = seq.size_hint() {
+                    files.reserve(hint);
+                }
+                while let Some(file) = seq.next_element::<PersistedFileGenerationArtifactsV1>()? {
+                    files.push(restore_one_file_page(file).map_err(de::Error::custom)?);
+                }
+                Ok(StreamingRestoredFilesV1 { files })
+            }
+        }
+
+        deserializer.deserialize_seq(FilesVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamingPersistedPublishedGenerationV1 {
+    format_revision: CompatibleSealedFormatRevisionV1,
+    manifest: CodeGenerationManifestV1,
+    snapshot: SanitizedCodeSnapshotV1,
+    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    ignored_source_admissions_digest: ManifestDigest,
+    files: StreamingRestoredFilesV1,
+    lineage: Vec<SymbolLineageCandidateV1>,
+    coverage: CoverageSummaryV1,
+    capability: CodeIndexCapabilityManifestV1,
+    projection_request: ProjectionBatchRequestV1,
+    projection_receipt: ProjectionBatchReceiptV1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamingSealedEnvelopeV1 {
+    state_digest: ManifestDigest,
+    generation: StreamingPersistedPublishedGenerationV1,
+}
+
+enum CompatibleSealedMaterializationV1 {
+    Streamed(StreamingPersistedPublishedGenerationV1),
+    Legacy(SealedPublishedGenerationEnvelopeV1),
+}
+
+fn restore_one_file_page(
+    file: PersistedFileGenerationArtifactsV1,
+) -> Result<Arc<FileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
+    hotpath::measure_block!("code_index.sealed_decode.file_page", {
+        let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+            .map_err(CodeIndexProductionErrorV1::Chunk)?;
+        Ok(Arc::new(FileGenerationArtifactsV1 {
+            authority: file.authority,
+            extraction: file.extraction,
+            artifacts: file.artifacts,
+            exact_authority,
+        }))
+    })
+}
+
+fn assemble_published_generation(
+    generation: StreamingPersistedPublishedGenerationV1,
+) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
+    let StreamingPersistedPublishedGenerationV1 {
+        format_revision: _,
+        manifest,
+        snapshot,
+        repository_parse_identity,
+        ignored_source_admissions,
+        ignored_source_admissions_digest,
+        files: StreamingRestoredFilesV1 { files },
+        lineage,
+        coverage,
+        capability,
+        projection_request,
+        projection_receipt,
+    } = generation;
+    let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
+        hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
+            let ignored_source_roster = IgnoredSourceRosterV1::restore(
+                &snapshot,
+                &repository_parse_identity,
+                ignored_source_admissions,
+                ignored_source_admissions_digest,
+            )?;
+            // Persist pages are already gone: each file was restored and dropped
+            // before the next `files` element was decoded. Project the generation
+            // aggregates from those restored pages so the seating path never holds
+            // a second owned copy of the whole persist corpus.
+            let chunk_rows = files
+                .iter()
+                .map(|file| file.artifacts.chunks.clone())
+                .collect::<Vec<_>>();
+            let symbol_rows = files
+                .iter()
+                .flat_map(|file| file.artifacts.symbols.iter().cloned())
+                .collect::<Vec<_>>();
+            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
+                .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            let imports = derive_import_evidence(&files);
+            let (edges, edge_abstentions) = collect_edge_evidence(&files);
+            let projection =
+                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
+                    .map_err(CodeIndexProductionErrorV1::Projection)?;
+            Ok::<_, CodeIndexProductionErrorV1>((
+                ignored_source_roster,
+                chunks,
+                symbols,
+                imports,
+                edges,
+                edge_abstentions,
+                projection,
+            ))
+        })?;
+    let published = CodeIndexPublishedGenerationV1 {
+        manifest,
+        snapshot,
+        repository_parse_identity,
+        ignored_source_roster,
+        files,
+        chunks,
+        symbols,
+        lineage,
+        imports,
+        edges,
+        edge_abstentions,
+        coverage,
+        capability,
+        projection,
+        validated: OnceLock::new(),
+        admitted: OnceLock::new(),
+        attribution: OnceLock::new(),
+        chunk_policy: OnceLock::new(),
+        graph_manifest: OnceLock::new(),
+    };
+    hotpath::measure_block!(
+        "code_index.sealed_decode.corpus_validation",
+        published.validate_fresh()
+    )?;
+    Ok(published)
+}
+
 #[derive(Serialize)]
 struct PersistedPublishedGenerationRefV1<'a> {
     format_revision: u32,
@@ -167,7 +339,7 @@ struct PersistedPublishedGenerationFormatProbeV1 {
 /// without building corpus-scale structures from unverified bytes.
 fn materialize_compatible_envelope(
     bytes: &[u8],
-) -> Result<Option<SealedPublishedGenerationEnvelopeV1>, CodeIndexProductionErrorV1> {
+) -> Result<Option<CompatibleSealedMaterializationV1>, CodeIndexProductionErrorV1> {
     let raw: SealedPublishedGenerationRawEnvelopeV1 = match hotpath::measure_block!(
         "code_index.generation.decode.raw_envelope_parse",
         serde_json::from_slice(bytes)
@@ -179,7 +351,8 @@ fn materialize_compatible_envelope(
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation decoding failed: {error}"
                 )),
-            );
+            )
+            .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
         }
     };
     let payload_digest = hotpath::measure_block!(
@@ -195,32 +368,35 @@ fn materialize_compatible_envelope(
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation state digest does not match its payload".to_owned(),
             ),
-        );
+        )
+        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
     }
-    let generation: PersistedPublishedGenerationV1 = match hotpath::measure_block!(
+    let streamed: Result<StreamingPersistedPublishedGenerationV1, _> = hotpath::measure_block!(
         "code_index.sealed_decode.persisted_materialization",
         serde_json::from_str(raw.generation.get())
-    ) {
-        Ok(generation) => generation,
-        Err(error) => {
-            return classify_unaccepted_envelope(
-                bytes,
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation payload decoding failed: {error}"
-                )),
-            );
+    );
+    match streamed {
+        Ok(generation) if generation.format_revision.0 == SEALED_GENERATION_FORMAT_REVISION_V1 => {
+            Ok(Some(CompatibleSealedMaterializationV1::Streamed(
+                generation,
+            )))
         }
-    };
-    if generation.format_revision.0 == SEALED_GENERATION_FORMAT_REVISION_V1 {
-        return Ok(Some(SealedPublishedGenerationEnvelopeV1 {
-            state_digest: raw.state_digest,
-            generation,
-        }));
+        Ok(_) => {
+            // A compatible non-V1 revision whose raw payload bytes coincide
+            // with its canonical serialization: restore through the strict
+            // legacy envelope parse so envelope-level admission stays
+            // identical to the legacy reader.
+            decode_legacy_envelope(bytes)
+                .map(|envelope| Some(CompatibleSealedMaterializationV1::Legacy(envelope)))
+        }
+        Err(error) => classify_unaccepted_envelope(
+            bytes,
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation payload decoding failed: {error}"
+            )),
+        )
+        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy)),
     }
-    // A compatible non-V1 revision whose raw payload bytes coincide with its
-    // canonical serialization: restore through the strict legacy envelope
-    // parse so envelope-level admission stays identical to the legacy reader.
-    decode_legacy_envelope(bytes).map(Some)
 }
 
 /// Historical probe-first classification for bytes the single-pass V1 decode
@@ -662,9 +838,20 @@ impl CodeIndexPublishedGenerationV1 {
             admit_sealed_generation_bytes(bytes, admitted_len)
         )?;
         crate::hotpath_observe::record_seal_bytes(admitted_len);
-        let Some(envelope) = materialize_compatible_envelope(bytes)? else {
-            return Ok(None);
-        };
+        match materialize_compatible_envelope(bytes)? {
+            Some(CompatibleSealedMaterializationV1::Streamed(generation)) => {
+                assemble_published_generation(generation).map(Some)
+            }
+            Some(CompatibleSealedMaterializationV1::Legacy(envelope)) => {
+                Self::assemble_legacy_envelope(envelope).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn assemble_legacy_envelope(
+        envelope: SealedPublishedGenerationEnvelopeV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         let expected_digest = match envelope.generation.format_revision.0 {
             LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => sealed_generation_payload_digest(
                 LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
@@ -682,116 +869,84 @@ impl CodeIndexPublishedGenerationV1 {
                 "sealed generation state digest does not match its payload".to_owned(),
             ));
         }
+        let streamed = StreamingPersistedPublishedGenerationV1 {
+            format_revision: envelope.generation.format_revision,
+            manifest: envelope.generation.manifest,
+            snapshot: envelope.generation.snapshot,
+            repository_parse_identity: envelope.generation.repository_parse_identity,
+            ignored_source_admissions: envelope.generation.ignored_source_admissions,
+            ignored_source_admissions_digest: envelope.generation.ignored_source_admissions_digest,
+            files: StreamingRestoredFilesV1 {
+                files: envelope
+                    .generation
+                    .files
+                    .into_iter()
+                    .map(restore_one_file_page)
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            lineage: envelope.generation.lineage,
+            coverage: envelope.generation.coverage,
+            capability: envelope.generation.capability,
+            projection_request: envelope.generation.projection_request,
+            projection_receipt: envelope.generation.projection_receipt,
+        };
+        assemble_published_generation(streamed)
+    }
 
-        let PersistedPublishedGenerationV1 {
-            format_revision: _,
-            manifest,
-            snapshot,
-            repository_parse_identity,
-            ignored_source_admissions,
-            ignored_source_admissions_digest,
-            files: persisted_files,
-            lineage,
-            coverage,
-            capability,
-            projection_request,
-            projection_receipt,
-        } = envelope.generation;
-        let (
-            ignored_source_roster,
-            files,
-            chunks,
-            symbols,
-            imports,
-            edges,
-            edge_abstentions,
-            projection,
-        ) = hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
-            let ignored_source_roster = IgnoredSourceRosterV1::restore(
-                &snapshot,
-                &repository_parse_identity,
-                ignored_source_admissions,
-                ignored_source_admissions_digest,
-            )?;
-            // Restoring one file's exact authority re-derives a canonical
-            // digest for every chunk, and the generation-level chunk/symbol
-            // aggregates need their own owned rows (their constructors take
-            // flattened owned vectors while each file artifact keeps its own
-            // copy). Both are independent per file, so one ordered fan-out on
-            // the reserved indexing pool restores every authority and
-            // materializes the aggregate rows at machine width instead of one
-            // serial corpus-scale sweep. Failure semantics stay sequential:
-            // the reported error is the lowest-index file's.
-            let restored = collect_bounded_ordered(&persisted_files, |file, _worker| {
-                let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                Ok::<_, CodeIndexProductionErrorV1>((
-                    exact_authority,
-                    file.artifacts.chunks.clone(),
-                    file.artifacts.symbols.clone(),
-                ))
-            })?;
-            let mut files = Vec::with_capacity(persisted_files.len());
-            let mut chunk_rows = Vec::with_capacity(persisted_files.len());
-            let mut symbol_rows = Vec::new();
-            for (file, (exact_authority, file_chunks, file_symbols)) in
-                persisted_files.into_iter().zip(restored)
+    /// Stream one compatible sealed generation from a seekable reader without
+    /// holding the envelope bytes or the persist corpus in memory at once.
+    ///
+    /// The layout scan proves the envelope digest incrementally (the same
+    /// `sha256(generation_json)` rule as [`Self::decode_sealed_if_compatible`])
+    /// and optionally the durable file digest. Each `files` element is then
+    /// restored and dropped before the next is decoded.
+    #[hotpath::measure(label = "code_index.generation.decode.seek")]
+    pub fn decode_sealed_seek_reader<R: Read + Seek>(
+        mut reader: R,
+        admitted_len: u64,
+        expected_file_digest: Option<&ManifestDigest>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
+        admit_sealed_generation_len(admitted_len)?;
+        crate::hotpath_observe::record_seal_bytes(admitted_len);
+        let layout = match scan_layout(&mut reader, admitted_len, expected_file_digest, control) {
+            Ok(layout) => layout,
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message.contains("format revision is incompatible") =>
             {
-                files.push(Arc::new(FileGenerationArtifactsV1 {
-                    authority: file.authority,
-                    extraction: file.extraction,
-                    artifacts: file.artifacts,
-                    exact_authority,
-                }));
-                chunk_rows.push(file_chunks);
-                symbol_rows.extend(file_symbols);
+                return Ok(None);
             }
-            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
-                .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            let imports = derive_import_evidence(&files);
-            let (edges, edge_abstentions) = collect_edge_evidence(&files);
-            let projection =
-                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
-                    .map_err(CodeIndexProductionErrorV1::Projection)?;
-            Ok::<_, CodeIndexProductionErrorV1>((
-                ignored_source_roster,
-                files,
-                chunks,
-                symbols,
-                imports,
-                edges,
-                edge_abstentions,
-                projection,
+            Err(error) => return Err(error),
+        };
+        reader.seek(SeekFrom::Start(0)).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation decode seek failed: {error}"
             ))
         })?;
-        let generation = Self {
-            manifest,
-            snapshot,
-            repository_parse_identity,
-            ignored_source_roster,
-            files,
-            chunks,
-            symbols,
-            lineage,
-            imports,
-            edges,
-            edge_abstentions,
-            coverage,
-            capability,
-            projection,
-            validated: OnceLock::new(),
-            admitted: OnceLock::new(),
-            attribution: OnceLock::new(),
-            chunk_policy: OnceLock::new(),
-            graph_manifest: OnceLock::new(),
-        };
-        hotpath::measure_block!(
-            "code_index.sealed_decode.corpus_validation",
-            generation.validate_fresh()
-        )?;
-        Ok(Some(generation))
+        match layout.format_revision {
+            SEALED_GENERATION_FORMAT_REVISION_V1 => {
+                let envelope: StreamingSealedEnvelopeV1 = hotpath::measure_block!(
+                    "code_index.sealed_decode.persisted_materialization",
+                    serde_json::from_reader(BufReader::with_capacity(64 * 1024, reader))
+                )
+                .map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed generation payload decoding failed: {error}"
+                    ))
+                })?;
+                if envelope.state_digest != layout.state_digest {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed generation state digest does not match its payload".to_owned(),
+                    ));
+                }
+                assemble_published_generation(envelope.generation).map(Some)
+            }
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
+                let bytes = read_admitted_bytes(reader, admitted_len)?;
+                Self::decode_admitted_sealed_bytes_if_compatible(&bytes, admitted_len)
+            }
+            _ => Ok(None),
+        }
     }
 
     pub fn sealed_format_is_compatible(bytes: &[u8]) -> Result<bool, CodeIndexProductionErrorV1> {

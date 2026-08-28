@@ -137,6 +137,21 @@ pub trait CodeIndexExecutionControlV1: Sync {
     fn is_deadline_exceeded(&self) -> bool;
 }
 
+/// A control that never interrupts. Sealed seating uses it when the caller
+/// already proved the envelope is admissible and only wants the streaming
+/// restore, not a request-scoped cancel/deadline.
+pub struct UninterruptibleCodeIndexControlV1;
+
+impl CodeIndexExecutionControlV1 for UninterruptibleCodeIndexControlV1 {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
 /// The terminal reason an index run abstained before publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeIndexInterruptionV1 {
