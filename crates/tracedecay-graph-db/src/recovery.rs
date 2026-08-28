@@ -82,6 +82,23 @@ pub(crate) fn validate_or_initialize_format(
     database: &GrafeoDB,
     validated: &ValidatedOpen,
 ) -> Result<(), GraphDbError> {
+    validate_or_initialize_format_marker(database, validated)?;
+    // Property indexes live in memory only -- grafeo persists no index section
+    // and rebuilds none on open -- so every open has to register them, not just
+    // the one that initializes the store. Without this the unique-key lookups
+    // in `state.rs` degrade from a hash hit to a full node scan on every
+    // reopened store: measured at 500k entities, 64 point reads took 23.7s
+    // instead of 1.4ms, and the bounded traversal 773ms instead of 2.7ms.
+    for property in INDEXED_PROPERTIES {
+        database.create_property_index(property);
+    }
+    Ok(())
+}
+
+fn validate_or_initialize_format_marker(
+    database: &GrafeoDB,
+    validated: &ValidatedOpen,
+) -> Result<(), GraphDbError> {
     let store = database.graph_store();
     let markers = nodes_with_label(store.as_ref(), FORMAT_LABEL);
     if markers.is_empty() {
@@ -115,9 +132,6 @@ pub(crate) fn validate_or_initialize_format(
         session
             .commit()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        for property in INDEXED_PROPERTIES {
-            database.create_property_index(property);
-        }
         if validated.durability == GraphDurability::WalSync
             && let Err(error) = crate::runtime::sync_wal(database)
         {
