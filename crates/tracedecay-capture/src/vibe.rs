@@ -22,7 +22,7 @@ pub fn native_record_id(
         .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.vibe.normalize")]
 pub fn normalize_observation(
     native: &Value,
     session_id: &str,

@@ -14,7 +14,7 @@ use crate::timestamp::timestamp_secs as shared_timestamp_secs;
 
 const PROVIDER: &str = "opencode";
 
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.opencode.normalize")]
 pub fn normalize_observation(
     native: &Value,
     session_id: &str,

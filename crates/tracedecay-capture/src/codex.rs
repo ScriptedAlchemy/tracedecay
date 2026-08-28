@@ -75,7 +75,7 @@ pub fn normalize_codex_observation_with_location(
 /// Shared normalization work behind both public Codex entry points.
 /// Measuring here (rather than each thin wrapper) covers per-record capture
 /// cost exactly once regardless of caller.
-#[hotpath::measure]
+#[hotpath::measure(label = "capture.codex.normalize")]
 fn normalize_codex_observation_inner(
     native: &Value,
     session_id: &str,

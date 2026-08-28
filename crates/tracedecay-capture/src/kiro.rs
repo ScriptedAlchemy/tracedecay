@@ -24,6 +24,7 @@ pub struct KiroSnapshotMessage<'a> {
 /// Discovery metadata and provider-private bags are intentionally absent so
 /// the root adapter can admit this bounded payload through sanitization before
 /// any durable write.
+#[hotpath::measure(label = "capture.kiro.snapshot")]
 pub fn snapshot_native_payload(message: KiroSnapshotMessage<'_>) -> Value {
     let mut fields = Map::new();
     fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));
