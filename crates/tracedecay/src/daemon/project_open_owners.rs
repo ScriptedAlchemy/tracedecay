@@ -1167,6 +1167,16 @@ async fn register_semantic_activation_owner(
             graph.configuration_runtime().registered_database(),
         ),
     );
+    let operation = Arc::new(
+        tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
+            Arc::clone(graph.configuration_runtime()),
+            accepted_profiles,
+        ),
+    );
+    invocation
+        .configuration_runtime_registrar()
+        .install_semantic_operation(project_root, operation)
+        .await?;
     let current_state = configuration_store
         .current_state_if_present()
         .await
@@ -1338,16 +1348,7 @@ async fn register_semantic_activation_owner(
         .configuration_runtime_registrar()
         .install_semantic_activation_reconciler(project_root, reconciler)
         .await?;
-    let operation = Arc::new(
-        tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
-            Arc::clone(graph.configuration_runtime()),
-            accepted_profiles,
-        ),
-    );
-    invocation
-        .configuration_runtime_registrar()
-        .install_semantic_operation(project_root, operation)
-        .await
+    Ok(())
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
