@@ -86,7 +86,13 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
-    let Some(row) = row else { return Ok(None) };
+    // Hit/miss/stale are disjoint counters: `misses` is a cold lookup with no
+    // row, `stale` is a row evicted by an mtime mismatch. Both force the
+    // caller to recompute, but only stale implies the file changed.
+    let Some(row) = row else {
+        hotpath::gauge!("usecases.context.read_cache.misses").inc(1.0);
+        return Ok(None);
+    };
 
     let cached_mtime: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 0: {e}"),
@@ -94,6 +100,7 @@ pub async fn get(
     })?;
 
     if cached_mtime != current_mtime_ns {
+        hotpath::gauge!("usecases.context.read_cache.stale").inc(1.0);
         return Ok(None);
     }
 
@@ -106,6 +113,7 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
+    hotpath::gauge!("usecases.context.read_cache.hits").inc(1.0);
     Ok(Some(CachedRead {
         mtime_ns: cached_mtime,
         digest,
