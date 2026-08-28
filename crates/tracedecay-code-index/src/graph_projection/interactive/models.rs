@@ -118,6 +118,18 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
 }
 
 impl InteractiveCatalog {
+    pub(in crate::graph_projection) fn empty() -> Self {
+        Self {
+            symbols: BTreeMap::new(),
+            by_qualified_name: BTreeMap::new(),
+            by_simple_name: BTreeMap::new(),
+            by_file: BTreeMap::new(),
+            by_logical_path: BTreeMap::new(),
+            files: BTreeMap::new(),
+            imports: Vec::new(),
+        }
+    }
+
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
         if let Some(metadata) = &record.metadata {
             self.by_qualified_name

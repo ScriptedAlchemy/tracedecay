@@ -36,11 +36,13 @@ use super::{
     validate_edge,
 };
 
+mod artifact;
 mod catalog;
 mod imports;
 mod models;
 
 use self::models::CatalogSymbol;
+pub use self::artifact::{INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact};
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
@@ -51,6 +53,20 @@ pub use self::models::{
 /// Symbols measured per bulk degree read while ranking a generation. Bounds
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
+
+/// Process-wide count of full projection warm scans, so tests can prove a
+/// bundled generation opened without any warm work — the scan may run on a
+/// background thread, which is why this is a process atomic and not
+/// thread-local.
+#[cfg(any(test, feature = "test-helpers"))]
+static CATALOG_SCAN_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Number of interactive-catalog projection scans this process has run.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn interactive_catalog_scan_builds() -> usize {
+    CATALOG_SCAN_BUILDS.load(std::sync::atomic::Ordering::Acquire)
+}
 
 enum InteractiveCatalogState {
     Cold,
@@ -135,6 +151,57 @@ impl CodeGraphProjectionStore {
                 Ok(())
             }
             InteractiveCatalogState::Warming { .. } | InteractiveCatalogState::Ready(_) => Ok(()),
+            InteractiveCatalogState::Failed(error) => Err(error.clone()),
+        }
+    }
+
+    /// Installs a digest-verified sealed-read-bundle catalog artifact as this
+    /// store's ready interactive catalog, so no projection warm scan ever
+    /// runs for this generation. The bundle envelope has already proven the
+    /// bytes against the generation identity; this decodes them, revalidates
+    /// structure, and publishes the catalog into the shared slot.
+    ///
+    /// Idempotent over an already-ready catalog. Refused while a warm build
+    /// owns the slot: the owner's outcome wins, so a loaded artifact can
+    /// never half-replace an in-flight scan.
+    pub fn install_interactive_catalog_artifact(
+        &self,
+        bytes: &[u8],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), CodeGraphProjectionError> {
+        if cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
+        let expected_generation = crate::graph_projection::code_graph_generation_id(
+            &self.generation,
+            &tracedecay_graph_db::GraphProjectorRevision::try_from(
+                crate::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )?,
+        )?;
+        let catalog = hotpath::measure_block!(
+            "code_graph.catalog.bundle_install",
+            artifact::decode_interactive_catalog_artifact(
+                bytes,
+                expected_generation.as_str(),
+                cancellation.as_ref(),
+            )
+        )?;
+        let mut state = self
+            .interactive_catalog
+            .state
+            .write()
+            .map_err(|_| catalog_lock_poisoned())?;
+        match &*state {
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { owner: None } => {
+                *state = InteractiveCatalogState::Ready(Arc::new(catalog));
+                Ok(())
+            }
+            InteractiveCatalogState::Ready(_) => Ok(()),
+            InteractiveCatalogState::Warming { owner: Some(_) } => {
+                Err(CodeGraphProjectionError::Unavailable(
+                    "code graph interactive catalog warm already has an owner".to_owned(),
+                ))
+            }
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
         }
     }
@@ -798,6 +865,8 @@ impl CodeGraphInteractiveReader {
                 }
             }
         }
+        #[cfg(any(test, feature = "test-helpers"))]
+        CATALOG_SCAN_BUILDS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let result = hotpath::measure_block!("code_graph.catalog.build", {
             catalog::build_interactive_catalog(
                 &self.snapshot,
