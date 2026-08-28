@@ -1643,7 +1643,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn produce_and_hydrate_flow_canonicalizes_each_digest_once_per_instance() {
-        let manifest = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        let produced = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
         reset_manifest_canonicalizations();
         reset_dependency_closure_canonicalizations();
 
