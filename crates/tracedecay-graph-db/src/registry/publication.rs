@@ -696,6 +696,10 @@ impl GraphDbRegistry {
                             database.verify_existing_generation(&identity, sealed_digest, &check)?
                         }
                     };
+                // Seal implies an isolated compact store: adopt or build the
+                // per-generation artifact from the rows the digest just
+                // proved, before this head starts serving reads.
+                database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
                 operation.check(self, context)?;
                 // The digest proof above already streamed this generation's
                 // stored rows against the head's journaled recovered digest
@@ -706,9 +710,10 @@ impl GraphDbRegistry {
                 // through its replay would hydrate the manifest and stream
                 // the rows a second time without adding durability.
                 let physical_namespace = locator.physical_namespace()?;
-                match database
-                    .ensure_projection_readable(&physical_namespace, &identity.projection.projection)
-                {
+                match database.ensure_projection_readable(
+                    &physical_namespace,
+                    &identity.projection.projection,
+                ) {
                     Ok(()) => {}
                     Err(GraphDbError::ProjectionMismatch { message, .. }) => {
                         return Err(GraphDbError::GenerationMismatch {
@@ -808,6 +813,12 @@ impl GraphDbRegistry {
         };
         database
             .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
+        // Seal implies an isolated compact store. Built after the recovered
+        // digest proved the staged rows and before the relational CAS, so a
+        // build failure is a typed, retryable publication error rather than a
+        // post-linearization surprise. The artifact is digest-bound to this
+        // exact generation, so a competing publisher adopting it is safe.
+        database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
         operation.check(self, context)?;
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
@@ -1129,6 +1140,10 @@ impl GraphDbRegistry {
             Err(error) => return Err(error),
         }
         drop(guard);
+        // Recovery adopts a matching sealed compact artifact from disk when
+        // one exists; anything stale or unreadable is discarded and reads
+        // stay on the staging rows just verified above.
+        database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
         let lease = generation_lease(&identity, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);
@@ -1184,8 +1199,9 @@ mod historical_publication_reuse_tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::UtcMicros;
+    use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
-        BrainId, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
+        BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
         GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
         GraphPublicationProjectionPageV1, GraphPublicationReplayLookupV1,
         GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
@@ -1193,20 +1209,19 @@ mod historical_publication_reuse_tests {
         GraphPublicationReplayV1, GraphPublicationRetiredCleanupPageRequestV1,
         GraphPublicationRetiredCleanupPageV1, GraphPublicationSequenceV1,
         GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1, GraphPublicationStoreV1,
-        GraphProjectionIdentityV1, GraphReplayAppendOutcomeV1,
-        GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-        GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1, ProjectId,
-        RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+        GraphReplayAppendOutcomeV1, GraphRetiredReplayCleanupFinalizeOutcomeV1,
+        GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
+        ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
         RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
         RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
         RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
         StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
         UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
     };
-    use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
 
     use crate::generation::{
         recovered_generation_enumerations, reset_recovered_generation_enumerations,
+        reset_sealed_copy_proofs, sealed_copy_proofs,
     };
     use crate::{
         GraphCancellation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
@@ -1570,6 +1585,7 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        reset_sealed_copy_proofs();
         let first = registry
             .publish_verified(
                 registration(binding.clone(), &root),
@@ -1583,6 +1599,17 @@ mod historical_publication_reuse_tests {
             recovered_generation_enumerations(),
             1,
             "first publication must stream the recovered-digest proof exactly once"
+        );
+        // The sealed per-generation copy pays its own two proofs (pre-compact
+        // and post-reopen) and never re-streams the staging rows.
+        assert_eq!(
+            sealed_copy_proofs(),
+            if cfg!(feature = "graph-sealed-store") {
+                2
+            } else {
+                0
+            },
+            "a first seal proves the sealed copy before compaction and after reopen"
         );
         let head = first.head.clone();
         assert_eq!(first.snapshot.generation(), &manifest.generation);
@@ -1612,6 +1639,7 @@ mod historical_publication_reuse_tests {
         let (control, probe) = control_and_probe();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
         reset_recovered_generation_enumerations();
+        reset_sealed_copy_proofs();
         let republished = fixture
             .registry
             .publish_verified(
@@ -1629,6 +1657,11 @@ mod historical_publication_reuse_tests {
             recovered_generation_enumerations(),
             0,
             "an idempotent republication on the proving instance must not re-enumerate the stored rows"
+        );
+        assert_eq!(
+            sealed_copy_proofs(),
+            0,
+            "the installed sealed store is reused; no sealed copy is rebuilt or re-proven"
         );
         let seated = fixture
             .registry

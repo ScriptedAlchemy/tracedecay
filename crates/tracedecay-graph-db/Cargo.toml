@@ -65,9 +65,27 @@ eval-helpers = []
 # Spilling covers the vector/text/ring index buffers and query scratch,
 # never LPG data.
 graph-disk-tier = [
+    "graph-sealed-store",
     "grafeo-engine/mmap",
     "grafeo-engine/compact-store",
     "grafeo-engine/spill",
+]
+
+# Per-generation sealed compact stores (`src/sealed_store.rs`): at seal time
+# the verified generation's rows are copied into their own single-generation
+# Grafeo database, compacted with `GrafeoDB::compact()` (whose whole-database
+# scope then coincides exactly with the one immutable generation), and served
+# read-only after a recovered-digest proof. This is the narrow slice of the
+# grafeo storage features that lane needs: `compact-store` for `compact()`
+# and the columnar section, `mmap` for the mmap-backed base on reopen. It
+# deliberately excludes `spill`, so the staging database's memory behavior is
+# untouched — see `graph-disk-tier` above for that half.
+#
+# Without this feature the sealed-store lane is compiled out and every read
+# serves from the staging database exactly as before.
+graph-sealed-store = [
+    "grafeo-engine/mmap",
+    "grafeo-engine/compact-store",
 ]
 
 # `graph-tiered-storage` adds grafeo-core's own `tiered-storage` feature on
