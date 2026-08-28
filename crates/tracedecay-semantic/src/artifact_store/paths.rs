@@ -82,6 +82,10 @@ impl ModelArtifactStore {
         self.artifact_dir(digest).join(member_file_name(role))
     }
 
+    /// Exclusive store lock acquisition (in-process mutex + advisory file
+    /// lock). Measured so store contention is distinguishable from I/O time
+    /// inside the operations that hold the lock.
+    #[hotpath::measure(label = "semantic.artifact.lock_wait")]
     pub(super) fn acquire_lock(&self) -> Result<ArtifactStoreLock<'_>, ArtifactImportErrorV1> {
         let memory = self
             .operation_lock
@@ -123,6 +127,9 @@ impl ModelArtifactStore {
         Ok(())
     }
 
+    /// Inventory read + JSON parse under the store lock; runs on every locked
+    /// operation and scales with the record count.
+    #[hotpath::measure(label = "semantic.artifact.inventory_load")]
     pub(super) fn load_inventory_locked(
         &self,
     ) -> Result<ArtifactInventoryV1, ArtifactImportErrorV1> {

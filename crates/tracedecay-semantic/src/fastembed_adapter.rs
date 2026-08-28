@@ -1151,7 +1151,14 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
     ) -> Result<Self::Session, EmbedError> {
         self.verify_artifact_compatibility(authority)?;
         let artifact = authority.runtime_artifact();
-        let model = fastembed_model(artifact)?;
+        // Disk read + digest recheck of the model and tokenizer members,
+        // separate from the tokenizer/ORT-graph build in
+        // `semantic.model.load` below. FastEmbed parses the tokenizer and
+        // builds the graph inside one constructor, so those two costs are
+        // not separable further at this boundary.
+        let model =
+            hotpath::measure_block!("semantic.model.member_bytes", fastembed_model(artifact))?;
+        hotpath::gauge!("semantic_model_member_bytes").set(model.onnx_file.len());
         let intra_threads =
             crate::embedding_parallelism::embedding_intra_threads(artifact.max_threads());
         let options = InitOptionsUserDefined::new()
@@ -1202,6 +1209,10 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
         hotpath::gauge!("semantic_embed_batch_size").set(batch.len());
+        // Sanitized input volume — the tokenizer's cost driver. FastEmbed
+        // fuses tokenization into `semantic.embed.infer`, so bytes-in is the
+        // only tokenization signal available at this boundary.
+        hotpath::gauge!("semantic_embed_batch_bytes").set(batch.total_bytes());
 
         check_execution_authority(authority)?;
         // FastEmbed/ORT inference is synchronous. Keep batches small at the

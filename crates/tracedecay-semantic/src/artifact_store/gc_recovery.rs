@@ -400,6 +400,9 @@ impl ModelArtifactStore {
         Ok(())
     }
 
+    /// Full read + SHA-256 re-verification of every installed member — the
+    /// dominant read cost inside runtime admission and recovery.
+    #[hotpath::measure]
     pub(super) fn verify_artifact_record(
         &self,
         record: &ArtifactInventoryRecordV1,
