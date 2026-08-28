@@ -152,7 +152,8 @@ impl From<GraphDbError> for WorkTopologyError {
             GraphDbError::Conflict => {
                 Self::Unavailable("Work topology publication conflict".to_owned())
             }
-            GraphDbError::Unavailable { message } => Self::Unavailable(message),
+            GraphDbError::Unavailable { message }
+            | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
             GraphDbError::Closed => Self::Unavailable("graph store is closed".to_owned()),
         }
     }
