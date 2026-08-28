@@ -27,6 +27,17 @@
 //!     generation.grafeo         <- compacted single-generation store
 //!     sealed.json               <- receipt binding the recovered digest
 //! ```
+//!
+//! # Sealed-read-bundle integration point
+//!
+//! Each `<physical-namespace-hex>/` directory is a self-describing,
+//! digest-bound, immutable artifact — exactly the shape a sealed-read bundle
+//! catalogs. The bundle manifest work owns the catalog; its integration
+//! point here is the directory plus `sealed.json` (identity, physical
+//! namespace, recovered digest, row counts, and the `form` the store was
+//! sealed in). A bundle that ships this directory can be adopted on any host
+//! through [`GraphDb::open_sealed_generation_store_if_present`], which
+//! re-proves the digest before the store serves a read.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -382,10 +393,10 @@ impl GraphDb {
             let sealed = self.inner.sealed_generations.read().map_err(|_| {
                 GraphDbError::unavailable("sealed generation store lock is poisoned")
             })?;
-            if let Some(existing) = sealed.get(&locator) {
-                if existing.recovered_digest() == expected.as_str() {
-                    return Ok(());
-                }
+            if let Some(existing) = sealed.get(&locator)
+                && existing.recovered_digest() == expected.as_str()
+            {
+                return Ok(());
             }
         }
         let store = build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
