@@ -397,9 +397,8 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty());
         let authority = self.lcm_authority(context).await?;
-        let response = authority
-            .as_ref()
-            .execute_admitted(
+        let response = hotpath::future!(
+            authority.as_ref().execute_admitted(
                 context.request_context,
                 context.cancellation_signal,
                 LcmAuthorityRequest::Status(LcmStatusQuery {
@@ -407,8 +406,10 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     session_id: session_id.map(str::to_owned),
                     deep: request.deep.unwrap_or(false),
                 }),
-            )
-            .await;
+            ),
+            label = "daemon.retained.lcm.status.execute"
+        )
+        .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Status)?;
         let authority_outcome = lcm_authority_outcome(response.outcome.clone());
         let status = match (response.outcome, response.payload) {
@@ -469,14 +470,15 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         _request: &LcmDoctorRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let authority = self.lcm_authority(context).await?;
-        let response = authority
-            .as_ref()
-            .execute_admitted(
+        let response = hotpath::future!(
+            authority.as_ref().execute_admitted(
                 context.request_context,
                 context.cancellation_signal,
                 LcmAuthorityRequest::Doctor(LcmDoctorQuery),
-            )
-            .await;
+            ),
+            label = "daemon.retained.lcm.doctor.execute"
+        )
+        .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Doctor)?;
         let authority_outcome = lcm_authority_outcome(response.outcome.clone());
         let report = match (response.outcome, response.payload) {
@@ -531,6 +533,7 @@ fn validate_receipt(
         || receipt.cancellation_token_id != request.cancellation().token_id
         || receipt.execution.effective_deadline != *request.deadline()
     {
+        hotpath::gauge!("daemon.retained.lcm.authority.receipt_invalid").inc(1.0);
         return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
     }
     Ok(())
@@ -538,16 +541,28 @@ fn validate_receipt(
 
 fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
-        LcmAuthorityOutcome::Denied => RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
-        LcmAuthorityOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_application::CancellationStage::DuringRead,
-        ),
-        LcmAuthorityOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_application::CancellationStage::DuringRead,
-        ),
+        LcmAuthorityOutcome::Denied => {
+            hotpath::gauge!("daemon.retained.lcm.authority.denied").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
+        }
+        LcmAuthorityOutcome::Cancelled => {
+            hotpath::gauge!("daemon.retained.lcm.authority.cancelled").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::DuringRead,
+            )
+        }
+        LcmAuthorityOutcome::TimedOut => {
+            hotpath::gauge!("daemon.retained.lcm.authority.timed_out").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_application::CancellationStage::DuringRead,
+            )
+        }
         LcmAuthorityOutcome::Ready
         | LcmAuthorityOutcome::Unavailable { .. }
-        | LcmAuthorityOutcome::Failed { .. } => RetainedSurfaceExecutionErrorV1::Unavailable,
+        | LcmAuthorityOutcome::Failed { .. } => {
+            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
+            RetainedSurfaceExecutionErrorV1::Unavailable
+        }
     }
 }
 

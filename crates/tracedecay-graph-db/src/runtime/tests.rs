@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 
-use super::require_committed_vector_scalar;
+use super::{require_committed_vector_scalar, sync_wal};
+use crate::recovery::set_projection_quarantine;
 use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
@@ -370,6 +371,145 @@ fn committed_entity_present(db: &GraphDbLeaseV1) -> bool {
         )
         .unwrap()
         .is_some()
+}
+
+fn sidecar_wal_path(store: &std::path::Path) -> std::path::PathBuf {
+    let mut sidecar = store.as_os_str().to_owned();
+    sidecar.push(".wal");
+    std::path::PathBuf::from(sidecar)
+}
+
+fn copy_directory(source: &std::path::Path, target: &std::path::Path) {
+    std::fs::create_dir_all(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_directory(&entry.path(), &target_path);
+        } else {
+            std::fs::copy(entry.path(), &target_path).unwrap();
+        }
+    }
+}
+
+fn entity_marker(db: &GraphDbLeaseV1) -> Option<String> {
+    db.snapshot()
+        .unwrap()
+        .entity(
+            &GraphNamespace::new("project").unwrap(),
+            &GraphEntityId::new("a").unwrap(),
+            Arc::new(NeverCancelled),
+        )
+        .unwrap()
+        .map(|entity| {
+            match entity
+                .properties
+                .get(&GraphPropertyName::new("name").unwrap())
+            {
+                Some(GraphProperty::String(value)) => value.clone(),
+                other => panic!("committed entity lost its scalar marker: {other:?}"),
+            }
+        })
+}
+
+/// A clean close must checkpoint the WAL sidecar away: the next open then has
+/// no journal to replay and hydrates from the checkpointed sections alone. A
+/// surviving sidecar would make every reopen replay session history that the
+/// checkpoint already made durable.
+#[test]
+fn clean_shutdown_checkpoints_the_wal_so_reopen_has_no_journal_to_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_wal_path(&dir.path().join("graph.grafeo"));
+
+    let db = walsync_db(&dir);
+    db.apply_unverified(scalar_batch("checkpointed")).unwrap();
+    assert!(
+        sidecar.is_dir(),
+        "a WalSync store must journal into its sidecar before checkpoint"
+    );
+    db.close().unwrap();
+    assert!(
+        !sidecar.exists(),
+        "clean close left a WAL journal behind; the next open would replay \
+         work the checkpoint already persisted"
+    );
+
+    let reopened = walsync_db(&dir);
+    assert_eq!(entity_marker(&reopened), Some("checkpointed".to_owned()));
+    reopened.close().unwrap();
+}
+
+/// A hard stop leaves the container without its latest sections and only the
+/// synced WAL sidecar beside it. Opening that on-disk shape must replay the
+/// journal and serve the committed write; dropping it would silently lose a
+/// commit `WalSync` already acknowledged.
+#[test]
+fn reopen_of_a_dirty_store_copy_replays_the_walled_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = walsync_db(&dir);
+    live.apply_unverified(scalar_batch("unclean")).unwrap();
+
+    // Simulate the crash by snapshotting the on-disk state while the store is
+    // still open: nothing has checkpointed yet, so the committed batch exists
+    // only in the WAL sidecar the copy carries along.
+    let source = dir.path().join("graph.grafeo");
+    let source_wal = sidecar_wal_path(&source);
+    assert!(
+        source_wal.is_dir(),
+        "a WalSync store must journal into its sidecar before checkpoint"
+    );
+    let crash_dir = tempfile::tempdir().unwrap();
+    let target = crash_dir.path().join("graph.grafeo");
+    std::fs::copy(&source, &target).unwrap();
+    copy_directory(&source_wal, &sidecar_wal_path(&target));
+
+    let recovered = walsync_db(&crash_dir);
+    assert_eq!(entity_marker(&recovered), Some("unclean".to_owned()));
+    recovered.close().unwrap();
+    live.close().unwrap();
+}
+
+/// Recovery persists a projection quarantine before checkpointing; an open of
+/// that dirty state must load the marker and fail closed on reads until the
+/// quarantine is explicitly cleared and checkpointed away.
+#[test]
+fn persisted_quarantine_survives_checkpointed_reopen_and_blocks_reads_until_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let namespace = GraphNamespace::new("project").unwrap();
+    let projection = GraphProjectionId::new("code").unwrap();
+
+    let db = walsync_db(&dir);
+    db.apply_unverified(scalar_batch("guarded")).unwrap();
+    {
+        let guard = db.read_guard().unwrap();
+        let database = guard.as_ref().unwrap();
+        set_projection_quarantine(database, &namespace, &projection, true).unwrap();
+        sync_wal(database).unwrap();
+    }
+    db.close().unwrap();
+
+    let reopened = walsync_db(&dir);
+    assert!(
+        matches!(
+            reopened.ensure_projection_readable(&namespace, &projection),
+            Err(GraphDbError::ProjectionMismatch { .. })
+        ),
+        "a reopened store must fail closed on a persisted quarantine"
+    );
+    {
+        let guard = reopened.read_guard().unwrap();
+        let database = guard.as_ref().unwrap();
+        set_projection_quarantine(database, &namespace, &projection, false).unwrap();
+        sync_wal(database).unwrap();
+    }
+    reopened.close().unwrap();
+
+    let cleared = walsync_db(&dir);
+    assert_eq!(
+        cleared.ensure_projection_readable(&namespace, &projection),
+        Ok(())
+    );
+    cleared.close().unwrap();
 }
 
 /// A threaded deadline may expire at any observation point in the write path.

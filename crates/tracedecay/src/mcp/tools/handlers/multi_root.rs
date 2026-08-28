@@ -71,7 +71,7 @@ pub(super) async fn handle_multi_root(
     if let Some(map) = body.as_object_mut() {
         map.remove("__mcp_request_id");
     }
-    let invocation = match operation {
+    let invocation = hotpath::measure_block!("mcp.multi_root.decode", match operation {
         MultiRootApplicationOperation::ScopeSetRead => {
             let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
                 return invalid_request(operation, request_id);
@@ -108,7 +108,7 @@ pub(super) async fn handle_multi_root(
                 cancellation.context(),
             )
         }
-    };
+    });
     let policy = match operation {
         MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
             InvocationCancellationPolicy::AuthoritativeEffect
@@ -127,10 +127,15 @@ pub(super) async fn handle_multi_root(
             }),
         );
     };
-    let response = executor
-        .invoke_controlled(invocation, deadline, cancellation, policy)
-        .await;
-    render_response(operation, request_id, response)
+    let response = hotpath::future!(
+        executor.invoke_controlled(invocation, deadline, cancellation, policy),
+        label = "mcp.multi_root.invoke"
+    )
+    .await;
+    hotpath::measure_block!(
+        "mcp.multi_root.render",
+        render_response(operation, request_id, response)
+    )
 }
 
 fn operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
@@ -230,6 +235,9 @@ fn problem_result(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ToolResult> {
+    // Denied and failed multi-root requests are part of the serving story;
+    // success-only timing would hide invalid requests and daemon refusals.
+    hotpath::gauge!("mcp.multi_root.problems_total").inc(1_u64);
     let application =
         ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
             .map_err(|error| TraceDecayError::Config {

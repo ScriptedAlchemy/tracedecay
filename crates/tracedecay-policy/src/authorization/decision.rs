@@ -205,6 +205,7 @@ impl SourceAuthorizationEvaluatorV1 {
         effective_grant: Option<EffectiveSourceGrantV1>,
         ordered_reason_codes: Vec<PolicyReasonCodeV1>,
     ) -> SourceAuthorizationDecisionV1 {
+        crate::hotpath_observe::authorization_outcome(access, disposition);
         let mut decision = SourceAuthorizationDecisionV1 {
             evaluator_version: self.version.clone(),
             input_digest: input.input_digest(),

@@ -868,6 +868,16 @@ impl DaemonGitHubStackRuntimeV1 {
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        let outcome = self.preflight_via_circuit(request, cancellation);
+        record_stack_preflight_outcome(&outcome);
+        outcome
+    }
+
+    fn preflight_via_circuit(
+        &self,
+        request: &NativeIntegrationPreflightRequestV1,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
         let request_digest = canonical_sha256(request)
             .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?;
         let disposition = self.coordinator.optional_preflight(
@@ -990,6 +1000,46 @@ impl Drop for DaemonGitHubStackRuntimeV1 {
             && let Some(task) = task.take()
         {
             task.abort();
+        }
+    }
+}
+
+/// Tallies one GitHub-stack preflight against its exact typed outcome. The
+/// outcome set is the closed [`NativeIntegrationPreflightOutcomeV1`] enum plus
+/// one coordinator-error bucket, so every gauge key stays compile-time static
+/// and fail-closed dispositions are recorded alongside previews.
+fn record_stack_preflight_outcome(
+    outcome: &Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+) {
+    match outcome {
+        Ok(NativeIntegrationPreflightOutcomeV1::Preview(_)) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.preview").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::Partial) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.partial").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::Stale) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.stale").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::Denied) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.denied").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::Unavailable) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.unavailable").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::ResetRequired) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.reset_required").inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::DurabilityUncertain) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.durability_uncertain")
+                .inc(1.0);
+        }
+        Ok(NativeIntegrationPreflightOutcomeV1::Cancelled) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.cancelled").inc(1.0);
+        }
+        Err(_) => {
+            hotpath::gauge!("daemon.native_integration.stack_preflight.coordinator_error")
+                .inc(1.0);
         }
     }
 }

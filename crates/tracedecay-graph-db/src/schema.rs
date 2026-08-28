@@ -777,6 +777,7 @@ pub(crate) fn has_native_label(node: &Node, label: &str) -> bool {
 /// Falls back to `label` when nothing matches so a caller that feeds this to a
 /// `ProjectionSpec` still filters: an empty label set there means *no filter*,
 /// which would silently widen the projection to the whole store.
+#[hotpath::measure(label = "graph_db.schema.label_keys")]
 pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
     let keys: Vec<String> = store
         .all_labels()
@@ -792,6 +793,7 @@ pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
 /// Every node carrying `label`, across whichever key the store files it under.
 ///
 /// Each node belongs to exactly one label table, so the union needs no dedupe.
+#[hotpath::measure(label = "graph_db.schema.nodes_with_label")]
 pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeId> {
     let keys = label_keys(store, label);
     if let [only] = keys.as_slice() {
@@ -803,6 +805,7 @@ pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeI
 }
 
 /// How many nodes carry `label`. See [`nodes_with_label`].
+#[hotpath::measure(label = "graph_db.schema.nodes_with_label_count")]
 pub(crate) fn nodes_with_label_count(store: &dyn GraphStore, label: &str) -> usize {
     label_keys(store, label)
         .iter()

@@ -98,42 +98,46 @@ pub async fn read_source(
         });
     }
 
-    let body = match mode {
-        ReadMode::Full => render_full(
-            &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("cannot read '{file}': {error}"),
-                }
+    let body = hotpath::measure_block!(
+        "usecases.context.source_read.render",
+        match mode {
+            ReadMode::Full => render_full(
+                &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
+                    |error| TraceDecayError::Config {
+                        message: format!("cannot read '{file}': {error}"),
+                    },
+                )?,
+            ),
+            ReadMode::Lines => render_lines(
+                &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
+                    |error| TraceDecayError::Config {
+                        message: format!("cannot read '{file}': {error}"),
+                    },
+                )?,
+                line_range.ok_or_else(|| TraceDecayError::Config {
+                    message: "lines mode requires a parsed range".to_owned(),
+                })?,
+            ),
+            ReadMode::Map => serde_json::to_string_pretty(&render_map(
+                reader,
+                Arc::clone(&cancellation),
+                &display_file,
+                None,
+            )?)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("cannot render map for '{file}': {error}"),
             })?,
-        ),
-        ReadMode::Lines => render_lines(
-            &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("cannot read '{file}': {error}"),
-                }
+            ReadMode::Signatures => serde_json::to_string_pretty(&render_signatures(
+                reader,
+                Arc::clone(&cancellation),
+                &display_file,
+            )?)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("cannot render signatures for '{file}': {error}"),
             })?,
-            line_range.ok_or_else(|| TraceDecayError::Config {
-                message: "lines mode requires a parsed range".to_owned(),
-            })?,
-        ),
-        ReadMode::Map => serde_json::to_string_pretty(&render_map(
-            reader,
-            Arc::clone(&cancellation),
-            &display_file,
-            None,
-        )?)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("cannot render map for '{file}': {error}"),
-        })?,
-        ReadMode::Signatures => serde_json::to_string_pretty(&render_signatures(
-            reader,
-            Arc::clone(&cancellation),
-            &display_file,
-        )?)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("cannot render signatures for '{file}': {error}"),
-        })?,
-    };
+        }
+    );
+    hotpath::gauge!("usecases.context.source_read.bytes").inc(body.len() as f64);
     let context = source_symbol_context(
         reader,
         cancellation,
@@ -242,7 +246,10 @@ fn source_symbol_context(
     if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
         return Ok(None);
     }
-    render_symbol_context(reader, cancellation, display_file, line_range).map(Some)
+    hotpath::measure_block!(
+        "usecases.context.source_read.symbol_context",
+        render_symbol_context(reader, cancellation, display_file, line_range).map(Some)
+    )
 }
 
 fn relative_source_key(path: &Path) -> Result<Option<String>> {

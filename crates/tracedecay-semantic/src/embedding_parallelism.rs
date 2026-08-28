@@ -152,6 +152,9 @@ pub fn embedding_session_width(intra_threads: u32, configured_max_sessions: u32)
     hotpath::gauge!("semantic_embedding_sessions_requested").set(requested);
     hotpath::gauge!("semantic_embedding_sessions_effective").set(effective);
     hotpath::gauge!("semantic_embedding_sessions_cpu_safe").set(cpu_safe_sessions);
+    // The other half of effective native width: `sessions * intra_threads`
+    // is the CPU demand admitted against the shared code-index budget.
+    hotpath::gauge!("semantic_embedding_intra_threads").set(intra);
     hotpath::gauge!("semantic_embedding_sessions_limiting_reason").set(match limiting_reason {
         EmbeddingSessionLimitingReasonV1::SharedCodeIndexCpuBudget => 1,
         EmbeddingSessionLimitingReasonV1::EnvironmentOverride => 2,

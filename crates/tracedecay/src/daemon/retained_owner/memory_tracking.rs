@@ -29,6 +29,7 @@ impl TrackedExplicitSearch {
     }
 }
 
+#[hotpath::measure(label = "daemon.retained.memory.track", future = true)]
 pub(super) async fn track_explicit_search(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     memory: &MemoryApplication<DatabaseFactStore<'_>>,

@@ -41,7 +41,6 @@ pub struct SkillWriterAutomationOptions {
     pub profile_root: Option<PathBuf>,
 }
 
-#[hotpath::measure(label = "automation_run_skill_writer")]
 pub async fn run_skill_writer_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -252,6 +251,10 @@ pub(super) async fn run_skill_writer_for_store(
     .await
 }
 
+// The single funnel every skill-writer entry point (project, user, retained
+// settlement) flows through: one static run-lifetime span in the futures lane
+// so suspension and cancellation of long runs stay visible.
+#[hotpath::measure(future = true, label = "automation_run_skill_writer")]
 async fn run_skill_writer_for_store_with_publication(
     runtime: SkillWriterStoreRuntime<'_>,
     retrieval: &dyn AutomationSessionRetrieval,

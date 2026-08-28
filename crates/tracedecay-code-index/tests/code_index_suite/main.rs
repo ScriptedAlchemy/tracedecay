@@ -14,6 +14,7 @@ mod production_orchestration;
 mod projection_receipts;
 mod retained_parse;
 mod sanitized_intake;
+mod sealed_generation_restore;
 mod search_chunks;
 mod support;
 mod test_attribution;

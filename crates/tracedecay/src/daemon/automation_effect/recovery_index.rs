@@ -166,6 +166,15 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             ))
         })??;
     }
+    hotpath::gauge!("daemon.automation.effect.reconcile.inspected_total").inc(report.inspected);
+    hotpath::gauge!("daemon.automation.effect.reconcile.terminal_total")
+        .inc(report.already_terminal);
+    hotpath::gauge!("daemon.automation.effect.reconcile.partial_total")
+        .inc(report.partial_effects);
+    hotpath::gauge!("daemon.automation.effect.reconcile.reset_total").inc(report.reset_required);
+    hotpath::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
+        .inc(report.indeterminate);
+    hotpath::gauge!("daemon.automation.effect.reconcile.deferred_total").inc(report.deferred);
     Ok(report)
 }
 

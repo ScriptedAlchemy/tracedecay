@@ -94,10 +94,12 @@ impl<'a> GraphQueryManager<'a> {
         include_public: bool,
         limit: Option<usize>,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        let symbols = self.page_all_symbols(
-            MAX_ANALYTICAL_SYMBOLS,
-            "verified dead-code census exceeded its analytical budget",
-        )?;
+        let symbols = hotpath::measure_block!("usecases.graph.dead_code.symbols", {
+            self.page_all_symbols(
+                MAX_ANALYTICAL_SYMBOLS,
+                "verified dead-code census exceeded its analytical budget",
+            )
+        })?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -114,26 +116,27 @@ impl<'a> GraphQueryManager<'a> {
                 "verified dead-code evidence is incomplete for one or more symbols",
             ));
         }
-        let edges = self
-            .reader
-            .edges_among(
-                &occurrences,
-                &[
-                    RelationEdgeKindV1::Calls,
-                    RelationEdgeKindV1::Uses,
-                    RelationEdgeKindV1::TypeOf,
-                    RelationEdgeKindV1::Implements,
-                    RelationEdgeKindV1::Extends,
-                    RelationEdgeKindV1::Returns,
-                    RelationEdgeKindV1::Receives,
-                    RelationEdgeKindV1::Annotates,
-                ],
-                MAX_ANALYTICAL_RELATIONS,
-                Arc::clone(&self.cancellation),
-            )
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+        let edges = hotpath::measure_block!("usecases.graph.dead_code.edges", {
+            self.reader
+                .edges_among(
+                    &occurrences,
+                    &[
+                        RelationEdgeKindV1::Calls,
+                        RelationEdgeKindV1::Uses,
+                        RelationEdgeKindV1::TypeOf,
+                        RelationEdgeKindV1::Implements,
+                        RelationEdgeKindV1::Extends,
+                        RelationEdgeKindV1::Returns,
+                        RelationEdgeKindV1::Receives,
+                        RelationEdgeKindV1::Annotates,
+                    ],
+                    MAX_ANALYTICAL_RELATIONS,
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
         let test_markers = symbols
             .iter()
             .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
@@ -246,36 +249,39 @@ impl<'a> GraphQueryManager<'a> {
     }
 
     fn file_neighbors(&self, file_path: &str, incoming: bool) -> Result<Vec<String>> {
-        let symbols = self
-            .reader
-            .symbols_in_logical_file(
-                file_path,
-                MAX_ANALYTICAL_SYMBOLS,
-                Arc::clone(&self.cancellation),
-            )
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+        let symbols = hotpath::measure_block!("usecases.graph.file_neighbors.symbols", {
+            self.reader
+                .symbols_in_logical_file(
+                    file_path,
+                    MAX_ANALYTICAL_SYMBOLS,
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
         let seeds = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let edges = if incoming {
-            self.reader.callers(
-                &seeds,
-                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                MAX_ANALYTICAL_RELATIONS,
-                Arc::clone(&self.cancellation),
-            )
-        } else {
-            self.reader.callees(
-                &seeds,
-                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                MAX_ANALYTICAL_RELATIONS,
-                Arc::clone(&self.cancellation),
-            )
-        }
-        .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
+            if incoming {
+                self.reader.callers(
+                    &seeds,
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                    MAX_ANALYTICAL_RELATIONS,
+                    Arc::clone(&self.cancellation),
+                )
+            } else {
+                self.reader.callees(
+                    &seeds,
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                    MAX_ANALYTICAL_RELATIONS,
+                    Arc::clone(&self.cancellation),
+                )
+            }
+            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+        })?;
         let mut paths = edges
             .into_iter()
             .flatten()
@@ -290,11 +296,17 @@ impl<'a> GraphQueryManager<'a> {
 
     #[hotpath::measure(label = "usecases.graph.circular_dependencies", future = true)]
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
-        let adjacency = self.build_file_adjacency(None).await?;
-        let mut cycles = super::scc::tarjan_scc(&adjacency)
-            .into_iter()
-            .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
-            .collect::<Vec<_>>();
+        let adjacency = hotpath::future!(
+            self.build_file_adjacency(None),
+            label = "usecases.graph.circular.adjacency"
+        )
+        .await?;
+        let mut cycles = hotpath::measure_block!("usecases.graph.circular.scc", {
+            super::scc::tarjan_scc(&adjacency)
+                .into_iter()
+                .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
+                .collect::<Vec<_>>()
+        });
         for cycle in &mut cycles {
             cycle.sort_unstable();
         }
@@ -327,35 +339,39 @@ impl<'a> GraphQueryManager<'a> {
         max_files: usize,
         max_dependency_edges: usize,
     ) -> Result<FileAdjacencyScan> {
-        let files = self
-            .reader
-            .files(max_files, Arc::clone(&self.cancellation))
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+        let files = hotpath::measure_block!("usecases.graph.adjacency.files", {
+            self.reader
+                .files(max_files, Arc::clone(&self.cancellation))
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
         let mut adjacency = files
             .iter()
             .map(|file| (file.logical_path.clone(), HashSet::new()))
             .collect::<HashMap<_, _>>();
-        let symbols = self.page_all_symbols(
-            max_dependency_edges.max(1),
-            "verified graph symbol census exceeded its analytical budget",
-        )?;
+        let symbols = hotpath::measure_block!("usecases.graph.adjacency.symbols", {
+            self.page_all_symbols(
+                max_dependency_edges.max(1),
+                "verified graph symbol census exceeded its analytical budget",
+            )
+        })?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let edges = self
-            .reader
-            .edges_among(
-                &occurrences,
-                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                max_dependency_edges,
-                Arc::clone(&self.cancellation),
-            )
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+        let edges = hotpath::measure_block!("usecases.graph.adjacency.edges", {
+            self.reader
+                .edges_among(
+                    &occurrences,
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                    max_dependency_edges,
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
         let paths = symbols
             .into_iter()
             .filter_map(|symbol| Some((symbol.occurrence, symbol.binding?.logical_path?)))
@@ -389,34 +405,37 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        let symbols = self.page_all_symbols(
-            MAX_ANALYTICAL_SYMBOLS,
-            "verified health symbol census exceeded its analytical budget",
-        )?;
+        let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
+            self.page_all_symbols(
+                MAX_ANALYTICAL_SYMBOLS,
+                "verified health symbol census exceeded its analytical budget",
+            )
+        })?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let edges = self
-            .reader
-            .edges_among(
-                &occurrences,
-                &[
-                    RelationEdgeKindV1::Calls,
-                    RelationEdgeKindV1::Uses,
-                    RelationEdgeKindV1::TypeOf,
-                    RelationEdgeKindV1::Implements,
-                    RelationEdgeKindV1::Extends,
-                    RelationEdgeKindV1::Returns,
-                    RelationEdgeKindV1::Receives,
-                    RelationEdgeKindV1::Annotates,
-                ],
-                MAX_ANALYTICAL_RELATIONS,
-                Arc::clone(&self.cancellation),
-            )
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+        let edges = hotpath::measure_block!("usecases.graph.health.edges", {
+            self.reader
+                .edges_among(
+                    &occurrences,
+                    &[
+                        RelationEdgeKindV1::Calls,
+                        RelationEdgeKindV1::Uses,
+                        RelationEdgeKindV1::TypeOf,
+                        RelationEdgeKindV1::Implements,
+                        RelationEdgeKindV1::Extends,
+                        RelationEdgeKindV1::Returns,
+                        RelationEdgeKindV1::Receives,
+                        RelationEdgeKindV1::Annotates,
+                    ],
+                    MAX_ANALYTICAL_RELATIONS,
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })
+        })?;
         let metadata = symbols
             .iter()
             .filter_map(|symbol| {

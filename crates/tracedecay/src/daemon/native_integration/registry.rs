@@ -277,6 +277,9 @@ impl DaemonNativeIntegrationOwner {
         })
         .await
         .map_err(|_| NativeIntegrationPortError::Unavailable)?
+        .inspect(|reconciled| {
+            hotpath::gauge!("daemon.native_integration.worktree_recovered").inc(*reconciled as f64);
+        })
     }
 
     pub(crate) fn authorized_scope_set(
@@ -385,6 +388,31 @@ impl DaemonNativeIntegrationServiceRegistry {
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
+        let owner = self
+            .ensure_registered(
+                database,
+                repository_root,
+                project_id,
+                repository_id,
+                policy_digest,
+                observed_at,
+            )
+            .await;
+        if owner.is_err() {
+            hotpath::gauge!("daemon.native_integration.ensure.failed").inc(1.0);
+        }
+        owner
+    }
+
+    async fn ensure_registered(
+        &self,
+        database: RegisteredGlobalDbLeaseV1,
+        repository_root: PathBuf,
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        policy_digest: ManifestDigest,
+        observed_at: UtcMicros,
+    ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
         let database_path = database.db_path().to_path_buf();
         let scope_sets = database
             .authorized_scope_set_storage()
@@ -452,6 +480,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
+            hotpath::gauge!("daemon.native_integration.ensure.reused").inc(1.0);
             return Ok(owner);
         }
 
@@ -463,6 +492,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
+            hotpath::gauge!("daemon.native_integration.ensure.reused").inc(1.0);
             return Ok(owner);
         }
 
@@ -572,6 +602,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                 owner: owner.clone(),
             },
         );
+        hotpath::gauge!("daemon.native_integration.ensure.mounted").inc(1.0);
         Ok(owner)
     }
 

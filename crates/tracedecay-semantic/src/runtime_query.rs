@@ -178,9 +178,13 @@ where
         let mut session =
             hotpath::measure_block!("semantic.search.acquire", pool.acquire(&authority))
                 .map_err(map_acquire_error)?;
-        let mut vectors = session
-            .embed_batch(&batch, self.cancellation.as_ref())
-            .map_err(map_embed_error)?;
+        // Query infer shares `semantic.embed.infer` with projection. This
+        // search-only span keeps query inference separable from indexing.
+        let mut vectors = hotpath::measure_block!(
+            "semantic.search.infer",
+            session.embed_batch(&batch, self.cancellation.as_ref())
+        )
+        .map_err(map_embed_error)?;
         let vector = match vectors.pop() {
             Some(vector) if vectors.is_empty() => vector,
             _ => {
@@ -189,12 +193,15 @@ where
                 ));
             }
         };
-        vector.validate().map_err(map_embed_error)?;
-        EphemeralQueryEmbeddingV1::new(
-            request.query_digest.clone(),
-            request.projection.clone(),
-            vector.values,
-        )
+        hotpath::measure_block!("semantic.search.hydrate", {
+            vector.validate().map_err(map_embed_error).and_then(|()| {
+                EphemeralQueryEmbeddingV1::new(
+                    request.query_digest.clone(),
+                    request.projection.clone(),
+                    vector.values,
+                )
+            })
+        })
     }
 }
 

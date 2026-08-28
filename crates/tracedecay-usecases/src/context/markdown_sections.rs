@@ -149,6 +149,7 @@ impl<'a> SectionEnrichment<'a> {
     /// Mints the full-body handle through the shared response-handle cache.
     fn attach_handle(&mut self, value: &mut Value, body: &str) {
         let Some(root) = self.project_root else {
+            hotpath::gauge!("usecases.context.markdown.handle_unavailable").inc(1.0);
             value["body_handle"] = Value::Null;
             value["body_handle_unavailable"] = json!({
                 "reason_code": "handle_storage_unavailable",
@@ -159,6 +160,7 @@ impl<'a> SectionEnrichment<'a> {
             return;
         };
         if self.handles_minted >= MAX_SECTION_HANDLES {
+            hotpath::gauge!("usecases.context.markdown.handle_unavailable").inc(1.0);
             value["body_handle"] = Value::Null;
             value["body_handle_unavailable"] = json!({
                 "reason_code": "handle_budget_exhausted",
@@ -170,8 +172,15 @@ impl<'a> SectionEnrichment<'a> {
             });
             return;
         }
-        match store_response_handle(root, body, self.now) {
+        // Each mint is one durable write with an fsync; the span makes that
+        // cost visible against the rest of the markdown enrichment pass.
+        let stored = hotpath::measure_block!(
+            "usecases.context.markdown.mint_handle",
+            store_response_handle(root, body, self.now)
+        );
+        match stored {
             Ok(record) => {
+                hotpath::gauge!("usecases.context.markdown.handles_minted").inc(1.0);
                 self.handles_minted += 1;
                 value["body_handle"] = json!(record.handle);
                 value["body_handle_expires_at"] = json!(record.expires_at);
@@ -180,6 +189,7 @@ impl<'a> SectionEnrichment<'a> {
             // The handle cache records the typed error in its own telemetry.
             // Public output must not disclose project-local filesystem paths.
             Err(_) => {
+                hotpath::gauge!("usecases.context.markdown.handle_unavailable").inc(1.0);
                 value["body_handle"] = Value::Null;
                 value["body_handle_unavailable"] = json!({
                     "reason_code": "handle_store_failed",

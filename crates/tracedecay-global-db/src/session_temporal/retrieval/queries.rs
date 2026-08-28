@@ -574,6 +574,7 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
            authority_session.provider, frozen.generation
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
+      INDEXED BY idx_session_occurrences_root_generation_order
       ON o.session_id = frozen.session_id
      AND o.generation = frozen.generation
     JOIN retrieval_anchors AS authority_anchor

@@ -101,6 +101,16 @@ pub fn issue_source_authorization_proof(
     input: &SourceAuthorizationInputV1,
     decision: &SourceAuthorizationDecisionV1,
 ) -> Option<SourceAuthorizationProofV1> {
+    let proof = evaluate_proof_issuance(evaluator, input, decision);
+    crate::hotpath_observe::proof_issuance(proof.is_some());
+    proof
+}
+
+fn evaluate_proof_issuance(
+    evaluator: &impl SourceAuthorizationEvaluator,
+    input: &SourceAuthorizationInputV1,
+    decision: &SourceAuthorizationDecisionV1,
+) -> Option<SourceAuthorizationProofV1> {
     if evaluator.evaluate(input) != *decision {
         return None;
     }
@@ -130,6 +140,16 @@ pub fn issue_source_authorization_proof(
 /// application sink. No proof survives a revision or privacy drift.
 #[hotpath::measure(label = "policy.authorization.recheck")]
 pub fn recheck_sink_admission(
+    evaluator: &impl SourceAuthorizationEvaluator,
+    proof: &SourceAuthorizationProofV1,
+    current: &SourceAuthorizationInputV1,
+) -> SinkRecheckDecisionV1 {
+    let decision = evaluate_sink_recheck(evaluator, proof, current);
+    crate::hotpath_observe::recheck_outcome(decision.disposition);
+    decision
+}
+
+fn evaluate_sink_recheck(
     evaluator: &impl SourceAuthorizationEvaluator,
     proof: &SourceAuthorizationProofV1,
     current: &SourceAuthorizationInputV1,

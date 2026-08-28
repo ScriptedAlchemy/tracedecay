@@ -32,6 +32,7 @@ pub(super) fn retained_mcp_composition() -> Result<&'static ApplicationCatalogCo
         .map_err(retained_catalog_error)
 }
 
+#[hotpath::measure(label = "mcp.retained.profile.binding_resolve")]
 fn retained_mcp_binding(operation: RetainedSurfaceOperation) -> Result<BindingId> {
     let composition = retained_mcp_composition()?;
     let profile_id =
@@ -150,9 +151,11 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         }
     })?;
     let requested_format = normalized.requested_format;
-    let typed_request =
+    let typed_request = hotpath::measure_block!(
+        "mcp.retained.profile.decode",
         crate::application_surface::retained::decode_request(operation, normalized.request)
-            .ok_or_else(|| retained_catalog_error("retained MCP request is invalid"))?;
+    )
+    .ok_or_else(|| retained_catalog_error("retained MCP request is invalid"))?;
     if typed_request.operation() != operation {
         return Err(retained_catalog_error(
             "retained MCP request does not match its catalog operation",
@@ -176,25 +179,31 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
             "profile retained protocol controls are unavailable",
         )
     })?;
-    let result = crate::daemon::retained_owner::execute_profile_retained_application(
-        crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
-            runtime_registry: Some(runtime_registry),
-            session_identity: authority.session_identity().clone(),
-            configuration_digest: authority.configuration_digest().clone(),
-            lcm_authority,
-        },
-        authority,
-        typed_request,
-        request_id,
-        deadline,
-        cancellation,
+    let result = hotpath::future!(
+        crate::daemon::retained_owner::execute_profile_retained_application(
+            crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
+                runtime_registry: Some(runtime_registry),
+                session_identity: authority.session_identity().clone(),
+                configuration_digest: authority.configuration_digest().clone(),
+                lcm_authority,
+            },
+            authority,
+            typed_request,
+            request_id,
+            deadline,
+            cancellation,
+        ),
+        label = "mcp.retained.profile.execute"
     )
     .await?;
-    application_surface::render_retained_result(
-        project_root,
-        operation,
-        binding_id,
-        result,
-        requested_format,
+    hotpath::measure_block!(
+        "mcp.retained.profile.render",
+        application_surface::render_retained_result(
+            project_root,
+            operation,
+            binding_id,
+            result,
+            requested_format,
+        )
     )
 }

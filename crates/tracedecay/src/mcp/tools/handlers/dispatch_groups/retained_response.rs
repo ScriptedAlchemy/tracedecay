@@ -8,6 +8,7 @@ use crate::errors::Result;
 
 use super::{retained_problem_envelope, retained_safe_diagnostic};
 
+#[hotpath::measure(label = "mcp.retained.response_validate")]
 pub(super) fn validated_retained_response(
     outcome: DaemonInvocationOutcome,
     operation: tracedecay_application::RetainedSurfaceOperation,

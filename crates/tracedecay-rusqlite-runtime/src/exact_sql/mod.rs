@@ -503,22 +503,30 @@ impl ExactSqlHandle {
         })
     }
 
+    /// Measured as the whole caller round trip, like `begin_immediate`: the
+    /// send to the writer actor, the wait for its single thread to reach this
+    /// command, and the execution itself. The worker-side
+    /// `rusqlite.exact_sql.execute` span covers only the execution, so the
+    /// difference between the two populations is the queue wait a busy writer
+    /// imposes on one-shot commands.
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
-        validate_request(&request)?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.writer
-            .as_ref()
-            .ok_or(ExactSqlError::WriterUnavailable)?
-            .try_send(WriterCommand::Dispatch {
-                request,
-                reply,
-                last_insert_rowid: Arc::clone(&self.last_insert_rowid),
-                authority: self.write_authority.clone(),
-            })
-            .map_err(map_writer_send_error)?;
-        response
-            .recv()
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
+        hotpath::measure_block!("rusqlite.exact_sql.dispatch", {
+            validate_request(&request)?;
+            let (reply, response) = mpsc::sync_channel(1);
+            self.writer
+                .as_ref()
+                .ok_or(ExactSqlError::WriterUnavailable)?
+                .try_send(WriterCommand::Dispatch {
+                    request,
+                    reply,
+                    last_insert_rowid: Arc::clone(&self.last_insert_rowid),
+                    authority: self.write_authority.clone(),
+                })
+                .map_err(map_writer_send_error)?;
+            response
+                .recv()
+                .map_err(|_| ExactSqlError::WriterUnavailable)?
+        })
     }
 }
 
