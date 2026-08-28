@@ -61,6 +61,15 @@ compiles.
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
   stale rebuild.
+- This machine shares one compile cache (kache, keyed on
+  profile × features × RUSTFLAGS × source). `CARGO_TARGET_DIR` and worktree
+  paths do not affect the key — use per-task target dirs freely. Novel feature
+  permutations do: each one recompiles the workspace spine (~7 min for
+  `tracedecay`) instead of hitting the cache. Stick to the standard lanes —
+  default features (add `test-helpers` only when the suite requires it), plain
+  `--no-default-features` for lean lib iteration, `--all-features` for the
+  handoff gate, and the fixed hotpath profiling combos — rather than toggling
+  individual features (e.g. `semantic-fastembed`) per task.
 
 ## Conventions
 
