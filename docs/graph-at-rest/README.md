@@ -1,0 +1,297 @@
+# An at-rest form for the graph: measurement and verdict
+
+Bench-lane investigation. Nothing here is wired into production; the two
+harnesses are `#[ignore]`d and the one new crate method is gated on
+`test-helpers` so it cannot compile into a shipped binary.
+
+## The question
+
+Activating a sealed generation replays every node and edge into grafeo's in-RAM
+`LpgStore` MVCC arenas. Publishing one serializes that whole store back out.
+Both costs scale with the size of the generation rather than with what changed,
+because `LpgStore` has no byte-addressable at-rest representation.
+
+grafeo already ships the thing that would fix this: `CompactStore`, a columnar
+read-optimised store whose deserialize is a pointer re-base over `Bytes`, and
+`GrafeoDB::compact()`, which freezes the live store into a `CompactStore` base
+plus a mutable overlay. Nothing in TraceDecay calls it.
+
+This investigation measured what calling it would buy.
+
+## Verdict
+
+**`compact()` cannot be applied to TraceDecay's graph as it is currently
+shaped.** Not "does not pay off" — it returns an error.
+
+The blocker is TraceDecay's own schema, not grafeo. And under a schema that
+does not trip it, the columnar form is a large, real win: **10.9x faster
+activation at 1M rows, 2.4x lower resident memory, 185x faster adjacency.**
+
+So the at-rest work is worth doing, but the first ticket is a schema change,
+not a storage change.
+
+## Numbers
+
+All figures from a single box, `--test-threads=1`, one scenario per process
+(`VmHWM` is process-wide and monotonic, so two scenarios in one process would
+report each other's peaks). Harnesses:
+`crates/tracedecay-graph-db/tests/at_rest_snapshot.rs` and
+`crates/tracedecay-graph-db/tests/at_rest_grafeo_probe.rs`.
+
+### TraceDecay's real schema — `at_rest_snapshot.rs`
+
+Entities plus relations through the public `apply_unverified` path, staged in
+production-sized 65,536-mutation pages.
+
+| rows | mode | open wall | VmRSS after open | publish peak | on-disk | point reads | traversal |
+|---|---|---|---|---|---|---|---|
+| 20k + 5k | replay | 0.539s | 140.1 MiB | 156.0 MiB (15.0x disk) | 10.4 MiB | 64/64 in 3.89ms | 9 visits, 0.37ms |
+| 20k + 5k | compact | 0.308s | 290.0 MiB | 341.5 MiB | 40.4 MiB | **0/64** | **error** |
+| 40k + 10k | compact | — | — | — | — | — | **`compact()` fails** |
+| 500k + 125k | replay | 12.065s | 2589.6 MiB | **3804.1 MiB (14.4x disk)** | 264.9 MiB | 64/64 in 1.69ms | 9 visits, 7.44ms |
+| 1M + 250k | replay | 21.265s | 6067.6 MiB | **7581.7 MiB (14.3x disk)** | 531.4 MiB | 64/64 in 1.15ms | 9 visits, 4.00ms |
+
+Two things to read off this table.
+
+The **14.3–14.4x publish peak reproduces exactly** as reported, which is the
+harness validating itself against a known figure before it is trusted on
+anything new.
+
+And compaction **fails on TraceDecay's graph**. At 20k entities it "succeeds"
+and produces a store that answers nothing — zero of 64 point reads, traversal
+errors with `traversal start entity does not exist` — while being *larger* on
+disk (40.4 MiB vs 10.4 MiB) and costing *more* RAM (290 MiB vs 140 MiB) than
+the thing it was supposed to improve. At 40k it stops pretending:
+
+```
+compact result : FAILED -- grafeo compact failed: GRAFEO-X001: Internal error:
+                 table count 50002 exceeds compact ID limit of 32767 (node tables)
+```
+
+50,002 = 40,000 entities + 10,000 relations + 2 fixed labels. Exactly one
+columnar node table per entity and per relation. The real repo graph
+(~430k chunks) would ask for well over 430,000.
+
+### Schema-neutral — `at_rest_grafeo_probe.rs`
+
+The same close/reopen cycle straight against grafeo, with the same node and
+edge counts spread over **4 shared labels** instead of one label per entity.
+This prices the schema change: it is what TraceDecay would measure if entity
+identity were an indexed property rather than a label.
+
+| rows | mode | open wall | VmRSS after open | publish peak | on-disk | adjacency walk |
+|---|---|---|---|---|---|---|
+| 50k | replay | 0.144s | 69.2 MiB | 78.6 MiB | 4.4 MiB | 0.013ms |
+| 50k | compact | **0.009s** | 31.4 MiB | 45.5 MiB | 2.7 MiB | 0.006ms |
+| 500k | replay | 2.210s | 790.1 MiB | 890.6 MiB | 43.8 MiB | 3.194ms |
+| 500k | compact | **0.164s** | 315.0 MiB | 572.5 MiB | 27.2 MiB | 0.014ms |
+| 1M | replay | 3.703s | 1417.3 MiB | 1763.9 MiB | 87.7 MiB | 2.399ms |
+| 1M | compact | **0.339s** | 592.2 MiB | 1157.5 MiB | 54.5 MiB | 0.013ms |
+
+Compact vs replay, same scale:
+
+| scale | open | VmRSS | publish peak | on-disk | adjacency |
+|---|---|---|---|---|---|
+| 500k | **13.5x faster** | 2.51x lower | 1.56x lower | 1.61x smaller | 228x faster |
+| 1M | **10.9x faster** | 2.39x lower | 1.52x lower | 1.61x smaller | 185x faster |
+
+Point reads and the adjacency walk both return correct results in every
+compact run here — 64/64 hits, 8 hops — so this is a real win and not a store
+that opened quickly by not loading anything.
+
+Note what compaction does **not** fix: the publish peak improves by ~1.5x, but
+the transient multiple over file size remains. `Section::serialize()` returns
+`Vec<u8>`, so the entire section is still materialised in the heap before it
+reaches the file. Compaction shrinks that buffer; it does not stream it.
+
+## Sealed generations are immutable — confirmed
+
+This was the question that decides how big the production design has to be, and
+the answer collapses it.
+
+**A sealed generation's node/edge data is never mutated.** Enforced at four
+independent points:
+
+- `src/generation_runtime.rs:337-340` — once `generation_dependency_digest` is
+  set (the seal marker written by `finalize_staged_generation`,
+  `generation_runtime.rs:412-492`), any further stage-page write returns
+  `GraphDbError::Conflict` unless it is a byte-identical replay.
+- `src/registry/staging.rs:252-254` — the semantic-vector path refuses any
+  batch once the stage leaves `SemanticVectorStageState::Pending`.
+- `src/generation.rs:651-665` — `physical_namespace()` is
+  `sha256(namespace, projection, generation_id)`, so a different generation id
+  resolves to a different physical namespace. Cross-generation overwrite is
+  structurally impossible, not merely forbidden.
+- `src/registry/publication.rs:764-813` — publication is a CAS that installs a
+  *new* `GraphVerifiedHeadV1`. Head history is append-only.
+
+The only post-seal writes are exact idempotent replays of identical content and
+whole-generation deletion during retirement
+(`generation_runtime.rs:743-819`) — never a partial patch of live data.
+Registry *metadata* about a generation (retiring/collected/quarantined
+bookkeeping) does change; node and edge rows do not.
+
+**Consequence: there is no delta or replay-tail problem.** The design is
+`seal => compact => serve reads from the columnar base`, with the RAM
+`LpgStore` needed only during staging. No overlay merge policy, no
+recompaction schedule, no tombstone reconciliation for sealed generations. That
+is a much smaller system than the one this investigation set out to scope.
+
+It also means **the schema change needs no migration**. Generations are
+content-addressed and immutable; new generations adopt the new index and old
+ones age out through the retirement path that already exists.
+
+## Gaps: what CompactStore cannot answer
+
+TraceDecay's entire read surface against grafeo is seven methods, all reached
+through `GrafeoDB::graph_store() -> Arc<dyn GraphStore>`:
+
+| method | call sites | CompactStore |
+|---|---|---|
+| `nodes_by_label` | 7 | implemented, but see gap 2 |
+| `get_node` | 5 | implemented |
+| `nodes_by_label_count` | 3 | implemented |
+| `get_edge` | 3 | implemented |
+| `edges_from` | 2 | implemented (CSR) |
+| `node_count` | 1 | implemented |
+| `has_vector_index` | 1 | **gap 3** |
+
+Because everything already flows through `Arc<dyn GraphStore>` and
+`impl GraphStore for CompactStore` exists
+(`grafeo-core/src/graph/compact/graph_store_impl.rs:21`), a compacted base is
+type-compatible with every TraceDecay read path as written. The gaps are
+semantic, not structural.
+
+1. **Label cardinality — blocking.** `CompactStore` allocates one node table
+   per distinct label key and addresses tables with a `u16`: hard cap 32,767
+   (`grafeo-core/src/graph/compact/builder.rs:725`). TraceDecay mints a unique
+   key label per entity (`schema.rs:92`) and per relation (`schema.rs:99`).
+   Measured failure at 50,002 tables.
+
+2. **Multi-label collapse — blocking.** A node with several labels is filed
+   under a *composite* key, the sorted labels joined with `|`
+   (`builder.rs:1129-1136`). TraceDecay nodes carry both a type label
+   (`ENTITY_LABEL`) and a key label, so they land in a table named
+   `"tde_k_<hash>|tracedecay_entity"`. `nodes_by_label("tde_k_<hash>")` looks
+   up that exact string in `label_to_table_id`, misses, and returns empty —
+   which is why every point read returned `None` and traversal reported
+   `traversal start entity does not exist`. `get_node` compounds it: it
+   restores the composite string as a *single* label
+   (`graph_store_impl.rs:31`), so the original label set is not recoverable.
+
+3. **`has_vector_index` — non-blocking, silent.** `CompactStore` does not
+   override it, so it inherits the trait default `false`
+   (`grafeo-core/src/graph/traits.rs:443`). The three call sites in
+   `src/runtime.rs` (578, 602, 802) would silently take the non-HNSW plan
+   rather than error. Vector data lives in its own section, so this is a
+   planning regression, not data loss — but it is silent, which is worse.
+
+4. **No MVCC — non-blocking given immutability.** `get_node_versioned` and
+   friends ignore epoch and transaction
+   (`graph_store_impl.rs:58-82`), `current_epoch()` is hardcoded to 1, and
+   history queries return empty. Correct for a sealed generation; means the
+   compact base can never serve the staging path, which keeps writing to
+   `LpgStore`.
+
+5. **Publish peak is reduced, not removed.** `Section::serialize()` returns an
+   owned `Vec<u8>`. A streaming section writer is the fix; it is a fork change
+   and was not needed to answer this investigation's question.
+
+6. **Reopen is not zero-copy today.** The zero-copy path exists —
+   `CompactStoreSection::deserialize_from_bytes(Bytes::from_owner(mmap))`
+   (`compact/section.rs:88`), used by `CompactStoreTiered::open_mmap`
+   (`grafeo-engine/src/database/compact_tiered.rs:170`). But the container open
+   path, `GrafeoDB::extract_compact_base`
+   (`grafeo-engine/src/database/mod.rs:1511`), calls
+   `Section::deserialize(&data)` over a heap `Vec<u8>` from
+   `fm.read_section_data`. So the 10.9x measured above is what the *heap-copy*
+   path already delivers; the mmap path is additional headroom that was not
+   measured here.
+
+**No fork change was required.** The compact/persist/reopen round trip is
+already complete in grafeo at the pinned rev: `compact()` builds the layered
+store, `build_sections()` writes `SectionType::CompactStore` plus the overlay
+(`mod.rs:2645`), and `extract_compact_base` + `wire_layered_after_load`
+reconstruct it on open (`mod.rs:1511`, `mod.rs:1448`). This investigation
+therefore commits no `.patch` — there is nothing to patch. Gaps 5 and 6 are the
+only candidates for a future fork change, and both are optimisations on top of
+a working path.
+
+## Projection to the real repo graph
+
+Stated as ratios, because the measured harness graph is not the repo graph.
+
+Activation of the ~430k-chunk graph currently costs **619s**. The measured
+replay-to-compact open ratio under a sane label count is **10.9x at 1M rows and
+13.5x at 500k**. If activation is dominated by grafeo's open — which the
+harness supports but does not prove for the production path, since production
+activation also runs digest verification — then compaction lands it at roughly
+**45–60s**.
+
+That assumption is the one number in this document that is not directly
+measured, and it should be confirmed with a profile of the real activation path
+before anyone commits to it.
+
+Publish peak at 1M rows measures 7581.7 MiB against a 531.4 MiB store (14.3x).
+Compaction reduces the absolute peak by ~1.52x, so the 5.2GB transient becomes
+roughly **3.4GB** — better, but still a multiple. Removing the multiple needs
+the streaming writer from gap 5.
+
+## Production wiring plan
+
+Ordered by dependency. Phase 1 is the bulk of the work and everything else is
+blocked on it.
+
+**Phase 1 — replace the per-entity label index with a property index.**
+The prerequisite. Store the stable entity/relation key as a node *property* and
+resolve through `GraphStore::find_nodes_by_property`, which `CompactStore`
+implements with zone-map pruning (`graph_store_impl.rs:272`). This removes both
+blocking gaps at once: label cardinality drops to the fixed schema set, and
+nodes stop needing a second label.
+
+The lookup is already funnelled through two functions, so the change is
+narrower than the entity count suggests:
+- `src/schema.rs:92,99` — `entity_key_label` / `relation_key_label` become
+  property writes.
+- `src/state.rs:207` — `load_indexed_entity_node`, and the `unique_labeled_node`
+  helper it calls.
+- `src/traversal.rs:805` — `optional_node_for_entity`.
+- `src/mutation.rs` — the write side that mints the labels.
+
+No migration: generations are immutable and content-addressed, so new
+generations adopt the property index and old ones retire normally. Needs a
+generation format marker so a mixed store is never ambiguous.
+
+**Phase 2 — seal implies compact.** Call `compact()` at the end of
+`finalize_staged_generation` (`src/generation_runtime.rs:412-492`), before the
+close/reopen verification. Small: the crate already holds
+`RwLock<Option<GrafeoDB>>` (`src/runtime.rs:59`), so a write guard yields the
+`&mut GrafeoDB` that `compact()` needs — exactly what
+`compact_snapshot_for_bench` does today. Everything downstream (section write,
+section reload, layered rewiring) is already implemented in grafeo.
+
+**Phase 3 — restore vector-index planning.** Either override
+`has_vector_index` on the layered store so it consults the overlay and the
+vector section, or hoist the check in `src/runtime.rs` off `graph_store()`.
+Small, but do not skip it: gap 3 fails silently.
+
+**Phase 4 — optional fork work.** Streaming section serialize (gap 5) and
+mmap-backed container open (gap 6). Both are pure wins on top of a working
+path, and neither is needed for the activation number.
+
+## Reproducing
+
+```text
+# TraceDecay's real schema
+TRACEDECAY_ATREST_MODE=replay TRACEDECAY_ATREST_ROWS=500000 \
+  cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
+  --test at_rest_snapshot -- --ignored --nocapture --exact at_rest_reopen_probe
+
+# schema-neutral
+TRACEDECAY_ATREST_MODE=compact TRACEDECAY_ATREST_ROWS=1000000 \
+  cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
+  --test at_rest_grafeo_probe -- --ignored --nocapture --exact grafeo_at_rest_probe
+```
+
+One scenario per process. `TRACEDECAY_ATREST_MODE` is `replay` or `compact`;
+`TRACEDECAY_ATREST_ROWS` sets the scale.
