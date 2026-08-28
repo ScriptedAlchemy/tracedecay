@@ -507,25 +507,25 @@ pub(crate) fn record_extraction_reset(reason: ParsedExtractionResetReason) {
         hotpath::gauge!("code_extraction.extract.resets").inc(1.0);
         match reason {
             ParsedExtractionResetReason::ChangedRootIdentity => {
-                hotpath::gauge!("code_extraction.extract.reset.changed_root_identity").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.changed_root_identity").inc(1.0);
             }
             ParsedExtractionResetReason::CompositeGrammar => {
-                hotpath::gauge!("code_extraction.extract.reset.composite_grammar").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.composite_grammar").inc(1.0);
             }
             ParsedExtractionResetReason::FullReplacement => {
-                hotpath::gauge!("code_extraction.extract.reset.full_replacement").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.full_replacement").inc(1.0);
             }
             ParsedExtractionResetReason::LanguageChanged => {
-                hotpath::gauge!("code_extraction.extract.reset.language_changed").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.language_changed").inc(1.0);
             }
             ParsedExtractionResetReason::MissingPriorExtraction => {
-                hotpath::gauge!("code_extraction.extract.reset.missing_prior_extraction").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.missing_prior_extraction").inc(1.0);
             }
             ParsedExtractionResetReason::MultilineEdit => {
-                hotpath::gauge!("code_extraction.extract.reset.multiline_edit").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.multiline_edit").inc(1.0);
             }
             ParsedExtractionResetReason::PartialParse => {
-                hotpath::gauge!("code_extraction.extract.reset.partial_parse").inc(1.0)
+                hotpath::gauge!("code_extraction.extract.reset.partial_parse").inc(1.0);
             }
         };
     }
