@@ -40,8 +40,6 @@ pub use self::interactive::{
     CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
     write_interactive_catalog_artifact,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-pub use self::interactive::interactive_catalog_scan_builds;
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, serialize,
     stable_identity,

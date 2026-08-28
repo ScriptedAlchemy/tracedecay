@@ -54,19 +54,6 @@ pub use self::models::{
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
 
-/// Process-wide count of full projection warm scans, so tests can prove a
-/// bundled generation opened without any warm work — the scan may run on a
-/// background thread, which is why this is a process atomic and not
-/// thread-local.
-#[cfg(any(test, feature = "test-helpers"))]
-static CATALOG_SCAN_BUILDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// Number of interactive-catalog projection scans this process has run.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn interactive_catalog_scan_builds() -> usize {
-    CATALOG_SCAN_BUILDS.load(std::sync::atomic::Ordering::Acquire)
-}
 
 enum InteractiveCatalogState {
     Cold,
@@ -82,6 +69,10 @@ struct InteractiveCatalogBuildLease;
 pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
     build: Mutex<()>,
+    /// Count of full projection warm scans run against this store, so tests
+    /// can prove a bundled generation opened without any warm work. The scan
+    /// may run on a background thread, hence an atomic.
+    scan_builds: std::sync::atomic::AtomicUsize,
 }
 
 impl InteractiveCatalogCache {
@@ -89,6 +80,7 @@ impl InteractiveCatalogCache {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
+            scan_builds: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -204,6 +196,15 @@ impl CodeGraphProjectionStore {
             }
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
         }
+    }
+
+    /// Number of full projection warm scans this store has run. A bundled
+    /// generation must open with this still at zero.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn interactive_catalog_scan_builds(&self) -> usize {
+        self.interactive_catalog
+            .scan_builds
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Reports whether this store's generation-pinned interactive catalog has
@@ -865,8 +866,9 @@ impl CodeGraphInteractiveReader {
                 }
             }
         }
-        #[cfg(any(test, feature = "test-helpers"))]
-        CATALOG_SCAN_BUILDS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.catalog
+            .scan_builds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let result = hotpath::measure_block!("code_graph.catalog.build", {
             catalog::build_interactive_catalog(
                 &self.snapshot,
