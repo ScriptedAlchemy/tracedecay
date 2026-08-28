@@ -1455,7 +1455,7 @@ fn measure_native_partition(
             || sample.provenance.incremental_after_content_digest
                 != published.incremental_after_content_digest
             || sample.provenance.threads == 0
-            || sample.provenance.max_concurrent_sessions != 1
+            || sample.provenance.max_concurrent_sessions == 0
             || sample.provenance.batch_size == 0
             || sample.provenance.sequence_length == 0
             || sample.provenance.load_deadline_ms == 0
