@@ -18,6 +18,12 @@ plus a mutable overlay. Nothing in TraceDecay calls it.
 
 This investigation measured what calling it would buy.
 
+> **Status:** the schema change this document asks for has since landed, and
+> the numbers were re-measured on the real schema. Phase 1 is done; phase 2 is
+> blocked on two things this investigation did not reach. See
+> [Follow-up: the schema change, measured](#follow-up-the-schema-change-measured)
+> at the end — its table supersedes the `compact` rows below.
+
 ## Verdict
 
 **`compact()` cannot be applied to TraceDecay's graph as it is currently
@@ -295,3 +301,166 @@ TRACEDECAY_ATREST_MODE=compact TRACEDECAY_ATREST_ROWS=1000000 \
 
 One scenario per process. `TRACEDECAY_ATREST_MODE` is `replay` or `compact`;
 `TRACEDECAY_ATREST_ROWS` sets the scale.
+
+## Follow-up: the schema change, measured
+
+Phase 1 landed. The synthetic key labels are gone — entity, relation, relation
+edge, publication, and projection identity all resolve through indexed
+properties — and TraceDecay's label reads now flatten the composite key a
+`CompactStore` files a multi-label node under. `compact()` runs on the real
+schema at every scale, and the reopened columnar store answers every point read
+and walks adjacency.
+
+Two things the original investigation did not reach turned up in the process.
+
+### The label change was not the whole schema blocker
+
+The plan said removing the key label would leave nodes "not needing a second
+label". It does not. An entity also carries a record label, an owner label, and
+two labels per domain label, so it is still multi-label, and gap 2 still
+applies: `get_node` on a compacted base returns the fused composite as the
+node's only label, `nodes_by_label` answers only for that exact composite, and
+`ProjectionSpec` matches labels by exact name. Point reads survive the property
+index on their own, but the record-label filters, the projection scans, the two
+GQL projection queries, and the traversal spec all had to learn to read through
+the composite before a compacted generation answered anything.
+
+### Numbers
+
+Same box, `--test-threads=1`, one scenario per process, and — unlike the tables
+above — `--profile perf` throughout, so replay is re-measured here rather than
+carried over.
+
+| rows | mode | open wall | VmRSS after open | publish peak | on-disk | point reads | traversal |
+|---|---|---|---|---|---|---|---|
+| 500k + 125k | replay | 7.552s | 2048.2 MiB | 2816.5 MiB | 166.1 MiB | 64/64 in 0.64ms | 9 visits, 0.24ms |
+| 500k + 125k | compact | **0.431s** | 1217.8 MiB | 1744.3 MiB | 95.4 MiB | 64/64 in **156.4ms** | 9 visits, 2.09ms |
+| 1M + 250k | replay | 16.584s | 4684.2 MiB | 5614.5 MiB | 332.8 MiB | 64/64 in 0.78ms | 9 visits, 0.23ms |
+| 1M + 250k | compact | **0.903s** | 2410.3 MiB | 3365.4 MiB | 192.3 MiB | 64/64 in **328.9ms** | 9 visits, 3.92ms |
+
+Compact against replay, same scale:
+
+| scale | open | VmRSS | publish peak | on-disk | point reads | traversal |
+|---|---|---|---|---|---|---|
+| 500k | **17.5x faster** | 1.68x lower | 1.61x lower | 1.74x smaller | **243x slower** | 8.7x slower |
+| 1M | **18.4x faster** | 1.94x lower | 1.67x lower | 1.73x smaller | **421x slower** | 17x slower |
+
+The activation win is real and larger than the schema-neutral probe predicted.
+The point-read cost is new, and it is the number that decides phase 2.
+
+### Blocker 1 — the columnar base has no point-read index
+
+`CompactStore::find_nodes_by_property` walks every node table, prunes on a zone
+map, and scans the column (`compact/graph_store_impl.rs:272`). There is no hash
+index, so a point read is a scan whose cost grows with the store: 2.4ms per
+read at 500k, 5.1ms at 1M, against 10µs on the live store's property index.
+
+This did not show up in the original schema-neutral probe because that probe
+timed adjacency, not identity lookups, and because under the old schema
+identity resolved through a label index that `CompactStore` *does* answer in
+O(1). Moving identity onto a property is what made the columnar form's missing
+property index visible.
+
+Trading 18x on activation for 400x on point reads is not obviously a win for a
+graph whose interactive queries are dominated by identity lookups. Either the
+base needs a real property index — a fork change — or reads have to be routed
+by kind, which is a much larger design than "serve reads from the compact base".
+
+### Blocker 2 — writing to a compacted store loses base rows
+
+Deleting a node created in the overlay after `compact()` also drops an
+unrelated node from the columnar base, and the loss survives the next open.
+`tests/at_rest_compact_mutation_probe.rs` reproduces it in nine lines of pure
+grafeo, with no TraceDecay schema involved:
+
+```text
+life1 post-compact:  node_count=3  Alpha=1 Beta=1 Gamma=1
+life2 after create:  node_count=4  Alpha=1 Beta=1 Gamma=1 Delta=1
+life2 after delete:  node_count=3  Alpha=0 Beta=1 Gamma=1 Delta=0   <-- Alpha
+life3 open:          node_count=2  Alpha=0 Beta=1 Gamma=1
+```
+
+`LayeredStore` masks base rows by `NodeId`, and the overlay allocates ids that
+collide with base ids, so an overlay delete masks a base node that shares the
+id. This is data loss, and the generation lifecycle triggers it directly:
+retirement deletes whole generations after a seal, and the recovery path
+creates and clears quarantine markers.
+
+Wiring `compact()` into `finalize_staged_generation` was implemented and then
+reverted for this reason. It first surfaced as four generation-runtime
+contract failures — a sealed generation reopened twice came back with its
+format marker gone — which is the same defect reached through TraceDecay's own
+lifecycle rather than the minimal probe.
+
+### `has_vector_index` — resolved, and worse than gap 3 described
+
+Gap 3 said `CompactStore` inherits the trait default `false`. The layered store
+is more specific than that: `LayeredStore::has_vector_index` delegates to the
+*overlay* (`compact/layered.rs:1081`), which `compact()` leaves empty, so it
+answers `false` for indexes the store had a moment earlier. That part is at
+least truthful — the HNSW index really is gone, and it was never durable across
+a reopen anyway.
+
+The silent failure is one layer along. `create_vector_index` builds by scanning
+`nodes_by_label(label)`, and TraceDecay's vector label is
+`entity_projection_label`, one of several labels on an entity node. On a
+compacted base that scan matches nothing, so the build succeeds over zero
+vectors, `has_vector_index` then answers `true`, and every vector search
+returns empty while reporting an index exists.
+
+The resolution, when phase 2 becomes unblocked, is the routed one: refuse to
+build an HNSW index over a store serving from a columnar base, with a typed
+error rather than an empty index, and keep a generation that carries vector
+indexes in its replay form. Both halves were implemented against the seal-time
+compaction and reverted with it; neither is reachable while nothing calls
+`compact()` outside the bench lane.
+
+### Why "never write after compact" is not a guarantee TraceDecay can make
+
+The obvious containment for blocker 2 is to promise the store is never mutated
+after it is compacted, and enforce it with a typed refusal. That promise cannot
+be kept, because the two scopes do not line up: **immutability is per
+generation, `compact()` is per database.**
+
+A `GraphDb` holds one `GrafeoDB` (`runtime.rs`, `Inner::database`), and
+generations live inside it separated by physical namespace, not by file. Sealing
+generation N and compacting freezes the same store that generation N+1 stages
+into — and staging the next generation is the daemon's whole job. The recovery
+path also writes: `set_projection_quarantine` creates and clears markers on a
+store that may already be compacted.
+
+That is not a deduction, it is what the wiring did. With `compact()` called at
+the end of `finalize_staged_generation`, five contract tests failed:
+`later_generation_page_creates_its_first_native_vector_index`, which writes a
+later page after an earlier seal, and four recovered-generation tests where a
+sealed generation reopened a second time came back with its format marker gone.
+
+A refusal that actually held would make the graph read-only after its first
+seal. Per-generation compaction would need per-generation stores, which is a
+different design from the one this document scoped.
+
+### The fork's mmap open needs no wiring here
+
+`extract_compact_base` is called from `GrafeoDB::with_config`'s own open path
+(`grafeo-engine/src/database/mod.rs:419,477`), and that is the constructor both
+`runtime.rs` and `recovery.rs` already call. Nothing in TraceDecay names the
+section, the mmap, or the base. So when the pin moves to the fork branch whose
+`extract_compact_base` prefers `fm.mmap_section`, the mmap-backed open arrives
+without a line of wiring in this crate — the open numbers in the table above are
+the heap-copy path and are a floor, not a ceiling.
+
+### Revised wiring plan
+
+- **Phase 1 — property index. Done.** Also fixed on the way: the property
+  indexes were only ever registered on the store that initialized them, so
+  every reopened store ran without them. That was invisible while identity
+  resolved through the intrinsic label index, and cost 23.7s for 64 point reads
+  at 500k once it did not.
+- **Phase 2 — seal implies compact. Blocked** on blockers 1 and 2. Blocker 2 is
+  a correctness stop and cannot be contained inside TraceDecay, because
+  `compact()` freezes the whole database while only a generation is immutable.
+  Blocker 1 is an economics question that should be settled before anyone pays
+  for a fork fix.
+- **Phase 3 — vector planning.** Specified above, blocked behind phase 2.
+- **Phase 4 — streaming section writer, mmap container open.** Unchanged, and
+  now clearly behind a property index for the columnar base in priority.

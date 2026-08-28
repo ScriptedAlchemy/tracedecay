@@ -8,10 +8,9 @@ use crate::error::rollback_failure;
 use crate::schema::{
     ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
     PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
-    SEQUENCE_PROPERTY, edge_properties, encoded_namespace_key, entity_key_label, entity_labels,
-    entity_properties, projection_properties, projection_state_label, publication_key_label,
-    publication_properties, relation_locator_labels, relation_properties, relation_type_for_kind,
-    stable_key_from_encoded,
+    SEQUENCE_PROPERTY, edge_properties, encoded_namespace_key, entity_labels, entity_properties,
+    projection_properties, publication_properties, relation_locator_labels, relation_properties,
+    relation_type_for_kind, stable_key_from_encoded,
 };
 use crate::state::{
     ExistingBatchState, FormatState, StoredEntity, StoredRelation, latest_projection,
@@ -202,8 +201,7 @@ fn apply_in_transaction(
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
                 let locator_properties =
                     relation_properties(&batch.namespace, &batch.projection, relation, edge)?;
-                let locator_labels =
-                    relation_locator_labels(&batch.namespace, &batch.projection, relation, edge);
+                let locator_labels = relation_locator_labels(&batch.namespace, &batch.projection);
                 tracked_create_node(session, &locator_labels, &locator_properties, batch, check)?;
             }
         }
@@ -220,10 +218,9 @@ fn apply_in_transaction(
             check,
         )?,
         None => {
-            let label = projection_state_label(&batch.namespace, &batch.projection);
             tracked_create_node(
                 session,
-                &[PROJECTION_LABEL.to_owned(), label],
+                &[PROJECTION_LABEL.to_owned()],
                 &projection_properties,
                 batch,
                 check,
@@ -233,10 +230,9 @@ fn apply_in_transaction(
     if let Some((key, digest, input_digest)) = publication_record {
         let properties =
             publication_properties(&batch.namespace, key, digest, input_digest, commit)?;
-        let label = publication_key_label(&batch.namespace, key);
         tracked_create_node(
             session,
-            &[PUBLICATION_LABEL.to_owned(), label],
+            &[PUBLICATION_LABEL.to_owned()],
             &properties,
             batch,
             check,
@@ -262,8 +258,6 @@ fn create_entity(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<grafeo_common::types::NodeId, GraphDbError> {
     let labels = entity_labels(&batch.namespace, &batch.projection, &entity.labels);
-    let mut labels = labels;
-    labels.push(entity_key_label(&batch.namespace, &entity.identity));
     let properties = entity_properties(&batch.namespace, &batch.projection, entity);
     tracked_create_node(session, &labels, &properties, batch, check)
 }
@@ -296,13 +290,7 @@ fn replace_entity(
         &previous.projection,
         &previous.entity.labels,
     );
-    let mut prior_labels = prior_labels;
-    prior_labels.push(entity_key_label(
-        &previous.namespace,
-        &previous.entity.identity,
-    ));
-    let mut labels = entity_labels(&batch.namespace, &batch.projection, &entity.labels);
-    labels.push(entity_key_label(&batch.namespace, &entity.identity));
+    let labels = entity_labels(&batch.namespace, &batch.projection, &entity.labels);
     tracked_replace_node_properties(
         session,
         ENTITY_LABEL,
