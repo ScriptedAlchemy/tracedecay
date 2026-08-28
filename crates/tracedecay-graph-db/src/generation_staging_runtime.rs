@@ -154,7 +154,7 @@ impl GraphDb {
         let mut state = self.state_write_guard()?;
         let commit = hotpath::measure_block!(
             "graph_db.generation.stage.batch.apply_locked",
-            self.apply_locked(
+            self.apply_locked_without_vector_index_maintenance(
                 database,
                 &mut state,
                 batch,

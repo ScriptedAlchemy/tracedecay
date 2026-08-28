@@ -894,6 +894,35 @@ impl GraphDb {
         Ok(commit)
     }
 
+    /// Commits a persistence-only batch without maintaining an ephemeral
+    /// HNSW index that the next close/reopen would discard.
+    pub(crate) fn apply_locked_without_vector_index_maintenance(
+        &self,
+        database: &GrafeoDB,
+        state: &mut FormatState,
+        batch: GraphWriteBatch,
+        metadata: mutation::CommitMetadata,
+        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        let commit = mutation::apply(
+            database,
+            state,
+            batch,
+            metadata,
+            endpoint_namespaces,
+            &self.inner.poisoned,
+            check,
+        )?;
+        if self.inner.durability == GraphDurability::WalSync
+            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
+        {
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(error);
+        }
+        Ok(commit)
+    }
+
     pub(crate) fn read_database(
         &self,
         cancellation: &dyn GraphCancellation,

@@ -509,7 +509,7 @@ impl GraphDb {
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let mut state = self.state_write_guard()?;
-        mutation::apply(
+        self.apply_locked_without_vector_index_maintenance(
             database,
             &mut state,
             batch,
@@ -519,12 +519,8 @@ impl GraphDb {
                 publication_record: None,
             },
             endpoint_namespaces,
-            &self.inner.poisoned,
             check,
         )?;
-        if self.inner.durability == GraphDurability::WalSync {
-            crate::runtime::sync_wal(database)?;
-        }
         Ok(())
     }
 }
