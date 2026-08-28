@@ -49,12 +49,14 @@ fn measure_catalog_seal_vs_open_at_scale() {
         generation(),
         (0..symbols)
             .map(|index| {
-                symbol_metadata(
+                let mut record = symbol_metadata(
                     &format!("sym.{index}"),
                     &format!("bench::module_{}::symbol_{index}", index / 20),
                     "function",
-                    char::from(b'a' + (index % 6) as u8),
-                )
+                    'a',
+                );
+                record.identity = id(&format!("sha256:{index:064x}"));
+                record
             })
             .collect(),
     )
