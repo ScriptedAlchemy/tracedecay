@@ -1353,6 +1353,15 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
         metric: VectorMetric::Cosine,
         cancellation: live(),
     };
+    // Pinned-grafeo behaviour: the `.grafeo` file carries this index's
+    // HNSW topology, but the loader at the pinned rev never reads the
+    // section back, so the reopened store has no index at all. The fix
+    // is on the fork branch `tracedecay/0.5.42-vector-index-durable`
+    // (`f38218653dfc69fda67f9c669371036fde1ed5fe`); bumping the five
+    // `grafeo-*` revs in the root `Cargo.toml` `[patch.crates-io]` block
+    // together turns this into `Available` and makes the
+    // `ensure_vector_index` call below redundant. See
+    // `docs/graph-at-rest/README.md`.
     assert_eq!(
         reopened.vector_index_status(index.clone()).unwrap(),
         GraphVectorIndexStatus::Missing
@@ -1411,6 +1420,12 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
         GraphVectorIndexStatus::Missing,
         "GraphDb admission must not synchronously rebuild a corpus index"
     );
+    // Note what this does and does not pin down. It proves admission is
+    // not paying for a rebuild; it does not prove the index is gone for
+    // a good reason. At the pinned grafeo rev it is gone because the
+    // loader discards the persisted topology, which is the bug the fork
+    // branch fixes. Once the pin moves this must become `Available`
+    // *and* keep its admission bound - restored, not rebuilt.
 }
 
 #[test]
