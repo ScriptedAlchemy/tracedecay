@@ -54,7 +54,10 @@ pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreError
             VectorGenerationStoreErrorV1::ResetRequired(message)
         }
         GraphDbError::Corrupt { message } => VectorGenerationStoreErrorV1::Corrupt(message),
-        GraphDbError::Unavailable { message } => VectorGenerationStoreErrorV1::Unavailable(message),
+        GraphDbError::Unavailable { message }
+        | GraphDbError::SealedStoreImmutable { message } => {
+            VectorGenerationStoreErrorV1::Unavailable(message)
+        }
         GraphDbError::InvalidRequest { message } => {
             VectorGenerationStoreErrorV1::InvalidPlan(message)
         }

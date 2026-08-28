@@ -138,7 +138,8 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             },
             GraphDbError::ResetRequired { message } => Self::ResetRequired(message),
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
-            GraphDbError::Unavailable { message } => Self::Unavailable(message),
+            GraphDbError::Unavailable { message }
+            | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
             GraphDbError::DurabilityUncertain { message } => Self::DurabilityUncertain(message),
             GraphDbError::Closed => Self::Closed,
         }

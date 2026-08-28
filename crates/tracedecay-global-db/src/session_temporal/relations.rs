@@ -900,9 +900,9 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
         GraphDbError::ProjectionMismatch { .. } | GraphDbError::GenerationMismatch { .. } => {
             SessionRelationError::Conflict
         }
-        GraphDbError::Unavailable { .. } | GraphDbError::Closed => {
-            SessionRelationError::Unavailable
-        }
+        GraphDbError::Unavailable { .. }
+        | GraphDbError::SealedStoreImmutable { .. }
+        | GraphDbError::Closed => SessionRelationError::Unavailable,
     }
 }
 

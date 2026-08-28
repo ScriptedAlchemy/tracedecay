@@ -191,6 +191,12 @@ hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 # grafeo 0.5.42 (1 MiB per-epoch record ceiling, then a panic).
 # See `crates/tracedecay-graph-db/Cargo.toml` for the detail.
 graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
+
+# Per-generation sealed compact stores: at seal time each verified generation
+# gets its own isolated, digest-proven store beside the staging database
+# (compacted when the pinned engine round-trips its scalars). Production
+# default; `TRACEDECAY_GRAPH_SEALED_STORE=off` is the runtime kill-switch.
+graph-sealed-store = ["tracedecay-graph-db/graph-sealed-store"]
 graph-tiered-storage = ["tracedecay-graph-db/graph-tiered-storage"]
 
 production = [
@@ -198,6 +204,7 @@ production = [
     "lite",
     "full",
     "semantic-fastembed",
+    "graph-sealed-store",
 ]
 
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
