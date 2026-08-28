@@ -234,7 +234,7 @@ pub enum SemanticNativeEvaluationErrorV1 {
 
 /// Execute channel ablations, exact-flat oracle capture, bounded rerank
 /// off/on, and the fallback-byte invariant for one checked-in query.
-#[hotpath::measure(label = "search_eval.query.evaluate")]
+#[hotpath::measure]
 pub fn evaluate_native_query(
     input: SemanticNativeQueryInputV1<'_, '_>,
 ) -> Result<SemanticNativeQueryOutputV1, SemanticNativeEvaluationErrorV1> {
@@ -412,7 +412,7 @@ fn canonical_fallback_bytes(
         .map_err(|error| SemanticNativeEvaluationErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure(label = "search_eval.fusion.ablation")]
+#[hotpath::measure]
 fn compose_ablation(
     kernel: &CompositionKernel,
     profile: &FusionProfile,
@@ -468,6 +468,9 @@ fn ablated_profile(profile: &FusionProfile, admitted: &BTreeSet<RetrieverKind>) 
     profile
         .calibrations
         .retain(|lane, _| admitted.contains(lane));
+    profile
+        .minimum_calibrated_feature_micros
+        .retain(|lane, _| admitted.contains(lane));
     profile.rerank_policy_id = None;
     profile
 }
@@ -480,7 +483,7 @@ type SemanticStageOutcome = (
     SemanticNativeStageResultV1<SemanticNativeStageMeasurementV1>,
 );
 
-#[hotpath::measure(label = "search_eval.semantic.evaluate")]
+#[hotpath::measure]
 fn evaluate_semantic(
     semantic: Option<SemanticNativeSemanticInputV1<'_>>,
     fusion_profile: &FusionProfile,
@@ -621,7 +624,6 @@ fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-#[hotpath::measure(label = "search_eval.semantic.oracle")]
 fn exact_flat_oracle(
     batch: &RetrieverBatch<CodeSemanticEvidenceV1>,
 ) -> Result<SemanticExactFlatOracleV1, SemanticNativeEvaluationErrorV1> {
@@ -660,7 +662,7 @@ fn exact_flat_oracle(
     })
 }
 
-#[hotpath::measure(label = "search_eval.rerank.evaluate")]
+#[hotpath::measure]
 fn evaluate_rerank(
     requested: bool,
     pre_rerank: &[RankedCandidate],
@@ -928,40 +930,104 @@ pub struct SemanticNativeResourceProvenanceV1 {
 
 impl SemanticNativeResourceSampleV1 {
     fn is_complete(&self) -> bool {
-        !self.provenance.workload_digest.is_empty()
-            && !self.provenance.corpus_digest.is_empty()
-            && REQUIRED_RESOURCE_SCALES.contains(&self.provenance.scale.as_str())
-            && !self.provenance.code_generation_id.is_empty()
-            && !self.provenance.code_source_manifest_digest.is_empty()
-            && !self.provenance.incremental_code_generation_id.is_empty()
-            && !self
-                .provenance
-                .incremental_code_source_manifest_digest
-                .is_empty()
-            && !self.provenance.incremental_before_content_digest.is_empty()
-            && !self.provenance.incremental_after_content_digest.is_empty()
-            && self.provenance.incremental_before_content_digest
-                != self.provenance.incremental_after_content_digest
-            && self.provenance.threads != 0
-            && self.provenance.max_concurrent_sessions == 1
-            && self.provenance.batch_size != 0
-            && self.provenance.sequence_length != 0
-            && self.provenance.load_deadline_ms != 0
-            && !self.provenance.measurement_method.is_empty()
-            && self.eligible_chunks != 0
-            && self.measured_queries != 0
-            && self.measured_queries == self.latency_samples_us.len() as u64
-            && self.cpu_time_us.is_some()
-            && self.peak_rss_bytes.is_some()
-            && self.model_bytes.is_some_and(|bytes| bytes != 0)
-            && self.tokenizer_bytes.is_some_and(|bytes| bytes != 0)
-            && self.vector_bytes.is_some()
-            && self.index_bytes.is_some()
-            && self.cache_bytes.is_some()
-            && self.cold_model_loads_within_deadline()
-            && !self.clean_projection_build_samples_us.is_empty()
-            && !self.incremental_rebuild_samples_us.is_empty()
-            && self.projection_case_matrix_is_complete()
+        self.incomplete_reason().is_none()
+    }
+
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        if self.provenance.workload_digest.is_empty() {
+            return Some("workload_digest");
+        }
+        if self.provenance.corpus_digest.is_empty() {
+            return Some("corpus_digest");
+        }
+        if !REQUIRED_RESOURCE_SCALES.contains(&self.provenance.scale.as_str()) {
+            return Some("scale");
+        }
+        if self.provenance.code_generation_id.is_empty() {
+            return Some("code_generation_id");
+        }
+        if self.provenance.code_source_manifest_digest.is_empty() {
+            return Some("code_source_manifest_digest");
+        }
+        if self.provenance.incremental_code_generation_id.is_empty() {
+            return Some("incremental_code_generation_id");
+        }
+        if self
+            .provenance
+            .incremental_code_source_manifest_digest
+            .is_empty()
+        {
+            return Some("incremental_code_source_manifest_digest");
+        }
+        if self.provenance.incremental_before_content_digest.is_empty() {
+            return Some("incremental_before_content_digest");
+        }
+        if self.provenance.incremental_after_content_digest.is_empty() {
+            return Some("incremental_after_content_digest");
+        }
+        if self.provenance.incremental_before_content_digest
+            == self.provenance.incremental_after_content_digest
+        {
+            return Some("incremental_content_digest_transition");
+        }
+        if self.provenance.threads == 0 {
+            return Some("threads");
+        }
+        if self.provenance.max_concurrent_sessions != 1 {
+            return Some("max_concurrent_sessions");
+        }
+        if self.provenance.batch_size == 0 {
+            return Some("batch_size");
+        }
+        if self.provenance.sequence_length == 0 {
+            return Some("sequence_length");
+        }
+        if self.provenance.load_deadline_ms == 0 {
+            return Some("load_deadline_ms");
+        }
+        if self.provenance.measurement_method.is_empty() {
+            return Some("measurement_method");
+        }
+        if self.eligible_chunks == 0 {
+            return Some("eligible_chunks");
+        }
+        if self.measured_queries == 0 {
+            return Some("measured_queries");
+        }
+        if self.measured_queries != self.latency_samples_us.len() as u64 {
+            return Some("latency_samples_us");
+        }
+        if self.cpu_time_us.is_none() {
+            return Some("cpu_time_us");
+        }
+        if self.peak_rss_bytes.is_none() {
+            return Some("peak_rss_bytes");
+        }
+        if !self.model_bytes.is_some_and(|bytes| bytes != 0) {
+            return Some("model_bytes");
+        }
+        if !self.tokenizer_bytes.is_some_and(|bytes| bytes != 0) {
+            return Some("tokenizer_bytes");
+        }
+        if self.vector_bytes.is_none() {
+            return Some("vector_bytes");
+        }
+        if self.index_bytes.is_none() {
+            return Some("index_bytes");
+        }
+        if self.cache_bytes.is_none() {
+            return Some("cache_bytes");
+        }
+        if !self.cold_model_loads_within_deadline() {
+            return Some("cold_model_load_samples_us");
+        }
+        if self.clean_projection_build_samples_us.is_empty() {
+            return Some("clean_projection_build_samples_us");
+        }
+        if self.incremental_rebuild_samples_us.is_empty() {
+            return Some("incremental_rebuild_samples_us");
+        }
+        self.projection_case_matrix_incomplete_reason()
     }
 
     fn cold_model_loads_within_deadline(&self) -> bool {
@@ -975,7 +1041,7 @@ impl SemanticNativeResourceSampleV1 {
                 .all(|sample| *sample != 0 && *sample <= deadline_micros)
     }
 
-    fn projection_case_matrix_is_complete(&self) -> bool {
+    fn projection_case_matrix_incomplete_reason(&self) -> Option<&'static str> {
         let observed = self
             .projection_cases
             .keys()
@@ -985,67 +1051,89 @@ impl SemanticNativeResourceSampleV1 {
             .into_iter()
             .collect::<BTreeSet<_>>();
         if observed != expected {
-            return false;
+            return Some("projection_case_catalog");
         }
         let Some(clean) = self.projection_cases.get(&SemanticProjectionCaseV1::Clean) else {
-            return false;
+            return Some("projection_case_clean");
         };
         let Some(one_symbol) = self
             .projection_cases
             .get(&SemanticProjectionCaseV1::OneSymbol)
         else {
-            return false;
+            return Some("projection_case_one_symbol");
         };
         let Some(deletion) = self
             .projection_cases
             .get(&SemanticProjectionCaseV1::Deletion)
         else {
-            return false;
+            return Some("projection_case_deletion");
         };
         let Some(no_op) = self.projection_cases.get(&SemanticProjectionCaseV1::NoOp) else {
-            return false;
+            return Some("projection_case_no_op");
         };
         let Some(idempotency_replay) = self
             .projection_cases
             .get(&SemanticProjectionCaseV1::IdempotencyReplay)
         else {
-            return false;
+            return Some("projection_case_idempotency_replay");
         };
         let Some(cancellation) = self
             .projection_cases
             .get(&SemanticProjectionCaseV1::Cancellation)
         else {
-            return false;
+            return Some("projection_case_cancellation");
         };
         let Some(incompatible) = self
             .projection_cases
             .get(&SemanticProjectionCaseV1::IncompatibleState)
         else {
-            return false;
+            return Some("projection_case_incompatible_state");
         };
-        clean.outcome == SemanticProjectionCaseOutcomeV1::Complete
-            && clean.projection_calls == clean.chunks_added_or_changed
-            && clean.projection_calls != 0
-            && one_symbol.outcome == SemanticProjectionCaseOutcomeV1::Complete
-            && one_symbol.projection_calls == one_symbol.chunks_added_or_changed
-            && one_symbol.projection_calls != 0
-            && deletion.outcome == SemanticProjectionCaseOutcomeV1::Complete
-            && deletion.chunks_deleted != 0
-            && no_op.outcome == SemanticProjectionCaseOutcomeV1::Complete
-            && no_op.projection_calls == 0
-            && no_op.chunks_added_or_changed == 0
-            && no_op.chunks_deleted == 0
-            && idempotency_replay.outcome == SemanticProjectionCaseOutcomeV1::Complete
-            && idempotency_replay.projection_calls == 0
-            && idempotency_replay.chunks_added_or_changed == 0
-            && idempotency_replay.chunks_deleted == 0
-            && idempotency_replay.chunks_reused == 0
-            && cancellation.outcome == SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication
-            && cancellation.projection_calls != 0
-            && cancellation.chunks_added_or_changed != 0
-            && cancellation.projection_calls < cancellation.chunks_added_or_changed
-            && incompatible.outcome == SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible
-            && incompatible.projection_calls != 0
+        if clean.outcome != SemanticProjectionCaseOutcomeV1::Complete
+            || clean.projection_calls != clean.chunks_added_or_changed
+            || clean.projection_calls == 0
+        {
+            return Some("projection_case_clean");
+        }
+        if one_symbol.outcome != SemanticProjectionCaseOutcomeV1::Complete
+            || one_symbol.projection_calls != one_symbol.chunks_added_or_changed
+            || one_symbol.projection_calls == 0
+        {
+            return Some("projection_case_one_symbol");
+        }
+        if deletion.outcome != SemanticProjectionCaseOutcomeV1::Complete
+            || deletion.chunks_deleted == 0
+        {
+            return Some("projection_case_deletion");
+        }
+        if no_op.outcome != SemanticProjectionCaseOutcomeV1::Complete
+            || no_op.projection_calls != 0
+            || no_op.chunks_added_or_changed != 0
+            || no_op.chunks_deleted != 0
+        {
+            return Some("projection_case_no_op");
+        }
+        if idempotency_replay.outcome != SemanticProjectionCaseOutcomeV1::Complete
+            || idempotency_replay.projection_calls != 0
+            || idempotency_replay.chunks_added_or_changed != 0
+            || idempotency_replay.chunks_deleted != 0
+            || idempotency_replay.chunks_reused != 0
+        {
+            return Some("projection_case_idempotency_replay");
+        }
+        if cancellation.outcome != SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication
+            || cancellation.projection_calls == 0
+            || cancellation.chunks_added_or_changed == 0
+            || cancellation.projection_calls >= cancellation.chunks_added_or_changed
+        {
+            return Some("projection_case_cancellation");
+        }
+        if incompatible.outcome != SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible
+            || incompatible.projection_calls == 0
+        {
+            return Some("projection_case_incompatible_state");
+        }
+        None
     }
 
     /// Lossless projection into the resource fields understood by the current
@@ -1096,25 +1184,25 @@ impl SemanticNativeResourceEvidenceV1 {
         })?;
         for (scale, sample) in [("current", current), ("10x", ten_x)] {
             match sample {
-                SemanticNativeStageResultV1::Complete(sample) if !sample.is_complete() => {
-                    return Err(SemanticNativeEvaluationErrorV1::Contract(
-                        "complete resource evidence is missing a raw observation".to_owned(),
-                    ));
-                }
-                SemanticNativeStageResultV1::Complete(sample)
-                    if sample.provenance.scale != scale =>
-                {
-                    return Err(SemanticNativeEvaluationErrorV1::Contract(
-                        "resource evidence provenance names the wrong scale".to_owned(),
-                    ));
+                SemanticNativeStageResultV1::Complete(sample) => {
+                    if let Some(reason) = sample.incomplete_reason() {
+                        return Err(SemanticNativeEvaluationErrorV1::Contract(format!(
+                            "complete resource evidence is missing a raw observation: {}",
+                            reason
+                        )));
+                    }
+                    if sample.provenance.scale != scale {
+                        return Err(SemanticNativeEvaluationErrorV1::Contract(
+                            "resource evidence provenance names the wrong scale".to_owned(),
+                        ));
+                    }
                 }
                 SemanticNativeStageResultV1::NotRequested => {
                     return Err(SemanticNativeEvaluationErrorV1::Contract(
                         "current and 10x resource measurements are required".to_owned(),
                     ));
                 }
-                SemanticNativeStageResultV1::Complete(_)
-                | SemanticNativeStageResultV1::Pending { .. } => {}
+                SemanticNativeStageResultV1::Pending { .. } => {}
             }
         }
         if let (
@@ -1350,18 +1438,25 @@ mod tests {
         let mut sample = complete_resource_sample();
         sample.tokenizer_bytes = None;
         assert!(!sample.is_complete());
+        assert_eq!(sample.incomplete_reason(), Some("tokenizer_bytes"));
 
         let mut sample = complete_resource_sample();
         sample.cold_model_load_samples_us = vec![30_000_001];
         assert!(!sample.is_complete());
+        assert_eq!(
+            sample.incomplete_reason(),
+            Some("cold_model_load_samples_us")
+        );
 
         let mut sample = complete_resource_sample();
         sample.provenance.threads = 0;
         assert!(!sample.is_complete());
+        assert_eq!(sample.incomplete_reason(), Some("threads"));
 
         let mut sample = complete_resource_sample();
         sample.provenance.max_concurrent_sessions = 2;
         assert!(!sample.is_complete());
+        assert_eq!(sample.incomplete_reason(), Some("max_concurrent_sessions"));
     }
 
     #[test]

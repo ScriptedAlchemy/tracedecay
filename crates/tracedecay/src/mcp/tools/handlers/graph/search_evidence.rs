@@ -9,7 +9,7 @@ use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 
 use super::super::dependency_hints;
 
-#[hotpath::measure(future = true, label = "mcp.graph.race.total")]
+#[hotpath::measure(future = true, label = "mcp.graph.search_race")]
 pub(super) async fn race_primary_search_with_graph<S, G>(
     search: S,
     graph: G,
@@ -119,7 +119,7 @@ impl<'a> SearchGraphEvidence<'a> {
         self.unavailable.as_ref()
     }
 
-    #[hotpath::measure(future = true, label = "mcp.graph.search.import")]
+    #[hotpath::measure(future = true, label = "mcp.graph.import_hint")]
     pub(super) async fn external_import_hint(
         &self,
         query: &str,

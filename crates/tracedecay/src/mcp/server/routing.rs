@@ -16,6 +16,22 @@ use crate::mcp::project_route::{
 pub(crate) struct SelectedProjectResponseLease {
     _guard: tokio::sync::OwnedRwLockReadGuard<()>,
     revoked: tracedecay_usecases::context::CancellationToken,
+    _active: ResponseLeaseGaugeGuard,
+}
+
+struct ResponseLeaseGaugeGuard;
+
+impl ResponseLeaseGaugeGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("mcp.server.response_leases_active").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for ResponseLeaseGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.server.response_leases_active").dec(1_u64);
+    }
 }
 
 impl SelectedProjectResponseLease {
@@ -26,6 +42,7 @@ impl SelectedProjectResponseLease {
         Self {
             _guard: guard,
             revoked,
+            _active: ResponseLeaseGaugeGuard::enter(),
         }
     }
 
@@ -66,7 +83,6 @@ impl ConnectionRouteState {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.routing.observe_initialize", future = true)]
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
@@ -115,7 +131,7 @@ impl ConnectionRouteState {
     }
 }
 
-#[hotpath::measure(label = "mcp.server.routing.initialize_route", future = true)]
+#[hotpath::measure(label = "mcp.server.initialize_route", future = true)]
 async fn resolve_initialize_roots_project_route(
     params: Option<&Value>,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -143,7 +159,7 @@ async fn resolve_initialize_roots_project_route(
     }))
 }
 
-#[hotpath::measure(label = "mcp.server.routing.project_route", future = true)]
+#[hotpath::measure(label = "mcp.server.project_route", future = true)]
 pub(crate) async fn resolve_private_project_route(
     requested_path: &Path,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -252,7 +268,6 @@ async fn resolve_initialize_roots_project_path(
     None
 }
 
-#[hotpath::measure(label = "mcp.server.routing.initialize_root", future = true)]
 async fn resolve_initialize_root_project_path(
     root: &Path,
     registry_db: &RegisteredGlobalDb,

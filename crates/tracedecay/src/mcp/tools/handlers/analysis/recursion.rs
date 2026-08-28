@@ -4,7 +4,7 @@ use super::*;
 
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
-#[hotpath::measure(label = "mcp.analysis.recursion.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
 pub(crate) async fn handle_recursion(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

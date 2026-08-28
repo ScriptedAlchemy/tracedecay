@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.analysis.complexity.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
 pub(crate) async fn handle_complexity(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -103,7 +103,7 @@ fn analysis_score(
         .saturating_add(fan_in.get(&symbol.occurrence).copied().unwrap_or(0))
 }
 
-#[hotpath::measure(label = "mcp.analysis.doc_coverage.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
 pub(crate) async fn handle_doc_coverage(
     _cg: &TraceDecay,
     _graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -116,7 +116,7 @@ pub(crate) async fn handle_doc_coverage(
     ))
 }
 
-#[hotpath::measure(label = "mcp.analysis.god_class.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.god_class.total")]
 pub(crate) async fn handle_god_class(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

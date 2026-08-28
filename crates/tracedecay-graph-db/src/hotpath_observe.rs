@@ -18,6 +18,32 @@ pub(crate) enum HydrationSource {
     SemanticVector,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GrafeoMemoryPhase {
+    Open,
+    PublishStart,
+    ReplayHydrated,
+    NativeVerified,
+    Published,
+    RecoveryStart,
+    Recovered,
+}
+
+impl GrafeoMemoryPhase {
+    #[cfg(feature = "hotpath")]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::PublishStart => "publish_start",
+            Self::ReplayHydrated => "replay_hydrated",
+            Self::NativeVerified => "native_verified",
+            Self::Published => "published",
+            Self::RecoveryStart => "recovery_start",
+            Self::Recovered => "recovered",
+        }
+    }
+}
+
 impl HydrationSource {
     #[cfg(any(feature = "hotpath", test, feature = "test-helpers"))]
     pub(crate) const fn as_str(self) -> &'static str {
@@ -94,6 +120,26 @@ pub(crate) fn record_hydration_source(source: HydrationSource) {
     {
         let _ = source;
     }
+}
+
+/// Records Grafeo's own memory census at coarse lifecycle boundaries. The
+/// census walks internal store structures, so it runs only in opt-in Hotpath
+/// builds and never on graph query paths.
+#[inline(always)]
+#[cfg(feature = "hotpath")]
+pub(crate) fn record_grafeo_memory(database: &grafeo_engine::GrafeoDB, phase: GrafeoMemoryPhase) {
+    let usage = hotpath::measure_block!("graph_db.memory.census", database.memory_usage());
+    hotpath::val!("graph_db.memory.phase").set(&phase.as_str());
+    hotpath::gauge!("graph_db.memory.total_bytes").set(usage.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.store_bytes").set(usage.store.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.index_bytes").set(usage.indexes.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.mvcc_bytes").set(usage.mvcc.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.cache_bytes").set(usage.caches.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.string_pool_bytes").set(usage.string_pool.total_bytes as f64);
+    hotpath::gauge!("graph_db.memory.buffer_budget_bytes")
+        .set(usage.buffer_manager.budget_bytes as f64);
+    hotpath::gauge!("graph_db.memory.buffer_allocated_bytes")
+        .set(usage.buffer_manager.allocated_bytes as f64);
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

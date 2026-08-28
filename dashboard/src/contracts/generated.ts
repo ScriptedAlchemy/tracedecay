@@ -526,7 +526,7 @@ export const AutomationSettingsPayloadV1Schema = z.object({
 });
 export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPayloadV1Schema>;
 
-export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
+export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
 export type AutomationSkipReasonV1 = z.infer<typeof AutomationSkipReasonV1Schema>;
 
 export const AutomationTaskStatusV1Schema = z.object({
@@ -2722,7 +2722,7 @@ export const LeakOwnerClassV1Schema = z.enum(["delivery", "git", "unknown", "wor
 export type LeakOwnerClassV1 = z.infer<typeof LeakOwnerClassV1Schema>;
 
 /** Bounded action an adapter may offer without inferring executable authority. */
-export const LegalActionSchema = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "retry"]);
+export const LegalActionSchema = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "restart_without_cursor", "retry"]);
 export type LegalAction = z.infer<typeof LegalActionSchema>;
 
 export const LinkAcceptedWorkAttemptRequestV1Schema = z.object({
@@ -4326,6 +4326,23 @@ export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 export const SessionIdSchema = z.string();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
+/** Structural budget boundary that rejected a session retrieval request.
+These causes are non-retryable request corrections; concurrent permit or
+queue pressure remains a separate capacity-saturation failure. */
+export const SessionRetrievalBudgetStageV1Schema = z.enum(["context_bytes", "context_tokens", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
+export type SessionRetrievalBudgetStageV1 = z.infer<typeof SessionRetrievalBudgetStageV1Schema>;
+
+export const SessionRetrievalStructuralRefusalV1Schema = z.discriminatedUnion("refusal", [z.object({
+  refusal: z.literal("budget_exhausted"),
+  stage: z.lazy(() => SessionRetrievalBudgetStageV1Schema),
+}).strict(), z.object({
+  kind: z.string(),
+  maximum: z.number().int().safe().min(0),
+  observed: z.number().int().safe().min(0),
+  refusal: z.literal("cursor_manifest_limit_exceeded"),
+}).strict()]);
+export type SessionRetrievalStructuralRefusalV1 = z.infer<typeof SessionRetrievalStructuralRefusalV1Schema>;
+
 export const SettingsAvailabilityV1Schema = z.object({
   available: z.boolean(),
   reason: z.string().nullable().optional(),
@@ -5372,7 +5389,9 @@ export const WorkEvidenceFrontierV1Schema = z.object({
 }).strict();
 export type WorkEvidenceFrontierV1 = z.infer<typeof WorkEvidenceFrontierV1Schema>;
 
-export const WorkEvidenceOmissionReasonV1Schema = z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "reset_required", "stale", "timed_out", "unavailable"]);
+export const WorkEvidenceOmissionReasonV1Schema = z.union([z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "reset_required", "stale", "timed_out", "unavailable"]), z.object({
+  structural_refusal: z.lazy(() => SessionRetrievalStructuralRefusalV1Schema),
+}).strict()]);
 export type WorkEvidenceOmissionReasonV1 = z.infer<typeof WorkEvidenceOmissionReasonV1Schema>;
 
 export const WorkEvidenceOmissionV1Schema = z.object({

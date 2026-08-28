@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.info.read.total")]
+#[hotpath::measure(future = true, label = "mcp.info.read.total")]
 pub(crate) async fn handle_read(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

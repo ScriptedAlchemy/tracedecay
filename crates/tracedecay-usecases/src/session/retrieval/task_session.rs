@@ -24,9 +24,15 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     },
     Unavailable,
     ResetRequired,
+    CursorManifestLimitExceeded {
+        kind: tracedecay_domain::CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    TimedOut,
     Cancelled,
 }
 
@@ -43,6 +49,7 @@ pub(super) enum SessionExecutionAdmissionFailure {
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    TimedOut,
     Cancelled,
 }
 
@@ -53,6 +60,7 @@ impl SessionExecutionAdmissionFailure {
             Self::Denied => SessionRetrievalOutcome::Denied,
             Self::Unavailable => SessionRetrievalOutcome::Unavailable,
             Self::BudgetExhausted { stage } => super::budget_exhausted(stage),
+            Self::TimedOut => SessionRetrievalOutcome::TimedOut,
             Self::Cancelled => SessionRetrievalOutcome::Cancelled,
         }
     }
@@ -70,8 +78,14 @@ where
         binding: &SessionRequestBinding,
         query: &SessionTemporalQuery,
     ) -> Result<AdmittedSessionTemporalExecution, SessionExecutionAdmissionFailure> {
-        if application_request_interruption(context, binding.cancellation()).is_some() {
-            return Err(SessionExecutionAdmissionFailure::Cancelled);
+        match application_request_interruption(context, binding.cancellation()) {
+            Some(crate::context::RequestInterruption::Cancelled) => {
+                return Err(SessionExecutionAdmissionFailure::Cancelled);
+            }
+            Some(crate::context::RequestInterruption::DeadlineExceeded) => {
+                return Err(SessionExecutionAdmissionFailure::TimedOut);
+            }
+            None => {}
         }
         let authorization = SessionScopeAuthorizationRequest::new(
             context.actor().clone(),
@@ -91,15 +105,22 @@ where
         grant
             .validate(context, binding, &authorization)
             .map_err(map_authorization_failure)?;
-        if !within_request_budgets(binding, query)
-            || self.estimator.version() != query.context_budget.estimator_version
-        {
+        if let Some(stage) = request_budget_refusal(binding, query) {
+            return Err(SessionExecutionAdmissionFailure::BudgetExhausted { stage });
+        }
+        if self.estimator.version() != query.context_budget.estimator_version {
             return Err(SessionExecutionAdmissionFailure::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+                stage: SessionRetrievalBudgetStageV1::EstimatorVersionMismatch,
             });
         }
-        if application_request_interruption(context, binding.cancellation()).is_some() {
-            return Err(SessionExecutionAdmissionFailure::Cancelled);
+        match application_request_interruption(context, binding.cancellation()) {
+            Some(crate::context::RequestInterruption::Cancelled) => {
+                return Err(SessionExecutionAdmissionFailure::Cancelled);
+            }
+            Some(crate::context::RequestInterruption::DeadlineExceeded) => {
+                return Err(SessionExecutionAdmissionFailure::TimedOut);
+            }
+            None => {}
         }
 
         let root_digest = digest_root(grant.scope().authorized_root().identity());
@@ -191,7 +212,7 @@ where
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "usecases.session.task_session", future = true)]
+    #[hotpath::measure(label = "usecases.session.task_session")]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,
@@ -222,16 +243,25 @@ where
             Ok(request) => request,
             Err(error) => return map_task_session_callback_error(error),
         };
-        let Ok(result) = run_application_request_interruptible(
-            context,
-            session_binding.cancellation(),
-            self.execution
-                .execute_task_session(request, selector, &self.estimator),
-            || admitted.cancellation_control.cancel(),
+        let result = match hotpath::future!(
+            run_application_request_interruptible(
+                context,
+                session_binding.cancellation(),
+                self.execution
+                    .execute_task_session(request, selector, &self.estimator),
+                || admitted.cancellation_control.cancel(),
+            ),
+            label = "usecases.session.task_session.execute"
         )
         .await
-        else {
-            return TaskSessionRetrievalOutcomeV1::Cancelled;
+        {
+            Ok(result) => result,
+            Err(RequestInterruption::DeadlineExceeded) => {
+                return TaskSessionRetrievalOutcomeV1::TimedOut;
+            }
+            Err(RequestInterruption::Cancelled) => {
+                return TaskSessionRetrievalOutcomeV1::Cancelled;
+            }
         };
         match result {
             Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(report))
@@ -269,6 +299,7 @@ fn task_session_admission_failure(
         SessionExecutionAdmissionFailure::BudgetExhausted { stage } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
+        SessionExecutionAdmissionFailure::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
         SessionExecutionAdmissionFailure::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
     }
 }
@@ -298,17 +329,51 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::BudgetExhausted { stage } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
+        SessionRetrievalOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
         SessionRetrievalOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
         SessionRetrievalOutcome::Unavailable
+        | SessionRetrievalOutcome::CursorStale
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }
         | SessionRetrievalOutcome::Locked
         | SessionRetrievalOutcome::Redacted
-        | SessionRetrievalOutcome::Deleted
-        | SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
-            TaskSessionRetrievalOutcomeV1::Unavailable
-        }
+        | SessionRetrievalOutcome::Deleted => TaskSessionRetrievalOutcomeV1::Unavailable,
+        SessionRetrievalOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::CursorManifestLimitKindV1;
+    use tracedecay_temporal_query::TemporalKernelError;
+    use tracedecay_temporal_query::ports::TemporalPortError;
+
+    use super::*;
+
+    #[test]
+    fn task_session_preserves_cursor_manifest_refusal_details() {
+        assert_eq!(
+            map_task_session_execution_error(SessionTemporalExecutionError::Kernel(
+                TemporalKernelError::Port(TemporalPortError::ParticipantLimitExceeded {
+                    observed: 257,
+                    maximum: 256,
+                }),
+            )),
+            TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+                kind: CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            }
+        );
     }
 }

@@ -18,6 +18,7 @@ use tracedecay_domain::{
     WorkProposalDecisionV1, WorkRelationReplanDecisionV1,
 };
 
+use crate::retrieval::SessionRetrievalStructuralRefusalV1;
 use crate::work::work_authority;
 use crate::{
     AuthorizedWorkProductScopeV1, OpaqueCursor, RequestAdmission, RequestContext,
@@ -204,6 +205,7 @@ pub enum WorkEvidenceOmissionReasonV1 {
     Cancelled,
     TimedOut,
     Redacted,
+    StructuralRefusal(SessionRetrievalStructuralRefusalV1),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -343,6 +345,8 @@ pub enum WorkEvidenceHydrationErrorV1 {
     Cancelled,
     #[error("evidence hydration timed out")]
     TimedOut,
+    #[error("evidence hydration was structurally refused: {0:?}")]
+    StructuralRefusal(SessionRetrievalStructuralRefusalV1),
 }
 
 pub type WorkTaskSessionFuture<'a> = Pin<
@@ -670,7 +674,8 @@ where
                 | WorkEvidenceOmissionReasonV1::Unavailable
                 | WorkEvidenceOmissionReasonV1::ResetRequired
                 | WorkEvidenceOmissionReasonV1::Cancelled
-                | WorkEvidenceOmissionReasonV1::TimedOut => {
+                | WorkEvidenceOmissionReasonV1::TimedOut
+                | WorkEvidenceOmissionReasonV1::StructuralRefusal(_) => {
                     freshness = merge_freshness(freshness, WorkEvidenceFreshnessV1::Unknown)
                 }
             }
@@ -1107,6 +1112,9 @@ fn hydration_omission(
         WorkEvidenceHydrationErrorV1::Stale => WorkEvidenceOmissionReasonV1::Stale,
         WorkEvidenceHydrationErrorV1::Cancelled => WorkEvidenceOmissionReasonV1::Cancelled,
         WorkEvidenceHydrationErrorV1::TimedOut => WorkEvidenceOmissionReasonV1::TimedOut,
+        WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal) => {
+            WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal)
+        }
     };
     WorkEvidenceOmissionV1 {
         relation: relation.to_owned(),

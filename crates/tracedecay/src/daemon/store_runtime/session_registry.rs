@@ -60,58 +60,44 @@ pub(crate) use profile_memory::open_user_memory_db;
 ///
 /// This was 8, which is where enrolment actually stopped: a profile with four
 /// projects was refused with `graph capacity budget exhausted (limit 8)`, and
-/// once the budget was exhausted even a read-only `projects list` failed.
-/// Nothing about 8 was derived — the working set of a developer with a few
-/// dozen checkouts is far above it.
+/// once the budget was exhausted even a read-only `projects list` failed. Two
+/// graph owners per mounted project plus two profile-wide ones is exactly 8,
+/// so three projects filled it. Nothing about 8 was derived.
 ///
-/// Sizing is honest about what does and does not bound this today. File
-/// descriptors are not the constraint (a mount holds a handful). Resident
-/// memory *is*, and it is currently ungoverned for these owners: no
-/// resident-memory gate covers a mounted project runtime, and capacity
-/// eviction cannot reclaim one, because a mounted project holds its owner
-/// attachment for the life of the mount and so can never be selected as an
-/// eviction candidate. A ceiling this high therefore means residency grows
-/// with the number of projects actually touched. That is the deliberate trade
-/// — refusing the fourth project was the worse failure — and the real fix is
+/// Resident memory is the real constraint and it is currently ungoverned for
+/// these owners: capacity eviction cannot reclaim a mounted project, because
+/// it holds its owner attachment for the life of the mount and so is never a
+/// candidate. A ceiling this high therefore lets residency grow with the
+/// number of projects actually touched. That is the deliberate trade —
+/// refusing the fourth project was the worse failure — and the real fix is
 /// idle-project hibernation, which is follow-up work.
 ///
-/// This is the *only* declared project-population ceiling. Every other ceiling
-/// that has to admit the same projects is derived from it below, so the
-/// advertised capacity cannot silently become unreachable again.
+/// This is the *only* declared project-population ceiling; every other ceiling
+/// that must admit the same projects is derived from it below.
 const MAX_RETAINED_PROJECT_RUNTIME_OWNERS: usize = 4_096;
 
 /// Graph owners that exist once per profile rather than once per project: the
-/// profile memory graph and the profile session-relation graph. Both are
-/// retained for the life of the daemon, so they permanently occupy graph
-/// registry slots no project can use.
+/// profile memory graph and the profile session-relation graph. Both live for
+/// the daemon's lifetime, so they permanently hold slots no project can use.
 const PROFILE_WIDE_GRAPH_DB_OWNERS: usize = 2;
 
 const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 
 /// Graph registry slot ceiling, derived so the project ceiling above is
-/// actually reachable.
-///
-/// Written as arithmetic rather than a round literal on purpose: the
-/// profile-wide owners take their slots first, so a hand-picked ceiling is
-/// short by exactly that many and the last project fails inside the graph
-/// registry before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
-/// Deriving it keeps the two ceilings from drifting apart when either input
-/// changes.
+/// actually reachable. Written as arithmetic rather than a literal because the
+/// profile-wide owners take their slots first: a hand-picked number is short by
+/// exactly that many, and the last project then fails inside the graph registry
+/// before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
 pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
     + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
-/// Remote Brain node owner ceiling, taken from the credential registry rather
-/// than declared independently.
-///
-/// These two ceilings admit the same nodes and are not interchangeable about
-/// *when* they refuse. Owner admission refuses before anything is published;
-/// the credential authority refuses after the runtime owner is published and
-/// the node's `remote.db` is provisioned. Whenever this ceiling is the looser
-/// of the two, the refusal lands on the later check and leaves a provisioned
-/// database behind — and startup remounts every discovered `remote.db`, so the
-/// residue turns the next daemon start into a hard failure. Binding this to
-/// the credential ceiling keeps the earlier, residue-free refusal
-/// authoritative by construction.
+/// Remote Brain node ceiling, taken from the credential registry rather than
+/// declared independently. Owner admission refuses before anything is
+/// published; the credential authority refuses after the runtime owner exists
+/// and the node's `remote.db` is provisioned. Whenever this ceiling is the
+/// looser of the two the refusal lands on the later check and leaves a
+/// provisioned database behind, and startup remounts every discovered
+/// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize =
     crate::daemon::remote_protocol::MAX_REGISTERED_REMOTE_NODES;
 
@@ -172,29 +158,27 @@ impl RegisteredSessionOwnerV1 {
         owner: &SessionGraphOwnerV1,
         scope: SessionRelationScope,
     ) -> Result<()> {
-        hotpath::measure_block!("daemon.session_registry.graph_lease", {
-            let graph = owner.graph.issue_lease().map_err(|error| {
+        let graph = owner.graph.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue registered session relation graph client",
+                error.to_string(),
+            )
+        })?;
+        database
+            .bind_session_relation_graph(
+                scope,
+                graph,
+                owner.graph.binding().clone(),
+                owner.graph.verified_locator().clone(),
+            )
+            .map_err(|_| {
                 session_registry_error(
-                    "issue registered session relation graph client",
-                    error.to_string(),
+                    "bind issued registered session relation graph",
+                    "issued graph client did not match the exact registered session owner"
+                        .to_owned(),
                 )
             })?;
-            database
-                .bind_session_relation_graph(
-                    scope,
-                    graph,
-                    owner.graph.binding().clone(),
-                    owner.graph.verified_locator().clone(),
-                )
-                .map_err(|_| {
-                    session_registry_error(
-                        "bind issued registered session relation graph",
-                        "issued graph client did not match the exact registered session owner"
-                            .to_owned(),
-                    )
-                })?;
-            Ok(())
-        })
+        Ok(())
     }
 
     fn graph_unavailable_reason(&self) -> String {

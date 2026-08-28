@@ -116,22 +116,34 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
 /// The frame accumulator lives in the reader, not in the `read_line` future, so
 /// a read dropped by a lost `tokio::select!` race resumes rather than truncating
 /// the frame. See [`tracedecay_usecases::host_admission::BoundedLineReader`].
+#[cfg(feature = "hotpath")]
+type ProfiledStdin = hotpath::io::InstrumentedIo<tokio::io::Stdin>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdin = tokio::io::Stdin;
+#[cfg(feature = "hotpath")]
+type ProfiledStdout = hotpath::io::InstrumentedIo<tokio::io::Stdout>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledStdout = tokio::io::Stdout;
+
 type StdinLineReader =
-    tracedecay_usecases::host_admission::BoundedLineReader<tokio::io::BufReader<tokio::io::Stdin>>;
+    tracedecay_usecases::host_admission::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
 
 /// Real stdio transport — reads from stdin, writes to stdout.
 pub struct StdioTransport {
     reader: StdinLineReader,
-    writer: tokio::io::Stdout,
+    writer: ProfiledStdout,
 }
 
 impl Default for StdioTransport {
     fn default() -> Self {
         Self {
             reader: tracedecay_usecases::host_admission::BoundedLineReader::new(
-                tokio::io::BufReader::new(tokio::io::stdin()),
+                tokio::io::BufReader::new(hotpath::io!(
+                    tokio::io::stdin(),
+                    label = "mcp.server.stdin"
+                )),
             ),
-            writer: tokio::io::stdout(),
+            writer: hotpath::io!(tokio::io::stdout(), label = "mcp.server.stdout"),
         }
     }
 }
@@ -172,7 +184,7 @@ where
     }
 }
 
-impl McpTransportWriter for &mut tokio::io::Stdout {
+impl McpTransportWriter for &mut ProfiledStdout {
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         tokio::io::AsyncWriteExt::write_all(&mut **self, line.as_bytes()).await
     }
@@ -184,7 +196,7 @@ impl McpTransportWriter for &mut tokio::io::Stdout {
 
 impl McpDuplexTransport for StdioTransport {
     type Reader<'a> = &'a mut StdinLineReader;
-    type Writer<'a> = &'a mut tokio::io::Stdout;
+    type Writer<'a> = &'a mut ProfiledStdout;
 
     fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {
         (&mut self.reader, &mut self.writer)

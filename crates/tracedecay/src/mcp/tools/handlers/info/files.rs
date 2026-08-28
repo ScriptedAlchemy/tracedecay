@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.info.files.total")]
+#[hotpath::measure(future = true, label = "mcp.info.files.total")]
 pub(crate) async fn handle_files(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

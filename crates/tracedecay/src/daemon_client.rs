@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -369,6 +370,66 @@ pub struct DaemonInvocationClient {
     connection: crate::daemon::DaemonConnection,
     handshake: crate::daemon::DaemonHandshake,
     state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+    activity: Arc<DaemonInvocationClientActivity>,
+}
+
+#[derive(Default)]
+struct DaemonInvocationClientActivity {
+    queued: AtomicUsize,
+    in_flight: AtomicUsize,
+}
+
+enum DaemonInvocationClientPhase {
+    Queued,
+    InFlight,
+}
+
+struct DaemonInvocationClientActivityGuard {
+    activity: Arc<DaemonInvocationClientActivity>,
+    phase: DaemonInvocationClientPhase,
+}
+
+impl DaemonInvocationClientActivity {
+    fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        hotpath::gauge!("daemon.invocation.client.queued").inc(1.0);
+        DaemonInvocationClientActivityGuard {
+            activity: Arc::clone(self),
+            phase: DaemonInvocationClientPhase::Queued,
+        }
+    }
+
+    fn in_flight(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        hotpath::gauge!("daemon.invocation.client.in_flight").inc(1.0);
+        DaemonInvocationClientActivityGuard {
+            activity: Arc::clone(self),
+            phase: DaemonInvocationClientPhase::InFlight,
+        }
+    }
+}
+
+impl DaemonInvocationClientActivityGuard {
+    fn into_in_flight(self) -> Self {
+        let activity = Arc::clone(&self.activity);
+        drop(self);
+        activity.in_flight()
+    }
+}
+
+impl Drop for DaemonInvocationClientActivityGuard {
+    fn drop(&mut self) {
+        match self.phase {
+            DaemonInvocationClientPhase::Queued => {
+                self.activity.queued.fetch_sub(1, Ordering::AcqRel);
+                hotpath::gauge!("daemon.invocation.client.queued").inc(-1.0);
+            }
+            DaemonInvocationClientPhase::InFlight => {
+                self.activity.in_flight.fetch_sub(1, Ordering::AcqRel);
+                hotpath::gauge!("daemon.invocation.client.in_flight").inc(-1.0);
+            }
+        }
+    }
 }
 
 struct DaemonInvocationConnection {
@@ -395,6 +456,7 @@ impl DaemonInvocationClient {
             connection: crate::daemon::current_daemon_connection()?,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            activity: Arc::new(DaemonInvocationClientActivity::default()),
         })
     }
 
@@ -407,22 +469,40 @@ impl DaemonInvocationClient {
             connection,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            activity: Arc::new(DaemonInvocationClientActivity::default()),
         }
     }
 
-    #[hotpath::measure(label = "daemon_client.invoke", future = true)]
+    #[hotpath::measure(label = "daemon.invocation.client", future = true)]
     pub(crate) async fn invoke(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
     ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
-        let mut state = self.state.lock().await;
+        let queued = self.activity.queued();
+        let mut state = hotpath::future!(
+            self.state.lock(),
+            label = "daemon.invocation.client.queue_wait"
+        )
+        .await;
+        let _in_flight = queued.into_in_flight();
         if state.is_none() {
-            let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
+            let stream = hotpath::future!(
+                crate::daemon::connect_to_daemon_connection(&self.connection),
+                label = "daemon.invocation.client.connect"
+            )
+            .await?;
             let (reader, mut writer) = stream.into_split();
-            crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
-                .await?;
+            hotpath::future!(
+                crate::daemon::write_daemon_preamble(
+                    &mut writer,
+                    &self.connection,
+                    &self.handshake
+                ),
+                label = "daemon.invocation.client.preamble"
+            )
+            .await?;
             *state = Some(DaemonInvocationConnection {
                 reader: BufReader::new(reader),
                 writer,
@@ -432,18 +512,30 @@ impl DaemonInvocationClient {
             let connection = state.as_mut().ok_or_else(|| crate::errors::TraceDecayError::Config {
                 message: "daemon invocation connection was not initialized".to_owned(),
             })?;
-            connection
-                .writer
-                .write_all(serde_json::to_string(&request)?.as_bytes())
-                .await?;
-            connection.writer.write_all(b"\n").await?;
-            connection.writer.flush().await?;
+            let request_json = hotpath::measure_block!(
+                "daemon.invocation.client.request.encode",
+                serde_json::to_string(&request)
+            )?;
+            hotpath::gauge!("daemon.invocation.client.request.bytes")
+                .set(request_json.len() as f64);
+            hotpath::future!(
+                async {
+                    connection.writer.write_all(request_json.as_bytes()).await?;
+                    connection.writer.write_all(b"\n").await?;
+                    connection.writer.flush().await
+                },
+                label = "daemon.invocation.client.request.write"
+            )
+            .await?;
 
-            let Some(line) = crate::daemon::next_daemon_response_line(
-                &mut connection.reader,
-                &self.connection,
-                request_label,
-                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            let Some(line) = hotpath::future!(
+                crate::daemon::next_daemon_response_line(
+                    &mut connection.reader,
+                    &self.connection,
+                    request_label,
+                    crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                ),
+                label = "daemon.invocation.client.response.wait"
             )
             .await?
             else {
@@ -453,8 +545,13 @@ impl DaemonInvocationClient {
                     ),
                 });
             };
+            hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
             let response: crate::daemon_contract::DaemonInvocationResponse =
-                serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
+                hotpath::measure_block!(
+                    "daemon.invocation.client.response.decode",
+                    serde_json::from_str(&line)
+                )
+                .map_err(|_| crate::errors::TraceDecayError::Config {
                     message: "daemon returned an invalid invocation response".to_owned(),
                 })?;
             if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
@@ -474,7 +571,6 @@ impl DaemonInvocationClient {
         result
     }
 
-    #[hotpath::measure(label = "daemon_client.acknowledge_delivery", future = true)]
     pub(crate) async fn acknowledge_work_delivery(
         &self,
         target_request_id: &str,
@@ -505,7 +601,13 @@ impl DaemonInvocationClient {
             }
         };
         let request_id = target_request_id.to_owned();
-        let mut state = self.state.lock().await;
+        let queued = self.activity.queued();
+        let mut state = hotpath::future!(
+            self.state.lock(),
+            label = "daemon.invocation.client.queue_wait"
+        )
+        .await;
+        let _in_flight = queued.into_in_flight();
         let result = async {
             let connection = state.as_mut().ok_or_else(|| {
                 crate::errors::TraceDecayError::Config {
@@ -560,7 +662,6 @@ impl DaemonInvocationClient {
         result
     }
 
-    #[hotpath::measure(label = "daemon_client.observe_feedback", future = true)]
     pub async fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
@@ -604,7 +705,6 @@ impl DaemonInvocationClient {
         .await
     }
 
-    #[hotpath::measure(label = "daemon_client.semantic_evaluate", future = true)]
     pub async fn evaluate_and_publish_semantic_profile_until(
         &self,
         evaluated_profile_id: &str,
@@ -678,10 +778,9 @@ impl DaemonInvocationClient {
         }
     }
 
-    #[hotpath::measure(label = "daemon_client.semantic_qualify", future = true)]
     pub async fn qualify_semantic_profile_until(
         &self,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: &str,
         deadline_micros: i64,
         cancellation: CancellationSignal,
     ) -> crate::errors::Result<SemanticEvaluationQualificationResultV1> {
@@ -707,7 +806,7 @@ impl DaemonInvocationClient {
             .invoke_controlled(
                 crate::daemon_contract::DaemonInvocationRequest::semantic_qualify(
                     request_id.as_str(),
-                    candidate,
+                    evaluated_profile_id.to_owned(),
                     observed_at,
                     deadline.clone(),
                     cancellation.context(),
@@ -738,7 +837,6 @@ impl DaemonInvocationClient {
         }
     }
 
-    #[hotpath::measure(label = "daemon_client.cancel", future = true)]
     async fn cancel_invocation(&self, target_request_id: &str) -> crate::errors::Result<()> {
         let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
         let (_reader, mut writer) = stream.into_split();
@@ -795,30 +893,29 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
         &self,
         invocation: ApplicationInvocation,
     ) -> ApplicationInvocationFuture<'_, Result<ApplicationResponse, InvocationError>> {
-        Box::pin(hotpath::future!(
-            async move {
-                let (context, request) = invocation.into_parts();
-                let (request_id, target, deadline, cancellation) = context.into_parts();
-                match request {
-                    ApplicationRequest::Surface { binding, payload } => {
-                        let (_binding_id, surface, operation, result_contract, _page) =
-                            binding.into_parts();
-                        let operation =
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let (request_id, target, deadline, cancellation) = context.into_parts();
+            match request {
+                ApplicationRequest::Surface { binding, payload } => {
+                    let (_binding_id, surface, operation, result_contract, _page) =
+                        binding.into_parts();
+                    let operation =
                         crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
                             operation.as_str(),
                         )
                         .ok_or(InvocationError::InvalidRequest)?;
-                        let typed = crate::application_surface::parse_application_surface_request(
-                            operation, payload,
-                        )
-                        .map_err(|_| InvocationError::InvalidRequest)?;
-                        let observed_at = invocation_now_micros();
-                        let cancellation_context = cancellation.context();
-                        let scope = match target {
-                            InvocationTarget::CurrentProject => None,
-                            InvocationTarget::Resolved(scope) => Some(scope),
-                        };
-                        let policy = if matches!(
+                    let typed = crate::application_surface::parse_application_surface_request(
+                        operation, payload,
+                    )
+                    .map_err(|_| InvocationError::InvalidRequest)?;
+                    let observed_at = invocation_now_micros();
+                    let cancellation_context = cancellation.context();
+                    let scope = match target {
+                        InvocationTarget::CurrentProject => None,
+                        InvocationTarget::Resolved(scope) => Some(scope),
+                    };
+                    let policy = if matches!(
                         operation,
                         crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
@@ -828,7 +925,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     } else {
                         InvocationCancellationPolicy::ReadOnly
                     };
-                        let request = match (operation, typed) {
+                    let request = match (operation, typed) {
                         (
                             crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
@@ -863,32 +960,28 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                         _ => return Err(InvocationError::InvalidRequest),
                     }
                     .with_delivery_route(application_delivery_route(surface));
-                        let response = self
-                            .invoke_controlled(request, deadline, cancellation, policy)
-                            .await
-                            .map_err(map_invocation_error)?;
-                        application_response(request_id, result_contract, response.outcome)
-                    }
-                    ApplicationRequest::FeedbackObservation {
-                        configuration_digest,
-                        observed_at,
-                        event,
-                    } => {
-                        let event = serde_json::from_value(event)
-                            .map_err(|_| InvocationError::InvalidRequest)?;
-                        self.observe_feedback(configuration_digest, observed_at, event)
-                            .await
-                            .map_err(|_| InvocationError::Unavailable)?;
-                        Ok(ApplicationResponse::ObservationAccepted)
-                    }
-                    ApplicationRequest::OperationEvents { .. }
-                    | ApplicationRequest::OperationCancel { .. } => {
-                        Err(InvocationError::Unavailable)
-                    }
+                    let response = self
+                        .invoke_controlled(request, deadline, cancellation, policy)
+                        .await
+                        .map_err(map_invocation_error)?;
+                    application_response(request_id, result_contract, response.outcome)
                 }
-            },
-            label = "daemon_client.application_invoke"
-        ))
+                ApplicationRequest::FeedbackObservation {
+                    configuration_digest,
+                    observed_at,
+                    event,
+                } => {
+                    let event = serde_json::from_value(event)
+                        .map_err(|_| InvocationError::InvalidRequest)?;
+                    self.observe_feedback(configuration_digest, observed_at, event)
+                        .await
+                        .map_err(|_| InvocationError::Unavailable)?;
+                    Ok(ApplicationResponse::ObservationAccepted)
+                }
+                ApplicationRequest::OperationEvents { .. }
+                | ApplicationRequest::OperationCancel { .. } => Err(InvocationError::Unavailable),
+            }
+        })
     }
 }
 

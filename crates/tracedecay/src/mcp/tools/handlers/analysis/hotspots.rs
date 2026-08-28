@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.analysis.hotspots.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.hotspots.total")]
 pub(crate) async fn handle_hotspots(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

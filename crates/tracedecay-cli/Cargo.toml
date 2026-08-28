@@ -174,9 +174,7 @@ url = "2"
 [dev-dependencies]
 axum = "0.8"
 dirs = "6"
-filetime = "0.2"
 fs2 = "0.4"
-jsonschema = { version = "0.46.8", default-features = false }
 regex = "1.12.3"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -192,6 +190,13 @@ xattr = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+
+# `fs2` is consumed only by `../tracedecay/tests/common/fixture.rs`, which
+# this crate's integration test binaries pull in through relative `#[path]`
+# attributes. Cargo-shear's per-crate scan cannot see files outside this
+# crate's directory tree, so it reports a false positive.
+[package.metadata.cargo-shear]
+ignored = ["fs2"]
 
 [build-dependencies]
 logo-art = "0.2"

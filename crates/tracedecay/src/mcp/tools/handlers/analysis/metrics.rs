@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.analysis.rank.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.rank.total")]
 pub(crate) async fn handle_rank(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -133,7 +133,7 @@ pub(crate) async fn handle_rank(
     ))
 }
 
-#[hotpath::measure(label = "mcp.analysis.largest.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.largest.total")]
 pub(crate) async fn handle_largest(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -202,7 +202,7 @@ pub(crate) async fn handle_largest(
     ))
 }
 
-#[hotpath::measure(label = "mcp.analysis.coupling.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.coupling.total")]
 pub(crate) async fn handle_coupling(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -297,7 +297,7 @@ pub(crate) async fn handle_coupling(
     ))
 }
 
-#[hotpath::measure(label = "mcp.analysis.inheritance_depth.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.inheritance_depth.total")]
 pub(crate) async fn handle_inheritance_depth(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -394,7 +394,7 @@ fn inheritance_depth(
     Ok(depth)
 }
 
-#[hotpath::measure(label = "mcp.analysis.distribution.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.distribution.total")]
 pub(crate) async fn handle_distribution(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

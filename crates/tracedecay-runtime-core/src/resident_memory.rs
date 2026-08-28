@@ -5,26 +5,67 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, Weak};
 
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
+/// Conservative fallback when the host cannot report physical memory.
+///
+/// Production normally derives the authority from the machine. This fallback
+/// is not a project-size ceiling: the authority governs concurrently live
+/// resident allocations, while project data must remain paged or durable.
 pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
     NonZeroU64::MIN.saturating_add(6 * 1024 * 1024 * 1024 - 1);
 
 /// Environment override for the process resident-memory admission limit, in
-/// bytes. Unset, unparseable, or zero values keep the compiled default. The
-/// code-index worker pool derives its reservation from this same limit, so on
-/// hosts with plenty of RAM raising it both admits and widens indexing.
+/// bytes. Unset, unparseable, or zero values fall back to the RAM-derived
+/// authority. The code-index worker pool derives its reservation from this
+/// same limit, so on hosts with plenty of RAM raising it both admits and
+/// widens indexing.
 pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES";
 
-/// The admission limit honoring [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`].
-pub fn process_resident_memory_limit_v1() -> NonZeroU64 {
+/// Derive the concurrent resident-allocation authority for a known host size.
+#[must_use]
+pub fn process_resident_memory_limit_for_system_v1(total_memory_bytes: u64) -> NonZeroU64 {
+    NonZeroU64::new(total_memory_bytes.saturating_sub(total_memory_bytes / 4))
+        .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+}
+
+/// Read the operator override for the resident-allocation authority.
+///
+/// Unset, unparseable, and zero values yield `None` so the caller keeps the
+/// RAM-derived authority.
+#[must_use]
+fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
     std::env::var(PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .and_then(NonZeroU64::new)
-        .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+}
+
+/// Size the shared resident-allocation authority for this process.
+///
+/// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
+/// so operators can raise or lower the authority without rebuilding. Otherwise
+/// TraceDecay retains one quarter of physical RAM outside its modeled
+/// concurrent allocations for the OS, agent hosts, and allocations that do
+/// not yet participate in this authority. The remaining authority throttles
+/// simultaneous scratch ownership; it never limits repository bytes on disk.
+#[must_use]
+pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
+    if let Some(limit) = process_resident_memory_limit_override_v1() {
+        hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
+        return limit;
+    }
+    let system = System::new_with_specifics(
+        RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
+    );
+    let total_memory_bytes = system.total_memory();
+    let limit = process_resident_memory_limit_for_system_v1(total_memory_bytes);
+    hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
+    hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
+    limit
 }
 
 /// Stable component label inside one exact generation identity.

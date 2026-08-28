@@ -624,10 +624,22 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         | SessionRetrievalServiceOutcome::Deleted => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        outcome @ (SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalServiceOutcome::BudgetExhausted { .. }) => {
-            super::super::refusal::from_session_retrieval(outcome)
+        SessionRetrievalServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
         }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => {
+            RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
+        }
+        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
+            RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
+        }
+        SessionRetrievalServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
@@ -656,6 +668,19 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
         LcmDescribeServiceOutcome::BudgetExhausted => {
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
+        LcmDescribeServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
+        }
+        LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => {
+            RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
+        }
+        LcmDescribeServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         LcmDescribeServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
@@ -679,6 +704,19 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         LcmExpandServiceOutcome::BudgetExhausted => {
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal()
         }
+        LcmExpandServiceOutcome::CursorStale => {
+            RetainedSurfaceExecutionErrorV1::cursor_stale_refusal()
+        }
+        LcmExpandServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => {
+            RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
+        }
+        LcmExpandServiceOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         LcmExpandServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
             tracedecay_application::CancellationStage::DuringRead,
         ),
@@ -983,6 +1021,81 @@ fn default_context_budget() -> ContextBudget {
     admitted_context_budget(ADMITTED_RETRIEVAL_BYTE_LIMIT / 4)
 }
 
+#[cfg(test)]
+mod refusal_tests {
+    use tracedecay_application::{
+        ApplicationProblemKind, CancellationStage, LegalAction, RetainedSurfaceExecutionErrorV1,
+        RetryDirective, retained_surface_execution_problem,
+    };
+    use tracedecay_domain::CursorManifestLimitKindV1;
+
+    use super::{
+        LcmDescribeServiceOutcome, LcmExpandServiceOutcome, SessionRetrievalServiceOutcome,
+        describe_error, expand_error, retrieval_error,
+    };
+
+    #[test]
+    fn lcm_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
+        for (kind, expected_code) in [
+            (
+                CursorManifestLimitKindV1::Participants,
+                "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                CursorManifestLimitKindV1::CanonicalBytes,
+                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+        ] {
+            for error in [
+                retrieval_error(
+                    SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                        kind,
+                        observed: 257,
+                        maximum: 256,
+                    },
+                ),
+                describe_error(LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
+                    kind,
+                    observed: 257,
+                    maximum: 256,
+                }),
+                expand_error(LcmExpandServiceOutcome::CursorManifestLimitExceeded {
+                    kind,
+                    observed: 257,
+                    maximum: 256,
+                }),
+            ] {
+                assert!(!matches!(
+                    &error,
+                    RetainedSurfaceExecutionErrorV1::Saturated
+                ));
+                let problem = retained_surface_execution_problem(error);
+                assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+                assert_eq!(problem.retry(), RetryDirective::Never);
+                assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+                assert_eq!(
+                    problem
+                        .diagnostic()
+                        .map(|diagnostic| diagnostic.code.as_str()),
+                    Some(expected_code)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lcm_deadline_remains_timed_out() {
+        assert_eq!(
+            retrieval_error(SessionRetrievalServiceOutcome::TimedOut),
+            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
+        );
+        assert_eq!(
+            retrieval_error(SessionRetrievalServiceOutcome::Cancelled),
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+        );
+    }
+}
+
 fn bounded_value(
     value: Option<u64>,
     default: usize,
@@ -1001,4 +1114,35 @@ fn bounded_limit(
     default: usize,
 ) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
     bounded_value(value, default, MAX_RESULTS)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_application::{
+        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
+    };
+
+    use super::*;
+
+    #[test]
+    fn cursor_stale_lcm_refusals_require_cursorless_restart() {
+        for error in [
+            describe_error(LcmDescribeServiceOutcome::CursorStale),
+            expand_error(LcmExpandServiceOutcome::CursorStale),
+        ] {
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::Stale);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(
+                problem.legal_actions(),
+                &[LegalAction::RestartWithoutCursor]
+            );
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some("application.retained.cursor-stale")
+            );
+        }
+    }
 }

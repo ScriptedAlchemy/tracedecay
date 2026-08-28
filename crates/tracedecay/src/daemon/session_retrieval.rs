@@ -34,10 +34,15 @@ use crate::global_db::session_temporal::{
 use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
-use tracedecay_temporal_query::context::{TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalExecutionSnapshot};
+use tracedecay_temporal_query::context::{ContextError, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::hydration::HydrationError;
+use tracedecay_temporal_query::ports::{
+    ExecutionLimits, TemporalExecutionSnapshot, TemporalPortError,
+};
 use tracedecay_temporal_query::ranking::RankedCandidate;
-use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
+use tracedecay_temporal_query::{
+    TemporalHydratedResult, TemporalKernelError, TemporalKernelResult,
+};
 
 const MESSAGE_SEARCH_PROFILE_ID: &str = "profile.primary";
 const MESSAGE_SEARCH_SCHEMA_VERSION: u32 = 1;
@@ -61,8 +66,8 @@ pub(crate) const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 /// The admitted binding checks exactly four things: the three *total* byte
 /// limits against [`APPLICATION_RETRIEVAL_MAX_BYTES`], and that the hydration
 /// item count covers the requested page. The defaults are multi-MiB and are
-/// rejected outright, which reads to the caller as a terminal `Saturated`
-/// rather than a smaller answer, so those four are the ones this sizes.
+/// rejected outright as a non-retryable structural refusal rather than a
+/// smaller answer, so those four are the ones this sizes.
 ///
 /// Nothing else is narrowed. Candidate and record item counts are the pool the
 /// ranker draws from, not the page it returns: clamping them to `limit` would
@@ -78,6 +83,20 @@ pub(crate) fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
         hydration_limit: defaults.hydration_limit.max(limit),
         ..defaults
     }
+}
+
+pub(super) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
+    matches!(
+        error,
+        TemporalKernelError::DeadlineExceeded
+            | TemporalKernelError::Port(TemporalPortError::DeadlineExceeded)
+            | TemporalKernelError::Hydration(HydrationError::Interrupted(
+                TemporalPortError::DeadlineExceeded
+            ))
+            | TemporalKernelError::Context(ContextError::Interrupted(
+                TemporalPortError::DeadlineExceeded
+            ))
+    )
 }
 
 mod admitted;
@@ -497,6 +516,7 @@ impl DaemonSessionRetrievalService {
                 temporal: self.empty_temporal(),
                 freshness,
             },
+            SessionRetrievalOutcome::CursorStale => SessionRetrievalServiceOutcome::CursorStale,
             SessionRetrievalOutcome::Partial {
                 items,
                 freshness,
@@ -536,6 +556,7 @@ impl DaemonSessionRetrievalService {
             SessionRetrievalOutcome::BudgetExhausted { stage } => {
                 SessionRetrievalServiceOutcome::BudgetExhausted { stage }
             }
+            SessionRetrievalOutcome::TimedOut => SessionRetrievalServiceOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
         }
     }
@@ -568,6 +589,9 @@ impl DaemonSessionRetrievalService {
                 }
             }
             SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
+                SessionRetrievalServiceOutcome::TimedOut
+            }
             SessionTemporalExecutionError::Stale { generation_lag } => {
                 SessionRetrievalServiceOutcome::Stale {
                     temporal: self.empty_temporal(),

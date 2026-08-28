@@ -51,7 +51,7 @@ impl From<GrepSearchHit> for GrepHit {
     }
 }
 
-#[hotpath::measure(label = "mcp.search.grep.total")]
+#[hotpath::measure(future = true, label = "mcp.search.grep.total")]
 pub(super) async fn handle_grep(
     cg: &TraceDecay,
     args: Value,

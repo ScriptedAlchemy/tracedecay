@@ -102,7 +102,7 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
 }
 
 /// Lists exact local branch refs. A branch name never selects a branch DB.
-#[hotpath::measure(label = "mcp.git.branch_list.total")]
+#[hotpath::measure(future = true, label = "mcp.git.branch_list.total")]
 pub(crate) async fn handle_branch_list(
     cg: &TraceDecay,
     args: Value,
@@ -262,7 +262,7 @@ fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static s
 }
 
 /// Searches the generation sealed for the selected local ref's exact commit.
-#[hotpath::measure(label = "mcp.git.branch_search.total")]
+#[hotpath::measure(future = true, label = "mcp.git.branch_search.total")]
 pub(crate) async fn handle_branch_search(
     cg: &TraceDecay,
     args: Value,
@@ -504,7 +504,7 @@ fn branch_change_counts(
 }
 
 /// Compares generations sealed for the two selected local refs' exact commits.
-#[hotpath::measure(label = "mcp.git.branch_diff.total")]
+#[hotpath::measure(future = true, label = "mcp.git.branch_diff.total")]
 pub(crate) async fn handle_branch_diff(
     cg: &TraceDecay,
     args: Value,

@@ -488,6 +488,43 @@ pub fn write_packaged_native_qualification(
     })
 }
 
+/// Durably retain a daemon-qualified artifact without re-authoring its runtime
+/// expectations in the caller. The daemon has already validated those live
+/// authorities; this boundary revalidates the document shape and canonical
+/// bytes before publishing the file.
+pub fn write_daemon_native_qualification(
+    output: &Path,
+    bytes: &[u8],
+) -> Result<(), SearchEvalError> {
+    let qualification = serde_json::from_slice::<PackagedNativeQualificationV1>(bytes)
+        .map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)
+        .and_then(|qualification| {
+            validate_document_bindings(&qualification)?;
+            Ok(qualification)
+        })
+        .map_err(|error| SearchEvalError::Contract(error.to_string()))?;
+    let canonical = serde_json::to_vec(&qualification).map_err(|error| {
+        SearchEvalError::Contract(format!("serialize native qualification: {error}"))
+    })?;
+    if canonical != bytes {
+        return Err(SearchEvalError::Contract(
+            "native qualification bytes are not canonical".to_owned(),
+        ));
+    }
+    atomic_write(
+        output,
+        "native-qualification",
+        &canonical,
+        DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| {
+        SearchEvalError::Contract(format!(
+            "durably write native qualification {}: {error}",
+            output.display()
+        ))
+    })
+}
+
 /// Validate arbitrary package bytes without materializing evaluator assets.
 pub fn load_packaged_native_qualification_from_bytes(
     bytes: &[u8],

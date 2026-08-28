@@ -348,7 +348,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.request")]
+    #[hotpath::measure(label = "mcp.server.request", future = true)]
     pub(crate) async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
@@ -451,7 +451,7 @@ impl McpServer {
         result
     }
 
-    #[hotpath::measure(label = "mcp.server.hook_event")]
+    #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -618,7 +618,7 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_list")]
+    #[hotpath::measure(label = "mcp.server.tools_list", future = true)]
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -673,7 +673,7 @@ impl McpServer {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
-    #[hotpath::measure(label = "mcp.server.resources_read")]
+    #[hotpath::measure(label = "mcp.server.resources_read", future = true)]
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -838,7 +838,7 @@ impl McpServer {
 
     /// Applies the pre-dispatch freshness policy and records the call in the
     /// server counters and the activity lane.
-    #[hotpath::measure(label = "mcp.server.tools_call.begin_dispatch")]
+    #[hotpath::measure(label = "mcp.server.tools_call.begin_dispatch", future = true)]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
@@ -1048,6 +1048,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.accounting", future = true)]
     async fn record_success_accounting(
         &self,
         cg: &TraceDecay,
@@ -1076,6 +1077,7 @@ impl McpServer {
         );
     }
 
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check", future = true)]
     async fn append_version_notice(
         &self,
         result: &mut ToolResult,
@@ -1103,6 +1105,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.tools_call.complete.index_warnings", future = true)]
     async fn prepend_index_warnings(
         &self,
         include_connection_worktree_warning: bool,
@@ -1124,7 +1127,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete")]
+    #[hotpath::measure(label = "mcp.server.tools_call.complete", future = true)]
     async fn complete_tool_call(
         &self,
         id: Value,
@@ -1150,15 +1153,17 @@ impl McpServer {
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 mark_semantic_tool_error(&mut result);
                 if !tool_result_has_semantic_error(&result)
-                    && let Err(error) =
+                    && let Err(error) = hotpath::future!(
                         super::live_transcript_refresh::join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
                             selected_owner.is_some(),
                             self.project_session_refresh_wake.as_ref(),
                             self.user_session_refresh_wake.as_ref(),
-                        )
-                        .await
+                        ),
+                        label = "mcp.server.tools_call.complete.transcript_refresh"
+                    )
+                    .await
                 {
                     self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                         project_root: cg.project_root(),
@@ -1197,21 +1202,26 @@ impl McpServer {
                     .await;
                 self.prepend_index_warnings(selected_owner.is_none(), &mut result)
                     .await;
-                JsonRpcResponse::success(id, result.value)
+                hotpath::measure_block!(
+                    "mcp.server.tools_call.complete.response",
+                    JsonRpcResponse::success(id, result.value)
+                )
             }
             Err(error) => {
-                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
-                    project_root: cg.project_root(),
-                    session_id: analytics_session_id,
-                    tool_name: &tool_name,
-                    request_id: &request_id,
-                    arguments: &analytics_arguments,
-                    duration_us: elapsed_us,
-                    error: &error,
-                    connection_client_name,
-                    connection_instance_id,
-                });
-                tool_error_response(id, &tool_name, &error)
+                hotpath::measure_block!("mcp.server.tools_call.complete.error", {
+                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id,
+                        tool_name: &tool_name,
+                        request_id: &request_id,
+                        arguments: &analytics_arguments,
+                        duration_us: elapsed_us,
+                        error: &error,
+                        connection_client_name,
+                        connection_instance_id,
+                    });
+                    tool_error_response(id, &tool_name, &error)
+                })
             }
         }
     }
@@ -1326,7 +1336,7 @@ impl McpServer {
         ))
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call")]
+    #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,
@@ -1405,7 +1415,11 @@ impl McpServer {
         // lifecycle locks or fall back to the caller's response authority.
         let response_lifecycle = dispatch_server.project_server_lifecycle.clone();
         let response_gate = Arc::clone(response_lifecycle.response_gate());
-        let response_guard = response_gate.read_owned().await;
+        let response_guard = hotpath::future!(
+            response_gate.read_owned(),
+            label = "mcp.server.response_gate.wait"
+        )
+        .await;
         if response_lifecycle.response_revoked().is_cancelled() {
             return dispatch_server
                 .project_server_revoked_response(&id, &tool_name)

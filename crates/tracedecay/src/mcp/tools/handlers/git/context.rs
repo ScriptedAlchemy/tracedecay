@@ -223,7 +223,7 @@ where
     Ok(joined)
 }
 
-#[hotpath::measure(label = "mcp.git.diff_context.total")]
+#[hotpath::measure(future = true, label = "mcp.git.diff_context.total")]
 pub(crate) async fn handle_diff_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -352,7 +352,7 @@ pub(crate) async fn handle_diff_context(
     ))
 }
 
-#[hotpath::measure(label = "mcp.git.changelog.total")]
+#[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
 pub(crate) async fn handle_changelog(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -457,7 +457,7 @@ pub(crate) async fn handle_changelog(
     ))
 }
 
-#[hotpath::measure(label = "mcp.git.commit_context.total")]
+#[hotpath::measure(future = true, label = "mcp.git.commit_context.total")]
 pub(crate) async fn handle_commit_context(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
@@ -792,7 +792,7 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     )
 }
 
-#[hotpath::measure(label = "mcp.pr_context.total")]
+#[hotpath::measure(future = true, label = "mcp.pr_context.total")]
 pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
     graph: F,

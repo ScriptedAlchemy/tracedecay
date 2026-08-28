@@ -18,8 +18,9 @@ use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     BindingDigest, ExecutionControl, KernelVersions, PageRequest, TemporalAuthorizedRoot,
     TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalPortError, TemporalRecord, TemporalRetrievalScope,
-    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
+    TemporalParticipantManifest, TemporalPortError, TemporalPreparedCandidateCohort,
+    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
+    TemporalWatermarks,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
@@ -200,7 +201,7 @@ fn participant(
 }
 
 #[test]
-fn root_relation_reads_bind_each_frozen_participant_generation() {
+fn prepared_root_candidates_bind_each_frozen_participant_generation() {
     let snapshot = root_snapshot_with_mode(99, None, TemporalModeV1::Forensic)
         .with_participant_manifest(
             TemporalParticipantManifest::new(vec![
@@ -210,18 +211,26 @@ fn root_relation_reads_bind_each_frozen_participant_generation() {
             .expect("participant manifest"),
         )
         .expect("root snapshot");
-
-    assert_eq!(
-        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "claude").unwrap(),
-        2
-    );
-    assert_eq!(
-        participant_generation(&snapshot, &SessionId::new("session-b").unwrap(), "codex").unwrap(),
-        7
-    );
+    let mut candidate = candidate_for_anchor("anchor-a");
+    candidate.session = Some("session-a".to_string());
+    candidate.source = Some("claude".to_string());
+    candidate.participant_generation = 2;
     assert!(
-        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "codex").is_err(),
-        "a candidate must never inherit the root anchor generation"
+        snapshot
+            .clone()
+            .with_prepared_candidate_cohort(
+                TemporalPreparedCandidateCohort::new(vec![candidate.clone()]).expect("cohort")
+            )
+            .is_ok()
+    );
+    candidate.source = Some("codex".to_string());
+    assert_eq!(
+        snapshot
+            .with_prepared_candidate_cohort(
+                TemporalPreparedCandidateCohort::new(vec![candidate]).expect("cohort")
+            )
+            .expect_err("candidate cannot inherit another provider generation"),
+        TemporalPortError::UnauthorizedSnapshot
     );
 }
 
@@ -243,6 +252,7 @@ fn candidate_for_anchor(anchor_id: &str) -> RankingCandidate {
         source: Some("claude".to_string()),
         evidence_role: Some("user".to_string()),
         exact_ranges: Vec::new(),
+        participant_generation: 1,
     }
 }
 
@@ -1726,6 +1736,7 @@ async fn exact_candidate_matches_embedded_literal_and_returns_utf8_byte_range() 
         &row,
         CandidateChannel::ExactMessage,
         &TemporalRetrievalScope::Session(SessionId::new("session-snapshot").expect("session")),
+        1,
     )
     .expect("typed exact candidate");
 
@@ -2384,6 +2395,7 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
             source: Some("claude".to_string()),
             evidence_role: Some("user".to_string()),
             exact_ranges: Vec::new(),
+            participant_generation: 1,
         },
     )
     .collect::<Vec<_>>();

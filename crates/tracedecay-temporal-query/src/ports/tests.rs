@@ -556,7 +556,28 @@ fn candidate(stable_id: impl Into<String>) -> RankingCandidate {
         source: Some("source-1".to_string()),
         evidence_role: Some("message".to_string()),
         exact_ranges: Vec::new(),
+        participant_generation: 1,
     }
+}
+
+#[test]
+fn prepared_candidate_cohort_digest_binds_order_and_generation() {
+    let first = candidate("first");
+    let mut second = candidate("second");
+    second.anchor_id = anchor("anchor-2");
+    second.retriever_record_id = "record-2".to_string();
+
+    let original =
+        TemporalPreparedCandidateCohort::new(vec![first.clone(), second.clone()]).expect("cohort");
+    let reordered = TemporalPreparedCandidateCohort::new(vec![second.clone(), first.clone()])
+        .expect("reordered cohort");
+    let mut changed_generation = second;
+    changed_generation.participant_generation += 1;
+    let changed = TemporalPreparedCandidateCohort::new(vec![first, changed_generation])
+        .expect("changed generation cohort");
+
+    assert_ne!(original.ordered_digest(), reordered.ordered_digest());
+    assert_ne!(original.ordered_digest(), changed.ordered_digest());
 }
 
 fn snapshot_with_control(control: ExecutionControl) -> TemporalExecutionSnapshot {
@@ -662,6 +683,23 @@ fn bounded_async_pull_streams_multiple_pages_without_preloaded_vecs() {
 
 struct OversizedPort;
 
+struct PreparationFromReadPort<'a> {
+    port: &'a dyn TemporalReadPort,
+    snapshot: &'a TemporalExecutionSnapshot,
+    plan: &'a CandidatePlan,
+}
+
+impl TemporalCandidatePreparationPort for PreparationFromReadPort<'_> {
+    fn produce_prepared_candidate_page<'a>(
+        &'a self,
+        request: PageRequest,
+        sink: &'a mut CandidatePageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        self.port
+            .produce_candidate_page(self.snapshot, self.plan, request, sink)
+    }
+}
+
 impl TemporalReadPort for OversizedPort {
     fn produce_candidate_page<'a>(
         &'a self,
@@ -726,6 +764,33 @@ fn private_measurement_enforces_total_byte_limit() {
             .await,
             Err(TemporalPortError::BudgetExceeded {
                 resource: "candidate total bytes"
+            })
+        );
+    });
+}
+
+#[test]
+fn prepared_cohort_preserves_typed_candidate_byte_budget_failure() {
+    block_on(async {
+        let limits = ExecutionLimits {
+            candidate_limit: 1,
+            candidate_total_bytes: 128,
+            candidate_item_bytes: 128,
+            ..ExecutionLimits::default()
+        };
+        let snapshot = snapshot_with_control(ExecutionControl::default());
+        let request = snapshot.request().clone().with_limits(limits);
+        let plan = CandidatePlan::default();
+        let port = PreparationFromReadPort {
+            port: &OversizedPort,
+            snapshot: &snapshot,
+            plan: &plan,
+        };
+
+        assert_eq!(
+            prepare_temporal_candidate_cohort(&request, &port).await,
+            Err(TemporalPortError::BudgetExceeded {
+                resource: "candidate item bytes"
             })
         );
     });
@@ -871,6 +936,30 @@ fn async_pull_observes_live_cancellation_midstream() {
 }
 
 #[test]
+fn prepared_cohort_preserves_live_cancellation() {
+    block_on(async {
+        let control = ExecutionControl::default();
+        let snapshot = snapshot_with_control(control.clone());
+        let entered = Arc::new(AtomicBool::new(false));
+        let producer = CancellingPort {
+            control,
+            entered: Arc::clone(&entered),
+        };
+        let plan = CandidatePlan::default();
+        let port = PreparationFromReadPort {
+            port: &producer,
+            snapshot: &snapshot,
+            plan: &plan,
+        };
+
+        let result = prepare_temporal_candidate_cohort(snapshot.request(), &port).await;
+
+        assert!(entered.load(Ordering::Acquire));
+        assert_eq!(result, Err(TemporalPortError::Cancelled));
+    });
+}
+
+#[test]
 fn async_pull_observes_deadline_after_live_producer_work() {
     block_on(async {
         let deadline = Instant::now() + Duration::from_millis(100);
@@ -884,6 +973,30 @@ fn async_pull_observes_deadline_after_live_producer_work() {
         };
         let result =
             pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await;
+
+        assert!(entered.load(Ordering::Acquire));
+        assert_eq!(result, Err(TemporalPortError::DeadlineExceeded));
+    });
+}
+
+#[test]
+fn prepared_cohort_preserves_deadline_after_producer_work() {
+    block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let snapshot = snapshot_with_control(ExecutionControl::new(Some(deadline)));
+        let entered = Arc::new(AtomicBool::new(false));
+        let producer = DeadlineCrossingPort {
+            deadline,
+            entered: Arc::clone(&entered),
+        };
+        let plan = CandidatePlan::default();
+        let port = PreparationFromReadPort {
+            port: &producer,
+            snapshot: &snapshot,
+            plan: &plan,
+        };
+
+        let result = prepare_temporal_candidate_cohort(snapshot.request(), &port).await;
 
         assert!(entered.load(Ordering::Acquire));
         assert_eq!(result, Err(TemporalPortError::DeadlineExceeded));

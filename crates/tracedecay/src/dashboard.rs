@@ -95,7 +95,7 @@ pub async fn dashboard_automation_authority_for_test(
     let writer = standalone_dashboard_automation_writer();
     let resident_memory = std::sync::Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
-            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(),
         ),
     );
     let invocation_service = crate::daemon::DaemonInvocationService::with_code_index_schedulers(

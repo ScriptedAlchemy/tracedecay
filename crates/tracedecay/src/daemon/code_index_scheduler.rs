@@ -38,7 +38,7 @@ use tracedecay_private_fs::{
 };
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    ResidentMemoryKeyV1, ResidentMemoryReservationV1, detected_process_resident_memory_limit_v1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -116,28 +116,21 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-/// Measured on a 4379-file corpus with `journal_mode=DELETE`: each
-/// `query.artifact.batch.sqlite` transaction pays a fixed commit cost
-/// (journal fsync + page-cache flush) independent of its row count, and
-/// postings inserts alone were 73-76% of that phase (~212-245s of a ~7min
-/// batch phase). Doubling the page/work caps here roughly halves the number
-/// of commits paid for the same corpus while staying far inside both the
-/// 2M-row prepared-batch cap and the 1536MiB
-/// `CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1` ledger (see
-/// `TEXT_ARTIFACT_BATCH_BYTES_V1` below for the unchanged byte bound that
-/// still caps any single batch regardless of this page count).
-const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 64;
+const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 32;
 const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
 /// operations. Larger caller hints are clamped so work accounting cannot
 /// overflow and every expensive loop retains cancellation checkpoints.
-/// Doubled alongside `TEXT_ARTIFACT_BATCH_PAGES_V1` (see its comment) so one
-/// wake can still commit two full-sized batches under the raised page cap.
-const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 128;
+const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
+
+#[cfg(feature = "hotpath")]
+static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hotpath")]
+static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
@@ -431,6 +424,61 @@ impl Drop for DecodeLeaseV1<'_> {
             state.in_flight.retain(|pending| *pending != self.subject);
         }
         self.cache.ready.notify_all();
+    }
+}
+
+#[cfg(feature = "hotpath")]
+struct GenerationDecodeObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl GenerationDecodeObservationV1 {
+    fn enter() -> Self {
+        let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("code_index.generation.decode.attempts_total").inc(1_u64);
+        hotpath::gauge!("code_index.generation.decode.active").set(active);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for GenerationDecodeObservationV1 {
+    fn drop(&mut self) {
+        let _ = CODE_INDEX_GENERATION_DECODES_ACTIVE.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |active| active.checked_sub(1),
+        );
+        hotpath::gauge!("code_index.generation.decode.active")
+            .set(CODE_INDEX_GENERATION_DECODES_ACTIVE.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(feature = "hotpath")]
+struct GenerationDecodeWaitObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl GenerationDecodeWaitObservationV1 {
+    fn enter() -> Self {
+        let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("code_index.generation.decode.waiters").set(waiters);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for GenerationDecodeWaitObservationV1 {
+    fn drop(&mut self) {
+        let _ = CODE_INDEX_GENERATION_DECODE_WAITERS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |waiters| waiters.checked_sub(1),
+        );
+        hotpath::gauge!("code_index.generation.decode.waiters")
+            .set(CODE_INDEX_GENERATION_DECODE_WAITERS.load(Ordering::Relaxed));
     }
 }
 
@@ -958,11 +1006,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if state.is_in_flight(&subject) {
                 // Another caller already owns this O(store) decode. Park on it
                 // rather than starting a second sweep over the same bytes.
-                let _parked = self
-                    .cache
-                    .ready
-                    .wait(state)
-                    .map_err(|_| DecodedGenerationCacheV1::poisoned())?;
+                #[cfg(feature = "hotpath")]
+                let _waiting = GenerationDecodeWaitObservationV1::enter();
+                let _parked =
+                    hotpath::measure_block!("code_index.generation.decode.singleflight_wait", {
+                        self.cache
+                            .ready
+                            .wait(state)
+                            .map_err(|_| DecodedGenerationCacheV1::poisoned())
+                    })?;
                 continue;
             }
             let epoch = state.active_epoch;
@@ -1023,32 +1075,42 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "indexed code-generation byte size does not match its durable entry",
             ));
         }
-        let bytes = std::fs::read(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Self::corruption("durable code-generation index target disappeared during read")
-            } else {
-                Self::unavailable(error)
-            }
+        #[cfg(feature = "hotpath")]
+        let _decode = GenerationDecodeObservationV1::enter();
+        let bytes = hotpath::measure_block!("code_index.generation.decode.file_read", {
+            std::fs::read(path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Self::corruption("durable code-generation index target disappeared during read")
+                } else {
+                    Self::unavailable(error)
+                }
+            })
         })?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(bytes_read) = u64::try_from(bytes.len()) {
+            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
+        }
         let actual_size = u64::try_from(bytes.len()).map_err(Self::unavailable)?;
         if actual_size != entry.size_bytes {
             return Err(Self::corruption(
                 "indexed code-generation byte size does not match its durable entry",
             ));
         }
-        if Self::state_digest(&bytes) != entry.state_digest {
+        let state_digest = hotpath::measure_block!(
+            "code_index.generation.decode.file_digest",
+            Self::state_digest(&bytes)
+        );
+        if state_digest != entry.state_digest {
             return Err(Self::corruption(
                 "indexed code-generation bytes do not match their sealed digest",
             ));
         }
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
-            .map_err(Self::unavailable)?
-        {
+        let Some(generation) = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&bytes)
+            .map_err(Self::corruption)?
+        else {
             return Ok(None);
-        }
+        };
         self.cache.note_decode();
-        let generation =
-            CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::corruption)?;
         if let Some(cardinality) = entry.cardinality.as_ref()
             && Self::generation_cardinality(&generation)? != *cardinality
         {
@@ -1135,11 +1197,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 // rather than starting a second sweep over the same bytes.
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_add(1, Ordering::AcqRel);
-                let parked = self
-                    .cache
-                    .ready
-                    .wait(state)
-                    .map_err(|_| DecodedGenerationCacheV1::poisoned());
+                #[cfg(feature = "hotpath")]
+                let _waiting = GenerationDecodeWaitObservationV1::enter();
+                let parked = hotpath::measure_block!(
+                    "code_index.generation.decode.singleflight_wait",
+                    self.cache
+                        .ready
+                        .wait(state)
+                        .map_err(|_| DecodedGenerationCacheV1::poisoned())
+                );
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_sub(1, Ordering::AcqRel);
                 let _parked = parked?;
@@ -1207,26 +1273,38 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation byte size does not match its durable entry",
             ));
         }
-        let generation_bytes = std::fs::read(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Self::corruption("active code-generation target is missing")
-            } else {
-                Self::unavailable(error)
-            }
-        })?;
-        if Self::state_digest(&generation_bytes) != pointer.state_digest {
+        #[cfg(feature = "hotpath")]
+        let _decode = GenerationDecodeObservationV1::enter();
+        let generation_bytes =
+            hotpath::measure_block!("code_index.generation.decode.file_read", {
+                std::fs::read(path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Self::corruption("active code-generation target is missing")
+                    } else {
+                        Self::unavailable(error)
+                    }
+                })
+            })?;
+        #[cfg(feature = "hotpath")]
+        if let Ok(bytes_read) = u64::try_from(generation_bytes.len()) {
+            hotpath::gauge!("code_index.generation.decode.bytes_total").inc(bytes_read);
+        }
+        let state_digest = hotpath::measure_block!(
+            "code_index.generation.decode.file_digest",
+            Self::state_digest(&generation_bytes)
+        );
+        if state_digest != pointer.state_digest {
             return Err(Self::corruption(
                 "sealed code-generation bytes do not match the active pointer digest",
             ));
         }
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&generation_bytes)
-            .map_err(Self::unavailable)?
-        {
+        let Some(generation) =
+            CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&generation_bytes)
+                .map_err(Self::corruption)?
+        else {
             return Ok(None);
-        }
+        };
         self.cache.note_decode();
-        let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
-            .map_err(Self::corruption)?;
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
@@ -1270,7 +1348,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .map(|generation| generation.as_ref().clone()))
     }
 
-    #[hotpath::measure(label = "daemon.code_index.generation.publish")]
+    #[hotpath::measure(label = "code_index.generation.publish")]
     fn publish_atomically(
         &mut self,
         _scope: &CodeIndexGenerationScopeV1,
@@ -1348,7 +1426,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
         let generation_size = hotpath::measure_block!(
-            "daemon.code_index.generation.publish.seal_fsync",
+            "code_index.generation.publish.seal_fsync",
             Self::write_sealed_durable(&temporary.path, &generation)
         )?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
@@ -1357,11 +1435,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         let state_digest = hotpath::measure_block!(
-            "daemon.code_index.generation.publish.state_digest",
+            "code_index.generation.publish.state_digest",
             Self::state_digest_file(&temporary.path)
         )?;
         #[cfg(feature = "hotpath")]
-        hotpath::gauge!("daemon.code_index.generation.publish.digest_bytes").set(generation_size);
+        hotpath::gauge!("code_index.generation.publish.digest_bytes").set(generation_size);
         let generation_file = format!(
             "generation-{}.json",
             state_digest
@@ -1372,7 +1450,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         match generation_path.symlink_metadata() {
             Ok(_) => {
                 let equal = hotpath::measure_block!(
-                    "daemon.code_index.generation.publish.dedupe_compare",
+                    "code_index.generation.publish.dedupe_compare",
                     Self::files_equal(&generation_path, &temporary.path)
                 )?;
                 if !equal {
@@ -1482,7 +1560,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         if temporary.exists() {
             std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
         }
-        hotpath::measure_block!("daemon.code_index.generation.publish.pointer_commit", {
+        hotpath::measure_block!("code_index.generation.publish.pointer_commit", {
             Self::write_durable(&temporary, &bytes)?;
             std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
             Self::sync_directory(
@@ -1840,7 +1918,7 @@ impl CodeIndexBuildProgressSlotStateV1 {
     ) -> bool {
         if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
             #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.code_index.artifact.progress.rejected_stale_total").inc(1u64);
+            hotpath::gauge!("query.artifact.progress.rejected_stale_total").inc(1u64);
             return false;
         }
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
@@ -1850,31 +1928,25 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.snapshot = Some(Arc::new(snapshot));
         #[cfg(feature = "hotpath")]
         {
-            hotpath::gauge!("daemon.code_index.artifact.progress.publication_total").inc(1u64);
+            hotpath::gauge!("query.artifact.progress.publication_total").inc(1u64);
             match published_phase {
                 CodeIndexBuildPhaseV1::SourceScan => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.source_scan_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.source_scan_total").inc(1u64);
                 }
                 CodeIndexBuildPhaseV1::RelationalPreparation => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.preparation_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.preparation_total").inc(1u64);
                 }
                 CodeIndexBuildPhaseV1::BulkCommit => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.bulk_commit_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.bulk_commit_total").inc(1u64);
                 }
                 CodeIndexBuildPhaseV1::IndexBuild => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.index_build_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.index_build_total").inc(1u64);
                 }
                 CodeIndexBuildPhaseV1::Verification => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.verification_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.verification_total").inc(1u64);
                 }
                 CodeIndexBuildPhaseV1::Ready => {
-                    hotpath::gauge!("daemon.code_index.artifact.progress.phase.ready_total")
-                        .inc(1u64);
+                    hotpath::gauge!("query.artifact.progress.phase.ready_total").inc(1u64);
                 }
             }
         }
@@ -2506,7 +2578,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         sealed_identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        hotpath::measure_block!("daemon.code_index.artifact.store.publish", {
+        hotpath::measure_block!("query.artifact.store.publish", {
             let artifacts_root = code_text_artifacts_root(&self.store_root);
             ensure_private_text_artifacts_root(&artifacts_root)?;
             // Publication and artifact retention share this canonical store lock.
@@ -2516,12 +2588,11 @@ impl DaemonCodeTextArtifactStoreV1 {
             let lock = acquire_code_generation_store_lock(&self.store_root)
                 .map_err(text_artifact_unavailable)?;
             let (artifact_hex, artifact_size_bytes) = hotpath::measure_block!(
-                "daemon.code_index.artifact.store.state_digest",
+                "query.artifact.store.state_digest",
                 sha256_private_file_hex_and_size(staging_path, control)
             )?;
             #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.code_index.artifact.store.digest_bytes")
-                .set(artifact_size_bytes);
+            hotpath::gauge!("query.artifact.store.digest_bytes").set(artifact_size_bytes);
             let descriptor = DurableCodeTextArtifactDescriptorV1 {
                 generation_id: generation_id.clone(),
                 artifact_file: format!("text-artifact-{artifact_hex}.bin"),
@@ -2539,7 +2610,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     // before withdrawing staging evidence; a symlink, non-regular
                     // object, truncated file, or same-name collision fails closed.
                     let (existing_hex, existing_size_bytes) = hotpath::measure_block!(
-                        "daemon.code_index.artifact.store.dedupe_compare",
+                        "query.artifact.store.dedupe_compare",
                         sha256_private_file_hex_and_size(&final_path, control)
                     )?;
                     if existing_size_bytes != artifact_size_bytes {
@@ -2562,7 +2633,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 Err(error) => return Err(text_artifact_unavailable(error)),
             }
             hotpath::measure_block!(
-                "daemon.code_index.artifact.store.seal_fsync",
+                "query.artifact.store.seal_fsync",
                 DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
                     .map_err(text_artifact_unavailable)
             )?;
@@ -2577,7 +2648,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     )
                 })?;
             hotpath::measure_block!(
-                "daemon.code_index.artifact.store.pointer_commit",
+                "query.artifact.store.pointer_commit",
                 attach_verified_text_artifact_under_lock(
                     &lock,
                     &pointer,
@@ -2841,12 +2912,15 @@ impl LatestCompleteCodeIndexV1 {
         }
     }
 
-    /// The retained verified-snapshot projection store for interactive graph
-    /// reads, present once persistent graph activation has completed.
+    /// The retained verified-snapshot projection store for graph reads,
+    /// present once persistent graph publication has completed.
     ///
-    /// Interactive reads require the persistent Grafeo activation: unlike the
-    /// retrieval lanes there is no in-memory fallback, so a cold store is the
-    /// typed not-activated state, never an empty serve.
+    /// Occurrence-seeded adjacency reads are immediately available from the
+    /// verified snapshot. Name, file, and import lookups may still report the
+    /// typed catalog-warming state while their derived catalog builds in the
+    /// background. Unlike the retrieval lanes there is no in-memory fallback,
+    /// so an absent store is the typed not-activated state, never an empty
+    /// serve.
     pub fn interactive_graph_store(
         &self,
     ) -> Result<Arc<CodeGraphProjectionStore>, RetrievalPortError> {
@@ -2859,13 +2933,7 @@ impl LatestCompleteCodeIndexV1 {
                     "code graph projection has no persistent interactive store".to_owned(),
                 )
             })?;
-        match store.interactive_catalog_is_warm() {
-            Ok(true) => Ok(store),
-            Ok(false) => Err(RetrievalPortError::Contract(
-                "code graph interactive catalog has not completed activation".to_owned(),
-            )),
-            Err(error) => Err(RetrievalPortError::Contract(error.to_string())),
-        }
+        Ok(store)
     }
 }
 
@@ -2973,9 +3041,9 @@ impl LatestCodeTextGenerationV1 {
             });
             #[cfg(feature = "hotpath")]
             {
-                hotpath::gauge!("daemon.code_index.artifact.progress.committed_pages")
+                hotpath::gauge!("query.artifact.progress.committed_pages")
                     .set(progress.next_page_ordinal);
-                hotpath::gauge!("daemon.code_index.artifact.progress.committed_lexical_bytes")
+                hotpath::gauge!("query.artifact.progress.committed_lexical_bytes")
                     .set(completed_lexical_bytes);
             }
         }
@@ -3056,7 +3124,7 @@ impl LatestCodeTextGenerationV1 {
 
     fn publish_text_progress_snapshot(&self, snapshot: CodeIndexBuildProgressV1) {
         let generation_id = &self.metadata.manifest().generation_id;
-        hotpath::measure_block!("daemon.code_index.artifact.progress.publish", {
+        hotpath::measure_block!("query.artifact.progress.publish", {
             let _ = self
                 .text_progress_slot
                 .write()
@@ -3077,14 +3145,14 @@ impl LatestCodeTextGenerationV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed_micros();
-        hotpath::measure_block!("daemon.code_index.artifact.progress.publish", {
+        hotpath::measure_block!("query.artifact.progress.publish", {
             let mut slot = self
                 .text_progress_slot
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(current) = slot.snapshot() else {
                 #[cfg(feature = "hotpath")]
-                hotpath::gauge!("daemon.code_index.artifact.progress.no_snapshot_total").inc(1u64);
+                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
                 return;
             };
             let mut snapshot = current.as_ref().clone();
@@ -3099,14 +3167,14 @@ impl LatestCodeTextGenerationV1 {
 
     fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
         let generation_id = &self.metadata.manifest().generation_id;
-        hotpath::measure_block!("daemon.code_index.artifact.progress.publish", {
+        hotpath::measure_block!("query.artifact.progress.publish", {
             let mut slot = self
                 .text_progress_slot
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(current) = slot.snapshot() else {
                 #[cfg(feature = "hotpath")]
-                hotpath::gauge!("daemon.code_index.artifact.progress.no_snapshot_total").inc(1u64);
+                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
                 return;
             };
             let mut snapshot = current.as_ref().clone();
@@ -3134,16 +3202,13 @@ impl LatestCodeTextGenerationV1 {
             #[cfg(feature = "hotpath")]
             match self.text_control.cancellation_source() {
                 Some(GenerationTextCancellationSourceV1::Shutdown) => {
-                    hotpath::gauge!("daemon.code_index.artifact.cancelled.shutdown_total")
-                        .inc(1_u64);
+                    hotpath::gauge!("query.artifact.cancelled.shutdown_total").inc(1_u64);
                 }
                 Some(GenerationTextCancellationSourceV1::Superseded) => {
-                    hotpath::gauge!("daemon.code_index.artifact.cancelled.superseded_total")
-                        .inc(1_u64);
+                    hotpath::gauge!("query.artifact.cancelled.superseded_total").inc(1_u64);
                 }
                 None => {
-                    hotpath::gauge!("daemon.code_index.artifact.cancelled.external_total")
-                        .inc(1_u64);
+                    hotpath::gauge!("query.artifact.cancelled.external_total").inc(1_u64);
                 }
             }
         }
@@ -3211,7 +3276,7 @@ impl LatestCodeTextGenerationV1 {
     /// The durable-artifact journey: reopen a published head when one exists,
     /// otherwise stream the sealed generation through the staging builder one
     /// bounded page window at a time, finalize, publish, and reopen.
-    #[hotpath::measure(label = "daemon.code_index.artifact.batch.scheduler_wake")]
+    #[hotpath::measure(label = "query.artifact.batch.scheduler_wake")]
     fn advance_artifact_text_serving(
         &self,
         build: &mut Option<CodeTextArtifactBuildV1>,
@@ -3220,11 +3285,11 @@ impl LatestCodeTextGenerationV1 {
     ) -> Result<bool, RetrievalPortError> {
         let store = &self.text_artifact_store;
         if build.is_none() {
-            hotpath::gauge!("daemon.code_index.artifact.build_memory_budget_bytes")
+            hotpath::gauge!("query.artifact.build_memory_budget_bytes")
                 .set(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1);
-            hotpath::gauge!("daemon.code_index.artifact.source_batch_pages_max")
+            hotpath::gauge!("query.artifact.source_batch_pages_max")
                 .set(TEXT_ARTIFACT_BATCH_PAGES_V1);
-            hotpath::gauge!("daemon.code_index.artifact.source_batch_bytes_max")
+            hotpath::gauge!("query.artifact.source_batch_bytes_max")
                 .set(TEXT_ARTIFACT_BATCH_BYTES_V1);
             let generation_id = self.metadata.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
@@ -3371,7 +3436,7 @@ impl LatestCodeTextGenerationV1 {
                 let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
                 source.next_page_batch_if(control, bounds, |pages| {
                     #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.code_index.artifact.batch.offered_pages_total")
+                    hotpath::gauge!("query.artifact.batch.offered_pages_total")
                         .inc(u64::try_from(pages.len()).unwrap_or(u64::MAX));
                     let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
                         CodeLexicalArtifactErrorV1::Contract(
@@ -3391,16 +3456,14 @@ impl LatestCodeTextGenerationV1 {
                         offered_payload_bytes,
                     );
                     let (progress, accepted) =
-                        hotpath::measure_block!("daemon.code_index.artifact.batch.builder", {
+                        hotpath::measure_block!("query.artifact.batch.builder", {
                             let prepared =
                                 builder.prepare_admissible_page_prefix(pages, control)?;
                             let accepted = prepared.accepted_prefix();
                             let accepted_pages = &pages[..accepted.get()];
                             #[cfg(feature = "hotpath")]
-                            hotpath::gauge!(
-                                "daemon.code_index.artifact.batch.accepted_pages_total"
-                            )
-                            .inc(u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX));
+                            hotpath::gauge!("query.artifact.batch.accepted_pages_total")
+                                .inc(u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX));
                             let batch_pages =
                                 u64::try_from(accepted_pages.len()).map_err(|_| {
                                     CodeLexicalArtifactErrorV1::Contract(
@@ -3438,7 +3501,7 @@ impl LatestCodeTextGenerationV1 {
                 Ok(Ok(admitted)) => admitted,
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
                     #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.code_index.artifact.batch.refusal_total").inc(1u64);
+                    hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
                     return Err(map_text_artifact_error(error));
                 }
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::Unreserved(_))) => {
@@ -3491,15 +3554,11 @@ impl LatestCodeTextGenerationV1 {
                             .completed_lexical_bytes()
                             .map_err(map_sealed_page_source_error)?
                             .saturating_sub(completed_lexical_bytes_before);
-                        hotpath::gauge!(
-                            "daemon.code_index.artifact.batch.committed_lexical_bytes_total"
-                        )
-                        .inc(committed_lexical_bytes);
+                        hotpath::gauge!("query.artifact.batch.committed_lexical_bytes_total")
+                            .inc(committed_lexical_bytes);
                         if let Some(latency_micros) = commit_latency_micros {
-                            hotpath::gauge!(
-                                "daemon.code_index.artifact.progress.latest_commit_latency_micros"
-                            )
-                            .set(latency_micros);
+                            hotpath::gauge!("query.artifact.progress.latest_commit_latency_micros")
+                                .set(latency_micros);
                         }
                     }
                     remaining = remaining.checked_sub(page_count).ok_or_else(|| {
@@ -3532,18 +3591,15 @@ impl LatestCodeTextGenerationV1 {
             self.text_progress_phase(),
             Some(CodeIndexBuildPhaseV1::Verification)
         ) {
-            hotpath::measure_block!(
-                "daemon.code_index.artifact.finalization.digest_verify_wake",
-                {
-                    artifact_build.builder.advance_finalization(
-                        source_receipt,
-                        finalization_rows,
-                        control,
-                    )
-                }
-            )
+            hotpath::measure_block!("query.artifact.finalization.digest_verify_wake", {
+                artifact_build.builder.advance_finalization(
+                    source_receipt,
+                    finalization_rows,
+                    control,
+                )
+            })
         } else {
-            hotpath::measure_block!("daemon.code_index.artifact.index.build", {
+            hotpath::measure_block!("query.artifact.index.build", {
                 artifact_build.builder.advance_finalization(
                     source_receipt,
                     finalization_rows,
@@ -3784,6 +3840,36 @@ impl CodeIndexSchedulerErrorV1 {
                     if budget == "resident_memory"
             )
     }
+
+    /// A refusal that is transient *by construction*: this pass was turned away
+    /// because a bounded shared resource was already fully held, and it is
+    /// released by whoever holds it rather than by anything about this input.
+    ///
+    /// The background worker schedules its own delayed retry for exactly these,
+    /// because releasing shared capacity emits no wake: a sibling worktree or
+    /// artifact build finishing does not notify this worktree, so without a
+    /// self-scheduled retry it stayed stale until an unrelated query or edit
+    /// happened to wake it.
+    ///
+    /// The distinction the admission failure carries is the whole point. A
+    /// request that exceeds the *entire* process limit is shaped like a
+    /// capacity refusal and is not one — no other holder can release enough for
+    /// it — so it is classified permanent and never self-retried. Identity
+    /// failures, git and IO faults, production and privacy refusals, adjustment
+    /// invariant breaks, an uninstalled worker plan, and publication conflicts
+    /// likewise reproduce over the same input or already have an owner that
+    /// re-drives them; self-scheduling those is precisely the unbounded-retry
+    /// failure this module exists to stop.
+    pub(super) fn is_transient_capacity_failure(&self) -> bool {
+        match self {
+            Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
+                failure.requested_bytes <= failure.limit_bytes
+            }
+            Self::SnapshotMemoryCapacityUnavailable => true,
+            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Counts in-flight owner passes (retained activation or reconcile). A
@@ -3846,6 +3932,10 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// `retained_snapshot_bytes`; worker scratch is admitted separately only
     /// after capture has completed.
     _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
+    /// Deterministic reconcile fault used only by the worker-loop isolation
+    /// tests; production never installs one.
+    #[cfg(test)]
+    reconcile_fault: Option<Arc<reconcile_panic_guard::ReconcileFaultInjectionV1>>,
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
@@ -4019,8 +4109,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
             _retained_snapshot_memory: Vec::new(),
+            #[cfg(test)]
+            reconcile_fault: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
-                tracedecay_runtime_core::resident_memory::process_resident_memory_limit_v1(),
+                detected_process_resident_memory_limit_v1(),
             )),
             publication,
             production_config,
@@ -4200,7 +4292,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let generation_id = generation.manifest().generation_id.clone();
         match catch_unwind(AssertUnwindSafe(|| {
             hotpath::measure_block!(
-                "daemon.code_index.semantic.generation_handoff",
+                "code_index.semantic_generation_handoff",
                 schedule(generation)
             )
         })) {
@@ -4655,7 +4747,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             size_bytes: entry.size_bytes,
         };
         let text_progress_owner_epoch = hotpath::measure_block!(
-            "daemon.code_index.artifact.progress.publish",
+            "query.artifact.progress.publish",
             self.build_progress
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4760,8 +4852,37 @@ impl CodeIndexWorktreeSchedulerV1 {
         })
     }
 
+    /// Install a deterministic reconcile fault for one mounted worktree so a
+    /// test can drive the real background worker loop over a pass that panics
+    /// or fails, and count the attempts the loop actually makes.
+    #[cfg(test)]
+    pub(in crate::daemon::code_index_scheduler) fn install_reconcile_fault_for_test(
+        &mut self,
+        fault: Arc<reconcile_panic_guard::ReconcileFaultInjectionV1>,
+    ) {
+        self.reconcile_fault = Some(fault);
+    }
+
+    /// Records one attempted reconcile pass against the installed test fault.
+    ///
+    /// The worker loop reaches indexing through three branches — a retained
+    /// text generation, retained-owner activation, and a plain reconcile — so
+    /// hooking any single one of them counts a subset of the passes the loop
+    /// actually makes. This is called once at the top of the loop's blocking
+    /// closure instead, which is what `install_reconcile_fault_for_test`
+    /// promises to count.
+    #[cfg(test)]
+    pub(in crate::daemon::code_index_scheduler) fn arrive_reconcile_fault_for_test(
+        &self,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        if let Some(fault) = self.reconcile_fault.clone() {
+            fault.arrive()?;
+        }
+        Ok(())
+    }
+
     /// Retained-owner activation entry point. Foreground reads never call this.
-    #[hotpath::measure(label = "daemon.code_index.reconcile.pass")]
+    #[hotpath::measure(label = "code_index.reconcile.pass")]
     pub(super) fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
@@ -5342,7 +5463,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         )
                     } else {
                         let progress_epoch = hotpath::measure_block!(
-                            "daemon.code_index.artifact.progress.publish",
+                            "query.artifact.progress.publish",
                             self.build_progress
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5527,6 +5648,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.capture_candidate_bytes_with_progress(registry, logical_path, &raw_bytes, progress)
     }
 
+    #[hotpath::measure(label = "code_index.capture.authoritative_snapshot")]
     fn capture_authoritative_snapshot(
         &self,
         control: Option<&dyn CodeIndexExecutionControlV1>,
@@ -5635,30 +5757,26 @@ impl CodeIndexWorktreeSchedulerV1 {
         let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let progress = git_tree_capture::CaptureProgressV1::new();
-        let outcomes = hotpath::measure_block!("daemon.code_index.capture.sweep", {
-            crate::code_index::parallelism::install(|| {
-                use rayon::prelude::*;
-                candidates
-                    .par_iter()
-                    .map(|logical_path| {
-                        crate::code_index::parallelism::with_background_cpu_permit(|| {
-                            hotpath::measure_block!("daemon.code_index.capture.worker", {
-                                if self.shutting_down.load(Ordering::Acquire) {
-                                    return Err(cancelled_code_index_reconcile());
-                                }
-                                ignored_dependencies::checkpoint_if_present(control)?;
-                                self.capture_admitted_candidate(
-                                    &registry,
-                                    logical_path,
-                                    control,
-                                    Some(&progress),
-                                    admitted_paths.contains(logical_path.as_str()),
-                                )
-                            })
-                        })
+        let outcomes = crate::code_index::parallelism::install(|| {
+            use rayon::prelude::*;
+            candidates
+                .par_iter()
+                .map(|logical_path| {
+                    crate::code_index::parallelism::with_background_cpu_permit(|| {
+                        if self.shutting_down.load(Ordering::Acquire) {
+                            return Err(cancelled_code_index_reconcile());
+                        }
+                        ignored_dependencies::checkpoint_if_present(control)?;
+                        self.capture_admitted_candidate(
+                            &registry,
+                            logical_path,
+                            control,
+                            Some(&progress),
+                            admitted_paths.contains(logical_path.as_str()),
+                        )
                     })
-                    .collect::<Vec<_>>()
-            })
+                })
+                .collect::<Vec<_>>()
         })
         .map_err(|error| {
             CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(error))
@@ -5935,6 +6053,7 @@ pub(in crate::daemon) mod observability;
 mod privacy;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
+mod reconcile_panic_guard;
 mod registry;
 pub(crate) mod semantic_query_runtime;
 pub(crate) mod semantic_vector_graph;

@@ -11,9 +11,6 @@ include = [
     "/src/**",
     "/fixtures/**",
     "/tests/**",
-    "/vendor/tree-sitter-rust/LICENSE",
-    "/vendor/tree-sitter-rust/queries/**",
-    "/vendor/tree-sitter-rust/src/**",
     "/vendor/tree-sitter-wgsl/src/**",
     "/build.rs",
 ]
@@ -79,6 +76,9 @@ tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", vers
 tree-sitter = "0.26"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 tree-sitter-language = "0.1"
+# Resolved through the workspace [patch.crates-io] git pin, which carries the
+# struct-pattern field attribute fix (tree-sitter/tree-sitter-rust#301).
+tree-sitter-rust = "0.24"
 thiserror = "2"
 
 [build-dependencies]

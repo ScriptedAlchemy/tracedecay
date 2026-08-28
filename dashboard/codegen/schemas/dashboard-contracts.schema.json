@@ -1823,6 +1823,7 @@
         "session_cursor_manifest_limit_exceeded",
         "session_evidence_budget_exhausted",
         "session_evidence_budget_suppressed",
+        "session_evidence_timed_out",
         "session_evidence_cancelled",
         "no_session_evidence",
         "shipped_fact_proposal_history_retired"
@@ -12167,6 +12168,7 @@
         "retry",
         "reconcile",
         "reset",
+        "restart_without_cursor",
         "contact_administrator"
       ],
       "type": "string"
@@ -17985,6 +17987,76 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
+    "SessionRetrievalBudgetStageV1": {
+      "description": "Structural budget boundary that rejected a session retrieval request.\nThese causes are non-retryable request corrections; concurrent permit or\nqueue pressure remains a separate capacity-saturation failure.",
+      "enum": [
+        "request_result_limit",
+        "request_hydration_limit",
+        "request_context_bytes",
+        "request_candidate_bytes",
+        "request_record_bytes",
+        "request_hydration_bytes",
+        "estimator_version_mismatch",
+        "execution_work_exhausted",
+        "kernel_result_limit",
+        "participant_manifest_participants",
+        "participant_manifest_canonical_bytes",
+        "hydration_bytes",
+        "context_bytes",
+        "context_tokens"
+      ],
+      "type": "string"
+    },
+    "SessionRetrievalStructuralRefusalV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "maximum": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "observed": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "refusal": {
+              "const": "cursor_manifest_limit_exceeded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "refusal",
+            "kind",
+            "observed",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "refusal": {
+              "const": "budget_exhausted",
+              "type": "string"
+            },
+            "stage": {
+              "$ref": "#/$defs/SessionRetrievalBudgetStageV1"
+            }
+          },
+          "required": [
+            "refusal",
+            "stage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SettingsAvailabilityV1": {
       "properties": {
         "available": {
@@ -21797,18 +21869,34 @@
       "type": "object"
     },
     "WorkEvidenceOmissionReasonV1": {
-      "enum": [
-        "limit_reached",
-        "pending",
-        "not_found_or_not_authorized",
-        "unavailable",
-        "reset_required",
-        "stale",
-        "cancelled",
-        "timed_out",
-        "redacted"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "limit_reached",
+            "pending",
+            "not_found_or_not_authorized",
+            "unavailable",
+            "reset_required",
+            "stale",
+            "cancelled",
+            "timed_out",
+            "redacted"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "structural_refusal": {
+              "$ref": "#/$defs/SessionRetrievalStructuralRefusalV1"
+            }
+          },
+          "required": [
+            "structural_refusal"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkEvidenceOmissionV1": {
       "additionalProperties": false,

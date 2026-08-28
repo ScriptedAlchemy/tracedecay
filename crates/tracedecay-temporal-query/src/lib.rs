@@ -53,6 +53,21 @@ pub struct TemporalKernelRequest {
     pub context_budget: ContextBudget,
 }
 
+/// Canonical candidate plan shared by root-wide preparation and kernel reads.
+pub fn plan_temporal_candidates(
+    query: &str,
+    direct_anchor: Option<&RetrievalAnchorId>,
+    goals: bool,
+) -> candidates::CandidatePlan {
+    if let Some(anchor_id) = direct_anchor {
+        candidates::plan_anchor(anchor_id)
+    } else if goals || query.trim().is_empty() {
+        candidates::plan_scope_candidates()
+    } else {
+        candidates::plan_candidates(query)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct TemporalHydratedResult {
     rank: u32,
@@ -299,54 +314,99 @@ pub async fn execute_temporal_candidate_export(
     if request.limit == 0 {
         return Err(TemporalKernelError::InvalidLimit);
     }
-    let snapshot = &request.snapshot;
-    check_control(snapshot)?;
+    let mut snapshot = request.snapshot.clone();
+    if let Err(error) = hotpath::measure_block!(
+        "temporal_query.participant_manifest.validate",
+        snapshot.participant_manifest().validate()
+    ) {
+        match &error {
+            TemporalPortError::ParticipantLimitExceeded { .. } => {
+                hotpath::gauge!("temporal_query.refusal.participant_manifest.participants_total")
+                    .inc(1_u64);
+            }
+            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+                hotpath::gauge!(
+                    "temporal_query.refusal.participant_manifest.canonical_bytes_total"
+                )
+                .inc(1_u64);
+            }
+            _ => {
+                hotpath::gauge!("temporal_query.refusal.participant_manifest.invalid_total")
+                    .inc(1_u64);
+            }
+        }
+        return Err(map_port_error(error));
+    }
+    check_control(&snapshot)?;
     let limits = snapshot.request().limits();
     if request.limit > limits.hydration_limit {
         return Err(TemporalKernelError::BudgetExceeded);
     }
 
-    let after = request
+    check_control(&snapshot)?;
+    // Authenticate and route cursors before storage work. A cohort mismatch is
+    // the one binding that cannot be decided until ordinary (non-prepared)
+    // session reads have produced their bounded cohort.
+    let preflight_after = request
         .cursor
         .as_deref()
-        .map(|cursor| verify_cursor(cursor, snapshot, authenticator))
-        .transpose()?;
-    check_control(snapshot)?;
+        .map(
+            |cursor| match verify_cursor(cursor, &snapshot, authenticator) {
+                Ok(sort_key) => Ok(Some(sort_key)),
+                Err(CursorError::CandidateCohortMismatch) => Ok(None),
+                Err(error) => Err(error),
+            },
+        )
+        .transpose()?
+        .flatten();
     // An empty query is a scope browse — the authorized scope's records in
     // temporal order — never a zero-clause (structurally empty) plan. Text
     // queries rank through the lexical/phrase/entity channels instead.
-    let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
-        if let Some(anchor_id) = request.direct_anchor.as_ref() {
-            candidates::plan_anchor(anchor_id)
-        } else if snapshot.request().semantic_filter().goals || request.query.trim().is_empty() {
-            candidates::plan_scope_candidates()
-        } else {
-            candidates::plan_candidates(&request.query)
-        }
-    });
-    let candidate_page_items = limits.candidate_limit.min(64);
-    let candidate_limits = PageLimits::new(
-        limits.candidate_limit,
-        limits.candidate_total_bytes,
-        limits.candidate_item_bytes,
-        candidate_page_items,
-    )
-    .map_err(map_port_error)?;
-    let mut candidate_state = CandidateReadState::new(candidate_limits);
-    let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
-    hotpath::measure_block!("temporal_query.candidates.generate", {
-        loop {
-            let page = pull_candidate_page(read_port, snapshot, &plan, &mut candidate_state)
-                .await
-                .map_err(map_port_error)?;
-            let status = page.status();
-            candidates.extend(page.into_items());
-            if status == PageStatus::Complete {
-                break;
+    let candidates = if let Some(prepared) = snapshot.prepared_candidate_cohort() {
+        prepared.candidates().to_vec()
+    } else {
+        let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
+            plan_temporal_candidates(
+                &request.query,
+                request.direct_anchor.as_ref(),
+                snapshot.request().semantic_filter().goals,
+            )
+        });
+        let candidate_page_items = limits.candidate_limit.min(64);
+        let candidate_limits = PageLimits::new(
+            limits.candidate_limit,
+            limits.candidate_total_bytes,
+            limits.candidate_item_bytes,
+            candidate_page_items,
+        )
+        .map_err(map_port_error)?;
+        let mut candidate_state = CandidateReadState::new(candidate_limits);
+        let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+        hotpath::measure_block!("temporal_query.candidates.generate", {
+            loop {
+                let page = pull_candidate_page(read_port, &snapshot, &plan, &mut candidate_state)
+                    .await
+                    .map_err(map_port_error)?;
+                let status = page.status();
+                candidates.extend(page.into_items());
+                if status == PageStatus::Complete {
+                    break;
+                }
             }
-        }
-    });
+        });
+        snapshot = snapshot
+            .with_observed_candidate_cohort(&candidates)
+            .map_err(map_port_error)?;
+        candidates
+    };
     hotpath::gauge!("temporal_query.candidates.generated").set(candidates.len());
+
+    let after = match (preflight_after, request.cursor.as_deref()) {
+        (Some(sort_key), _) => Some(sort_key),
+        (None, Some(cursor)) => Some(verify_cursor(cursor, &snapshot, authenticator)?),
+        (None, None) => None,
+    };
+    check_control(&snapshot)?;
 
     let record_page_items = limits.record_limit.min(64);
     let record_limits = PageLimits::new(
@@ -359,7 +419,7 @@ pub async fn execute_temporal_candidate_export(
     let mut record_state = TemporalRecordReadState::new(record_limits);
     let mut records = TemporalRecordBatch::default();
     loop {
-        let page = pull_temporal_record_page(read_port, snapshot, &candidates, &mut record_state)
+        let page = pull_temporal_record_page(read_port, &snapshot, &candidates, &mut record_state)
             .await
             .map_err(map_port_error)?;
         let status = page.status();
@@ -413,7 +473,7 @@ pub async fn execute_temporal_candidate_export(
     )
     .map_err(map_port_error)?;
     visible_anchors.extend(summary_eligibility.eligible_anchor_ids.clone());
-    check_control(snapshot)?;
+    check_control(&snapshot)?;
     let all_candidates = candidates;
     let examined =
         u64::try_from(all_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
@@ -492,14 +552,14 @@ pub async fn execute_temporal_candidate_export(
         ranked
             .last()
             .map(stable_sort_key)
-            .map(|sort_key| encode_cursor(snapshot, &sort_key, authenticator))
+            .map(|sort_key| encode_cursor(&snapshot, &sort_key, authenticator))
             .transpose()?
     } else {
         None
     };
 
     Ok(TemporalCandidateExport {
-        snapshot: snapshot.clone(),
+        snapshot,
         ranked,
         next_cursor,
         coverage: RetrieverCoverage {

@@ -62,6 +62,7 @@ pub enum LegalAction {
     Retry,
     Reconcile,
     Reset,
+    RestartWithoutCursor,
     ContactAdministrator,
 }
 

@@ -544,6 +544,7 @@ fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
         evaluation_result_anchor: evaluation.clone(),
         calibrations,
         score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: [
             (RetrieverKind::ExactLiteral, 1_000_000),
             (RetrieverKind::Lexical, 500_000),

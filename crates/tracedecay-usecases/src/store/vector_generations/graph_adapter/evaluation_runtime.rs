@@ -19,9 +19,10 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch,
-    NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationDependency,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch, NeverCancelled,
+    VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter,
@@ -36,14 +37,16 @@ use tracedecay_store::{
     AdmissionConfigV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationInputDigestV1, GraphPublicationOperationContextV1, GraphPublicationStoreV1,
     GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, RetainedGraphStoreLeaseV1,
+    RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
     RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
     RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
     SemanticVectorPublishedGenerationKey, SemanticVectorPublishedGenerationLookup,
     SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
-    StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStageState,
+    SemanticVectorStagingStore, StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 use crate::semantic_runtime::{
@@ -78,6 +81,11 @@ struct EvaluationGraphLeaseV1 {
     canonical_path: PathBuf,
 }
 
+#[derive(Debug)]
+struct EvaluationGraphOwnerAttachmentV1 {
+    operation: Arc<EvaluationGraphLeaseV1>,
+}
+
 impl RetainedGraphStoreLeaseV1 for EvaluationGraphLeaseV1 {
     fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
@@ -89,6 +97,27 @@ impl RetainedGraphStoreLeaseV1 for EvaluationGraphLeaseV1 {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for EvaluationGraphOwnerAttachmentV1 {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.operation.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.operation.locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.operation.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(self.operation.clone())
     }
 }
 
@@ -146,6 +175,7 @@ impl RuntimeRequestProbeV1 for EvaluationOperationProbeV1 {
 
 pub struct IsolatedSemanticEvaluationGraphV1 {
     registry: GraphDbRegistry,
+    _graph_owner: GraphDbOwnerAttachmentV1,
     lease: Arc<EvaluationGraphLeaseV1>,
     binding: StoreRuntimeBindingV1,
     source_scope: StoreShardIdV1,
@@ -235,6 +265,23 @@ impl IsolatedSemanticEvaluationGraphV1 {
     }
 }
 
+fn mount_evaluation_graph_runtime(
+    registry: &GraphDbRegistry,
+    operation: Arc<EvaluationGraphLeaseV1>,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
+    let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = operation.clone();
+    registry.resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+        operation: GraphDbRegistration {
+            authority_lease,
+            lifecycle_cancellation: Arc::clone(&cancellation),
+            cancellation,
+            deadline: Instant::now() + EVALUATION_GRAPH_OPERATION_DEADLINE,
+        },
+        authority_attachment: Box::new(EvaluationGraphOwnerAttachmentV1 { operation }),
+    })
+}
+
 impl IsolatedSemanticEvaluationGraphV1 {
     fn open(
         generations: &[&CodeIndexPublishedGenerationV1],
@@ -322,8 +369,15 @@ impl IsolatedSemanticEvaluationGraphV1 {
         let project = ProjectId::new("project.semantic-evaluation")
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let source_scope = evaluation_source_scope(&binding, &repository, &worktree)?;
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })?;
+        let graph_owner = mount_evaluation_graph_runtime(
+            &registry,
+            Arc::clone(&lease),
+            Arc::clone(&cancellation),
+        )?;
         let runtime = Self {
-            registry: GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })?,
+            registry,
+            _graph_owner: graph_owner,
             lease,
             binding,
             source_scope,
@@ -785,9 +839,40 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-cancel",
-            |registration, context| {
-                self.registry
-                    .cancel_generation_stage(registration, &mut *authority, context, stage)
+            |_registration, context| {
+                // This graph and its native rows share one temporary owner and
+                // are destroyed together after evaluation. Terminalize the
+                // canonical staging authority here, but do not run the
+                // persistent registry's page-wise native retirement while the
+                // evaluator is still measuring projection behavior.
+                let Some(record) = authority.stage(stage, context).map_err(map_staging_error)?
+                else {
+                    return Ok(SemanticVectorStageCancelOutcome::MissingStage);
+                };
+                if record.plan.key != *stage {
+                    return Err(GraphDbError::Conflict);
+                }
+                if record.state == SemanticVectorStageState::Cancelled {
+                    return Ok(SemanticVectorStageCancelOutcome::ExactReplay(record));
+                }
+                if record.state != SemanticVectorStageState::Pending {
+                    return Ok(SemanticVectorStageCancelOutcome::ReadyToPublish(record));
+                }
+                if !matches!(
+                    authority
+                        .replay(&record.plan.publication_key, context)
+                        .map_err(map_publication_error)?,
+                    tracedecay_store::GraphPublicationReplayLookupV1::Missing
+                ) || authority
+                    .verified_head(&record.plan.key.projection, context)
+                    .map_err(map_publication_error)?
+                    .is_some_and(|head| head.key == record.plan.publication_key)
+                {
+                    return Err(GraphDbError::Conflict);
+                }
+                authority
+                    .cancel_stage(stage, &record.plan.writer_fence, context)
+                    .map_err(map_staging_error)
             },
         )
     }
@@ -968,6 +1053,45 @@ fn post_commit_batch_settlement_error(error: GraphDbError) -> GraphDbError {
 #[cfg(test)]
 mod settlement_tests {
     use super::*;
+
+    #[test]
+    fn evaluation_graph_mounts_owner_before_registered_operations() {
+        let root = tempfile::tempdir().expect("evaluation root");
+        let graph_path = root
+            .path()
+            .canonicalize()
+            .expect("canonical evaluation root")
+            .join("evaluation.grafeo");
+        let binding = evaluation_binding().expect("evaluation binding");
+        let operation = Arc::new(EvaluationGraphLeaseV1 {
+            locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&graph_path).expect("graph locator digest"),
+            ),
+            binding,
+            canonical_path: graph_path,
+        });
+        let registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("registry");
+        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+        let _owner = mount_evaluation_graph_runtime(
+            &registry,
+            Arc::clone(&operation),
+            Arc::clone(&cancellation),
+        )
+        .expect("owner-mounted evaluation graph");
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = operation;
+
+        registry
+            .resolve(GraphDbRegistration {
+                authority_lease,
+                lifecycle_cancellation: Arc::clone(&cancellation),
+                cancellation,
+                deadline: Instant::now() + Duration::from_secs(30),
+            })
+            .expect("registered evaluation operation");
+    }
 
     #[test]
     fn post_commit_interruptions_are_durability_uncertain_not_cancelled() {

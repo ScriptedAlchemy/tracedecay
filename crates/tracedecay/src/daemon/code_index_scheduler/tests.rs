@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -1175,6 +1175,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
             )
         })
         .collect(),
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: [
             (RetrieverKind::ExactLiteral, 1_000_000),
             (RetrieverKind::Lexical, 500_000),
@@ -1600,6 +1601,77 @@ fn saved_edit_incremental_publish() {
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
+}
+
+#[test]
+fn occurrence_graph_store_is_available_before_catalog_warm() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store_root = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store_root.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
+        crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let projection = crate::code_index::graph_projection::code_graph_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
+    )
+    .expect("projection identity");
+    let manifest =
+        crate::code_index::graph_projection::build_published_code_graph_manifest_checked(
+            projection,
+            latest.generation(),
+            &projector_revision,
+            &|| Ok(()),
+        )
+        .expect("code graph manifest");
+    let snapshot = tracedecay_graph_db::VerifiedGraphSnapshot::memory(
+        manifest.as_ref().clone(),
+        Arc::new(tracedecay_graph_db::NeverCancelled),
+    )
+    .expect("verified graph snapshot");
+    let graph_store = Arc::new(
+        crate::code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot,
+            generation_id.clone(),
+        )
+        .expect("graph projection store"),
+    );
+    let reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation_id,
+            Some(latest.generation().snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph evidence reader");
+    graph_store
+        .mark_interactive_catalog_warming()
+        .expect("mark background catalog warm before serving");
+    latest
+        .install_graph_serving(
+            reader,
+            Some(Arc::clone(&graph_store)),
+            super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("install occurrence graph serving");
+
+    assert_eq!(graph_store.interactive_catalog_is_warm(), Ok(false));
+    assert!(
+        Arc::ptr_eq(
+            &latest
+                .interactive_graph_store()
+                .expect("occurrence graph serving is independent of catalog warm"),
+            &graph_store,
+        ),
+        "the installed generation-pinned graph store is immediately available"
+    );
 }
 
 #[test]

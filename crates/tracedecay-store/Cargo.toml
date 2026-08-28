@@ -25,8 +25,3 @@ hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-temporal-query/hotp
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
-
-# fault_harness.rs is linked into the lib via #[path] under the
-# tracedecay_observation_fault_harness cfg; shear cannot follow #[path].
-[package.metadata.cargo-shear]
-ignored-paths = ["test-support/fault_harness.rs"]

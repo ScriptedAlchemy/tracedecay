@@ -31,31 +31,11 @@ members = [
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
 ]
-# The vendored grafeo fork is wired in through `[patch.crates-io]`, not as a
-# member: its crates keep their own lint config and dev-dependencies, and
-# nothing in this workspace should build them twice. Listing them here lets
-# `cargo test` run from inside a vendored crate without cargo insisting the
-# package join this workspace.
 exclude = [
     ".worktrees",
     ".codex-worktrees",
 ]
 resolver = "3"
-
-[workspace.metadata.cargo-shear]
-ignored-paths = [
-    # Consumed only by scripts/check-distribution-acceptance.sh, which copies
-    # this file into the extracted package's `examples/` dir and builds it as
-    # `--example fastembed_distribution_acceptance`. It is deliberately not a
-    # source-repo target, so its "unlinked file" report is a false positive.
-    "tests/distribution/fastembed/acceptance.rs",
-    "evals/hermetic/fixtures/tool-args/*.rs",
-    "evals/hermetic/fixtures/tool-args-other/*.rs",
-    "evals/agent_adoption/fixture_broken/*.rs",
-    "tests/fixtures/context_eval_project/src/**/*.rs",
-    "tests/fixtures/search_quality/corpus/**/*.rs",
-    "tests/fixtures/search_quality/incremental/**/*.rs",
-]
 
 # Declared once here; every package inherits via
 # `edition.workspace = true`. Cargo has no config-level edition default — this
@@ -184,10 +164,12 @@ opt-level = 2
 [profile.perf.package.sha2]
 opt-level = 3
 
-# Workspace dependencies keep the upstream package API while the canonical
-# patched grammar sources ship inside the standalone code-extraction package.
+# The upstream Rust grammar rejects `#[cfg(...)]` attributes on
+# struct-destructuring fields (tree-sitter/tree-sitter-rust#301). Every
+# `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
+# pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
-tree-sitter-rust = { path = "vendor/tree-sitter-rust" }
+tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
 
 # Patched grafeo 0.5.42, consumed from our fork's patch branch
 # (tracedecay/0.5.42-arena-multichunk, based on upstream v0.5.42 rev 3bc8911).

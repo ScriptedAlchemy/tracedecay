@@ -16,7 +16,8 @@ impl McpServer {
         line: &str,
         transport: &mut impl McpTransport,
     ) -> Result<()> {
-        let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(line);
+        let parsed: std::result::Result<JsonRpcRequest, _> =
+            hotpath::measure_block!("mcp.server.connection.decode", serde_json::from_str(line));
         let project_tool_call = parsed
             .as_ref()
             .is_ok_and(|request| request.method == "tools/call")
@@ -65,7 +66,10 @@ impl McpServer {
             .as_ref()
             .map(SelectedProjectResponseLease::revoked);
         if let Some(response) = response {
-            let mut json_line = serialize_response_line(&response);
+            let mut json_line = hotpath::measure_block!(
+                "mcp.server.response.serialize",
+                serialize_response_line(&response)
+            );
             json_line.push('\n');
             let _ = self
                 .write_response_line_or_revoke(transport, &json_line, response_revoked)

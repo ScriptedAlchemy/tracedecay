@@ -800,6 +800,7 @@ mod tests {
                 })
                 .collect(),
             score_domain_calibrations: BTreeMap::new(),
+            minimum_calibrated_feature_micros: BTreeMap::new(),
             weights_micros: [
                 (RetrieverKind::ExactLiteral, 1_000_000),
                 (RetrieverKind::Lexical, 500_000),

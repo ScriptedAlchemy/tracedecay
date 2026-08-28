@@ -39,8 +39,13 @@ pub mod vibe;
 pub mod zed;
 
 use std::cell::RefCell;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -1058,37 +1063,500 @@ pub fn safe_write_bytes_file_with_metadata(
     backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!("cannot create directory {}: {e}", parent.display()),
-        })?;
+    safe_write_bytes_file_guarded(path, contents, backup, replacement_metadata)
+}
+
+/// Stable sibling lock held across host-file observation, intent, and rename.
+struct HostFileWriteLock(File);
+
+impl Drop for HostFileWriteLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
     }
-    let metadata = match std::fs::metadata(path) {
-        Ok(_) => Some(
-            capture_host_file_metadata(path).map_err(|e| TraceDecayError::Config {
-                message: format!("failed to capture metadata for {}: {e}", path.display()),
-            })?,
+}
+
+fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
+        message: format!("cannot create directory {}: {error}", parent.display()),
+    })?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to resolve host config directory {}: {error}",
+            parent.display()
         ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to inspect metadata for {}: {error}", path.display()),
-            });
+    })?;
+    let file_name = path.file_name().ok_or_else(|| TraceDecayError::Config {
+        message: format!("host config path has no file name: {}", path.display()),
+    })?;
+    let file_name_identity =
+        serde_json::to_vec(file_name).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to bind host config lock for {}: {error}",
+                path.display()
+            ),
+        })?;
+    let lock_name = format!(
+        ".tracedecay-host-config-{}.lock",
+        sha256_hex(&file_name_identity)
+    );
+    let directory = Dir::open_ambient_dir(&parent, ambient_authority()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!(
+                "failed to open host config directory {}: {error}",
+                parent.display()
+            ),
+        }
+    })?;
+    let mut options = CapOpenOptions::new();
+    options
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .follow(FollowSymlinks::No);
+    let lock = directory
+        .open_with(&lock_name, &options)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to open host config lock {}: {error}",
+                parent.join(&lock_name).display()
+            ),
+        })?
+        .into_std();
+    let metadata = lock.metadata().map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to inspect host config lock {}: {error}",
+            parent.join(&lock_name).display()
+        ),
+    })?;
+    if !metadata.is_file() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing unsafe host config lock {}",
+                parent.join(&lock_name).display()
+            ),
+        });
+    }
+    lock.lock_exclusive()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to lock host config {}: {error}", path.display()),
+        })?;
+    Ok(HostFileWriteLock(lock))
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostFileObjectIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    links: u64,
+    uid: u32,
+    gid: u32,
+    device_type: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(unix)]
+fn host_file_object_identity(metadata: &std::fs::Metadata) -> HostFileObjectIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    HostFileObjectIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        links: metadata.nlink(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        device_type: metadata.rdev(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(unix)]
+impl HostFileObjectIdentity {
+    fn same_after_move(&self, other: &Self) -> bool {
+        self.device == other.device
+            && self.inode == other.inode
+            && self.mode == other.mode
+            && self.links == other.links
+            && self.uid == other.uid
+            && self.gid == other.gid
+            && self.device_type == other.device_type
+            && self.size == other.size
+            && self.modified_seconds == other.modified_seconds
+            && self.modified_nanoseconds == other.modified_nanoseconds
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostFileObjectIdentity {
+    size: u64,
+    readonly: bool,
+    modified: std::time::SystemTime,
+}
+
+#[cfg(not(unix))]
+fn host_file_object_identity(
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<HostFileObjectIdentity> {
+    Ok(HostFileObjectIdentity {
+        size: metadata.len(),
+        readonly: metadata.permissions().readonly(),
+        modified: metadata.modified()?,
+    })
+}
+
+#[cfg(not(unix))]
+impl HostFileObjectIdentity {
+    fn same_after_move(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HostFileSnapshot {
+    Missing,
+    Present {
+        contents: Vec<u8>,
+        metadata: HostFileMetadataIdentityV1,
+        object: HostFileObjectIdentity,
+    },
+}
+
+impl HostFileSnapshot {
+    fn contents(&self) -> Option<&[u8]> {
+        match self {
+            Self::Missing => None,
+            Self::Present { contents, .. } => Some(contents),
+        }
+    }
+
+    fn metadata(&self) -> Option<&HostFileMetadataIdentityV1> {
+        match self {
+            Self::Missing => None,
+            Self::Present { metadata, .. } => Some(metadata),
+        }
+    }
+
+    fn same_after_move(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Missing, Self::Missing) => true,
+            (
+                Self::Present {
+                    contents,
+                    metadata,
+                    object,
+                },
+                Self::Present {
+                    contents: other_contents,
+                    metadata: other_metadata,
+                    object: other_object,
+                },
+            ) => {
+                contents == other_contents
+                    && metadata == other_metadata
+                    && object.same_after_move(other_object)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn capture_host_file_snapshot(path: &Path) -> std::io::Result<HostFileSnapshot> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "unsafe host metadata path: {}",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HostFileSnapshot::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    #[cfg(unix)]
+    let before_object = host_file_object_identity(&before);
+    #[cfg(not(unix))]
+    let before_object = host_file_object_identity(&before)?;
+    let contents = std::fs::read(path)?;
+    let metadata = capture_host_file_metadata(path)?;
+    let after = std::fs::symlink_metadata(path)?;
+    if !after.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "unsafe host metadata path: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    let after_object = host_file_object_identity(&after);
+    #[cfg(not(unix))]
+    let after_object = host_file_object_identity(&after)?;
+    if before_object != after_object {
+        return Err(std::io::Error::other(format!(
+            "host config changed while it was read: {}",
+            path.display()
+        )));
+    }
+    Ok(HostFileSnapshot::Present {
+        contents,
+        metadata,
+        object: after_object,
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TestHostConfigWriteBoundary {
+    Validation,
+    Publication,
+    Published,
+}
+
+#[cfg(test)]
+struct TestHostConfigWritePause {
+    state: std::sync::Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+static TEST_HOST_CONFIG_WRITE_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<
+        Vec<(
+            PathBuf,
+            TestHostConfigWriteBoundary,
+            std::sync::Weak<TestHostConfigWritePause>,
+        )>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[cfg(test)]
+struct TestHostConfigWritePauseController(std::sync::Arc<TestHostConfigWritePause>);
+
+#[cfg(test)]
+impl TestHostConfigWritePauseController {
+    fn wait_until_reached(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut state = self.0.state.lock().expect("host write pause state");
+        while !state.0 {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                drop(state);
+                panic!("host write did not reach its publication boundary");
+            };
+            let (next, timeout) = self
+                .0
+                .changed
+                .wait_timeout(state, remaining)
+                .expect("host write pause wait");
+            state = next;
+            if !state.0 && timeout.timed_out() {
+                drop(state);
+                panic!("host write pause timed out");
+            }
+        }
+    }
+
+    fn resume(&self) {
+        let mut state = self.0.state.lock().expect("host write pause state");
+        state.1 = true;
+        self.0.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestHostConfigWritePauseController {
+    fn drop(&mut self) {
+        self.resume();
+    }
+}
+
+#[cfg(test)]
+fn pause_next_host_config_write_after_validation(
+    path: &Path,
+) -> TestHostConfigWritePauseController {
+    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Validation)
+}
+
+#[cfg(test)]
+fn pause_next_host_config_write_at_publication(path: &Path) -> TestHostConfigWritePauseController {
+    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Publication)
+}
+
+#[cfg(test)]
+fn pause_next_host_config_write_after_publication(
+    path: &Path,
+) -> TestHostConfigWritePauseController {
+    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Published)
+}
+
+#[cfg(test)]
+fn pause_next_host_config_write(
+    path: &Path,
+    boundary: TestHostConfigWriteBoundary,
+) -> TestHostConfigWritePauseController {
+    let pause = std::sync::Arc::new(TestHostConfigWritePause {
+        state: std::sync::Mutex::new((false, false)),
+        changed: std::sync::Condvar::new(),
+    });
+    TEST_HOST_CONFIG_WRITE_PAUSES
+        .lock()
+        .expect("host write pause registry")
+        .push((
+            path.to_path_buf(),
+            boundary,
+            std::sync::Arc::downgrade(&pause),
+        ));
+    TestHostConfigWritePauseController(pause)
+}
+
+#[cfg(test)]
+fn test_pause_host_config_write(path: &Path, boundary: TestHostConfigWriteBoundary) {
+    let pause = {
+        let mut pauses = TEST_HOST_CONFIG_WRITE_PAUSES
+            .lock()
+            .expect("host write pause registry");
+        let Some(index) = pauses
+            .iter()
+            .position(|(candidate, candidate_boundary, pause)| {
+                candidate == path
+                    && *candidate_boundary == boundary
+                    && std::sync::Weak::strong_count(pause) > 0
+            })
+        else {
+            return;
+        };
+        pauses.remove(index).2.upgrade()
+    };
+    let Some(pause) = pause else {
+        return;
+    };
+    let mut state = pause.state.lock().expect("host write pause state");
+    state.0 = true;
+    pause.changed.notify_all();
+    while !state.1 {
+        state = pause.changed.wait(state).expect("host write pause wait");
+    }
+}
+
+fn verify_host_file_snapshot(path: &Path, expected: &HostFileSnapshot) -> std::io::Result<()> {
+    let observed = capture_host_file_snapshot(path)?;
+    if &observed == expected {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "host config changed since it was read: {}",
+            path.display()
+        )))
+    }
+}
+
+fn safe_write_bytes_file_guarded(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+) -> Result<()> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to capture metadata for {}: {error}", path.display()),
+    })?;
+    safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
+}
+
+
+fn remove_host_file_from_snapshot(path: &Path, observed: &HostFileSnapshot) -> Result<()> {
+    if matches!(observed, HostFileSnapshot::Missing) {
+        return Ok(());
+    }
+    persist_host_config_remove_intent(path)?;
+    tracedecay_private_fs::framed_log::remove_conditionally(
+        path,
+        || {
+            #[cfg(test)]
+            test_pause_host_config_write(path, TestHostConfigWriteBoundary::Publication);
+        },
+        |displaced| {
+            let displaced = capture_host_file_snapshot(displaced)?;
+            Ok(displaced.same_after_move(observed))
+        },
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to conditionally remove {}: {error}", path.display()),
+    })
+}
+
+fn safe_write_bytes_file_from_snapshot(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+    observed: &HostFileSnapshot,
+) -> Result<()> {
+    let publish_metadata = replacement_metadata.or(observed.metadata());
+    let staged_snapshot = RefCell::new(None);
+    let publish_expectation = match observed {
+        HostFileSnapshot::Missing => {
+            tracedecay_private_fs::framed_log::ConditionalPublishExpectation::Missing
+        }
+        HostFileSnapshot::Present { .. } => {
+            tracedecay_private_fs::framed_log::ConditionalPublishExpectation::Present
         }
     };
-    let publish_metadata = replacement_metadata.or(metadata.as_ref());
-    if let Err(e) = tracedecay_private_fs::framed_log::atomic_write_prepared(
+    if let Err(e) = tracedecay_private_fs::framed_log::atomic_write_prepared_conditionally(
         path,
         "host-config",
         contents,
-        |temporary| {
-            if let Some(metadata) = publish_metadata {
-                restore_host_file_metadata(temporary, metadata)?;
-            }
-            let expected_metadata = capture_host_file_metadata(temporary)?;
-            persist_host_config_write_intent(path, contents, Some(&expected_metadata))
-                .map_err(std::io::Error::other)?;
-            Ok(())
+        publish_expectation,
+        tracedecay_private_fs::framed_log::ConditionalPublishCallbacks {
+            prepare: |temporary: &Path| {
+                if let Some(metadata) = publish_metadata {
+                    restore_host_file_metadata(temporary, metadata)?;
+                }
+                let expected_metadata = capture_host_file_metadata(temporary)?;
+                staged_snapshot.replace(Some(capture_host_file_snapshot(temporary)?));
+                persist_host_config_write_intent(path, contents, Some(&expected_metadata))
+                    .map_err(std::io::Error::other)?;
+                verify_host_file_snapshot(path, observed)?;
+                #[cfg(test)]
+                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Validation);
+                verify_host_file_snapshot(path, observed)?;
+                Ok(())
+            },
+            before_publish: || {
+                #[cfg(test)]
+                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Publication);
+            },
+            after_publish: || {
+                #[cfg(test)]
+                test_pause_host_config_write(path, TestHostConfigWriteBoundary::Published);
+            },
+            verify_displaced: |displaced: &Path| {
+                let displaced = capture_host_file_snapshot(displaced)?;
+                Ok(displaced.same_after_move(observed))
+            },
+            verify_published: |rolled_back_published: &Path| {
+                let rolled_back = capture_host_file_snapshot(rolled_back_published)?;
+                let staged = staged_snapshot.borrow();
+                Ok(staged
+                    .as_ref()
+                    .is_some_and(|staged| rolled_back.same_after_move(staged)))
+            },
         },
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     ) {
@@ -3388,6 +3856,22 @@ mod path_normalize_tests {
 mod local_install_safety_tests {
     use super::*;
 
+    fn start_paused_host_write(
+        path: &Path,
+        contents: &'static [u8],
+    ) -> (
+        TestHostConfigWritePauseController,
+        std::thread::JoinHandle<std::result::Result<(), String>>,
+    ) {
+        let pause = pause_next_host_config_write_at_publication(path);
+        let path = path.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&path, contents, None).map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+        (pause, writer)
+    }
+
     #[test]
     fn windows_hook_command_quotes_windows_paths_with_spaces() {
         let command = hook_command_for_platform(
@@ -3513,5 +3997,152 @@ mod local_install_safety_tests {
             "shared writer must surface its cross-host symlink refusal: {error}"
         );
         assert_eq!(std::fs::read(&outside).unwrap(), b"operator bytes");
+    }
+
+    #[test]
+    fn shared_host_writer_serializes_a_competing_canonical_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        let (pause, first) = start_paused_host_write(&config, b"first");
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let second_path = config.clone();
+        let second = std::thread::spawn(move || {
+            let result = safe_write_bytes_file(&second_path, b"second", None)
+                .map_err(|error| error.to_string());
+            finished_tx.send(()).unwrap();
+            result
+        });
+
+        assert!(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "a competing canonical writer must wait for the path lock"
+        );
+        pause.resume();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&config).unwrap(), b"second");
+    }
+
+    #[test]
+    fn shared_host_writer_refuses_a_foreign_edit_at_publication_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        let pause = pause_next_host_config_write_at_publication(&config);
+        let writer_path = config.clone();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&writer_path, b"tracedecay", None)
+                .map_err(|error| error.to_string())
+        });
+        pause.wait_until_reached();
+
+        std::fs::write(&config, b"foreign").unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_retains_both_files_when_published_staging_is_mutated() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let publication = pause_next_host_config_write_at_publication(&config);
+        let published = pause_next_host_config_write_after_publication(&config);
+        let writer_path = config.clone();
+        let writer = std::thread::spawn(move || {
+            safe_write_bytes_file(&writer_path, b"tracedecay", None)
+                .map_err(|error| error.to_string())
+        });
+        publication.wait_until_reached();
+
+        std::fs::write(&config, b"foreign at boundary").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        publication.resume();
+        published.wait_until_reached();
+
+        std::fs::write(&config, b"foreign after publication").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        published.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("retained"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign at boundary");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
+        let retained = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path != &config
+                    && std::fs::read(path)
+                        .is_ok_and(|contents| contents == b"foreign after publication")
+            })
+            .expect("the ambiguous published staging file must remain recoverable");
+        assert_eq!(std::fs::metadata(retained).unwrap().mode() & 0o777, 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_a_symlink_swap_at_publication() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::remove_file(&config).unwrap();
+        symlink(&outside, &config).unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("unsafe host metadata path"), "{error}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_a_metadata_change_at_publication() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        std::fs::write(&config, b"original").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"original");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn shared_host_writer_refuses_a_missing_file_create_at_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("AGENTS.md");
+        let (pause, writer) = start_paused_host_write(&config, b"tracedecay");
+
+        std::fs::write(&config, b"foreign create").unwrap();
+        pause.resume();
+        let error = writer.join().unwrap().unwrap_err();
+
+        assert!(error.contains("changed since it was read"), "{error}");
+        assert_eq!(std::fs::read(&config).unwrap(), b"foreign create");
     }
 }

@@ -6,7 +6,7 @@ use super::*;
 /// queries. The verified projection intentionally publishes neither that
 /// similarity authority nor an equivalent score, so the compound result must
 /// fail closed until the canonical redundancy authority owns this journey.
-#[hotpath::measure(label = "mcp.info.simplify_scan.total")]
+#[hotpath::measure(future = true, label = "mcp.info.simplify_scan.total")]
 pub(crate) async fn handle_simplify_scan(
     _cg: &TraceDecay,
     _args: Value,

@@ -3,7 +3,7 @@ import { Outlet } from 'react-router';
 import { NavRail } from './NavRail';
 import { ScopeBar } from './ScopeBar';
 import { ScopeUrlSync } from '../../data/scope/UrlSync.tsx';
-import { QueryActivityStatus, StatusStrip } from './StatusStrip';
+import { QueryActivityStatus, SourceProvenance, StatusStrip } from './StatusStrip';
 
 const CommandPalette = lazy(() =>
   import('./CommandPalette').then((m) => ({ default: m.CommandPalette })),
@@ -63,7 +63,14 @@ export function Shell() {
         >
           <Outlet />
         </main>
-        <StatusStrip queryActivity={<QueryActivityStatus />} />
+        <StatusStrip
+          queryActivity={
+            <>
+              <SourceProvenance />
+              <QueryActivityStatus />
+            </>
+          }
+        />
       </div>
     </div>
   );

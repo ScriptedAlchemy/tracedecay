@@ -816,6 +816,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for WaiterPermit<R, C> {
             state.waiters.remove(index);
             state.mark_availability_changed();
         }
+        hotpath::gauge!("semantic_session_waiters").set(state.waiters.len());
         drop(state);
         self.inner.wakeups.notify_all();
     }

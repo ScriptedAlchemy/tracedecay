@@ -4,7 +4,7 @@ use super::*;
 
 /// Substring search across the cached `signature` column on every
 /// Function/Method node.
-#[hotpath::measure(label = "mcp.info.signature_search.total")]
+#[hotpath::measure(future = true, label = "mcp.info.signature_search.total")]
 pub(crate) async fn handle_signature_search(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

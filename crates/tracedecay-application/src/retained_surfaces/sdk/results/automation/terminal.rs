@@ -42,6 +42,7 @@ pub enum AutomationSkipReasonV1 {
     SessionCursorManifestLimitExceeded,
     SessionEvidenceBudgetExhausted,
     SessionEvidenceBudgetSuppressed,
+    SessionEvidenceTimedOut,
     SessionEvidenceCancelled,
     NoSessionEvidence,
     ShippedFactProposalHistoryRetired,
@@ -82,9 +83,14 @@ impl AutomationSkipReasonV1 {
             "session_evidence_denied" => Self::SessionEvidenceDenied,
             "session_evidence_locked" => Self::SessionEvidenceLocked,
             "session_evidence_reset_required" => Self::SessionEvidenceResetRequired,
-            "session_cursor_manifest_limit_exceeded" => Self::SessionCursorManifestLimitExceeded,
+            "session_cursor_manifest_limit_exceeded"
+            | "session_cursor_manifest_participants_limit_exceeded"
+            | "session_cursor_manifest_canonical_bytes_limit_exceeded" => {
+                Self::SessionCursorManifestLimitExceeded
+            }
             SESSION_EVIDENCE_BUDGET_EXHAUSTED => Self::SessionEvidenceBudgetExhausted,
             SESSION_EVIDENCE_BUDGET_SUPPRESSED => Self::SessionEvidenceBudgetSuppressed,
+            "session_evidence_timed_out" => Self::SessionEvidenceTimedOut,
             "session_evidence_cancelled" => Self::SessionEvidenceCancelled,
             "no_session_evidence" | "no_skill_writer_evidence" => Self::NoSessionEvidence,
             "shipped_fact_proposal_history_retired" => Self::ShippedFactProposalHistoryRetired,
@@ -115,6 +121,7 @@ impl AutomationSkipReasonV1 {
             | Self::SessionCursorManifestLimitExceeded
             | Self::SessionEvidenceBudgetExhausted
             | Self::SessionEvidenceBudgetSuppressed
+            | Self::SessionEvidenceTimedOut
             | Self::SessionEvidenceCancelled
             | Self::NoSessionEvidence => matches!(
                 task,

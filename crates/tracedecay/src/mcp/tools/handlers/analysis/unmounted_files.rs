@@ -266,7 +266,7 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
     out
 }
 
-#[hotpath::measure(label = "mcp.analysis.unmounted_files.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.unmounted_files.total")]
 pub(crate) async fn handle_unmounted_files(
     cg: &TraceDecay,
     args: Value,

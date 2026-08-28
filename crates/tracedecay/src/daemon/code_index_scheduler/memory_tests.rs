@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+    process_resident_memory_limit_for_system_v1,
 };
 
 use super::{
@@ -56,6 +57,46 @@ fn worker_reservation_bytes() -> u64 {
     tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
         status.effective_workers,
     ))
+}
+
+#[test]
+fn large_host_authority_admits_worker_scratch_lexical_build_and_snapshot() {
+    let host_memory_bytes = 88 * 1024 * 1024 * 1024;
+    let limit = process_resident_memory_limit_for_system_v1(host_memory_bytes).get();
+    let authority = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(limit).expect("derived host authority is nonzero"),
+    ));
+    let worker_scratch_bytes = limit.saturating_sub(limit / 4);
+    let lexical_build_bytes =
+        u64::try_from(super::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+            .expect("lexical build budget fits u64");
+    let retained_snapshot_bytes = 64 * 1024 * 1024;
+
+    let _workers = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test.code-index.worker-scratch")
+                .expect("valid component"),
+            NonZeroU64::new(worker_scratch_bytes).expect("worker scratch is nonzero"),
+        )
+        .expect("host authority admits the maximum automatic worker scratch");
+    let _lexical = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test.query.lexical-build").expect("valid component"),
+            NonZeroU64::new(lexical_build_bytes).expect("lexical build is nonzero"),
+        )
+        .expect("worker scratch and lexical build can coexist");
+    let _snapshot = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test.code-index.retained-snapshot")
+                .expect("valid component"),
+            NonZeroU64::new(retained_snapshot_bytes).expect("snapshot charge is nonzero"),
+        )
+        .expect("bounded source retention cannot be crowded out by admitted work");
+
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        worker_scratch_bytes + lexical_build_bytes + retained_snapshot_bytes
+    );
 }
 
 #[test]

@@ -588,6 +588,52 @@ async fn unavailable_task_session_continuation_remains_a_partial_read() {
 }
 
 #[tokio::test]
+async fn structural_task_session_refusal_remains_typed_in_hydration_omission() {
+    let refusal = SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+        kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+        observed: 257,
+        maximum: 256,
+    };
+    let sessions = Sessions {
+        error: Some(WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal)),
+        ..Default::default()
+    };
+    let (service, _reads) = task_session_service(&sessions);
+
+    let result = service
+        .retrieve(&context(), task_session_continuation_request())
+        .await
+        .expect("structural refusal must remain a successful partial read");
+
+    assert_eq!(result.coverage.state, WorkEvidenceCoverageStateV1::Partial);
+    assert_eq!(
+        result.omissions,
+        vec![WorkEvidenceOmissionV1 {
+            relation: "task_session".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal),
+        }]
+    );
+}
+
+#[test]
+fn structural_budget_stage_survives_hydration_rendering() {
+    let refusal = SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+        stage: crate::retrieval::SessionRetrievalBudgetStageV1::ContextTokens,
+    };
+
+    assert_eq!(
+        hydration_omission(
+            "task_session",
+            WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal),
+        ),
+        WorkEvidenceOmissionV1 {
+            relation: "task_session".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal),
+        }
+    );
+}
+
+#[tokio::test]
 async fn stale_task_session_without_a_matched_continuation_remains_an_omission() {
     let sessions = Sessions {
         error: Some(WorkEvidenceHydrationErrorV1::Stale),

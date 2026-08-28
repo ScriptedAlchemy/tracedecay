@@ -888,7 +888,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
-    #[hotpath::measure(label = "code_index.lexical_source.open")]
+    #[hotpath::measure(label = "code_index.restore.open")]
     pub fn open(
         mut reader: R,
         admitted_len: u64,
@@ -945,7 +945,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// in the durable generation index while the same bounded scan discovers
     /// the lexical layout. The caller can therefore pass a `File` directly;
     /// no whole-generation `Vec` is required merely to authenticate it.
-    #[hotpath::measure(label = "code_index.lexical_source.open_content_addressed")]
+    #[hotpath::measure(label = "code_index.restore.open_content_addressed")]
     pub fn open_content_addressed(
         reader: R,
         admitted_len: u64,
@@ -973,7 +973,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// Open a content-addressed source while reporting authenticated scan
     /// bytes. The callback is invoked at zero, bounded byte intervals, and
     /// exactly once with the admitted total before metadata is exposed.
-    #[hotpath::measure(label = "code_index.lexical_source.open_content_addressed_progress")]
+    #[hotpath::measure(label = "code_index.restore.open_content_addressed")]
     pub fn open_content_addressed_with_progress<F>(
         mut reader: R,
         admitted_len: u64,
@@ -1061,7 +1061,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     /// Adopt a persisted cursor after binding it to this source and validating
     /// its first unread file. This deliberately never walks earlier files.
-    #[hotpath::measure(label = "code_index.lexical_source.restore_cursor")]
+    #[hotpath::measure(label = "code_index.restore.cursor")]
     pub fn restore_cursor(
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
@@ -1191,7 +1191,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         std::mem::size_of::<u64>().saturating_mul(4)
     }
 
-    #[hotpath::measure(label = "code_index.lexical_source.next_page")]
+    #[hotpath::measure(label = "code_index.restore.page")]
     pub fn next_page(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1806,7 +1806,7 @@ struct SealedLexicalLayoutV1 {
     temporary_string_allocations: u64,
 }
 
-#[hotpath::measure(label = "code_index.lexical_source.scan_layout")]
+#[hotpath::measure(label = "code_index.restore.scan")]
 fn scan_layout<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
@@ -2384,12 +2384,12 @@ fn first_json_string_control(bytes: &[u8]) -> Option<usize> {
         .map(|relative| tail_base + relative)
 }
 
+#[hotpath::measure(label = "code_index.restore.metadata")]
 fn read_verified_text_metadata<R: Read + Seek>(
     reader: &mut R,
     layout: &SealedLexicalLayoutV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
-    #[hotpath::measure(label = "code_index.lexical_source.decode_range")]
     fn decode_range<T: serde::de::DeserializeOwned, R: Read + Seek>(
         reader: &mut R,
         range: (u64, u64),
@@ -2431,43 +2431,54 @@ fn read_verified_text_metadata<R: Read + Seek>(
         })
     }
 
-    let manifest: CodeGenerationManifestV1 = decode_range(
-        reader,
-        layout.manifest_range.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation manifest metadata is missing".to_owned(),
-            )
-        })?,
-        "manifest",
-        control,
+    let manifest: CodeGenerationManifestV1 = hotpath::measure_block!(
+        "code_index.restore.metadata.manifest_decode",
+        decode_range(
+            reader,
+            layout.manifest_range.ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation manifest metadata is missing".to_owned(),
+                )
+            })?,
+            "manifest",
+            control,
+        )
     )?;
-    let snapshot: SanitizedCodeSnapshotV1 = decode_range(
-        reader,
-        layout.snapshot_range.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation snapshot metadata is missing".to_owned(),
-            )
-        })?,
-        "snapshot",
-        control,
+    let snapshot: SanitizedCodeSnapshotV1 = hotpath::measure_block!(
+        "code_index.restore.metadata.snapshot_decode",
+        decode_range(
+            reader,
+            layout.snapshot_range.ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation snapshot metadata is missing".to_owned(),
+                )
+            })?,
+            "snapshot",
+            control,
+        )
     )?;
-    snapshot
-        .validate()
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    let snapshot_digest = canonical_sha256(&(INTAKE_DIGEST_SEPARATOR, &snapshot))
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    if snapshot_digest != manifest.snapshot_digest {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed text metadata snapshot digest does not match the manifest".to_owned(),
-        ));
-    }
-    let seal_digest = expected_seal_digest(&manifest)
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    if seal_digest != manifest.seal.expected_digest {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed text metadata manifest seal is invalid".to_owned(),
-        ));
-    }
+    hotpath::measure_block!("code_index.restore.metadata.snapshot_validate", {
+        snapshot
+            .validate()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    })?;
+    hotpath::measure_block!("code_index.restore.metadata.digest_verify", {
+        let snapshot_digest = canonical_sha256(&(INTAKE_DIGEST_SEPARATOR, &snapshot))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if snapshot_digest != manifest.snapshot_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed text metadata snapshot digest does not match the manifest".to_owned(),
+            ));
+        }
+        let seal_digest = expected_seal_digest(&manifest)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if seal_digest != manifest.seal.expected_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed text metadata manifest seal is invalid".to_owned(),
+            ));
+        }
+        Ok::<_, CodeIndexProductionErrorV1>(())
+    })?;
     Ok(VerifiedSealedTextGenerationMetadataV1 { manifest, snapshot })
 }
 

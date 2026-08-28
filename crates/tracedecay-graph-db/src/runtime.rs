@@ -121,7 +121,7 @@ impl GraphDb {
         validate_or_initialize_format(&database, &validated)?;
         let state = FormatState::load(&database)?;
         let quarantined_projections = load_quarantined_projections(&database)?;
-        Ok(Arc::new(Self {
+        let graph = Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(database)),
                 state: RwLock::new(state),
@@ -137,7 +137,9 @@ impl GraphDb {
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
-        }))
+        });
+        graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
+        Ok(graph)
     }
 
     #[must_use]
@@ -897,6 +899,28 @@ impl GraphDb {
         .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
         self.ensure_available()?;
         Ok(guard)
+    }
+
+    /// Best-effort profiler observation that cannot change graph authority or
+    /// operation outcomes. A closed or poisoned database simply has no
+    /// trustworthy memory census to report.
+    #[inline(always)]
+    pub(crate) fn record_memory_checkpoint(
+        &self,
+        phase: crate::hotpath_observe::GrafeoMemoryPhase,
+    ) {
+        #[cfg(feature = "hotpath")]
+        {
+            let Ok(guard) = self.read_guard() else {
+                return;
+            };
+            let Some(database) = guard.as_ref() else {
+                return;
+            };
+            crate::hotpath_observe::record_grafeo_memory(database, phase);
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = phase;
     }
 
     pub(crate) fn write_guard(

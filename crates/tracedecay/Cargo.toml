@@ -103,13 +103,13 @@ hotpath = [
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
-    "tracedecay-host-integration/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-search-eval/hotpath",
     "tracedecay-sdk/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
@@ -133,13 +133,13 @@ hotpath-alloc = [
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-host-integration/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-sdk/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
@@ -163,13 +163,13 @@ hotpath-cpu = [
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-host-integration/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-sdk/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
@@ -373,7 +373,6 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-jsonrpc = { path = "../tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
@@ -421,7 +420,6 @@ crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-open = "5.3"
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
@@ -441,9 +439,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
 tar = "0.4"
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-xattr = "1"
 
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
 # resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such

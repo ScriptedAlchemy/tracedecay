@@ -63,6 +63,62 @@ use tracedecay_query::retrieval::{
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
 
+type GenerationResolutionResultV1<T> =
+    Result<Option<T>, code_search::CodeIndexSearchUnavailableReasonV1>;
+
+enum GenerationResolutionSettlementV1<T> {
+    Completed(GenerationResolutionResultV1<T>),
+    JoinFailed,
+    Terminated(code_search::CodeIndexSearchUnavailableReasonV1),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationResolutionTerminalV1 {
+    Ready,
+    Unavailable,
+    Failed,
+}
+
+fn finish_generation_resolution_with<T>(
+    settlement: GenerationResolutionSettlementV1<T>,
+    observe: impl FnOnce(GenerationResolutionTerminalV1),
+) -> GenerationResolutionResultV1<T> {
+    let result = match settlement {
+        GenerationResolutionSettlementV1::Completed(result) => result,
+        GenerationResolutionSettlementV1::JoinFailed => {
+            Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
+        }
+        GenerationResolutionSettlementV1::Terminated(reason) => Err(reason),
+    };
+    observe(match &result {
+        Ok(Some(_)) => GenerationResolutionTerminalV1::Ready,
+        Ok(None) => GenerationResolutionTerminalV1::Unavailable,
+        Err(_) => GenerationResolutionTerminalV1::Failed,
+    });
+    result
+}
+
+fn finish_generation_resolution<T>(
+    settlement: GenerationResolutionSettlementV1<T>,
+) -> GenerationResolutionResultV1<T> {
+    finish_generation_resolution_with(settlement, |terminal| {
+        #[cfg(feature = "hotpath")]
+        match terminal {
+            GenerationResolutionTerminalV1::Ready => {
+                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
+            }
+            GenerationResolutionTerminalV1::Unavailable => {
+                hotpath::gauge!("query.generation.resolve.outcome.unavailable_total").inc(1_u64);
+            }
+            GenerationResolutionTerminalV1::Failed => {
+                hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
+            }
+        }
+        #[cfg(not(feature = "hotpath"))]
+        let _ = terminal;
+    })
+}
+
 /// Validated once per process. Live query pages and the unavailable
 /// constructor share this identifier; do not rebuild it on the failure path.
 static CALLABLE_CODE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
@@ -173,7 +229,6 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Compose real exact/lexical/graph lane outcomes only through the
     /// accepted profile and query/cursor key authority mounted for this exact
     /// admitted scope.
-    #[hotpath::measure(label = "daemon.code_index.query.compose_fallback", future = true)]
     pub(in crate::daemon) async fn compose_query_fallback(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -240,7 +295,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.code_index.query.generation", future = true)]
+    #[hotpath::measure(future = true, label = "query.generation.resolve")]
     pub(in crate::daemon) async fn generation_for_controlled(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -248,6 +303,8 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -255,10 +312,16 @@ impl CodeIndexSchedulerRegistryV1 {
                     std::sync::Arc::clone(&worktree.scheduler),
                     std::sync::Arc::clone(&worktree.serving_generation),
                 ),
-                UniqueMountedWorktree::None => return Ok(None),
+                UniqueMountedWorktree::None => {
+                    return finish_generation_resolution(
+                        GenerationResolutionSettlementV1::Completed(Ok(None)),
+                    );
+                }
                 UniqueMountedWorktree::Ambiguous => {
-                    return Err(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    return finish_generation_resolution(
+                        GenerationResolutionSettlementV1::Completed(Err(
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                        )),
                     );
                 }
             }
@@ -286,24 +349,32 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
                 return Ok(Some(generation));
             }
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let generation = scheduler
-                .generation(&generation_id)
-                .map_err(|error| match error {
-                    super::CodeIndexSchedulerErrorV1::Production(
-                        crate::code_index::production::CodeIndexProductionErrorV1::Publication(
-                            error,
-                        ),
-                    ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
-                    _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                })?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
+            let scheduler = hotpath::measure_block!("query.generation.resolve.scheduler_wait", {
+                scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+            let generation = hotpath::measure_block!("query.generation.resolve.load", {
+                scheduler
+                    .generation(&generation_id)
+                    .map_err(|error| match error {
+                        super::CodeIndexSchedulerErrorV1::Production(
+                            crate::code_index::production::CodeIndexProductionErrorV1::Publication(
+                                error,
+                            ),
+                        ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
+                        _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    })
+            })?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
-        match crate::daemon::park_admission(
+        let settlement = match crate::daemon::park_admission(
             crate::daemon::code_index_task_support::settle_owned_blocking_task(
                 task,
                 std::time::Duration::from_millis(10),
@@ -316,10 +387,11 @@ impl CodeIndexSchedulerRegistryV1 {
         )
         .await
         {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal),
-            Err(reason) => Err(reason),
-        }
+            Ok(Ok(result)) => GenerationResolutionSettlementV1::Completed(result),
+            Ok(Err(_)) => GenerationResolutionSettlementV1::JoinFailed,
+            Err(reason) => GenerationResolutionSettlementV1::Terminated(reason),
+        };
+        finish_generation_resolution(settlement)
     }
 
     /// Resolve the generation a callable-code query serves.
@@ -332,7 +404,6 @@ impl CodeIndexSchedulerRegistryV1 {
     /// reconciled at query admission without any standing filesystem watcher.
     /// Partial, stale, failed, or incompatible generations never surface here:
     /// the ladder only ever returns the latest complete generation.
-    #[hotpath::measure(label = "daemon.code_index.query.resolve_serving", future = true)]
     pub(super) async fn resolve_serving_generation(
         &self,
         request: &RequestContext,
@@ -381,7 +452,6 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(latest)
     }
 
-    #[hotpath::measure(label = "daemon.code_index.query.resolve_text_serving", future = true)]
     async fn resolve_text_serving_generation(
         &self,
         request: &RequestContext,
@@ -819,7 +889,6 @@ fn sorted_positions_for<'a>(
 }
 
 impl GenerationRecordIndexV1 {
-    #[hotpath::measure(label = "daemon.code_index.query.record_index")]
     pub(in crate::daemon) fn build(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> Self {
@@ -1365,7 +1434,6 @@ macro_rules! resolve_start_symbol {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    #[hotpath::measure(label = "daemon.code_index.query.prepare", future = true)]
     async fn prepare_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,
@@ -1405,7 +1473,6 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedCallableQueryV1 { latest, query })
     }
 
-    #[hotpath::measure(label = "daemon.code_index.query.prepare_text", future = true)]
     async fn prepare_text_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,
@@ -2932,6 +2999,59 @@ fn navigation_symbol_query<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_resolution_terminal_projection_records_exactly_one_outcome() {
+        use code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
+
+        let cases = [
+            (
+                "serving hit",
+                GenerationResolutionSettlementV1::Completed(Ok(Some("serving"))),
+                Ok(Some("serving")),
+                GenerationResolutionTerminalV1::Ready,
+            ),
+            (
+                "durable ready",
+                GenerationResolutionSettlementV1::Completed(Ok(Some("durable"))),
+                Ok(Some("durable")),
+                GenerationResolutionTerminalV1::Ready,
+            ),
+            (
+                "unavailable",
+                GenerationResolutionSettlementV1::Completed(Ok(None)),
+                Ok(None),
+                GenerationResolutionTerminalV1::Unavailable,
+            ),
+            (
+                "generation error",
+                GenerationResolutionSettlementV1::Completed(Err(Reason::GenerationUnavailable)),
+                Err(Reason::GenerationUnavailable),
+                GenerationResolutionTerminalV1::Failed,
+            ),
+            (
+                "cancellation",
+                GenerationResolutionSettlementV1::Terminated(Reason::Cancelled),
+                Err(Reason::Cancelled),
+                GenerationResolutionTerminalV1::Failed,
+            ),
+            (
+                "join error",
+                GenerationResolutionSettlementV1::JoinFailed,
+                Err(Reason::Internal),
+                GenerationResolutionTerminalV1::Failed,
+            ),
+        ];
+
+        for (label, settlement, expected_result, expected_terminal) in cases {
+            let mut terminals = Vec::new();
+            let result = finish_generation_resolution_with(settlement, |terminal| {
+                terminals.push(terminal);
+            });
+            assert_eq!(result, expected_result, "{label}");
+            assert_eq!(terminals, vec![expected_terminal], "{label}");
+        }
+    }
 
     fn page(items: Vec<&str>, total: u64) -> CodeQueryPage<String> {
         CodeQueryPage::new(

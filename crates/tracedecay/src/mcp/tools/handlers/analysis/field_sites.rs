@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.analysis.field_sites.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
 pub(crate) async fn handle_field_sites(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

@@ -129,7 +129,7 @@ fn complete_protocol_controls_with_ceiling(
     Ok(Some((deadline, cancellation)))
 }
 
-#[hotpath::measure(label = "mcp.application.surface.total")]
+#[hotpath::measure(future = true, label = "mcp.application.surface.total")]
 pub(super) async fn handle_application_surface(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,

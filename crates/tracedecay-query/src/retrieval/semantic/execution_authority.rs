@@ -284,6 +284,10 @@ fn validate_authority(
             .copied()
             .collect::<BTreeSet<_>>()
             != expected_lanes
+        || profile
+            .minimum_calibrated_feature_micros
+            .iter()
+            .any(|(lane, threshold)| !expected_lanes.contains(lane) || *threshold > 1_000_000)
     {
         return Err(SemanticCompositionAuthorityErrorV1::InvalidAuthority(
             "profile must authorize exact, lexical, graph, and semantic exactly once".to_owned(),
@@ -446,6 +450,7 @@ mod tests {
                 })
                 .collect(),
             score_domain_calibrations: BTreeMap::new(),
+            minimum_calibrated_feature_micros: BTreeMap::new(),
             weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
             diversity_policy_id: id("diversity.semantic-execution.v1"),
             rerank_policy_id,

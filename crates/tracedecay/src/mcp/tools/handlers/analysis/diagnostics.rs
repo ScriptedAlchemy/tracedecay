@@ -145,7 +145,7 @@ async fn session_correlation_health_json(
     }
 }
 
-#[hotpath::measure(label = "mcp.analysis.diagnostics.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.diagnostics.total")]
 pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

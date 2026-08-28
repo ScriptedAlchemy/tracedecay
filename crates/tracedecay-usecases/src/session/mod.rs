@@ -26,10 +26,10 @@ pub use serving::{
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
 };
+pub use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,
     SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
-    SessionRetrievalBudgetStageV1, SessionRetrievalError, SessionRetrievalOutcome,
-    SessionRetrievalRequest, SessionRetrievalScope, SessionRetrievalTarget,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRetrievalError, SessionRetrievalOutcome, SessionRetrievalRequest, SessionRetrievalScope,
+    SessionRetrievalTarget, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };

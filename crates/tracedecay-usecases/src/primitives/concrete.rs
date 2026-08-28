@@ -356,6 +356,7 @@ fn cursor_verification_failure(error: CursorError) -> PrimitiveFailure {
         CursorError::GenerationMismatch
         | CursorError::ParticipantManifestMismatch
         | CursorError::EpochMismatch
+        | CursorError::CandidateCohortMismatch
         | CursorError::SourceWatermarkMismatch
         | CursorError::ProjectionWatermarkMismatch
         | CursorError::IndexWatermarkMismatch

@@ -505,10 +505,23 @@ impl CodeIndexPublishedGenerationV1 {
     /// Restore and revalidate a complete sealed generation.
     #[hotpath::measure(label = "code_index.sealed_decode")]
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        Self::decode_sealed_if_compatible(bytes)?.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            )
+        })
+    }
+
+    /// Restore one compatible sealed generation without a separate format
+    /// probe over the same corpus-sized byte slice.
+    #[hotpath::measure(label = "code_index.generation.decode")]
+    pub fn decode_sealed_if_compatible(
+        bytes: &[u8],
+    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
         let admitted_len = u64::try_from(bytes.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
         })?;
-        Self::decode_admitted_sealed_bytes(bytes, admitted_len)
+        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)
     }
 
     pub fn decode_sealed_reader<R: std::io::Read>(
@@ -526,13 +539,24 @@ impl CodeIndexPublishedGenerationV1 {
         bytes: &[u8],
         admitted_len: u64,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
+        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)?.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            )
+        })
+    }
+
+    fn decode_admitted_sealed_bytes_if_compatible(
+        bytes: &[u8],
+        admitted_len: u64,
+    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
         let bytes = hotpath::measure_block!(
             "code_index.sealed_decode.input_admission",
             admit_sealed_generation_bytes(bytes, admitted_len)
         )?;
         crate::hotpath_observe::record_seal_bytes(admitted_len);
         let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
-            "code_index.sealed_decode.envelope_parse",
+            "code_index.generation.decode.format_probe",
             serde_json::from_slice(bytes).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation format probe failed: {error}"
@@ -552,7 +576,7 @@ impl CodeIndexPublishedGenerationV1 {
             )?,
             SEALED_GENERATION_FORMAT_REVISION_V1 => {
                 let raw: SealedPublishedGenerationRawEnvelopeV1 = hotpath::measure_block!(
-                    "code_index.sealed_decode.envelope_parse",
+                    "code_index.generation.decode.raw_envelope_parse",
                     serde_json::from_slice(bytes).map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed generation decoding failed: {error}"
@@ -587,9 +611,7 @@ impl CodeIndexPublishedGenerationV1 {
                 }
             }
             _ => {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation format revision is incompatible".to_owned(),
-                ));
+                return Ok(None);
             }
         };
         let expected_digest = match envelope.generation.format_revision.0 {
@@ -708,7 +730,7 @@ impl CodeIndexPublishedGenerationV1 {
             "code_index.sealed_decode.corpus_validation",
             generation.validate_fresh()
         )?;
-        Ok(generation)
+        Ok(Some(generation))
     }
 
     pub fn sealed_format_is_compatible(bytes: &[u8]) -> Result<bool, CodeIndexProductionErrorV1> {

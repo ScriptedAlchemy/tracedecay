@@ -1,6 +1,7 @@
 use std::fmt;
 
 use tracedecay_application::RequestContext;
+use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{
     ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
@@ -553,6 +554,9 @@ pub enum SessionRetrievalOutcome<T> {
     Stale {
         freshness: SessionDataFreshness,
     },
+    /// The cursor's frozen candidate cohort no longer matches the authorized
+    /// snapshot. Replaying this cursor cannot succeed; restart without it.
+    CursorStale,
     Partial {
         items: Vec<T>,
         freshness: SessionDataFreshness,
@@ -578,19 +582,8 @@ pub enum SessionRetrievalOutcome<T> {
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
     },
+    TimedOut,
     Cancelled,
-}
-
-/// Internal retrieval-budget stage. The daemon maps each stage to a distinct
-/// non-retryable `InvalidRequest` diagnostic; true concurrent saturation is a
-/// different outcome and never uses this variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionRetrievalBudgetStageV1 {
-    RequestBudgetMismatch,
-    ExecutionWorkExhausted,
-    ParticipantManifestLimit,
-    HydrationBytes,
-    ContextBytes,
 }
 
 impl<T> SessionRetrievalOutcome<T> {
@@ -1508,13 +1501,14 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 13] = [
+        let states: [SessionRetrievalOutcome<()>; 15] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
             SessionRetrievalOutcome::Stale {
                 freshness: SessionDataFreshness::Stored { generation_lag: 1 },
             },
+            SessionRetrievalOutcome::CursorStale,
             SessionRetrievalOutcome::Partial {
                 items: vec![],
                 freshness: SessionDataFreshness::Fresh,
@@ -1533,8 +1527,9 @@ mod tests {
                 maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
             },
             SessionRetrievalOutcome::BudgetExhausted {
-                stage: SessionRetrievalBudgetStageV1::RequestBudgetMismatch,
+                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
             },
+            SessionRetrievalOutcome::TimedOut,
             SessionRetrievalOutcome::Cancelled,
         ];
 

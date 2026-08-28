@@ -11,14 +11,110 @@ use tracedecay_domain::{
 
 use super::request::validate_label;
 use super::{
-    BindingDigest, ExecutionLimitTighteningError, ExecutionLimits, TemporalPortError,
-    TemporalRetrievalScope, TemporalSnapshotRequest,
+    BindingDigest, ExecutionLimitTighteningError, ExecutionLimits, MeasuredTemporalValue,
+    TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
 };
+use crate::candidates::CandidateChannel;
+use crate::ranking::RankingCandidate;
 use crate::resolution::types::ValidatedAuthorization;
 
 pub const MAX_TEMPORAL_PARTICIPANTS: usize = SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS;
 pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize =
     SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES;
+
+#[derive(Serialize)]
+struct CandidateCohortWire<'a> {
+    stable_id: &'a str,
+    anchor_id: &'a tracedecay_domain::RetrievalAnchorId,
+    retriever_record_id: &'a str,
+    channel: &'static str,
+    raw_score: i64,
+    knowledge_at_micros: i64,
+    logical_message: &'a Option<String>,
+    turn: &'a Option<String>,
+    session: &'a Option<String>,
+    source: &'a Option<String>,
+    evidence_role: &'a Option<String>,
+    exact_ranges: &'a [tracedecay_domain::ByteRangeV1],
+    participant_generation: u64,
+}
+
+/// Exact bounded candidate cohort admitted before a root-wide participant freeze.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemporalPreparedCandidateCohort {
+    candidates: Vec<RankingCandidate>,
+    ordered_digest: BindingDigest,
+}
+
+impl TemporalPreparedCandidateCohort {
+    pub fn new(candidates: Vec<RankingCandidate>) -> Result<Self, TemporalPortError> {
+        let ordered_digest = candidate_cohort_digest(&candidates)?;
+        Ok(Self {
+            candidates,
+            ordered_digest,
+        })
+    }
+
+    pub fn candidates(&self) -> &[RankingCandidate] {
+        &self.candidates
+    }
+
+    pub fn ordered_digest(&self) -> &BindingDigest {
+        &self.ordered_digest
+    }
+}
+
+fn candidate_cohort_digest(
+    candidates: &[RankingCandidate],
+) -> Result<BindingDigest, TemporalPortError> {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.participant_generation == 0)
+    {
+        return Err(TemporalPortError::ZeroGeneration);
+    }
+    let wire = candidates
+        .iter()
+        .map(|candidate| CandidateCohortWire {
+            stable_id: &candidate.stable_id,
+            anchor_id: &candidate.anchor_id,
+            retriever_record_id: &candidate.retriever_record_id,
+            channel: candidate_channel_name(candidate.channel),
+            raw_score: candidate.raw_score,
+            knowledge_at_micros: candidate.knowledge_at_micros,
+            logical_message: &candidate.logical_message,
+            turn: &candidate.turn,
+            session: &candidate.session,
+            source: &candidate.source,
+            evidence_role: &candidate.evidence_role,
+            exact_ranges: &candidate.exact_ranges,
+            participant_generation: candidate.participant_generation,
+        })
+        .collect::<Vec<_>>();
+    let canonical = serde_json::to_vec(&wire).map_err(|error| TemporalPortError::Read {
+        operation: "encode temporal candidate cohort",
+        message: error.to_string(),
+    })?;
+    BindingDigest::new(
+        "candidate_cohort_digest",
+        encode_tagged_lowercase_hex("sha256:", &Sha256::digest(canonical)),
+    )
+}
+
+const fn candidate_channel_name(channel: CandidateChannel) -> &'static str {
+    match channel {
+        CandidateChannel::Scope => "scope",
+        CandidateChannel::Anchor => "anchor",
+        CandidateChannel::ExactMessage => "exact_message",
+        CandidateChannel::Phrase => "phrase",
+        CandidateChannel::Entity => "entity",
+        CandidateChannel::Time => "time",
+        CandidateChannel::Lexical => "lexical",
+        CandidateChannel::Summary => "summary",
+        CandidateChannel::Span => "span",
+        CandidateChannel::Burst => "burst",
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TemporalWatermarks {
@@ -191,40 +287,62 @@ pub struct TemporalParticipantManifest {
 
 impl TemporalParticipantManifest {
     pub fn new(mut entries: Vec<TemporalParticipantGeneration>) -> Result<Self, TemporalPortError> {
-        if entries.is_empty() {
-            return Err(TemporalPortError::EmptyParticipantManifest);
-        }
-        if entries.len() > MAX_TEMPORAL_PARTICIPANTS {
-            return Err(TemporalPortError::ParticipantLimitExceeded {
-                observed: entries.len(),
-                maximum: MAX_TEMPORAL_PARTICIPANTS,
-            });
-        }
         entries.sort_by(|left, right| {
             left.session_id
                 .cmp(&right.session_id)
                 .then_with(|| left.source_id.cmp(&right.source_id))
         });
-        if entries.windows(2).any(|pair| {
-            pair[0].session_id == pair[1].session_id && pair[0].source_id == pair[1].source_id
-        }) {
-            return Err(TemporalPortError::DuplicateParticipant);
-        }
         let canonical = serde_json::to_vec(&entries).map_err(|error| TemporalPortError::Read {
             operation: "encode participant manifest",
             message: error.to_string(),
         })?;
+        let epoch_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
+        let manifest = Self {
+            entries,
+            epoch_digest,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Revalidates the bounded canonical manifest at an execution boundary.
+    ///
+    /// Persisted and signed wire values can be deserialized without calling
+    /// [`Self::new`]. Execution therefore treats the constructor as a
+    /// convenience, not as the authority for these bounds.
+    pub fn validate(&self) -> Result<(), TemporalPortError> {
+        if self.entries.is_empty() {
+            return Err(TemporalPortError::EmptyParticipantManifest);
+        }
+        if self.entries.len() > MAX_TEMPORAL_PARTICIPANTS {
+            return Err(TemporalPortError::ParticipantLimitExceeded {
+                observed: self.entries.len(),
+                maximum: MAX_TEMPORAL_PARTICIPANTS,
+            });
+        }
+        if self.entries.windows(2).any(|pair| {
+            pair[0].session_id == pair[1].session_id && pair[0].source_id == pair[1].source_id
+        }) {
+            return Err(TemporalPortError::DuplicateParticipant);
+        }
+        let canonical =
+            serde_json::to_vec(&self.entries).map_err(|error| TemporalPortError::Read {
+                operation: "encode participant manifest",
+                message: error.to_string(),
+            })?;
         if canonical.len() > MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES {
             return Err(TemporalPortError::ParticipantManifestBytesExceeded {
                 observed: canonical.len(),
                 maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
             });
         }
-        let epoch_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
-        Ok(Self {
-            entries,
-            epoch_digest,
-        })
+        let expected_epoch = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&canonical));
+        if self.epoch_digest != expected_epoch {
+            return Err(TemporalPortError::InvalidBinding {
+                field: "participant_manifest_epoch",
+            });
+        }
+        Ok(())
     }
 
     pub fn entries(&self) -> &[TemporalParticipantGeneration] {
@@ -322,6 +440,8 @@ pub struct TemporalExecutionSnapshot {
     authorization: ValidatedAuthorization,
     participants: TemporalParticipantManifest,
     participant_manifest_authoritative: bool,
+    candidate_cohort_digest: BindingDigest,
+    prepared_candidate_cohort: Option<TemporalPreparedCandidateCohort>,
 }
 
 impl TemporalExecutionSnapshot {
@@ -356,6 +476,7 @@ impl TemporalExecutionSnapshot {
                 TemporalParticipantAuthorization::Authorized,
                 TemporalSourceAccess::Available,
             )?])?;
+        let candidate_cohort_digest = candidate_cohort_digest(&[])?;
         Ok(Self {
             request,
             watermarks,
@@ -364,6 +485,8 @@ impl TemporalExecutionSnapshot {
             authorization,
             participants,
             participant_manifest_authoritative: false,
+            candidate_cohort_digest,
+            prepared_candidate_cohort: None,
         })
     }
 
@@ -518,6 +641,87 @@ impl TemporalExecutionSnapshot {
 
     pub fn participant_manifest(&self) -> &TemporalParticipantManifest {
         &self.participants
+    }
+
+    pub fn with_prepared_candidate_cohort(
+        mut self,
+        cohort: TemporalPreparedCandidateCohort,
+    ) -> Result<Self, TemporalPortError> {
+        if !matches!(
+            self.request.retrieval_scope(),
+            TemporalRetrievalScope::AllSessionsInAuthorizedRoot
+        ) || !self.participant_manifest_authoritative
+        {
+            return Err(TemporalPortError::UnauthorizedSnapshot);
+        }
+        let limits = self.request.limits();
+        if cohort.candidates().len() > limits.candidate_limit {
+            return Err(TemporalPortError::BudgetExceeded {
+                resource: "candidate item count",
+            });
+        }
+        let mut cohort_bytes = 0usize;
+        for candidate in cohort.candidates() {
+            let candidate_bytes = candidate.measured_encoded_bytes()?;
+            if candidate_bytes > limits.candidate_item_bytes {
+                return Err(TemporalPortError::BudgetExceeded {
+                    resource: "candidate item bytes",
+                });
+            }
+            cohort_bytes = cohort_bytes.checked_add(candidate_bytes).ok_or(
+                TemporalPortError::BudgetExceeded {
+                    resource: "candidate total bytes",
+                },
+            )?;
+            if cohort_bytes > limits.candidate_total_bytes {
+                return Err(TemporalPortError::BudgetExceeded {
+                    resource: "candidate total bytes",
+                });
+            }
+            let Some(session_id) = candidate.session.as_deref() else {
+                return Err(TemporalPortError::UnauthorizedSnapshot);
+            };
+            let Some(source_id) = candidate.source.as_deref() else {
+                return Err(TemporalPortError::UnauthorizedSnapshot);
+            };
+            if !self.participants.entries().iter().any(|participant| {
+                participant.session_id().as_str() == session_id
+                    && participant.source_id() == source_id
+                    && participant.generation() == candidate.participant_generation
+            }) {
+                return Err(TemporalPortError::UnauthorizedSnapshot);
+            }
+        }
+        self.candidate_cohort_digest = cohort.ordered_digest().clone();
+        self.prepared_candidate_cohort = Some(cohort);
+        Ok(self)
+    }
+
+    pub fn with_observed_candidate_cohort(
+        mut self,
+        candidates: &[RankingCandidate],
+    ) -> Result<Self, TemporalPortError> {
+        self.candidate_cohort_digest = candidate_cohort_digest(candidates)?;
+        self.prepared_candidate_cohort = None;
+        Ok(self)
+    }
+
+    pub fn candidate_cohort_digest(&self) -> &BindingDigest {
+        &self.candidate_cohort_digest
+    }
+
+    pub fn prepared_candidate_cohort(&self) -> Option<&TemporalPreparedCandidateCohort> {
+        self.prepared_candidate_cohort.as_ref()
+    }
+
+    pub fn has_same_execution_authority(&self, other: &Self) -> bool {
+        self.request == other.request
+            && self.watermarks == other.watermarks
+            && self.versions == other.versions
+            && self.cursor_key == other.cursor_key
+            && self.authorization == other.authorization
+            && self.participants == other.participants
+            && self.participant_manifest_authoritative == other.participant_manifest_authoritative
     }
 
     pub fn source_coverage(&self) -> Result<SessionSourceCoverageReceiptV1, SessionContractError> {

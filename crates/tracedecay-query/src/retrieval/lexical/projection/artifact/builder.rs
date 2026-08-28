@@ -2113,10 +2113,8 @@ fn admit_prepared_page_batch(
     memory_budget_bytes: usize,
     pages: &[PreparedCodeLexicalArtifactPageV1],
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let required = prepared_batch_memory_with_posting_plans_required_bytes(
-        fixed_ledger_charge_bytes,
-        pages,
-    )?;
+    let required =
+        prepared_batch_memory_with_posting_plans_required_bytes(fixed_ledger_charge_bytes, pages)?;
     if required > memory_budget_bytes {
         return Err(batch_limit(
             CodeLexicalArtifactBatchLimitV1::Memory,

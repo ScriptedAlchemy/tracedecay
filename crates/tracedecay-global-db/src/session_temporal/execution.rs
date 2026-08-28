@@ -74,6 +74,10 @@ impl AuthorizedTemporalExecutionRequest {
         &self.query
     }
 
+    pub fn direct_anchor(&self) -> Option<&RetrievalAnchorId> {
+        self.direct_anchor.as_ref()
+    }
+
     #[must_use]
     pub fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
         self.direct_anchor = Some(anchor_id);

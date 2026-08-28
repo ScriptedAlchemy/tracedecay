@@ -28,7 +28,7 @@ struct BoundedCycle {
     omitted_member_count: usize,
 }
 
-#[hotpath::measure(label = "mcp.analysis.circular.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.circular.total")]
 pub(crate) async fn handle_circular(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

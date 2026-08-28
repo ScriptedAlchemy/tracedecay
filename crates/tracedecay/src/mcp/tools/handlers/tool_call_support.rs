@@ -90,7 +90,7 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     .map(Some)
 }
 
-#[hotpath::measure(label = "mcp.retrieve.handle.total")]
+#[hotpath::measure(future = true, label = "mcp.retrieve.handle.total")]
 pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
         message: "tracedecay_retrieve arguments must be an object".to_string(),

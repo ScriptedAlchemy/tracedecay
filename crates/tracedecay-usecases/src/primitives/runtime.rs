@@ -21,7 +21,8 @@ use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, ExactSymbolRequest,
     GraphImpactPrimitiveRequest, GraphRelationRequest, HealthDeltaRequest, HealthDeltaResult,
     HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, PrimitiveFailureKind,
-    RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest,
+    RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
+    SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1, SignatureSearchRequest,
     SourceLinesRequest, SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
     SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
     SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolSearchPrimitiveRequest,
@@ -912,6 +913,17 @@ async fn dispatch_admitted(
                         )?),
                     );
                 }
+                Err(
+                    tracedecay_application::retrieval::TemporalRetrievalFailure::StructuralRefusal(
+                        refusal,
+                    ),
+                ) => {
+                    return problem(
+                        &context,
+                        &operation,
+                        session_structural_refusal_problem(refusal)?,
+                    );
+                }
             };
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
@@ -1026,6 +1038,83 @@ async fn dispatch_admitted(
         }
         PrimitiveRequest::RecentTestResults(page) => {
             recent_test_results(runtime, &context, &operation, &page, observed_at).await
+        }
+    }
+}
+
+fn session_structural_refusal_problem(
+    refusal: SessionRetrievalStructuralRefusalV1,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let (code, message) = match refusal {
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+            ..
+        } => (
+            "application.retrieval.session-cursor-manifest-participants-limit-exceeded",
+            "The authorized session scope contains too many cursor participants.",
+        ),
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
+            ..
+        } => (
+            "application.retrieval.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            "The authorized session scope exceeds the cursor manifest byte limit.",
+        ),
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage } => (
+            session_budget_diagnostic_code(stage),
+            "The request exceeds its admitted session retrieval budget.",
+        ),
+    };
+    Ok(ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic::new(code, message)?,
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
+    })
+}
+
+const fn session_budget_diagnostic_code(stage: SessionRetrievalBudgetStageV1) -> &'static str {
+    match stage {
+        SessionRetrievalBudgetStageV1::RequestResultLimit => {
+            "application.retrieval.session-budget-request-result-limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
+            "application.retrieval.session-budget-request-hydration-limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestContextBytes => {
+            "application.retrieval.session-budget-request-context-bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
+            "application.retrieval.session-budget-request-candidate-bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
+            "application.retrieval.session-budget-request-record-bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
+            "application.retrieval.session-budget-request-hydration-bytes"
+        }
+        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
+            "application.retrieval.session-budget-estimator-version-mismatch"
+        }
+        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
+            "application.retrieval.session-budget-execution-work-exhausted"
+        }
+        SessionRetrievalBudgetStageV1::KernelResultLimit => {
+            "application.retrieval.session-budget-kernel-result-limit"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
+            "application.retrieval.session-budget-participant-manifest-participants"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
+            "application.retrieval.session-budget-participant-manifest-canonical-bytes"
+        }
+        SessionRetrievalBudgetStageV1::HydrationBytes => {
+            "application.retrieval.session-budget-hydration-bytes"
+        }
+        SessionRetrievalBudgetStageV1::ContextBytes => {
+            "application.retrieval.session-budget-context-bytes"
+        }
+        SessionRetrievalBudgetStageV1::ContextTokens => {
+            "application.retrieval.session-budget-context-tokens"
         }
     }
 }
@@ -1903,15 +1992,18 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, OmissionReason, PrimitiveCapacity, PrimitiveDispatch,
         PrimitiveRequest, StorageStatusPrimitiveRequest, diagnostics_absence_problem,
-        pre_admission_problem, valid_owned_primitive_request, validate_admitted_root_uri,
+        pre_admission_problem, session_structural_refusal_problem, valid_owned_primitive_request,
+        validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
-        RetrievalOrder, RetrievalRequestMeta, SignatureSearchRequest, SymbolGraphScope,
+        RetrievalOrder, RetrievalRequestMeta, SessionRetrievalBudgetStageV1,
+        SessionRetrievalStructuralRefusalV1, SignatureSearchRequest, SymbolGraphScope,
         SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
     };
     use tracedecay_application::{
-        ApplicationProblemKind, CancellationContext, Deadline, PageRequest, RequestId,
+        ApplicationProblemKind, CancellationContext, Deadline, LegalAction, PageRequest, RequestId,
+        RetryDirective,
     };
     use tracedecay_domain::{
         EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
@@ -2015,6 +2107,48 @@ mod tests {
                 .legal_actions()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn session_structural_refusals_are_non_retryable_and_diagnostic() {
+        for (refusal, code) in [
+            (
+                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                },
+                "application.retrieval.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
+                    observed: 65_537,
+                    maximum: 65_536,
+                },
+                "application.retrieval.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+            (
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::ContextTokens,
+                },
+                "application.retrieval.session-budget-context-tokens",
+            ),
+        ] {
+            let problem = session_structural_refusal_problem(refusal).expect("typed refusal");
+            assert_eq!(
+                problem.kind(),
+                tracedecay_application::ApplicationProblemKind::InvalidRequest
+            );
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(code)
+            );
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+        }
     }
 
     #[test]

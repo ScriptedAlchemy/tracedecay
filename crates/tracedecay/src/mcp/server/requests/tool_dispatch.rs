@@ -138,7 +138,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "mcp.server.tools_call.dispatch")]
+    #[hotpath::measure(label = "mcp.server.tools_call.dispatch", future = true)]
     pub(super) async fn dispatch_routed_tool_call(
         &self,
         tool_name: &str,
@@ -328,7 +328,10 @@ impl McpServer {
                     Err(error) => Err(error),
                 },
                 ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok((*result).clone()),
+                    Some(result) => Ok(hotpath::measure_block!(
+                        "mcp.server.read_coalescing.result_clone",
+                        (*result).clone()
+                    )),
                     None => dispatch.await,
                 },
             }

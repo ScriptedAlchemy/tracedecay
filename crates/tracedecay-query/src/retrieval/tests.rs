@@ -98,6 +98,7 @@ fn profile() -> FusionProfile {
                 )
             })
             .collect(),
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: [
             (RetrieverKind::ExactLiteral, 1_000_000),
             (RetrieverKind::Lexical, 500_000),

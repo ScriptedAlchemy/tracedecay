@@ -22,7 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::retrieval::{
-    AutomationSessionRetrieval, AutomationTemporalRetrieval, retrieve_automation_session_evidence,
+    AutomationSessionRetrieval, AutomationTemporalRetrieval, automation_structural_refusal_reason,
+    retrieve_automation_session_evidence,
 };
 use super::session_reflector::{
     SessionReflectorAutomationOptions, default_session_provider, default_session_reflection_query,
@@ -701,6 +702,12 @@ pub(super) async fn build_session_reflector_evidence(
                 evidence_hash: None,
             });
         }
+        AutomationTemporalRetrieval::StructuralRefusal(refusal) => {
+            return Ok(SessionReflectorEvidenceOutcome::Skipped {
+                reason: automation_structural_refusal_reason(refusal),
+                evidence_hash: None,
+            });
+        }
     };
     let SerializedAutomationEvidence {
         hits,
@@ -800,6 +807,12 @@ pub(super) async fn build_skill_writer_evidence(
         AutomationTemporalRetrieval::Rejected(reason) => {
             return Ok(SkillWriterEvidenceOutcome::Skipped {
                 reason,
+                evidence_hash: None,
+            });
+        }
+        AutomationTemporalRetrieval::StructuralRefusal(refusal) => {
+            return Ok(SkillWriterEvidenceOutcome::Skipped {
+                reason: automation_structural_refusal_reason(refusal),
                 evidence_hash: None,
             });
         }

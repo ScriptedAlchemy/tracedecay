@@ -211,7 +211,7 @@ async fn foreign_request_context_scope_is_refused_before_scheduler_mutation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn writable_binding_returns_only_after_exact_scope_generation_is_warm_and_serving() {
+async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
     let fixture = Fixture::mount().await;
     let context = request_context(fixture.scope.clone(), "writable");
 
@@ -249,11 +249,13 @@ async fn writable_binding_returns_only_after_exact_scope_generation_is_warm_and_
     let graph = serving
         .interactive_graph_store()
         .expect("activated serving generation owns an interactive graph");
-    assert_eq!(
-        graph.interactive_catalog_is_warm(),
-        Ok(true),
-        "admission cannot return a cold graph generation"
-    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while graph.interactive_catalog_is_warm() != Ok(true) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background graph catalog warm completes");
     fixture.registry.shutdown().await;
 }
 

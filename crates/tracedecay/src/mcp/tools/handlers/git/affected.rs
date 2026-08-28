@@ -107,7 +107,7 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
     Ok(AffectedTestTraversal { test_distances })
 }
 
-#[hotpath::measure(label = "mcp.git.affected.total")]
+#[hotpath::measure(future = true, label = "mcp.git.affected.total")]
 pub(crate) async fn handle_affected(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

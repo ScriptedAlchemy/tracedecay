@@ -1077,6 +1077,21 @@ pub struct DashboardHttpRequestControlV1 {
 }
 
 impl DashboardHttpRequestControlV1 {
+    #[cfg(feature = "test-transport")]
+    pub fn from_parts_for_test(
+        request_id: tracedecay_application::RequestId,
+        deadline: tracedecay_application::Deadline,
+        cancellation: tracedecay_application::CancellationSignal,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Self {
+        Self {
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+        }
+    }
+
     pub fn request_id(&self) -> tracedecay_application::RequestId {
         self.request_id.clone()
     }

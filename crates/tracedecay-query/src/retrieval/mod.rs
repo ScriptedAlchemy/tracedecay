@@ -64,6 +64,14 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1: &str = "score.semantic-distance.evaluation.v1";
+/// Descending-score bounds for the useful half of canonical cosine distance,
+/// scaled by one billion. They express nonnegative cosine similarity directly
+/// in parts per million; zero and negative similarity both calibrate to zero.
+/// Consequently a profile threshold of `700_000` means cosine similarity
+/// `0.7`, rather than `0.4` under a shifted `[-1, 1]` mapping.
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1: u64 = i64::MAX as u64 - 1_000_000_000;
+pub const QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1: u64 = i64::MAX as u64;
 
 #[cfg(test)]
 mod tests;

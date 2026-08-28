@@ -894,7 +894,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     SemanticQualify {
-        candidate: Box<tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1503,7 +1503,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn semantic_qualify(
         request_id: impl Into<String>,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1514,7 +1514,7 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::SemanticQualify {
-                candidate: Box::new(candidate),
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
@@ -2234,13 +2234,14 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::SemanticQualify {
-                candidate,
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
-                if candidate.evaluated_profile_id.trim() != candidate.evaluated_profile_id
-                    || candidate.evaluated_profile_id.is_empty()
+                if evaluated_profile_id.trim() != evaluated_profile_id
+                    || evaluated_profile_id.is_empty()
+                    || evaluated_profile_id.len() > MAX_OPAQUE_HANDLE_BYTES
                     || observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
@@ -2489,47 +2490,15 @@ pub(crate) fn parse_daemon_invocation_request(
 mod semantic_qualification_tests {
     use super::*;
 
-    fn candidate() -> tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-        let material =
-            crate::search_eval::load_default_evaluated_profile_material("query-fallback")
-                .expect("checked-in query fallback profile");
-        tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-            evaluated_profile_id: "query-fallback".to_owned(),
-            profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
-                profile_id: material.profile.profile_id.clone(),
-                calibrations: material.profile.calibrations.clone(),
-                score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
-                weights_micros: material.profile.weights_micros.clone(),
-                diversity_policy_id: material.profile.diversity_policy_id.clone(),
-                rerank_policy_id: material.profile.rerank_policy_id.clone(),
-                retrieval_budget: material.profile.retrieval_budget,
-            },
-            diversity:
-                tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
-                    policy_id: material.diversity.policy_id.clone(),
-                    per_source_namespace: material.diversity.per_source_namespace,
-                    per_source_instance: material.diversity.per_source_instance,
-                    per_repository: material.diversity.per_repository,
-                    per_file: material.diversity.per_file,
-                    per_session_or_thread: material.diversity.per_session_or_thread,
-                    per_copy_cluster: material.diversity.per_copy_cluster,
-                    per_evidence_role: material.diversity.per_evidence_role,
-                },
-            rerank: None,
-            compatibility:
-                tracedecay_usecases::config::retrieval::RetrievalCompatibilityPinsV1::default(),
-        }
-    }
-
     #[test]
-    fn semantic_qualification_has_its_own_validated_read_only_wire_contract() {
+    fn semantic_qualification_wire_carries_only_the_daemon_owned_profile_selection() {
         let deadline = Deadline::new(UtcMicros(2_000)).expect("deadline");
         let cancellation =
             CancellationContext::active("cancellation.semantic-qualification.request-1")
                 .expect("cancellation");
         let request = DaemonInvocationRequest::semantic_qualify(
             "request.semantic-qualification.1",
-            candidate(),
+            "hybrid-conservative".to_owned(),
             UtcMicros(1_000),
             deadline,
             cancellation,
@@ -2544,6 +2513,8 @@ mod semantic_qualification_tests {
         assert_eq!(request.validate(), Ok(()));
         let wire = serde_json::to_value(request).expect("semantic qualification wire");
         assert_eq!(wire["operation"], "semantic_qualify");
+        assert_eq!(wire["evaluated_profile_id"], "hybrid-conservative");
+        assert!(wire.get("candidate").is_none());
         assert!(wire.get("report").is_none());
         assert!(wire.get("snapshot_digest").is_none());
     }

@@ -27,37 +27,6 @@ fn deadline_after(duration: Duration) -> Deadline {
     Deadline::new(UtcMicros(now.0.saturating_add(delta))).expect("deadline")
 }
 
-fn semantic_qualification_candidate()
--> tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-    let material = crate::search_eval::load_default_evaluated_profile_material("query-fallback")
-        .expect("checked-in query fallback profile");
-    tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
-        evaluated_profile_id: "query-fallback".to_owned(),
-        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
-            profile_id: material.profile.profile_id.clone(),
-            calibrations: material.profile.calibrations.clone(),
-            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
-            weights_micros: material.profile.weights_micros.clone(),
-            diversity_policy_id: material.profile.diversity_policy_id.clone(),
-            rerank_policy_id: material.profile.rerank_policy_id.clone(),
-            retrieval_budget: material.profile.retrieval_budget,
-        },
-        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
-        rerank: None,
-        compatibility:
-            tracedecay_usecases::config::retrieval::RetrievalCompatibilityPinsV1::default(),
-    }
-}
-
 fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationRequest {
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
@@ -68,6 +37,155 @@ fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationR
         deadline,
         CancellationContext::active(format!("cancel.{request_id}")).expect("request cancellation"),
     )
+}
+
+fn invocation_client(
+    endpoint: crate::daemon::transport::DaemonEndpoint,
+    instance_id: &str,
+) -> DaemonInvocationClient {
+    let profile = tempfile::tempdir().expect("profile");
+    let profile_root = profile.path().to_path_buf();
+    DaemonInvocationClient::for_connection_for_test(
+        DaemonConnection::unauthenticated_for_test(endpoint),
+        DaemonHandshake {
+            project_path: Some(profile_root.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                global_db_path: profile_root.join("global.db"),
+                profile_root,
+            },
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            client_instance_id: instance_id.to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        },
+    )
+}
+
+fn client_activity(client: &DaemonInvocationClient) -> (usize, usize) {
+    (
+        client
+            .activity
+            .queued
+            .load(std::sync::atomic::Ordering::Acquire),
+        client
+            .activity
+            .in_flight
+            .load(std::sync::atomic::Ordering::Acquire),
+    )
+}
+
+async fn write_unavailable_response(
+    writer: &mut tokio::io::WriteHalf<crate::daemon::transport::BrokerStream>,
+    request_id: &str,
+) {
+    let response =
+        DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+    writer
+        .write_all(
+            serde_json::to_string(&response)
+                .expect("response JSON")
+                .as_bytes(),
+        )
+        .await
+        .expect("write invocation response");
+    writer
+        .write_all(b"\n")
+        .await
+        .expect("write response newline");
+    writer.flush().await.expect("flush invocation response");
+}
+
+#[tokio::test]
+async fn concurrent_invocations_report_queue_and_settle_activity() {
+    const FIRST_ID: &str = "request.concurrent-first";
+    const SECOND_ID: &str = "request.concurrent-second";
+    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
+        &crate::daemon::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("bind invocation listener");
+    let (first_read, first_admitted) = tokio::sync::oneshot::channel();
+    let (release_first, first_release) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let stream = listener
+            .accept()
+            .await
+            .expect("accept invocation connection");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read invocation handshake")
+            .expect("invocation handshake");
+        let first_line = lines
+            .next_line()
+            .await
+            .expect("read first invocation")
+            .expect("first invocation");
+        let first: DaemonInvocationRequest =
+            serde_json::from_str(&first_line).expect("typed first invocation");
+        assert_eq!(first.request_id, FIRST_ID);
+        first_read.send(()).expect("report first admission");
+        first_release.await.expect("release first response");
+        write_unavailable_response(&mut writer, FIRST_ID).await;
+
+        let second_line = lines
+            .next_line()
+            .await
+            .expect("read second invocation")
+            .expect("second invocation");
+        let second: DaemonInvocationRequest =
+            serde_json::from_str(&second_line).expect("typed second invocation");
+        assert_eq!(second.request_id, SECOND_ID);
+        write_unavailable_response(&mut writer, SECOND_ID).await;
+    });
+    let client = invocation_client(endpoint, "client.concurrent-activity");
+    let first_client = client.clone();
+    let first = tokio::spawn(async move {
+        first_client
+            .invoke(invocation_request(
+                FIRST_ID,
+                deadline_after(Duration::from_secs(2)),
+            ))
+            .await
+    });
+    first_admitted.await.expect("first request admitted");
+    assert_eq!(client_activity(&client), (0, 1));
+
+    let second_client = client.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .invoke(invocation_request(
+                SECOND_ID,
+                deadline_after(Duration::from_secs(2)),
+            ))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while client_activity(&client) != (1, 1) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second invocation reported queued");
+
+    release_first.send(()).expect("release first response");
+    first
+        .await
+        .expect("first invocation task")
+        .expect("first invocation response");
+    second
+        .await
+        .expect("second invocation task")
+        .expect("second invocation response");
+    server.await.expect("server task");
+    assert_eq!(client_activity(&client), (0, 0));
 }
 
 async fn controlled_client(
@@ -550,7 +668,7 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
 }
 
 #[tokio::test]
-async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_bytes() {
+async fn semantic_qualification_uses_daemon_owned_profile_deadline_and_canonical_bytes() {
     const DEADLINE_MICROS: i64 = 5_000_000;
     const CANCELLATION_ID: &str = "cancel.semantic-qualification.success";
     let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
@@ -577,12 +695,12 @@ async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_b
         let request_id = request.request_id.clone();
         match request.payload {
             DaemonInvocationPayload::SemanticQualify {
-                candidate,
+                evaluated_profile_id,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
-                assert_eq!(candidate.evaluated_profile_id, "query-fallback");
+                assert_eq!(evaluated_profile_id, "hybrid-conservative");
                 assert_eq!(
                     deadline.expires_at.0 - observed_at.0,
                     DEADLINE_MICROS,
@@ -640,11 +758,7 @@ async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_b
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
 
     let result = client
-        .qualify_semantic_profile_until(
-            semantic_qualification_candidate(),
-            DEADLINE_MICROS,
-            cancellation,
-        )
+        .qualify_semantic_profile_until("hybrid-conservative", DEADLINE_MICROS, cancellation)
         .await
         .expect("canonical qualification bytes");
 
@@ -730,11 +844,7 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
     let call_client = client.clone();
     let call = tokio::spawn(async move {
         call_client
-            .qualify_semantic_profile_until(
-                semantic_qualification_candidate(),
-                5_000_000,
-                call_cancellation,
-            )
+            .qualify_semantic_profile_until("hybrid-conservative", 5_000_000, call_cancellation)
             .await
     });
     admitted.await.expect("request admission");

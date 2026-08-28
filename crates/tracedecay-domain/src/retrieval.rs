@@ -986,6 +986,9 @@ pub struct FusionProfile {
     pub evaluation_result_anchor: RetrievalAnchorId,
     pub calibrations: BTreeMap<RetrieverKind, CalibrationProfileId>,
     pub score_domain_calibrations: BTreeMap<ScoreDomainId, ScoreDomainCalibrationV1>,
+    /// Per-lane minimum calibrated feature admitted to fusion. Missing lanes
+    /// admit their full calibrated range.
+    pub minimum_calibrated_feature_micros: BTreeMap<RetrieverKind, u32>,
     pub weights_micros: BTreeMap<RetrieverKind, u32>,
     pub diversity_policy_id: DiversityPolicyId,
     pub rerank_policy_id: Option<RerankPolicyId>,

@@ -344,7 +344,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Run canonical query first, then attempt semantic influence against the
     /// same authenticated query and immutable code generation.
-    #[hotpath::measure(label = "daemon.code_index.query.execute_semantic", future = true)]
+    #[hotpath::measure(future = true)]
     pub(in crate::daemon) async fn execute_query_with_semantic<C>(
         &self,
         project_root: &Path,
@@ -356,13 +356,17 @@ impl CodeIndexSchedulerRegistryV1 {
     where
         C: SemanticExecutionControl + Send + Sync + 'static,
     {
-        let query = self
-            .execute_controlled_query(scope, input, control.clone())
-            .await?;
-        if self
-            .semantic_query_authority_for_scope(scope)
-            .await
-            .is_none()
+        let query = hotpath::future!(
+            self.execute_controlled_query(scope, input, control.clone()),
+            label = "daemon.query.semantic.canonical"
+        )
+        .await?;
+        if hotpath::future!(
+            self.semantic_query_authority_for_scope(scope),
+            label = "daemon.query.semantic.activation_lookup"
+        )
+        .await
+        .is_none()
         {
             let semantic = semantic_abstention(
                 mode,
@@ -372,7 +376,12 @@ impl CodeIndexSchedulerRegistryV1 {
             .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
             return Ok(ExecutedQuerySemanticSearchV1 { query, semantic });
         }
-        let latest = match self.generation_for(scope, &query.generation).await {
+        let latest = match hotpath::future!(
+            self.generation_for(scope, &query.generation),
+            label = "daemon.query.semantic.generation_lookup"
+        )
+        .await
+        {
             Ok(Some(latest)) => latest,
             Ok(None) => {
                 let semantic = semantic_abstention(
@@ -391,8 +400,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 ));
             }
         };
-        let semantic = self
-            .execute_semantic_after_query(
+        let semantic = hotpath::future!(
+            self.execute_semantic_after_query(
                 project_root,
                 scope,
                 &latest.generation,
@@ -401,9 +410,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 &query.authorized,
                 control.as_ref(),
                 mode,
-            )
-            .await
-            .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
+            ),
+            label = "daemon.query.semantic.augment"
+        )
+        .await
+        .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
         Ok(ExecutedQuerySemanticSearchV1 { query, semantic })
     }
 
@@ -411,7 +422,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// code generation, vector generation, calibration, and authenticated QUERY
     /// query. Every abstention returns the original canonical query `Arc`.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.code_index.query.semantic_after", future = true)]
+    #[hotpath::measure(future = true)]
     pub(in crate::daemon) async fn execute_semantic_after_query<C>(
         &self,
         project_root: &Path,
@@ -426,7 +437,12 @@ impl CodeIndexSchedulerRegistryV1 {
     where
         C: SemanticExecutionControl + Sync,
     {
-        let Some(authority) = self.semantic_query_authority_for_scope(scope).await else {
+        let Some(authority) = hotpath::future!(
+            self.semantic_query_authority_for_scope(scope),
+            label = "daemon.query.semantic.activation_revalidate"
+        )
+        .await
+        else {
             return semantic_abstention(
                 mode,
                 SemanticAbstentionV1::CalibrationUnavailable,
@@ -475,17 +491,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&authorized_query.fallback),
             );
         }
-        let outcome = ProductionProjectSemanticSearchBridgeV1
-            .execute(AuthorizedProjectSemanticSearchParametersV1 {
-                project_root,
-                code_generation,
-                request: &request,
-                calibration: Some(&pins.calibration),
-                control,
-                mode,
-                authorized_query,
-            })
-            .await?;
+        let outcome = hotpath::future!(
+            ProductionProjectSemanticSearchBridgeV1.execute(
+                AuthorizedProjectSemanticSearchParametersV1 {
+                    project_root,
+                    code_generation,
+                    request: &request,
+                    calibration: Some(&pins.calibration),
+                    control,
+                    mode,
+                    authorized_query,
+                }
+            ),
+            label = "daemon.query.semantic.vector_and_lane"
+        )
+        .await?;
         let mut rerank_executor = authority
             .rerank
             .as_ref()
@@ -511,13 +531,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 ),
             })
         };
-        let outcome = authority.execution.execute(
-            base,
-            authorized_query,
-            outcome,
-            semantic_abstention_disposition(mode),
-            rerank_readiness,
-        )?;
+        let outcome = hotpath::measure_block!("daemon.query.semantic.compose", {
+            authority.execution.execute(
+                base,
+                authorized_query,
+                outcome,
+                semantic_abstention_disposition(mode),
+                rerank_readiness,
+            )
+        })?;
         match outcome {
             SemanticCompositionExecutionOutcomeV1::Fallback {
                 abstention,
@@ -528,24 +550,31 @@ impl CodeIndexSchedulerRegistryV1 {
             }),
             SemanticCompositionExecutionOutcomeV1::Augmented(executed) => {
                 let mut composition = executed.composition;
-                let Some(query_authority) = self.query_authority_for_scope(scope).await else {
+                let Some(query_authority) = hotpath::future!(
+                    self.query_authority_for_scope(scope),
+                    label = "daemon.query.semantic.pagination_authority"
+                )
+                .await
+                else {
                     return Err(SemanticQueryServiceError::InvalidCursor);
                 };
-                let cursor = paginate_semantic_composition(
-                    query_authority.as_ref(),
-                    base,
-                    query_view,
-                    authorized_query,
-                    &authority.profile_digest,
-                    &code_generation.manifest().generation_id,
-                    &pins.vector_generation_id,
-                    pins.projection.projection_key(),
-                    &pins.search_index_key,
-                    &pins.fusion_revision,
-                    &authority.execution.profile().retrieval_budget,
-                    &executed.rerank,
-                    &mut composition,
-                )?;
+                let cursor = hotpath::measure_block!("daemon.query.semantic.paginate", {
+                    paginate_semantic_composition(
+                        query_authority.as_ref(),
+                        base,
+                        query_view,
+                        authorized_query,
+                        &authority.profile_digest,
+                        &code_generation.manifest().generation_id,
+                        &pins.vector_generation_id,
+                        pins.projection.projection_key(),
+                        &pins.search_index_key,
+                        &pins.fusion_revision,
+                        &authority.execution.profile().retrieval_budget,
+                        &executed.rerank,
+                        &mut composition,
+                    )
+                })?;
                 Ok(SemanticAugmentationOutcomeV1::Augmented(Box::new(
                     SemanticAugmentedCompositionV1 {
                         composition,
@@ -866,6 +895,7 @@ mod tests {
                 })
                 .collect(),
             score_domain_calibrations: BTreeMap::new(),
+            minimum_calibrated_feature_micros: BTreeMap::new(),
             weights_micros: [
                 (RetrieverKind::ExactLiteral, 1_000_000),
                 (RetrieverKind::Lexical, 500_000),

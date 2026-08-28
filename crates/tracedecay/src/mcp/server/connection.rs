@@ -8,6 +8,20 @@ mod response_delivery;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
+#[hotpath::measure(label = "mcp.server.connection.read", future = true)]
+async fn read_connection_line(
+    transport: &mut impl crate::mcp::transport::McpTransport,
+) -> std::io::Result<Option<String>> {
+    transport.read_line().await
+}
+
+#[hotpath::measure(label = "mcp.server.connection.inflight_read", future = true)]
+async fn read_inflight_connection_line(
+    transport: &mut impl crate::mcp::transport::McpTransport,
+) -> std::io::Result<Option<String>> {
+    transport.read_line().await
+}
+
 pub(in crate::mcp::server) struct McpShutdownCompletion {
     state: Arc<McpShutdownState>,
 }
@@ -96,18 +110,15 @@ impl McpShutdownCompletion {
                 );
             };
             let state = Arc::clone(&self.state);
-            let task = tokio::spawn(hotpath::future!(
-                async move {
-                    let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
-                    let runner = tokio::spawn(work);
-                    let status = match runner.await {
-                        Ok(status) => status,
-                        Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
-                    };
-                    state.finish(status);
-                },
-                label = "mcp.server.connection.shutdown"
-            ));
+            let task = tokio::spawn(async move {
+                let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
+                let runner = tokio::spawn(work);
+                let status = match runner.await {
+                    Ok(status) => status,
+                    Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
+                };
+                state.finish(status);
+            });
             *coordinator_task = Some(task);
             drop(coordinator_task);
             return self.wait_for_terminal_status_until(deadline).await;
@@ -217,18 +228,91 @@ struct QueuedRequestLine {
     /// `Some(id)` only when the line is a `tools/call` for a
     /// live-cancellable tool — the only lines a queued cancellation matches.
     cancellable_request_id: Option<Value>,
+    queued_at: std::time::Instant,
+    _depth: PendingRequestGaugeGuard,
+}
+
+struct PendingRequestGaugeGuard {
+    bytes: usize,
+    #[cfg(test)]
+    observer: Option<Arc<std::sync::atomic::AtomicIsize>>,
+}
+
+impl PendingRequestGaugeGuard {
+    fn enter(bytes: usize) -> Self {
+        hotpath::gauge!("mcp.server.request.queue_depth").inc(1_u64);
+        hotpath::gauge!("mcp.server.request.queue_bytes").inc(bytes as u64);
+        Self {
+            bytes,
+            #[cfg(test)]
+            observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn enter_observed(bytes: usize, observer: Arc<std::sync::atomic::AtomicIsize>) -> Self {
+        let mut guard = Self::enter(bytes);
+        observer.fetch_add(1, Ordering::AcqRel);
+        guard.observer = Some(observer);
+        guard
+    }
+}
+
+impl Drop for PendingRequestGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("mcp.server.request.queue_depth").dec(1_u64);
+        hotpath::gauge!("mcp.server.request.queue_bytes").dec(self.bytes as u64);
+        #[cfg(test)]
+        if let Some(observer) = self.observer.as_ref() {
+            observer.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl QueuedRequestLine {
     fn new(line: String) -> Self {
-        let cancellable_request_id = serde_json::from_str::<JsonRpcRequest>(line.trim())
-            .ok()
-            .as_ref()
-            .and_then(cancellable_queued_request_id);
+        let cancellable_request_id = hotpath::measure_block!(
+            "mcp.server.connection.queued_decode",
+            serde_json::from_str::<JsonRpcRequest>(line.trim())
+        )
+        .ok()
+        .as_ref()
+        .and_then(cancellable_queued_request_id);
+        let depth = PendingRequestGaugeGuard::enter(line.len());
         Self {
             line,
             cancellable_request_id,
+            queued_at: std::time::Instant::now(),
+            _depth: depth,
         }
+    }
+
+    fn from_parsed(line: String, request: Option<&JsonRpcRequest>) -> Self {
+        let cancellable_request_id = request.and_then(cancellable_queued_request_id);
+        let depth = PendingRequestGaugeGuard::enter(line.len());
+        Self {
+            line,
+            cancellable_request_id,
+            queued_at: std::time::Instant::now(),
+            _depth: depth,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_observed(line: String, observer: Arc<std::sync::atomic::AtomicIsize>) -> Self {
+        let depth = PendingRequestGaugeGuard::enter_observed(line.len(), observer);
+        Self {
+            line,
+            cancellable_request_id: None,
+            queued_at: std::time::Instant::now(),
+            _depth: depth,
+        }
+    }
+
+    fn into_line(self) -> String {
+        hotpath::gauge!("mcp.server.request.queue_wait_us")
+            .set(self.queued_at.elapsed().as_micros() as u64);
+        self.line
     }
 }
 
@@ -273,19 +357,22 @@ fn current_cancellable_request_key(
 }
 
 impl McpServer {
+    #[hotpath::measure(label = "mcp.server.write", future = true)]
     async fn write_response_line_or_revoke(
         &self,
         transport: &mut impl crate::mcp::transport::McpTransport,
         output: &str,
         response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
     ) -> std::io::Result<bool> {
-        let write = hotpath::future!(
-            async {
-                transport.write_line(output).await?;
-                transport.flush().await
-            },
-            label = "mcp.server.connection.write"
-        );
+        hotpath::gauge!("mcp.server.response.bytes").set(output.len());
+        let write = async {
+            hotpath::future!(
+                transport.write_line(output),
+                label = "mcp.server.response.write"
+            )
+            .await?;
+            hotpath::future!(transport.flush(), label = "mcp.server.response.flush").await
+        };
         let Some(response_revoked) = response_revoked else {
             return write.await.map(|()| true);
         };
@@ -296,6 +383,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.request_cancellable", future = true)]
     async fn handle_cancellable_application_request(
         &self,
         request: &JsonRpcRequest,
@@ -381,10 +469,7 @@ impl McpServer {
                     current_cancellation = None;
                 }
                 response = &mut handling => return Ok((response, false)),
-                incoming = hotpath::future!(
-                    transport.read_line(),
-                    label = "mcp.server.connection.read"
-                ) => {
+                incoming = read_inflight_connection_line(transport) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -400,7 +485,10 @@ impl McpServer {
                             return Err(error.into());
                         }
                     };
-                    let parsed = serde_json::from_str::<JsonRpcRequest>(line.trim());
+                    let parsed = hotpath::measure_block!(
+                        "mcp.server.connection.inflight_decode",
+                        serde_json::from_str::<JsonRpcRequest>(line.trim())
+                    );
                     if let Ok(notification) = &parsed
                         && matches!(
                             classify_mcp_method(&notification.method),
@@ -440,13 +528,10 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(QueuedRequestLine {
-                        cancellable_request_id: parsed
-                            .as_ref()
-                            .ok()
-                            .and_then(cancellable_queued_request_id),
+                    pending_lines.push_back(QueuedRequestLine::from_parsed(
                         line,
-                    });
+                        parsed.as_ref().ok(),
+                    ));
                 }
             }
         }
@@ -456,6 +541,7 @@ impl McpServer {
     /// teardown.  A request-side EOF is only a half-close until the transport
     /// reports the peer's write side closed; this keeps one-shot CLI responses
     /// intact while dropping abandoned handlers and their admission permits.
+    #[hotpath::measure(label = "mcp.server.request_non_cancellable", future = true)]
     async fn handle_non_cancellable_application_request(
         &self,
         request: &JsonRpcRequest,
@@ -511,10 +597,7 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = hotpath::future!(
-                    transport.read_line(),
-                    label = "mcp.server.connection.read"
-                ) => {
+                incoming = read_inflight_connection_line(transport) => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
@@ -588,6 +671,7 @@ impl McpServer {
         .await
     }
 
+    #[hotpath::measure(label = "mcp.server.connection", future = true)]
     pub(crate) async fn run_with_shutdown_policy(
         self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
@@ -613,52 +697,37 @@ impl McpServer {
 
         'connection: loop {
             let line: String = if let Some(queued) = pending_lines.pop_front() {
-                queued.line
+                queued.into_line()
             } else {
                 let read = {
+                    let transport_read = read_connection_line(transport);
+                    tokio::pin!(transport_read);
                     #[cfg(unix)]
                     {
                         if let Some(sigterm) = sigterm.as_mut() {
                             tokio::select! {
-                                result = hotpath::future!(
-                                    transport.read_line(),
-                                    label = "mcp.server.connection.read"
-                                ) => result,
+                                result = &mut transport_read => result,
                                 _ = tokio::signal::ctrl_c() => break,
                                 _ = sigterm.recv() => break,
                             }
                         } else if let Some(lifecycle) = request_lifecycle {
                             tokio::select! {
-                                result = hotpath::future!(
-                                    transport.read_line(),
-                                    label = "mcp.server.connection.read"
-                                ) => result,
+                                result = &mut transport_read => result,
                                 () = lifecycle.wait_for_draining() => break,
                             }
                         } else {
-                            hotpath::future!(
-                                transport.read_line(),
-                                label = "mcp.server.connection.read"
-                            )
-                            .await
+                            transport_read.await
                         }
                     }
                     #[cfg(not(unix))]
                     {
                         if listen_for_process_signals {
                             tokio::select! {
-                                result = hotpath::future!(
-                                    transport.read_line(),
-                                    label = "mcp.server.connection.read"
-                                ) => result,
+                                result = &mut transport_read => result,
                                 _ = tokio::signal::ctrl_c() => break,
                             }
                         } else {
-                            hotpath::future!(
-                                transport.read_line(),
-                                label = "mcp.server.connection.read"
-                            )
-                            .await
+                            transport_read.await
                         }
                     }
                 };
@@ -667,11 +736,7 @@ impl McpServer {
                     Ok(None) => break,
                     Err(e) => {
                         if is_wire_oversized_io_error(&e) {
-                            let _ = hotpath::future!(
-                                write_wire_oversized_rejection(transport, &e),
-                                label = "mcp.server.connection.write"
-                            )
-                            .await;
+                            let _ = write_wire_oversized_rejection(transport, &e).await;
                             break;
                         }
                         self.shutdown_if(shutdown_on_exit).await;
@@ -685,7 +750,10 @@ impl McpServer {
                 continue;
             }
 
-            let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
+            let parsed: std::result::Result<JsonRpcRequest, _> = hotpath::measure_block!(
+                "mcp.server.connection.decode",
+                serde_json::from_str(&line)
+            );
             let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
                 (request.method == "tools/call").then_some(())?;
                 let id = request.id.clone()?;
@@ -825,7 +893,10 @@ impl McpServer {
                         .drain(..)
                         .collect();
                 for notification in notifications {
-                    if let Ok(s) = serde_json::to_string(&notification) {
+                    if let Ok(s) = hotpath::measure_block!(
+                        "mcp.server.notification.serialize",
+                        serde_json::to_string(&notification)
+                    ) {
                         match self
                             .write_response_line_or_revoke(
                                 transport,
@@ -852,7 +923,10 @@ impl McpServer {
             }
 
             if let Some(resp) = response {
-                let json_line = serialize_response_line(&resp);
+                let json_line = hotpath::measure_block!(
+                    "mcp.server.response.serialize",
+                    serialize_response_line(&resp)
+                );
                 let output = format!("{json_line}\n");
                 match self
                     .write_response_line_or_revoke(transport, &output, response_revoked)
@@ -906,6 +980,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.shutdown", future = true)]
     pub(crate) async fn shutdown_until(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
@@ -1287,6 +1362,28 @@ mod cancellable_queue_tests {
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
         );
+    }
+
+    #[test]
+    fn queued_request_depth_is_released_on_dequeue_and_connection_drop() {
+        let queued = Arc::new(std::sync::atomic::AtomicIsize::new(0));
+        let mut pending = VecDeque::new();
+        pending.push_back(QueuedRequestLine::new_observed(
+            "first".to_owned(),
+            Arc::clone(&queued),
+        ));
+        pending.push_back(QueuedRequestLine::new_observed(
+            "second".to_owned(),
+            Arc::clone(&queued),
+        ));
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+
+        let first = pending.pop_front().expect("first queued line").into_line();
+        assert_eq!(first, "first");
+        assert_eq!(queued.load(Ordering::Acquire), 1);
+
+        drop(pending);
+        assert_eq!(queued.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

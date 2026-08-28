@@ -35,7 +35,7 @@ use super::evidence::{
 };
 use super::retrieval::{
     AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
-    retrieve_automation_session_evidence,
+    automation_structural_refusal_reason, retrieve_automation_session_evidence,
 };
 use super::{
     AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
@@ -291,6 +291,10 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
             "session_evidence_stale",
         ),
         (
+            SessionRetrievalOutcome::CursorStale,
+            "session_cursor_stale",
+        ),
+        (
             SessionRetrievalOutcome::Partial {
                 items: Vec::new(),
                 freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
@@ -331,6 +335,47 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
         ),
         AutomationTemporalRetrieval::CompleteZero
     ));
+}
+
+#[test]
+fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
+    for (kind, observed, maximum, expected_reason) in [
+        (
+            tracedecay_domain::CursorManifestLimitKindV1::Participants,
+            257,
+            256,
+            "session_cursor_manifest_participants_limit_exceeded",
+        ),
+        (
+            tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
+            65_537,
+            65_536,
+            "session_cursor_manifest_canonical_bytes_limit_exceeded",
+        ),
+    ] {
+        let actual = accept_automation_temporal_outcome(SessionRetrievalOutcome::<
+            TemporalKernelResult,
+        >::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        });
+        let AutomationTemporalRetrieval::StructuralRefusal(refusal) = actual else {
+            panic!("cursor manifest refusal must remain typed");
+        };
+        assert_eq!(
+            refusal,
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            }
+        );
+        assert_eq!(
+            automation_structural_refusal_reason(refusal),
+            expected_reason
+        );
+    }
 }
 
 #[test]

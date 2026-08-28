@@ -2,7 +2,7 @@ use super::*;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 enum SemanticExecutionInputV1 {
-    Qualify(Box<tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1>),
+    Qualify(String),
     EvaluateAndPublish(String),
 }
 
@@ -96,7 +96,7 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
         request_id: String,
-        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        evaluated_profile_id: String,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -109,7 +109,7 @@ impl DaemonInvocationService {
             deadline,
             cancellation,
             request_cancellation,
-            SemanticExecutionInputV1::Qualify(Box::new(candidate)),
+            SemanticExecutionInputV1::Qualify(evaluated_profile_id),
         )
         .await
     }
@@ -212,21 +212,26 @@ impl DaemonInvocationService {
         let scope = registered.scope.clone();
         let scheduler = self.code_index_schedulers.clone();
         let workers = Arc::clone(&registered.semantic_evaluation_workers);
-        let configuration = registered.runtime.client();
         let execution = match input {
-            SemanticExecutionInputV1::Qualify(candidate) => {
-                let candidate = *candidate;
+            SemanticExecutionInputV1::Qualify(evaluated_profile_id) => {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
-                        let authority =
-                            crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                        async move {
+                            let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
+                                &canonical_root,
+                                &scope,
+                                &scheduler,
+                                &evaluated_profile_id,
+                                Arc::clone(&control),
+                            )
+                            .await?;
+                            let authority = crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
                                 canonical_root.clone(),
                                 scope,
                                 scheduler,
                                 candidate.clone(),
                                 control,
                             );
-                        async move {
                             let qualification = tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::qualify_profile(
                                 &authority,
                                 &canonical_root,
@@ -277,16 +282,11 @@ impl DaemonInvocationService {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let configured = control
-                                .interruptible(configuration.current())
-                                .await?
-                                .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
                             let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
                                 &canonical_root,
                                 &scope,
                                 &scheduler,
                                 &evaluated_profile_id,
-                                configured.config.semantic.resources,
                                 Arc::clone(&control),
                             )
                             .await?;

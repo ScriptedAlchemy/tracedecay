@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
@@ -59,6 +60,7 @@ pub enum AutomationTemporalRetrieval {
     Complete(AutomationTemporalEvidence),
     CompleteZero,
     Rejected(&'static str),
+    StructuralRefusal(SessionRetrievalStructuralRefusalV1),
 }
 
 pub type AutomationSessionRetrievalFuture<'a> =
@@ -489,6 +491,9 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::Stale { .. } => {
             AutomationTemporalRetrieval::Rejected("session_evidence_stale")
         }
+        SessionRetrievalOutcome::CursorStale => {
+            AutomationTemporalRetrieval::Rejected("session_cursor_stale")
+        }
         SessionRetrievalOutcome::Partial { .. } => {
             AutomationTemporalRetrieval::Rejected("session_evidence_partial")
         }
@@ -506,14 +511,43 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::ResetRequired => {
             AutomationTemporalRetrieval::Rejected("session_evidence_reset_required")
         }
-        SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
-            AutomationTemporalRetrieval::Rejected("session_cursor_manifest_limit_exceeded")
-        }
+        SessionRetrievalOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => AutomationTemporalRetrieval::StructuralRefusal(
+            SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            },
+        ),
         SessionRetrievalOutcome::BudgetExhausted { .. } => {
             AutomationTemporalRetrieval::Rejected(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
         }
+        SessionRetrievalOutcome::TimedOut => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_timed_out")
+        }
         SessionRetrievalOutcome::Cancelled => {
             AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")
+        }
+    }
+}
+
+pub(super) const fn automation_structural_refusal_reason(
+    refusal: SessionRetrievalStructuralRefusalV1,
+) -> &'static str {
+    match refusal {
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+            ..
+        } => "session_cursor_manifest_participants_limit_exceeded",
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+            kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
+            ..
+        } => "session_cursor_manifest_canonical_bytes_limit_exceeded",
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { .. } => {
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED
         }
     }
 }
@@ -843,6 +877,9 @@ mod authority_tests {
         .expect("bounded query");
         match retrieval.retrieve(query).await {
             AutomationTemporalRetrieval::Rejected(reason) => reason,
+            AutomationTemporalRetrieval::StructuralRefusal(refusal) => {
+                panic!("expected typed unavailable, got structural refusal: {refusal:?}")
+            }
             AutomationTemporalRetrieval::Complete(_) => {
                 panic!("expected typed rejection, got Complete")
             }

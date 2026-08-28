@@ -146,6 +146,7 @@ fn branch_add_response_inner<'a>(
 /// then seal the exact scheduler generation and its Git provenance into the
 /// canonical project-store branch metadata.
 #[cfg(unix)]
+#[hotpath::measure(label = "daemon.branch_add.activate_and_track", future = true)]
 async fn activate_and_track_manual_branch(
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
@@ -188,7 +189,7 @@ async fn activate_and_track_manual_branch(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.activate_track", future = true)]
+#[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
 async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -832,6 +833,7 @@ fn generation_matches_branch_source(
             == Some(source.source_oid.as_str())
 }
 
+#[hotpath::measure(label = "daemon.branch_add.rollback", future = true)]
 async fn rollback_failed_branch_tracking(
     data_root: &Path,
     prepared: Option<&crate::branch::PreparedBranchTracking>,

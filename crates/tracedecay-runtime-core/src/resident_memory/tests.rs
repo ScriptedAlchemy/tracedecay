@@ -4,12 +4,29 @@ use std::sync::{Arc, Mutex};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    ProcessResidentMemoryV1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    process_resident_memory_limit_for_system_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("test byte count is non-zero")
+}
+
+#[test]
+fn host_capacity_reserves_one_quarter_without_a_universal_ceiling() {
+    assert_eq!(
+        process_resident_memory_limit_for_system_v1(8 * 1024 * 1024 * 1024).get(),
+        6 * 1024 * 1024 * 1024
+    );
+    assert_eq!(
+        process_resident_memory_limit_for_system_v1(88 * 1024 * 1024 * 1024).get(),
+        66 * 1024 * 1024 * 1024
+    );
+    assert_eq!(
+        process_resident_memory_limit_for_system_v1(0),
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
+    );
 }
 
 #[test]

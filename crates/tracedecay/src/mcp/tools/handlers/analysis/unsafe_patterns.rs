@@ -107,7 +107,7 @@ fn path_looks_like_test(path: &str) -> bool {
         || path.ends_with("Test.java")
 }
 
-#[hotpath::measure(label = "mcp.analysis.unsafe_patterns.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
 pub(crate) async fn handle_unsafe_patterns(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

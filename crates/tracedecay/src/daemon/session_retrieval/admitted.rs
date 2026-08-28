@@ -332,15 +332,21 @@ fn task_session_binding_outcome(
         SessionRetrievalServiceOutcome::ResetRequired { .. } => {
             TaskSessionRetrievalOutcomeV1::ResetRequired
         }
+        SessionRetrievalServiceOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
+        SessionRetrievalServiceOutcome::CursorStale => TaskSessionRetrievalOutcomeV1::Unavailable,
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
-        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
-            TaskSessionRetrievalOutcomeV1::BudgetExhausted {
-                stage: tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ParticipantManifestLimit,
-            }
-        }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
         _ => TaskSessionRetrievalOutcomeV1::Unavailable,
     }
 }
@@ -348,15 +354,25 @@ fn task_session_binding_outcome(
 fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescribeServiceOutcome {
     match outcome {
         SessionRetrievalServiceOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
+        SessionRetrievalServiceOutcome::TimedOut => LcmDescribeServiceOutcome::TimedOut,
         SessionRetrievalServiceOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionRetrievalServiceOutcome::Denied => LcmDescribeServiceOutcome::Denied,
         SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. }
-        | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
+        SessionRetrievalServiceOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
+        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
         }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => LcmDescribeServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
             LcmDescribeServiceOutcome::Unavailable(unavailable)
         }
@@ -367,15 +383,25 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
 fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandServiceOutcome {
     match outcome {
         SessionRetrievalServiceOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
+        SessionRetrievalServiceOutcome::TimedOut => LcmExpandServiceOutcome::TimedOut,
         SessionRetrievalServiceOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionRetrievalServiceOutcome::Denied => LcmExpandServiceOutcome::Denied,
         SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. }
-        | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
+        SessionRetrievalServiceOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
+        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
             LcmExpandServiceOutcome::BudgetExhausted
         }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => LcmExpandServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        },
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
             LcmExpandServiceOutcome::Unavailable(unavailable)
         }
@@ -492,6 +518,24 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn task_session_binding_preserves_cursor_manifest_refusal_details() {
+        assert!(matches!(
+            task_session_binding_outcome(
+                SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                }
+            ),
+            TaskSessionRetrievalOutcomeV1::CursorManifestLimitExceeded {
+                kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            }
+        ));
+    }
 
     #[test]
     fn admitted_binding_preserves_outer_grant_scope_and_cancellation_identity() {

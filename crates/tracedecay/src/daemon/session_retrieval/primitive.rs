@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use tracedecay_application::retrieval::{
     RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult,
-    TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
+    SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalFuture,
+    TemporalRetrievalPort,
 };
 use tracedecay_application::{
     CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
@@ -101,7 +102,13 @@ fn map_outcome(
                 }),
             )?))
         }
+        SessionRetrievalServiceOutcome::TimedOut => Ok(RetrievalPortOutcome::TimedOut(
+            terminal_evidence(request, finished_at, OmissionReason::TimedOut, None)?,
+        )),
         SessionRetrievalServiceOutcome::Stale { .. } => Ok(RetrievalPortOutcome::Unavailable(
+            terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
+        )),
+        SessionRetrievalServiceOutcome::CursorStale => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
         )),
         SessionRetrievalServiceOutcome::Redacted => Ok(RetrievalPortOutcome::Unavailable(
@@ -112,15 +119,24 @@ fn map_outcome(
         | SessionRetrievalServiceOutcome::Locked
         | SessionRetrievalServiceOutcome::Deleted
         | SessionRetrievalServiceOutcome::Denied
-        | SessionRetrievalServiceOutcome::Unavailable(_)
-        | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. }
-        | SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            Ok(RetrievalPortOutcome::Unavailable(terminal_evidence(
-                request,
-                finished_at,
-                OmissionReason::Unavailable,
-                None,
-            )?))
+        | SessionRetrievalServiceOutcome::Unavailable(_) => Ok(RetrievalPortOutcome::Unavailable(
+            terminal_evidence(request, finished_at, OmissionReason::Unavailable, None)?,
+        )),
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => Err(TemporalRetrievalFailure::StructuralRefusal(
+            SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            },
+        )),
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            Err(TemporalRetrievalFailure::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+            ))
         }
     }
 }
@@ -419,6 +435,46 @@ mod tests {
                 UtcMicros(7),
             ),
             Err(TemporalRetrievalFailure::ResetRequired)
+        );
+    }
+
+    #[test]
+    fn cursor_manifest_refusal_preserves_kind_and_exact_limits() {
+        let refusal = map_outcome(
+            SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            },
+            &request(),
+            UtcMicros(7),
+        );
+
+        assert_eq!(
+            refusal,
+            Err(TemporalRetrievalFailure::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
+                    kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
+                    observed: 257,
+                    maximum: 256,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn budget_refusal_preserves_stage() {
+        let stage = tracedecay_usecases::session::SessionRetrievalBudgetStageV1::ContextTokens;
+
+        assert_eq!(
+            map_outcome(
+                SessionRetrievalServiceOutcome::BudgetExhausted { stage },
+                &request(),
+                UtcMicros(7),
+            ),
+            Err(TemporalRetrievalFailure::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage }
+            ))
         );
     }
 

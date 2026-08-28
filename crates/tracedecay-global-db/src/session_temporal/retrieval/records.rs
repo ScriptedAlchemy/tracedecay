@@ -43,7 +43,7 @@ pub(super) fn build_record_query_with_relations(
     let mut params = Vec::with_capacity(
         candidates
             .len()
-            .saturating_mul(5)
+            .saturating_mul(6)
             .saturating_add(relations.copies.len().saturating_mul(7))
             .saturating_add(relations.summaries.len().saturating_mul(4))
             .saturating_add(relations.summary_sources.len().saturating_mul(6))
@@ -55,7 +55,7 @@ pub(super) fn build_record_query_with_relations(
         if local != 0 {
             values.push(',');
         }
-        values.push_str("(?, ?, ?, ?, ?)");
+        values.push_str("(?, ?, ?, ?, ?, ?)");
         params.push(SqlValue::Integer(
             i64::try_from(candidate_offset.saturating_add(local))
                 .map_err(|error| read_error(RECORD_OPERATION, error))?,
@@ -85,6 +85,10 @@ pub(super) fn build_record_query_with_relations(
             _ => SqlValue::Null,
         });
         params.push(SqlValue::Text(candidate.retriever_record_id.clone()));
+        params.push(SqlValue::Integer(
+            i64::try_from(candidate.participant_generation)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
     }
     let copy_relation_input = copy_relation_values(&relations.copies, &mut params)?;
     let summary_relation_input = summary_relation_values(&relations.summaries, &mut params)?;
@@ -168,7 +172,7 @@ pub(super) fn build_record_query_with_relations(
         retained_summary_provider_predicate(provider_param, &record_scope.summary_generation);
     let sql = format!(
         "WITH candidate_input(
-             ordinal, session_id, anchor_id, derived_kind, retriever_record_id
+             ordinal, session_id, anchor_id, derived_kind, retriever_record_id, generation
          ) AS (VALUES {values}),
          copy_relation(
              ordinal, session_id, occurrence_id, copied_from_occurrence_id,
@@ -185,10 +189,10 @@ pub(super) fn build_record_query_with_relations(
              ordinal, session_id, summary_id, anchor_id
          ) AS ({retained_summary_anchor_input}),
          candidate(
-             ordinal, session_id, anchor_id, derived_kind, retriever_record_id
+             ordinal, session_id, anchor_id, derived_kind, retriever_record_id, generation
          ) AS (
              SELECT MIN(input.ordinal), input.session_id, input.anchor_id,
-                    input.derived_kind, input.retriever_record_id
+                    input.derived_kind, input.retriever_record_id, input.generation
              FROM candidate_input AS input
              WHERE ?{root_param} IS NULL
                 OR EXISTS (
@@ -203,7 +207,7 @@ pub(super) fn build_record_query_with_relations(
                     LIMIT 1
                 )
              GROUP BY input.session_id, input.anchor_id, input.derived_kind,
-                      input.retriever_record_id
+                      input.retriever_record_id, input.generation
          ),
          records AS (
              SELECT c.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
@@ -237,6 +241,7 @@ pub(super) fn build_record_query_with_relations(
              FROM candidate AS c
              JOIN session_derived_evidence AS derived
                ON derived.session_id = c.session_id
+              AND derived.generation = c.generation
               AND derived.retrieval_anchor_id = c.anchor_id
               AND derived.evidence_kind = c.derived_kind
               AND derived.evidence_id = c.retriever_record_id
@@ -734,35 +739,22 @@ impl RecordScopeSql {
                 summary_generation: format!("?{generation_param}"),
             },
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot => Self {
-                occurrence_condition: "AND o.session_id = c.session_id".to_string(),
-                occurrence_generation_join:
-                    "JOIN session_temporal_generations AS occurrence_generation
-                       ON occurrence_generation.session_id = o.session_id
-                      AND occurrence_generation.generation = o.generation
-                      AND occurrence_generation.state = 'active'"
+                occurrence_condition:
+                    "AND o.session_id = c.session_id AND o.generation = c.generation".to_string(),
+                occurrence_generation_join: String::new(),
+                assertion_condition:
+                    "AND a.session_id = c.session_id AND a.generation = c.generation".to_string(),
+                assertion_generation_join: String::new(),
+                target_condition:
+                    "AND target.session_id = c.session_id AND target.generation = c.generation"
                         .to_string(),
-                assertion_condition: "AND a.session_id = c.session_id".to_string(),
-                assertion_generation_join:
-                    "JOIN session_temporal_generations AS assertion_generation
-                       ON assertion_generation.session_id = a.session_id
-                      AND assertion_generation.generation = a.generation
-                      AND assertion_generation.state = 'active'"
-                        .to_string(),
-                target_condition: "AND target.session_id = c.session_id".to_string(),
-                target_generation_join: "JOIN session_temporal_generations AS copy_generation
-                       ON copy_generation.session_id = target.session_id
-                      AND copy_generation.generation = target.generation
-                      AND copy_generation.state = 'active'"
-                    .to_string(),
+                target_generation_join: String::new(),
                 summary_condition: "AND n.session_id = c.session_id".to_string(),
-                summary_generation_join: "JOIN session_temporal_generations AS summary_generation
-                       ON summary_generation.session_id = n.session_id
-                      AND summary_generation.state = 'active'"
-                    .to_string(),
+                summary_generation_join: String::new(),
                 availability_condition: "availability.session_id = n.session_id
-                     AND availability.generation = summary_generation.generation"
+                     AND availability.generation = c.generation"
                     .to_string(),
-                summary_generation: "summary_generation.generation".to_string(),
+                summary_generation: "c.generation".to_string(),
             },
         }
     }

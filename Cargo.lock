@@ -5889,7 +5889,6 @@ dependencies = [
  "libc",
  "memmap2",
  "notify",
- "open",
  "rayon",
  "regex",
  "rmcp 3.1.1",
@@ -5924,7 +5923,6 @@ dependencies = [
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
- "tracedecay-host-integration",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
  "tracedecay-policy",
@@ -5947,7 +5945,6 @@ dependencies = [
  "url",
  "walkdir",
  "windows 0.62.2",
- "xattr",
  "zeroize",
  "zip",
 ]
@@ -6063,12 +6060,10 @@ dependencies = [
  "axum",
  "clap",
  "dirs",
- "filetime",
  "fs2",
  "futures-util",
  "hex",
  "hotpath",
- "jsonschema",
  "logo-art",
  "open",
  "rayon",
@@ -6116,6 +6111,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-hlsl",
  "tree-sitter-language",
+ "tree-sitter-rust",
 ]
 
 [[package]]
@@ -7008,7 +7004,8 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-rust"
-version = "0.24.2"
+version = "0.24.0"
+source = "git+https://github.com/vanessa-rodrigues/tree-sitter-rust?rev=877df9f82f320243ab23929589a940208faa9d15#877df9f82f320243ab23929589a940208faa9d15"
 dependencies = [
  "cc",
  "tree-sitter-language",

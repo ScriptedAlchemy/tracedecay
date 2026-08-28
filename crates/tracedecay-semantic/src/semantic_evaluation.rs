@@ -460,6 +460,10 @@ pub fn prepare_semantic_evaluation_projection(
         &mut encoder,
     )
     .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+    drop(encoder);
+    runtime
+        .warm_query_session()
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
     Ok(PreparedSemanticEvaluationProjectionV1 {
         query_factory: SemanticEvaluationQueryFactoryV1::from_runtime(
             PooledSemanticQueryEmbedderFactory::new(runtime),

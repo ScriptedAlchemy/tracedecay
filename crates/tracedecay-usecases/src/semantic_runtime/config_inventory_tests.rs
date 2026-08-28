@@ -124,6 +124,7 @@ fn initial_state(label: &str) -> (SemanticConfigurationPinV1, RetrievalProfileSt
             })
             .collect(),
         score_domain_calibrations: BTreeMap::new(),
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: RetrieverKind::QUERY_FALLBACK_LANES
             .into_iter()
             .map(|lane| (lane, 1))

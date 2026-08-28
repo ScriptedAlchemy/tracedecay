@@ -80,6 +80,7 @@ fn candidate() -> RankingCandidate {
         source: Some("claude".to_string()),
         evidence_role: None,
         exact_ranges: Vec::new(),
+        participant_generation: 1,
     }
 }
 
@@ -241,7 +242,7 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
 
     assert!(
         adapter
-            .session_matches_filter(&snapshot, session().as_str(), "claude", &filter)
+            .session_matches_filter(snapshot.request(), session().as_str(), "claude", 1, &filter)
             .await
             .expect("graph session context")
     );
@@ -267,7 +268,7 @@ async fn summary_semantic_filter_hydrates_only_grafeo_source_anchors() {
             .candidate_observations_match(
                 &candidate(),
                 &filter,
-                &snapshot(ExecutionControl::default())
+                snapshot(ExecutionControl::default()).request()
             )
             .await
             .expect("summary source eligibility")
@@ -289,7 +290,7 @@ async fn missing_summary_relation_projection_is_a_typed_read_failure() {
                 source: Some("claude".to_string()),
                 ..TemporalCandidateFilterV1::default()
             },
-            &snapshot(ExecutionControl::default()),
+            snapshot(ExecutionControl::default()).request(),
         )
         .await
         .expect_err("missing graph projection");
@@ -319,7 +320,7 @@ async fn cancelled_summary_relation_read_preserves_temporal_cancellation() {
                 source: Some("claude".to_string()),
                 ..TemporalCandidateFilterV1::default()
             },
-            &snapshot(control),
+            snapshot(control).request(),
         )
         .await
         .expect_err("cancelled relation read");

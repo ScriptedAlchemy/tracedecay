@@ -701,6 +701,41 @@ fn canonical_distance_supports_every_admitted_metric() {
 }
 
 #[test]
+fn evaluation_calibration_expresses_nonnegative_cosine_similarity_in_ppm() {
+    let calibration = ScoreDomainCalibrationV1 {
+        calibration_profile_id: id("calibration.semantic.fixture.v1"),
+        score_domain: id(crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1),
+        raw_min_micros: crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
+        raw_max_micros: crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+    };
+
+    assert_eq!(
+        calibration
+            .calibrate(CanonicalSemanticDistanceV1(1_500_000_000).as_descending_score())
+            .expect("negative cosine clamps to zero"),
+        0
+    );
+    assert_eq!(
+        calibration
+            .calibrate(CanonicalSemanticDistanceV1(1_000_000_000).as_descending_score())
+            .expect("zero cosine calibrates"),
+        0
+    );
+    assert_eq!(
+        calibration
+            .calibrate(CanonicalSemanticDistanceV1(300_000_000).as_descending_score())
+            .expect("positive cosine calibrates"),
+        700_000
+    );
+    assert_eq!(
+        calibration
+            .calibrate(CanonicalSemanticDistanceV1(0).as_descending_score())
+            .expect("identical vectors calibrate"),
+        1_000_000
+    );
+}
+
+#[test]
 fn non_finite_and_zero_norm_vectors_fail_closed() {
     assert!(matches!(
         canonical_distance(EmbeddingMetricV1::Cosine, &[f32::NAN, 0.0], &[1.0, 0.0]),
@@ -1191,6 +1226,7 @@ fn shared_fusion_profile() -> FusionProfile {
             .expect("evaluation anchor"),
         calibrations,
         score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
         weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
         diversity_policy_id: id("diversity.semantic.v1"),
         rerank_policy_id: None,

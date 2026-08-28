@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.analysis.dead_code.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.dead_code.total")]
 pub(crate) async fn handle_dead_code(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

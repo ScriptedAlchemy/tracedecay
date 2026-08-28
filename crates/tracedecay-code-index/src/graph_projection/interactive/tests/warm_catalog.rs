@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Barrier, atomic::AtomicBool};
+use std::sync::{Barrier, atomic::AtomicBool, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use tracedecay_graph_db::{GraphCancellation, GraphProperty, GraphRelationId, NeverCancelled};
 
 use super::*;
+use crate::graph_projection::interactive::InteractiveCatalogState;
 use crate::graph_projection::schema::{FILE_IMPORT_EDGE_KIND, IMPORT_LABEL};
 
 struct CancellationBudget {
@@ -85,13 +87,21 @@ fn assert_catalog_is_cold(store: &CodeGraphProjectionStore) {
     );
 }
 
-fn assert_catalog_warm_state_is_contended(store: &CodeGraphProjectionStore) {
+fn assert_catalog_state_is_cold(store: &CodeGraphProjectionStore) {
+    let state = store
+        .interactive_catalog
+        .state
+        .read()
+        .expect("interactive catalog lock");
+    assert!(matches!(*state, InteractiveCatalogState::Cold));
+}
+
+fn assert_catalog_is_warming(store: &CodeGraphProjectionStore) {
     assert!(
-        matches!(
-            store.interactive_catalog_is_warm(),
-            Err(CodeGraphProjectionError::Unavailable(_))
-        ),
-        "warm-state inspection must not fabricate cold while the builder owns the slot"
+        store
+            .interactive_catalog_is_warm()
+            .is_ok_and(|is_warm| !is_warm),
+        "warm-state inspection must remain responsive while the catalog is building"
     );
 }
 
@@ -104,11 +114,15 @@ fn warm_observations(store: &CodeGraphProjectionStore) -> usize {
 }
 
 fn catalog_authority(store: &CodeGraphProjectionStore) -> usize {
-    let slot = store
+    let state = store
         .interactive_catalog
+        .state
         .read()
         .expect("interactive catalog lock");
-    Arc::as_ptr(slot.as_ref().expect("warm catalog authority")) as usize
+    match &*state {
+        InteractiveCatalogState::Ready(catalog) => Arc::as_ptr(catalog) as usize,
+        _ => panic!("warm catalog authority"),
+    }
 }
 
 fn many_import_manifest() -> GraphGenerationManifest {
@@ -167,6 +181,90 @@ fn cached_warm_still_honors_cancellation() {
             .warm_interactive_catalog_with_cancellation(Arc::new(CancelledNow))
             .expect_err("cached warming still checks cancellation"),
         CodeGraphProjectionError::Cancelled
+    );
+}
+
+#[test]
+fn pre_cancelled_background_warm_restores_the_marked_catalog_to_cold() {
+    let store = store_for(production_manifest());
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark background catalog warm");
+
+    assert_eq!(
+        store
+            .warm_interactive_catalog_with_cancellation(Arc::new(CancelledNow))
+            .expect_err("pre-cancelled background warm is refused"),
+        CodeGraphProjectionError::Cancelled
+    );
+    assert_catalog_state_is_cold(&store);
+    store
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .expect("a later background warm can retry");
+    assert!(
+        store
+            .interactive_catalog_is_warm()
+            .expect("read retried catalog state")
+    );
+}
+
+#[test]
+fn cancelled_follower_does_not_clear_an_active_catalog_warm() {
+    let cached_baseline = store_for(production_manifest());
+    cached_baseline
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .expect("warm pause baseline");
+    let pause_at = warm_observations(&cached_baseline);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let store = Arc::new(store_for(production_manifest()));
+    let warm_store = Arc::clone(&store);
+    let warm_entered = Arc::clone(&entered);
+    let warm_release = Arc::clone(&release);
+    let warmer = thread::spawn(move || {
+        warm_store.warm_interactive_catalog_with_cancellation(Arc::new(PausingCancellation {
+            observations: AtomicUsize::new(0),
+            pause_at,
+            entered: warm_entered,
+            release: warm_release,
+            cancelled: AtomicBool::new(false),
+        }))
+    });
+
+    entered.wait();
+    let (follower_tx, follower_rx) = mpsc::channel();
+    let follower_store = Arc::clone(&store);
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.warm_interactive_catalog_with_cancellation(Arc::new(CancelledNow)))
+            .expect("send cancelled follower result");
+    });
+    let follower_result = follower_rx.recv_timeout(Duration::from_millis(250));
+    let state = store
+        .interactive_catalog
+        .state
+        .read()
+        .expect("interactive catalog lock");
+    assert!(matches!(
+        *state,
+        InteractiveCatalogState::Warming { owner: Some(_) }
+    ));
+    drop(state);
+
+    release.wait();
+    warmer
+        .join()
+        .expect("warm thread")
+        .expect("active catalog warm completes");
+    follower.join().expect("cancelled follower thread");
+    assert_eq!(
+        follower_result.expect("cancelled follower exits promptly"),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+    assert!(
+        store
+            .interactive_catalog_is_warm()
+            .expect("read completed catalog state")
     );
 }
 
@@ -323,7 +421,7 @@ fn cancellation_during_warm_leaves_the_catalog_cold() {
     });
 
     entered.wait();
-    assert_catalog_warm_state_is_contended(&store);
+    assert_catalog_is_warming(&store);
     cancellation.cancel();
     release.wait();
     assert_eq!(
@@ -339,5 +437,77 @@ fn cancellation_during_warm_leaves_the_catalog_cold() {
             .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
             .expect_err("cancelled warm did not make the catalog usable"),
         CodeGraphProjectionError::Cancelled
+    );
+}
+
+#[test]
+fn catalog_warming_does_not_gate_occurrence_adjacency() {
+    let cached_baseline = store_for(production_manifest());
+    cached_baseline
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .expect("warm pause baseline");
+    let pause_at = warm_observations(&cached_baseline);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let store = Arc::new(store_for(production_manifest()));
+    let warm_store = Arc::clone(&store);
+    let warm_cancellation = Arc::new(PausingCancellation {
+        observations: AtomicUsize::new(0),
+        pause_at,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        cancelled: AtomicBool::new(false),
+    });
+    let warmer = thread::spawn(move || {
+        warm_store.warm_interactive_catalog_with_cancellation(warm_cancellation)
+    });
+
+    entered.wait();
+    let graph = reader(&store);
+    let adjacency = graph
+        .callees(
+            &[id("sym.alpha.run")],
+            &[RelationEdgeKindV1::Calls],
+            8,
+            request(),
+        )
+        .expect("occurrence adjacency remains usable during catalog warm");
+    assert_eq!(adjacency.len(), 1);
+    assert_eq!(adjacency[0].len(), 1);
+    assert_eq!(adjacency[0][0].edge.to_occurrence.as_str(), "sym.beta.run");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (resolved_tx, resolved_rx) = mpsc::channel();
+    let resolve_store = Arc::clone(&store);
+    let resolver = thread::spawn(move || {
+        started_tx.send(()).expect("send name lookup start");
+        let result = reader(&resolve_store).resolve_qualified_name("beta::run", None, 8, request());
+        resolved_tx.send(result).expect("send name lookup result");
+    });
+    started_rx.recv().expect("name lookup thread starts");
+    let during_warm = resolved_rx.recv_timeout(Duration::from_millis(250));
+
+    release.wait();
+    warmer
+        .join()
+        .expect("warm thread")
+        .expect("catalog warm completes");
+    resolver.join().expect("resolve thread");
+
+    assert!(
+        matches!(
+            during_warm,
+            Ok(Err(CodeGraphProjectionError::Unavailable(message)))
+                if message.contains("warming")
+        ),
+        "catalog lookup must return typed warming promptly instead of waiting for the scan"
+    );
+    assert_eq!(
+        occurrences(
+            &reader(&store)
+                .resolve_qualified_name("beta::run", None, 8, request())
+                .expect("name lookup works after catalog warm")
+        ),
+        vec!["sym.beta.run".to_owned()]
     );
 }

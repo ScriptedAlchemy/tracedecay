@@ -196,7 +196,7 @@ impl CodeGraphActivationAuthorityV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
     }
 
-    #[hotpath::measure(label = "daemon.code_index.graph.activate", future = true)]
+    #[hotpath::measure(future = true, label = "code_graph.activation.total")]
     pub(super) async fn activate(
         &self,
         project_id: &ProjectId,
@@ -239,7 +239,7 @@ impl CodeGraphActivationAuthorityV1 {
                     .map_err(|error| {
                         CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
                     })?;
-                tokio::task::spawn_blocking(move || {
+                let pending_catalog_warm = tokio::task::spawn_blocking(move || {
                     latest.activate_persistent_graph(retained, cancellation)
                 })
                 .await
@@ -247,7 +247,16 @@ impl CodeGraphActivationAuthorityV1 {
                     CodeIndexSchedulerErrorV1::GraphActivation(format!(
                         "code graph activation task failed: {error}"
                     ))
-                })?
+                })??;
+                drop(tokio::task::spawn_blocking(move || {
+                    if let Err(error) = pending_catalog_warm.run() {
+                        tracing::warn!(
+                            error = %error,
+                            "background code graph interactive catalog warm failed"
+                        );
+                    }
+                }));
+                Ok(())
             }
             #[cfg(test)]
             Self::Memory { .. } => {
@@ -262,7 +271,9 @@ impl CodeGraphActivationAuthorityV1 {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::BudgetExhausted {
                             budget: "resident_memory".to_owned(),
-                            limit: tracedecay_runtime_core::resident_memory::process_resident_memory_limit_v1().get(),
+                            limit:
+                                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
+                                    .get(),
                         },
                     ));
                 }
@@ -338,12 +349,25 @@ impl GraphCancellation for SchedulerGraphCancellation {
     }
 }
 
+struct PendingInteractiveCatalogWarmV1 {
+    store: Arc<CodeGraphProjectionStore>,
+    cancellation: Arc<dyn GraphCancellation>,
+}
+
+impl PendingInteractiveCatalogWarmV1 {
+    #[hotpath::measure(label = "code_graph.catalog.background_warm")]
+    fn run(self) -> Result<(), CodeGraphProjectionError> {
+        self.store
+            .warm_interactive_catalog_with_cancellation(self.cancellation)
+    }
+}
+
 impl LatestCompleteCodeIndexV1 {
-    pub(super) fn activate_persistent_graph(
+    fn activate_persistent_graph(
         &self,
         retained: crate::daemon::store_runtime::session_registry::RetainedCodeGraphRuntimeV1,
         cancellation: Arc<AtomicBool>,
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+    ) -> Result<PendingInteractiveCatalogWarmV1, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let authority = retained.authority();
         let snapshot = retained
@@ -355,13 +379,16 @@ impl LatestCompleteCodeIndexV1 {
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
-        store.warm_interactive_catalog_with_cancellation(Arc::clone(&graph_cancellation))?;
+        // Install occurrence-seeded graph serving before the derived catalog
+        // scan. Marking first prevents a request from racing the background
+        // worker and performing the whole scan on its own thread.
+        store.mark_interactive_catalog_warming()?;
         let reader = store.evidence_reader_with_cancellation(
             &generation_id,
             Some(self.generation.snapshot().repository.clone()),
             self.source_freshness()
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
-            graph_cancellation,
+            Arc::clone(&graph_cancellation),
         )?;
         self.install_graph_serving(
             reader,
@@ -371,6 +398,9 @@ impl LatestCompleteCodeIndexV1 {
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
-        Ok(())
+        Ok(PendingInteractiveCatalogWarmV1 {
+            store,
+            cancellation: graph_cancellation,
+        })
     }
 }

@@ -524,6 +524,7 @@ impl GraphDbRegistry {
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
         let database = operation.database().clone();
+        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::PublishStart);
         let check = || operation.check(self, context);
         let replay = authority
             .replay(publication_key, context)
@@ -555,6 +556,8 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
+        database
+            .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::ReplayHydrated);
         // The identity and row counts are taken once, up front. Everything
         // after staging reads only these, so the bulk manifest can be handed
         // to staging and released there instead of living until this function
@@ -668,6 +671,8 @@ impl GraphDbRegistry {
                 } else {
                     database.remember_verified_generation(&lease)?;
                 }
+                database
+                    .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
                 let mut closure = BTreeMap::new();
                 collect_closure(&lease, &mut closure)?;
                 return Ok(VerifiedGraphCommit {
@@ -753,6 +758,8 @@ impl GraphDbRegistry {
                 return Err(error);
             }
         };
+        database
+            .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
         operation.check(self, context)?;
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
@@ -801,6 +808,7 @@ impl GraphDbRegistry {
         // deliberately not observed after it succeeds.
         let lease = generation_lease(&identity, head.clone(), dependencies);
         database.install_verified_generation(Arc::clone(&lease))?;
+        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
         Ok(VerifiedGraphCommit {
@@ -849,6 +857,7 @@ impl GraphDbRegistry {
         operation.check(self, context)?;
         operation.require_projection_binding(projection)?;
         let database = operation.database().clone();
+        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::RecoveryStart);
         let head = authority
             .verified_head(projection, context)
             .map_err(map_publication_error)?
@@ -865,6 +874,7 @@ impl GraphDbRegistry {
             &mut visiting,
         )?;
         database.install_verified_generation(Arc::clone(&lease))?;
+        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Recovered);
         operation.check(self, context)?;
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;

@@ -180,7 +180,7 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 /// covers the whole scope. `limit` cuts the walk between files rather than
 /// between one file's findings, so a page can exceed it by the last file's
 /// remainder and no finding is stranded behind the cursor.
-#[hotpath::measure(label = "mcp.analysis.unused_imports.total")]
+#[hotpath::measure(future = true, label = "mcp.analysis.unused_imports.total")]
 pub(crate) async fn handle_unused_imports(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

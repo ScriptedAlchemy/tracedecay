@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useCallback, useSyncExternalStore, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   useEventStreamState,
@@ -53,7 +53,12 @@ function feedReading(sync: ProjectionSync): {
   }
 }
 
-/** Telemetry bar for the real `/api/events` connection state. */
+/**
+ * Telemetry bar for the real `/api/events` connection state, drawn as a
+ * segmented subsystem header: every cell is a numbered register (01 LINK,
+ * 02 FEED, 03 SOURCE, 04 QUERY) so the strip reads as the instrument's own
+ * status word rather than as a footer of prose.
+ */
 export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {}) {
   const { state } = useEventStreamState();
   const feed = feedReading(useProjectionSync());
@@ -68,17 +73,17 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
       className="flex min-h-8 shrink-0 items-stretch border-t border-edge-subtle bg-surface-1"
       aria-label="Status"
     >
-      <Cell label="Link">
+      <Cell code="01" label="Link">
         <span
           aria-hidden
-          className={cn('size-1.5 shrink-0', link.tone, link.live && 'td-signal')}
+          className={cn('size-2 shrink-0', link.tone, link.live && 'td-signal')}
         />
         <span className="td-value text-2xs uppercase" role="status">
           {link.value}
         </span>
       </Cell>
-      <Cell label="Feed">
-        <span aria-hidden className={cn('size-1.5 shrink-0', feed.tone)} />
+      <Cell code="02" label="Feed">
+        <span aria-hidden className={cn('size-2 shrink-0', feed.tone)} />
         {/*
          * One region over the state and its reason together.
          *
@@ -110,6 +115,62 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
   );
 }
 
+/**
+ * Where the readings on screen actually come from, so the strip cannot lie by
+ * omission: a healthy plate over a dead link is a CAPTURED read, not a live
+ * one.
+ *
+ *   LIVE      the event stream is up; plates follow the daemon.
+ *   CAPTURED  the stream is down but resolved reads are still on screen —
+ *             fixtures, or the last answers before the link dropped. Stamped
+ *             in the alert register because it is exactly the state a reader
+ *             must not mistake for live.
+ *   NO SOURCE the stream is down and nothing has answered; the plates are
+ *             empty frames, which is its own honest state.
+ */
+export function SourceProvenance() {
+  const { state } = useEventStreamState();
+  const hasData = useAnyResolvedRead();
+  // Only a LIVE stream earns the live stamp. A connecting stream is a stream
+  // that is not delivering: whatever the plates show meanwhile is a captured
+  // read, and stamping it anything softer would be the strip vouching for
+  // freshness it cannot see.
+  const source =
+    state === 'live'
+      ? { value: 'live', tone: 'bg-state-ready', ink: 'text-text-primary' }
+      : hasData
+        ? { value: 'captured', tone: 'bg-alert', ink: 'text-alert' }
+        : { value: 'no source', tone: 'bg-state-offline', ink: 'text-text-muted' };
+  return (
+    <Cell code="03" label="Source">
+      <span aria-hidden className={cn('size-2 shrink-0', source.tone)} />
+      <span
+        role="status"
+        data-source-provenance={source.value}
+        className={cn('td-value text-2xs uppercase', source.ink)}
+      >
+        {source.value}
+      </span>
+    </Cell>
+  );
+}
+
+/** Whether any read model on screen has resolved with data — the difference
+ * between CAPTURED (plates hold a real read) and NO SOURCE (empty frames). */
+function useAnyResolvedRead(): boolean {
+  const client = useQueryClient();
+  const subscribe = useCallback(
+    (onChange: () => void) => client.getQueryCache().subscribe(onChange),
+    [client],
+  );
+  return useSyncExternalStore(subscribe, () =>
+    client
+      .getQueryCache()
+      .getAll()
+      .some((query) => query.state.data !== undefined),
+  );
+}
+
 /** Query-aware cell mounted by Shell, which is inside QueryClientProvider.
  * Keeping it separate lets the transport strip remain usable in isolation
  * without inventing a second QueryClient. */
@@ -121,7 +182,7 @@ export function QueryActivityStatus() {
 
   if (activeQuery !== undefined) {
     return (
-      <Cell label="Query">
+      <Cell code="04" label="Query">
         <span className="td-value max-w-64 truncate text-2xs" role="status">
           {activeQuery.label}
         </span>
@@ -145,7 +206,7 @@ export function QueryActivityStatus() {
   }
 
   return lastCancellation === null ? null : (
-    <Cell label="Query">
+    <Cell code="04" label="Query">
       <span className="td-value max-w-72 truncate text-2xs" role="status">
         cancelled · {lastCancellation.label}
       </span>
@@ -153,9 +214,22 @@ export function QueryActivityStatus() {
   );
 }
 
-function Cell({ label, children }: { label: string; children: ReactNode }) {
+/** One numbered register of the strip: segment number engraved first, the
+ * subsystem stamp beside it, the reading after the hairline. */
+function Cell({
+  code,
+  label,
+  children,
+}: {
+  code: string;
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-2 border-r border-edge-subtle px-3">
+      <span aria-hidden className="td-value text-3xs text-text-muted" data-cell="numeric">
+        {code}
+      </span>
       <span className="td-legend">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5">{children}</span>
     </div>

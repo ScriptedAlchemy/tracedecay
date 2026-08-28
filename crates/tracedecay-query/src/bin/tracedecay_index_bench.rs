@@ -320,8 +320,8 @@ fn collect_corpus(
         let Some(relative_path) = relative.to_str() else {
             return Err(format!("corpus path {} is not Unicode", relative.display()));
         };
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
         files.push(CorpusFile {
             relative_path: relative_path.replace('\\', "/"),
             language: descriptor.language.clone(),
@@ -461,24 +461,20 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                 + request.changes.deleted.len()
                 + request.changes.reused.len(),
         );
-        decisions.extend(
-            request
-                .changes
-                .added_or_changed
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: change.current_digest.clone(),
-                    operation: if change.prior_digest.is_some() {
-                        ProjectionOperationV1::Updated
-                    } else {
-                        ProjectionOperationV1::Added
-                    },
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: change.current_digest.clone(),
-                }),
-        );
+        decisions.extend(request.changes.added_or_changed.iter().map(|change| {
+            ChunkProjectionDecisionV1 {
+                chunk_id: change.chunk_id.clone(),
+                prior_chunk_digest: change.prior_digest.clone(),
+                current_chunk_digest: change.current_digest.clone(),
+                operation: if change.prior_digest.is_some() {
+                    ProjectionOperationV1::Updated
+                } else {
+                    ProjectionOperationV1::Added
+                },
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: change.current_digest.clone(),
+            }
+        }));
         decisions.extend(
             request
                 .changes
@@ -727,7 +723,13 @@ fn drain_pages(
     sealed_len: u64,
     state_digest: &ManifestDigest,
     control: &ActiveControl,
-) -> Result<(Vec<VerifiedSealedLexicalPageV1>, VerifiedSealedLexicalSourceReceiptV1), String> {
+) -> Result<
+    (
+        Vec<VerifiedSealedLexicalPageV1>,
+        VerifiedSealedLexicalSourceReceiptV1,
+    ),
+    String,
+> {
     let bounds =
         VerifiedSealedLexicalPageBatchBoundsV1::new(BATCH_MAX_PAGES, BATCH_MAX_RETAINED_BYTES)
             .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
