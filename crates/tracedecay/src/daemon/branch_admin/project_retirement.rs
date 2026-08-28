@@ -154,6 +154,15 @@ struct ProjectServerRetirementFinalizer {
 
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
+        match &status {
+            ProjectServerRetirementStatus::Clean => {
+                hotpath::gauge!("daemon.branch_admin.retirement.clean_total").inc(1_u64);
+            }
+            ProjectServerRetirementStatus::Failed(_) => {
+                hotpath::gauge!("daemon.branch_admin.retirement.failed_total").inc(1_u64);
+            }
+            ProjectServerRetirementStatus::Pending => {}
+        }
         self.completion.send_replace(status);
         self.terminal = true;
         hotpath::gauge!("retirement_pending").inc(-1.0);
@@ -163,6 +172,7 @@ impl ProjectServerRetirementFinalizer {
 impl Drop for ProjectServerRetirementFinalizer {
     fn drop(&mut self) {
         if !self.terminal {
+            hotpath::gauge!("daemon.branch_admin.retirement.abandoned_total").inc(1_u64);
             self.completion
                 .send_replace(ProjectServerRetirementStatus::Failed(
                     "retirement tracking task ended without a terminal receipt".to_owned(),

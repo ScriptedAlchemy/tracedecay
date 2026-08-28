@@ -319,6 +319,7 @@ async fn counts(executor: &impl QueryExecutor, project_id: &str) -> Result<(usiz
 
 /// Promotes the oldest deferred rows whenever pending capacity becomes
 /// available.  The ordering is explicit so a restart cannot reorder a queue.
+#[hotpath::measure(future = true, label = "global_db.stack_delivery.queue.promote")]
 async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<usize, String> {
     let pending = state_count(executor, project_id, GitHubStackDeliveryStateV1::Pending).await?;
     let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending);
@@ -366,7 +367,15 @@ async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<
             promoted += 1;
         }
     }
+    hotpath::gauge!("global_db.stack_delivery.queue.promoted_rows").inc(promoted as u64);
     Ok(promoted)
+}
+
+/// Records the durable queue depth a caller has already counted inside its
+/// own transaction; it never issues extra queries for observability.
+fn record_queue_depth(pending: usize, deferred: usize) {
+    hotpath::gauge!("global_db.stack_delivery.queue.pending_depth").set(pending as u64);
+    hotpath::gauge!("global_db.stack_delivery.queue.deferred_depth").set(deferred as u64);
 }
 
 async fn lookup_signal(
@@ -427,6 +436,7 @@ impl RegisteredGlobalDb {
                 return Err("GitHub stack signal identity conflict".to_owned());
             }
             let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
+            record_queue_depth(pending_count, deferred_count);
             transaction
                 .rollback()
                 .await
@@ -483,6 +493,7 @@ impl RegisteredGlobalDb {
                 .map_err(|error| format!("append GitHub stack delivery recipient: {error}"))?;
         }
         let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
+        record_queue_depth(pending_count, deferred_count);
         let saturated = deferred_count > 0;
         transaction
             .commit()
@@ -502,6 +513,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns a deterministic page of coordinator-pending deliveries.
+    #[hotpath::measure(future = true, label = "global_db.stack_delivery.query.pending_page")]
     pub async fn pending_github_stack_deliveries(
         &self,
         project_id: &str,
@@ -656,6 +668,7 @@ impl RegisteredGlobalDb {
 
     /// Final host receipt.  Replaying a receipt after settlement is harmless;
     /// settling a row that never reached the host is rejected.
+    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.settle")]
     pub async fn acknowledge_github_stack_host_delivery(
         &self,
         project_id: &str,
@@ -794,6 +807,10 @@ impl RegisteredGlobalDb {
 
     /// Reads the host-pending handoff page without exposing settled or
     /// authorization-lost bindings.
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.stack_delivery.query.host_pending_page"
+    )]
     pub async fn pending_host_github_stack_deliveries(
         &self,
         project_id: &str,

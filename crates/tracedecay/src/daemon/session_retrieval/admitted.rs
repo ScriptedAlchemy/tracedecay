@@ -117,7 +117,10 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
                 }
                 tokio::select! {
                     biased;
-                    () = cancellation.cancelled() => SessionRetrievalServiceOutcome::Cancelled,
+                    () = cancellation.cancelled() => {
+                        hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                        SessionRetrievalServiceOutcome::Cancelled
+                    }
                     outcome = self.retrieve_admitted(context, query) => outcome,
                 }
             },
@@ -187,6 +190,23 @@ impl SessionApplicationRetrievalPortV1 for UnavailableSessionApplicationRetrieva
     }
 }
 
+/// RAII count of admitted retrievals currently executing, so cancellation,
+/// deadline, and panic exits can never leak the in-flight gauge.
+struct SessionRetrievalInFlightObservation;
+
+impl SessionRetrievalInFlightObservation {
+    fn begin() -> Self {
+        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(1.0);
+        Self
+    }
+}
+
+impl Drop for SessionRetrievalInFlightObservation {
+    fn drop(&mut self) {
+        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(-1.0);
+    }
+}
+
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
     fn retrieve_admitted<'a>(
         &'a self,
@@ -194,6 +214,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
         Box::pin(async move {
+            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if requires_refresh_worker(query.freshness_policy())
                 && let Some(unavailable) = self.refresh_not_current()
             {
@@ -279,6 +300,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         command: LcmDescribeServiceCommand,
     ) -> LcmDescribeServiceFuture<'a> {
         Box::pin(async move {
+            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if cancellation.context().token_id != context.cancellation().token_id {
                 return LcmDescribeServiceOutcome::Denied;
             }
@@ -291,7 +313,10 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             };
             tokio::select! {
                 biased;
-                () = cancellation.cancelled() => LcmDescribeServiceOutcome::Cancelled,
+                () = cancellation.cancelled() => {
+                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                    LcmDescribeServiceOutcome::Cancelled
+                }
                 outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
             }
         })
@@ -304,6 +329,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         command: LcmExpandServiceCommand,
     ) -> LcmExpandServiceFuture<'a> {
         Box::pin(async move {
+            let _in_flight = SessionRetrievalInFlightObservation::begin();
             if cancellation.context().token_id != context.cancellation().token_id {
                 return LcmExpandServiceOutcome::Denied;
             }
@@ -316,7 +342,10 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             };
             tokio::select! {
                 biased;
-                () = cancellation.cancelled() => LcmExpandServiceOutcome::Cancelled,
+                () = cancellation.cancelled() => {
+                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                    LcmExpandServiceOutcome::Cancelled
+                }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
         })
@@ -409,7 +438,33 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
     }
 }
 
+/// Admission decision counters over the one binding choke point every
+/// admitted retrieval, task-session, describe, and expand request crosses.
+/// The builder refuses with exactly two typed outcomes, so the reason set
+/// stays static and bounded.
 fn admitted_session_binding(
+    root: &DaemonSessionRetrievalRoot,
+    retrieval_configuration: SessionRetrievalConfiguration,
+    context: &RequestContext,
+) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
+    let binding = build_admitted_session_binding(root, retrieval_configuration, context);
+    match &binding {
+        Ok(_) => {
+            hotpath::gauge!("daemon.session_retrieval.admitted").inc(1.0);
+        }
+        Err(outcome) => match outcome.as_ref() {
+            SessionRetrievalServiceOutcome::WrongScope => {
+                hotpath::gauge!("daemon.session_retrieval.refused.wrong_scope").inc(1.0);
+            }
+            _ => {
+                hotpath::gauge!("daemon.session_retrieval.refused.unavailable").inc(1.0);
+            }
+        },
+    }
+    binding
+}
+
+fn build_admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
     context: &RequestContext,

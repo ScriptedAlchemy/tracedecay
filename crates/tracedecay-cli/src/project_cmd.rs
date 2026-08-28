@@ -60,6 +60,7 @@ fn bounded_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_LIMIT)
 }
 
+#[hotpath::measure(label = "cli.projects.render")]
 fn print_registry_list(payload: &Value, label: &str, json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string_pretty(payload)?);
@@ -150,6 +151,7 @@ fn render_project_context_payload(payload: &Value) -> String {
     out
 }
 
+#[hotpath::measure(label = "cli.projects.request", future = true)]
 async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);

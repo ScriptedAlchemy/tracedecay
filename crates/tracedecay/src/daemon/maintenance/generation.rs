@@ -26,25 +26,34 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     retention: &crate::config::RetentionConfig,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
-    let mut outcome = crate::daemon::store_maintenance::run_semantic_vector_generation_retention(
-        graph,
-        code_index_schedulers,
-        maintenance_observations,
-        cancellation,
-    )
-    .await;
-    if continuation.is_some() {
-        return outcome;
-    }
-    let semantic_collection_complete = outcome.is_complete();
-    let code_generation_succeeded = if !cancellation.is_cancelled() {
-        crate::daemon::store_maintenance::run_code_generation_retention(
+    // Each ordered phase gets its own wall span: the outer generation span is
+    // inclusive, so a slow tick is attributed to vector retention, code
+    // generation retention, scope reconciliation, or compaction — not guessed.
+    let mut outcome = hotpath::measure_block!(
+        "daemon.maintenance.vector_retention",
+        crate::daemon::store_maintenance::run_semantic_vector_generation_retention(
             graph,
             code_index_schedulers,
             maintenance_observations,
             cancellation,
         )
         .await
+    );
+    if continuation.is_some() {
+        return outcome;
+    }
+    let semantic_collection_complete = outcome.is_complete();
+    let code_generation_succeeded = if !cancellation.is_cancelled() {
+        hotpath::measure_block!(
+            "daemon.maintenance.code_generation_retention",
+            crate::daemon::store_maintenance::run_code_generation_retention(
+                graph,
+                code_index_schedulers,
+                maintenance_observations,
+                cancellation,
+            )
+            .await
+        )
     } else {
         false
     };
@@ -56,13 +65,15 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
         && !cancellation.is_cancelled()
         && maintenance_observations.semantic_vector_scope_collection_ready(graph.project_root())
     {
-        let scope_reconciled =
+        let scope_reconciled = hotpath::measure_block!(
+            "daemon.maintenance.scope_reconciliation",
             crate::daemon::store_maintenance::run_code_index_scope_reconciliation(
                 graph,
                 code_index_schedulers,
                 maintenance_observations,
             )
-            .await;
+            .await
+        );
         if !scope_reconciled {
             outcome = MaintenanceTickOutcome::Retry;
         }
@@ -70,22 +81,32 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     if !cancellation.is_cancelled()
         && let Some(compaction) = &retention.compaction
     {
-        let project_compacted =
-            crate::daemon::store_maintenance::run_project_compaction(graph.db(), compaction).await;
-        if !project_compacted {
-            outcome = MaintenanceTickOutcome::Retry;
-        }
-        if !cancellation.is_cancelled() {
-            let branch_compacted =
-                crate::daemon::store_maintenance::run_branch_compaction(graph, compaction).await;
-            if !branch_compacted {
+        hotpath::measure_block!("daemon.maintenance.compaction", {
+            let project_compacted =
+                crate::daemon::store_maintenance::run_project_compaction(graph.db(), compaction)
+                    .await;
+            if !project_compacted {
                 outcome = MaintenanceTickOutcome::Retry;
             }
-        }
+            if !cancellation.is_cancelled() {
+                let branch_compacted =
+                    crate::daemon::store_maintenance::run_branch_compaction(graph, compaction)
+                        .await;
+                if !branch_compacted {
+                    outcome = MaintenanceTickOutcome::Retry;
+                }
+            }
+        });
     }
+    // Cancelled and degraded ticks are recorded too: a maintenance lane that
+    // silently retries forever is exactly the waste being diagnosed.
     if cancellation.is_cancelled() {
+        hotpath::gauge!("daemon.maintenance.generation.cancelled_total").inc(1_u64);
         MaintenanceTickOutcome::Retry
     } else {
+        if matches!(outcome, MaintenanceTickOutcome::Retry) {
+            hotpath::gauge!("daemon.maintenance.generation.retry_total").inc(1_u64);
+        }
         outcome
     }
 }

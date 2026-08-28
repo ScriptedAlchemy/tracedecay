@@ -709,6 +709,9 @@ pub async fn collect_unregistered_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
+    hotpath::gauge!("daemon.doctor.unregistered_stores_total").inc(
+        (report.plan.collect.len() + report.plan.retained_immature.len()) as u64,
+    );
     storage_family_read(
         report
             .plan
@@ -850,6 +853,9 @@ async fn collect_over_budget_store_findings(
         over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
     };
 
+    // Items-processed for the over-budget sweep: how many mounted stores this
+    // pass actually sampled, so the sweep span divides into per-store cost.
+    hotpath::gauge!("daemon.doctor.telemetry_stores_total").inc(telemetry_ports.len() as u64);
     let mut reads = BTreeMap::new();
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
@@ -976,6 +982,7 @@ pub async fn collect_retention_backlog_findings(
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
+    hotpath::gauge!("daemon.doctor.retention_backlog_records_total").inc(records.len() as u64);
     let mut findings = Vec::new();
     for record in records {
         let Ok(finding) = tracedecay_application::storage::retention_backlog_finding(
@@ -1376,8 +1383,14 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             let now = now_secs();
             let profile_scan_root = profile_root.join("projects");
             let profile_storage_reads = async {
+                // The admission walk stats every store file under the profile;
+                // its own wall span separates filesystem-walk cost from the
+                // census reads it admits.
                 let permitted = tokio::task::spawn_blocking(move || {
-                    permits_synchronous_exhaustive_scan(&profile_scan_root)
+                    hotpath::measure_block!(
+                        "daemon.doctor.profile_scan",
+                        permits_synchronous_exhaustive_scan(&profile_scan_root)
+                    )
                 })
                 .await
                 .is_ok_and(|permitted| permitted);
@@ -1421,23 +1434,25 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             let host_project_root = project_root.clone();
             let host_components_root = profile_root.join("host-components");
             let host_scan = tokio::task::spawn_blocking(move || {
-                host_home
-                    .as_ref()
-                    .map_or(HostIntegrationReadV1::Unsupported, |home| {
-                        let context = crate::agents::HealthcheckContext {
-                            home: home.clone(),
-                            project_path: host_project_root,
-                        };
-                        crate::agents::inspect_receipt_backed_host_components(
-                            &context,
-                            &host_components_root,
-                        )
+                hotpath::measure_block!("daemon.doctor.host_scan", {
+                    host_home
                         .as_ref()
-                        .map_or(
-                            HostIntegrationReadV1::Unknown,
-                            host_integration_read_from_report,
-                        )
-                    })
+                        .map_or(HostIntegrationReadV1::Unsupported, |home| {
+                            let context = crate::agents::HealthcheckContext {
+                                home: home.clone(),
+                                project_path: host_project_root,
+                            };
+                            crate::agents::inspect_receipt_backed_host_components(
+                                &context,
+                                &host_components_root,
+                            )
+                            .as_ref()
+                            .map_or(
+                                HostIntegrationReadV1::Unknown,
+                                host_integration_read_from_report,
+                            )
+                        })
+                })
             });
             let semantic_configuration_inventory =
                 configuration_runtime.semantic_configuration_inventory_authority();

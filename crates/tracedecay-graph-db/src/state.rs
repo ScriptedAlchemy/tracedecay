@@ -924,22 +924,33 @@ pub(crate) fn publication(
     }))
 }
 
+#[hotpath::measure(label = "graph_db.projection.labeled_nodes")]
 pub(crate) fn labeled_projection_nodes(
     database: &GrafeoDB,
     owner_label: &str,
     label: &str,
 ) -> Result<Vec<NodeId>, GraphDbError> {
     let store = database.graph_store();
-    Ok(nodes_with_label(store.as_ref(), owner_label)
-        .into_iter()
-        .filter(|node| {
-            store
-                .get_node(*node)
-                .is_some_and(|record| has_native_label(&record, label))
-        })
-        .collect())
+    let candidates = hotpath::measure_block!(
+        "graph_db.projection.labeled_nodes.scan",
+        nodes_with_label(store.as_ref(), owner_label)
+    );
+    hotpath::gauge!("graph_db.projection.labeled_nodes.candidates").set(candidates.len());
+    let nodes = hotpath::measure_block!("graph_db.projection.labeled_nodes.filter", {
+        candidates
+            .into_iter()
+            .filter(|node| {
+                store
+                    .get_node(*node)
+                    .is_some_and(|record| has_native_label(&record, label))
+            })
+            .collect::<Vec<_>>()
+    });
+    hotpath::gauge!("graph_db.projection.labeled_nodes.results").set(nodes.len());
+    Ok(nodes)
 }
 
+#[hotpath::measure(label = "graph_db.projection.labeled_nodes")]
 fn labeled_projection_nodes_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -949,17 +960,23 @@ fn labeled_projection_nodes_checked(
 ) -> Result<Vec<NodeId>, GraphDbError> {
     check()?;
     let store = database.graph_store();
-    require_generation_capacity(
-        if label == ENTITY_LABEL {
-            "entities"
-        } else {
-            "relations"
-        },
-        nodes_with_label_count(store.as_ref(), owner_label),
-        0,
-        maximum,
-    )?;
-    let candidates = nodes_with_label(store.as_ref(), owner_label);
+    hotpath::measure_block!("graph_db.projection.labeled_nodes.capacity", {
+        require_generation_capacity(
+            if label == ENTITY_LABEL {
+                "entities"
+            } else {
+                "relations"
+            },
+            nodes_with_label_count(store.as_ref(), owner_label),
+            0,
+            maximum,
+        )
+    })?;
+    let candidates = hotpath::measure_block!(
+        "graph_db.projection.labeled_nodes.scan",
+        nodes_with_label(store.as_ref(), owner_label)
+    );
+    hotpath::gauge!("graph_db.projection.labeled_nodes.candidates").set(candidates.len());
     check()?;
     require_generation_capacity(
         if label == ENTITY_LABEL {
@@ -972,18 +989,23 @@ fn labeled_projection_nodes_checked(
         maximum,
     )?;
     let mut nodes = Vec::new();
-    nodes.try_reserve_exact(candidates.len()).map_err(|_| {
-        GraphDbError::unavailable("native graph generation identity scan is too large")
+    hotpath::measure_block!("graph_db.projection.labeled_nodes.reserve", {
+        nodes.try_reserve_exact(candidates.len()).map_err(|_| {
+            GraphDbError::unavailable("native graph generation identity scan is too large")
+        })
     })?;
-    for node in candidates {
-        check()?;
-        if store
-            .get_node(node)
-            .is_some_and(|record| has_native_label(&record, label))
-        {
-            nodes.push(node);
+    hotpath::measure_block!("graph_db.projection.labeled_nodes.filter", {
+        for node in candidates {
+            check()?;
+            if store
+                .get_node(node)
+                .is_some_and(|record| has_native_label(&record, label))
+            {
+                nodes.push(node);
+            }
         }
-    }
+    });
+    hotpath::gauge!("graph_db.projection.labeled_nodes.results").set(nodes.len());
     check()?;
     Ok(nodes)
 }

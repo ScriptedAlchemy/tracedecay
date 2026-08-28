@@ -123,9 +123,9 @@ impl GraphDbRegistry {
         }
         let shard_id = &registration.binding().shard_id;
         let database = self.registered_database(&registration)?;
-        if let Some(action) =
-            converge_retired_cleanup(&registration, authority, context, writer_fence, &database)?
-        {
+        if let Some(action) = hotpath::measure_block!("graph_db.vector.retire.converge", {
+            converge_retired_cleanup(&registration, authority, context, writer_fence, &database)
+        })? {
             return Ok(SemanticVectorRetentionStep::Census(empty_census(
                 shard_id.clone(),
                 after,
@@ -455,15 +455,17 @@ fn finish_reserved_cancelled(
         reservation.preserve_cleanup_fence();
         return Err(error);
     }
-    let outcome = authority
-        .remove_cancelled_generation(
-            &SemanticVectorCancelledRetirement {
-                stage: record.plan.key.clone(),
-                writer_fence: writer_fence.clone(),
-            },
-            context,
-        )
-        .map_err(map_staging_error);
+    let outcome = hotpath::measure_block!("graph_db.vector.retire.authority", {
+        authority
+            .remove_cancelled_generation(
+                &SemanticVectorCancelledRetirement {
+                    stage: record.plan.key.clone(),
+                    writer_fence: writer_fence.clone(),
+                },
+                context,
+            )
+            .map_err(map_staging_error)
+    });
     match outcome {
         Ok(
             SemanticVectorCancelledRetirementOutcome::Removed
@@ -523,15 +525,17 @@ fn finish_reserved_published(
             ));
         }
     }
-    let outcome = match authority.retire_published_generation(
-        &SemanticVectorPublishedRetirement {
-            stage: record.plan.key.clone(),
-            semantic_generation_id: record.plan.semantic_generation_id.clone(),
-            replay,
-            writer_fence: writer_fence.clone(),
-        },
-        context,
-    ) {
+    let outcome = match hotpath::measure_block!("graph_db.vector.retire.authority", {
+        authority.retire_published_generation(
+            &SemanticVectorPublishedRetirement {
+                stage: record.plan.key.clone(),
+                semantic_generation_id: record.plan.semantic_generation_id.clone(),
+                replay,
+                writer_fence: writer_fence.clone(),
+            },
+            context,
+        )
+    }) {
         Ok(outcome) => outcome,
         Err(error) => {
             reservation.release()?;

@@ -545,7 +545,10 @@ impl DeterministicCodeChunker {
             sensitivity_level,
             cancellation,
         )?;
-        let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks)?;
+        let authority = hotpath::measure_block!(
+            "code_index.chunk.mint_authority",
+            ExactExtractionAuthorityV1::mint(&result.chunks.chunks)
+        )?;
         Ok((result, authority))
     }
 
@@ -1270,24 +1273,30 @@ impl DeterministicCodeChunker {
         let len = source.len() as u64;
         let offsets = line_offsets(source.as_bytes());
         let file_identity = self.file_identity(&file.file.logical_path)?;
-        let symbol_rows = self.symbol_rows(
-            &file.file.file_occurrence_id,
-            &file_identity,
-            &result.nodes,
-            &offsets,
-            len,
-        )?;
-        let chunks = self.build_chunks(
-            source,
-            len,
-            batch,
-            descriptor,
-            &file_identity,
-            &symbol_rows,
-            sensitivity_level,
-            cancellation,
-        )?;
-        let symbols = self.lineage_symbols(source, &file_identity, &symbol_rows)?;
+        let symbol_rows = hotpath::measure_block!("code_index.chunk.symbol_rows", {
+            self.symbol_rows(
+                &file.file.file_occurrence_id,
+                &file_identity,
+                &result.nodes,
+                &offsets,
+                len,
+            )
+        })?;
+        let chunks = hotpath::measure_block!("code_index.chunk.build", {
+            self.build_chunks(
+                source,
+                len,
+                batch,
+                descriptor,
+                &file_identity,
+                &symbol_rows,
+                sensitivity_level,
+                cancellation,
+            )
+        })?;
+        let symbols = hotpath::measure_block!("code_index.chunk.lineage", {
+            self.lineage_symbols(source, &file_identity, &symbol_rows)
+        })?;
         let mut relation_edges = result.edges.clone();
         relation_edges.extend(resolve_same_file_references(
             &result.unresolved_refs,
@@ -1522,261 +1531,269 @@ impl DeterministicCodeChunker {
             signature: Option<SourceSpan>,
         }
 
-        // Child start-bytes grouped by parent index in one pass; every
-        // symbol's members are consumed exactly once in the loop below.
-        let mut member_starts_by_parent: Vec<Vec<u64>> = vec![Vec::new(); symbols.len()];
-        for symbol in symbols {
-            if let Some(parent_index) = symbol.parent {
-                member_starts_by_parent[parent_index].push(symbol.span.start_byte);
-            }
-        }
-        let mut emissions = Vec::with_capacity(symbols.len());
-        for (index, symbol) in symbols.iter().enumerate() {
-            if index % 64 == 0 && cancellation.is_cancelled() {
-                return Err(ChunkingFailureV1::Cancelled);
-            }
-            let is_member = descriptor.stable_member_spans && symbol.parent.is_some();
-            let grain = if is_member {
-                CodeSearchChunkGrainV1::SymbolMember
-            } else {
-                CodeSearchChunkGrainV1::SymbolBody
-            };
-            let member_starts = std::mem::take(&mut member_starts_by_parent[index]);
-            let mut pieces = Vec::new();
-            if symbol.span.len() > MAX_CHUNK_TEXT_BYTES as u64 {
-                // Oversized bodies split on deterministic structural
-                // boundaries (member starts) when the descriptor identifies
-                // stable member spans; otherwise the pinned fallback windows.
-                let structural = descriptor.stable_member_spans && !member_starts.is_empty();
-                let segments = if structural {
-                    structural_segments(symbol.span, member_starts)
-                } else {
-                    vec![(symbol.span.start_byte, symbol.span.len())]
-                };
-                for (segment_index, (segment_start, segment_len)) in segments.iter().enumerate() {
-                    for window in
-                        fallback_windows(source, *segment_start, segment_start + segment_len)
-                    {
-                        let split_path = if structural {
-                            if window.1 < *segment_len {
-                                let mut path = vec![segment_index as u32];
-                                path.extend(window_split_path(*segment_start, window));
-                                path
-                            } else {
-                                vec![segment_index as u32]
-                            }
-                        } else {
-                            window_split_path(*segment_start, window)
-                        };
-                        pieces.push((
-                            split_path,
-                            SourceSpan {
-                                start_byte: window.0,
-                                end_byte: window.0 + window.1,
-                            },
-                        ));
-                    }
+        let (pending, emissions) = hotpath::measure_block!("code_index.chunk.plan", {
+            // Child start-bytes grouped by parent index in one pass; every
+            // symbol's members are consumed exactly once in the loop below.
+            let mut member_starts_by_parent: Vec<Vec<u64>> = vec![Vec::new(); symbols.len()];
+            for symbol in symbols {
+                if let Some(parent_index) = symbol.parent {
+                    member_starts_by_parent[parent_index].push(symbol.span.start_byte);
                 }
-            } else {
-                pieces.push((Vec::new(), symbol.span));
             }
-            let line_end = offsets_line_end(source, symbol.span.start_byte);
-            let signature_end = line_end.min(symbol.span.end_byte);
-            let signature = (signature_end > symbol.span.start_byte).then_some(SourceSpan {
-                start_byte: symbol.span.start_byte,
-                end_byte: signature_end,
-            });
-            emissions.push(Emission {
-                grain,
-                pieces,
-                signature,
-            });
-        }
-
-        // Pending chunks: signatures, primary grain pieces, preamble, windows.
-        let mut pending: Vec<PendingChunk> = Vec::new();
-        for (index, symbol) in symbols.iter().enumerate() {
-            let emission = &emissions[index];
-            let parent = symbol
-                .parent
-                .map(|parent_index| (parent_index, emissions[parent_index].pieces[0].0.clone()));
-            for (split_path, span) in &emission.pieces {
-                pending.push(PendingChunk {
-                    grain: emission.grain,
-                    symbol: Some(index),
-                    split_path: split_path.clone(),
-                    span: *span,
-                    parent: parent.clone(),
-                });
-            }
-            if let Some(signature) = emission.signature {
-                pending.push(PendingChunk {
-                    grain: CodeSearchChunkGrainV1::SymbolSignature,
-                    symbol: Some(index),
-                    split_path: Vec::new(),
-                    span: signature,
-                    parent: Some((index, emission.pieces[0].0.clone())),
-                });
-            }
-        }
-
-        // Preamble covers everything before the first symbol (imports,
-        // module documentation); windows cover otherwise unowned ranges,
-        // excluding the batch's explicit error/unsupported evidence.
-        let first_symbol_start = symbols
-            .iter()
-            .map(|symbol| symbol.span.start_byte)
-            .min()
-            .unwrap_or(len);
-        if first_symbol_start > 0 && !symbols.is_empty() {
-            for window in fallback_windows(source, 0, first_symbol_start) {
-                pending.push(PendingChunk {
-                    grain: CodeSearchChunkGrainV1::FilePreamble,
-                    symbol: None,
-                    split_path: if window.1 < first_symbol_start {
-                        window_split_path(0, window)
+            let mut emissions = Vec::with_capacity(symbols.len());
+            for (index, symbol) in symbols.iter().enumerate() {
+                if index % 64 == 0 && cancellation.is_cancelled() {
+                    return Err(ChunkingFailureV1::Cancelled);
+                }
+                let is_member = descriptor.stable_member_spans && symbol.parent.is_some();
+                let grain = if is_member {
+                    CodeSearchChunkGrainV1::SymbolMember
+                } else {
+                    CodeSearchChunkGrainV1::SymbolBody
+                };
+                let member_starts = std::mem::take(&mut member_starts_by_parent[index]);
+                let mut pieces = Vec::new();
+                if symbol.span.len() > MAX_CHUNK_TEXT_BYTES as u64 {
+                    // Oversized bodies split on deterministic structural
+                    // boundaries (member starts) when the descriptor identifies
+                    // stable member spans; otherwise the pinned fallback windows.
+                    let structural = descriptor.stable_member_spans && !member_starts.is_empty();
+                    let segments = if structural {
+                        structural_segments(symbol.span, member_starts)
                     } else {
-                        Vec::new()
-                    },
-                    span: SourceSpan {
-                        start_byte: window.0,
-                        end_byte: window.0 + window.1,
-                    },
-                    parent: None,
+                        vec![(symbol.span.start_byte, symbol.span.len())]
+                    };
+                    for (segment_index, (segment_start, segment_len)) in segments.iter().enumerate()
+                    {
+                        for window in
+                            fallback_windows(source, *segment_start, segment_start + segment_len)
+                        {
+                            let split_path = if structural {
+                                if window.1 < *segment_len {
+                                    let mut path = vec![segment_index as u32];
+                                    path.extend(window_split_path(*segment_start, window));
+                                    path
+                                } else {
+                                    vec![segment_index as u32]
+                                }
+                            } else {
+                                window_split_path(*segment_start, window)
+                            };
+                            pieces.push((
+                                split_path,
+                                SourceSpan {
+                                    start_byte: window.0,
+                                    end_byte: window.0 + window.1,
+                                },
+                            ));
+                        }
+                    }
+                } else {
+                    pieces.push((Vec::new(), symbol.span));
+                }
+                let line_end = offsets_line_end(source, symbol.span.start_byte);
+                let signature_end = line_end.min(symbol.span.end_byte);
+                let signature = (signature_end > symbol.span.start_byte).then_some(SourceSpan {
+                    start_byte: symbol.span.start_byte,
+                    end_byte: signature_end,
+                });
+                emissions.push(Emission {
+                    grain,
+                    pieces,
+                    signature,
                 });
             }
-        }
 
-        let mut covered: Vec<(u64, u64)> = symbols
-            .iter()
-            .map(|symbol| (symbol.span.start_byte, symbol.span.end_byte))
-            .collect();
-        if !symbols.is_empty() {
-            covered.push((0, first_symbol_start));
-        }
-        covered.extend(
-            batch
-                .error_ranges
-                .iter()
-                .chain(&batch.unsupported_ranges)
-                .map(|span| (span.start_byte, span.end_byte)),
-        );
-        covered.sort_unstable();
-        let mut cursor = 0u64;
-        let mut gap_ordinal = 0u64;
-        for (start, end) in covered {
-            if start > cursor {
-                emit_windows(source, cursor, start, gap_ordinal, &mut pending);
-                gap_ordinal += 1;
+            // Pending chunks: signatures, primary grain pieces, preamble, windows.
+            let mut pending: Vec<PendingChunk> = Vec::new();
+            for (index, symbol) in symbols.iter().enumerate() {
+                let emission = &emissions[index];
+                let parent = symbol.parent.map(|parent_index| {
+                    (parent_index, emissions[parent_index].pieces[0].0.clone())
+                });
+                for (split_path, span) in &emission.pieces {
+                    pending.push(PendingChunk {
+                        grain: emission.grain,
+                        symbol: Some(index),
+                        split_path: split_path.clone(),
+                        span: *span,
+                        parent: parent.clone(),
+                    });
+                }
+                if let Some(signature) = emission.signature {
+                    pending.push(PendingChunk {
+                        grain: CodeSearchChunkGrainV1::SymbolSignature,
+                        symbol: Some(index),
+                        split_path: Vec::new(),
+                        span: signature,
+                        parent: Some((index, emission.pieces[0].0.clone())),
+                    });
+                }
             }
-            cursor = cursor.max(end);
-        }
-        if cursor < len {
-            emit_windows(source, cursor, len, gap_ordinal, &mut pending);
-        }
+
+            // Preamble covers everything before the first symbol (imports,
+            // module documentation); windows cover otherwise unowned ranges,
+            // excluding the batch's explicit error/unsupported evidence.
+            let first_symbol_start = symbols
+                .iter()
+                .map(|symbol| symbol.span.start_byte)
+                .min()
+                .unwrap_or(len);
+            if first_symbol_start > 0 && !symbols.is_empty() {
+                for window in fallback_windows(source, 0, first_symbol_start) {
+                    pending.push(PendingChunk {
+                        grain: CodeSearchChunkGrainV1::FilePreamble,
+                        symbol: None,
+                        split_path: if window.1 < first_symbol_start {
+                            window_split_path(0, window)
+                        } else {
+                            Vec::new()
+                        },
+                        span: SourceSpan {
+                            start_byte: window.0,
+                            end_byte: window.0 + window.1,
+                        },
+                        parent: None,
+                    });
+                }
+            }
+
+            let mut covered: Vec<(u64, u64)> = symbols
+                .iter()
+                .map(|symbol| (symbol.span.start_byte, symbol.span.end_byte))
+                .collect();
+            if !symbols.is_empty() {
+                covered.push((0, first_symbol_start));
+            }
+            covered.extend(
+                batch
+                    .error_ranges
+                    .iter()
+                    .chain(&batch.unsupported_ranges)
+                    .map(|span| (span.start_byte, span.end_byte)),
+            );
+            covered.sort_unstable();
+            let mut cursor = 0u64;
+            let mut gap_ordinal = 0u64;
+            for (start, end) in covered {
+                if start > cursor {
+                    emit_windows(source, cursor, start, gap_ordinal, &mut pending);
+                    gap_ordinal += 1;
+                }
+                cursor = cursor.max(end);
+            }
+            if cursor < len {
+                emit_windows(source, cursor, len, gap_ordinal, &mut pending);
+            }
+            Ok::<_, ChunkingFailureV1>((pending, emissions))
+        })?;
 
         // Canonical materialization: identify, order, and number.
-        let mut chunks = Vec::with_capacity(pending.len());
-        for piece in pending {
-            if piece.span.is_empty() {
-                continue;
-            }
-            let text = &source[piece.span.start_byte as usize..piece.span.end_byte as usize];
-            if text.is_empty() {
-                continue;
-            }
-            let symbol = piece.symbol.map(|index| &symbols[index]);
-            let id = self.chunk_id(
-                file_identity,
-                symbol.map(|symbol| &symbol.identity),
-                piece.grain,
-                piece.split_path.clone(),
-            )?;
-            let parent_chunk_id = piece
-                .parent
-                .map(|(parent_index, parent_split)| {
-                    let parent_symbol = &symbols[parent_index];
-                    self.chunk_id(
-                        file_identity,
-                        Some(&parent_symbol.identity),
-                        emissions[parent_index].grain,
-                        parent_split,
+        hotpath::measure_block!("code_index.chunk.identify", {
+            let mut chunks = Vec::with_capacity(pending.len());
+            for piece in pending {
+                if piece.span.is_empty() {
+                    continue;
+                }
+                let text = &source[piece.span.start_byte as usize..piece.span.end_byte as usize];
+                if text.is_empty() {
+                    continue;
+                }
+                let symbol = piece.symbol.map(|index| &symbols[index]);
+                let id = self.chunk_id(
+                    file_identity,
+                    symbol.map(|symbol| &symbol.identity),
+                    piece.grain,
+                    piece.split_path.clone(),
+                )?;
+                let parent_chunk_id = piece
+                    .parent
+                    .map(|(parent_index, parent_split)| {
+                        let parent_symbol = &symbols[parent_index];
+                        self.chunk_id(
+                            file_identity,
+                            Some(&parent_symbol.identity),
+                            emissions[parent_index].grain,
+                            parent_split,
+                        )
+                    })
+                    .transpose()?;
+                let (mut exact_terms, subtokens) = classify_chunk_text(text, piece.span.start_byte);
+                if let Some(symbol) = symbol
+                    && let Some(span) = symbol_name_span(source, symbol)
+                    && span.start_byte >= piece.span.start_byte
+                    && span.end_byte <= piece.span.end_byte
+                    && let Ok(term) = ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
+                        source.as_bytes()[span.start_byte as usize..span.end_byte as usize]
+                            .to_vec(),
+                        span,
+                        symbol.occurrence.clone(),
                     )
-                })
-                .transpose()?;
-            let (mut exact_terms, subtokens) = classify_chunk_text(text, piece.span.start_byte);
-            if let Some(symbol) = symbol
-                && let Some(span) = symbol_name_span(source, symbol)
-                && span.start_byte >= piece.span.start_byte
-                && span.end_byte <= piece.span.end_byte
-                && let Ok(term) = ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
-                    source.as_bytes()[span.start_byte as usize..span.end_byte as usize].to_vec(),
-                    span,
-                    symbol.occurrence.clone(),
-                )
-            {
-                exact_terms.push(term);
-                exact_terms.sort_by(|left, right| {
-                    (
-                        left.span().start_byte,
-                        left.span().end_byte,
-                        left.kind(),
-                        left.canonical_bytes(),
-                        left.original_bytes(),
-                    )
-                        .cmp(&(
-                            right.span().start_byte,
-                            right.span().end_byte,
-                            right.kind(),
-                            right.canonical_bytes(),
-                            right.original_bytes(),
-                        ))
+                {
+                    exact_terms.push(term);
+                    exact_terms.sort_by(|left, right| {
+                        (
+                            left.span().start_byte,
+                            left.span().end_byte,
+                            left.kind(),
+                            left.canonical_bytes(),
+                            left.original_bytes(),
+                        )
+                            .cmp(&(
+                                right.span().start_byte,
+                                right.span().end_byte,
+                                right.kind(),
+                                right.canonical_bytes(),
+                                right.original_bytes(),
+                            ))
+                    });
+                }
+                chunks.push(CodeSearchChunkV1 {
+                    id,
+                    anchor: CodeSearchChunkAnchorV1 {
+                        generation_id: self.generation_id.clone(),
+                        file_occurrence_id: batch.file_occurrence_id.clone(),
+                        symbol_occurrence_id: symbol.map(|symbol| symbol.occurrence.clone()),
+                        parent_chunk_id,
+                        source_span: piece.span,
+                        grain: piece.grain,
+                        ordinal: 0,
+                    },
+                    content_digest: content_digest(text.as_bytes()),
+                    language_descriptor_revision: descriptor.descriptor_revision.clone(),
+                    chunker_revision: self.chunker_revision.clone(),
+                    sanitizer_revision: self.sanitizer_revision.clone(),
+                    sensitivity: SensitivityDecision {
+                        level: sensitivity_level,
+                        policy_revision: self.policy_revision.clone(),
+                    },
+                    exact_terms,
+                    subtokens,
+                    sanitized_text: BoundedSanitizedText::new(text).map_err(|error| {
+                        ChunkingFailureV1::NonCanonicalIdentity(error.to_string())
+                    })?,
                 });
             }
-            chunks.push(CodeSearchChunkV1 {
-                id,
-                anchor: CodeSearchChunkAnchorV1 {
-                    generation_id: self.generation_id.clone(),
-                    file_occurrence_id: batch.file_occurrence_id.clone(),
-                    symbol_occurrence_id: symbol.map(|symbol| symbol.occurrence.clone()),
-                    parent_chunk_id,
-                    source_span: piece.span,
-                    grain: piece.grain,
-                    ordinal: 0,
-                },
-                content_digest: content_digest(text.as_bytes()),
-                language_descriptor_revision: descriptor.descriptor_revision.clone(),
-                chunker_revision: self.chunker_revision.clone(),
-                sanitizer_revision: self.sanitizer_revision.clone(),
-                sensitivity: SensitivityDecision {
-                    level: sensitivity_level,
-                    policy_revision: self.policy_revision.clone(),
-                },
-                exact_terms,
-                subtokens,
-                sanitized_text: BoundedSanitizedText::new(text)
-                    .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?,
-            });
-        }
 
-        chunks.sort_by(|left, right| {
-            left.anchor
-                .source_span
-                .start_byte
-                .cmp(&right.anchor.source_span.start_byte)
-                .then(
-                    left.anchor
-                        .source_span
-                        .end_byte
-                        .cmp(&right.anchor.source_span.end_byte),
-                )
-                .then(left.anchor.grain.cmp(&right.anchor.grain))
-                .then(left.id.cmp(&right.id))
-        });
-        for (ordinal, chunk) in chunks.iter_mut().enumerate() {
-            chunk.anchor.ordinal = ordinal as u32;
-        }
-        Ok(chunks)
+            chunks.sort_by(|left, right| {
+                left.anchor
+                    .source_span
+                    .start_byte
+                    .cmp(&right.anchor.source_span.start_byte)
+                    .then(
+                        left.anchor
+                            .source_span
+                            .end_byte
+                            .cmp(&right.anchor.source_span.end_byte),
+                    )
+                    .then(left.anchor.grain.cmp(&right.anchor.grain))
+                    .then(left.id.cmp(&right.id))
+            });
+            for (ordinal, chunk) in chunks.iter_mut().enumerate() {
+                chunk.anchor.ordinal = ordinal as u32;
+            }
+            Ok(chunks)
+        })
     }
 }
 

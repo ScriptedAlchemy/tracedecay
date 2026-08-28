@@ -59,17 +59,20 @@ fsys = "1.1.0"
 # This crate has no reqwest 0.12 client, so `hotpath/reqwest-0-12` and
 # `hotpath::http!` stay unused; download vs decode are timed separately.
 hotpath = [
+    "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-query/hotpath",
 ]
 hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
 ]
 hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",

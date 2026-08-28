@@ -210,6 +210,10 @@ pub fn decode_native_hook_event(
     finish_decoded_native_event(host, signal, &raw)
 }
 
+/// OpenCode plugin callbacks enter here directly instead of through
+/// [`decode_native_hook_event`], so this surface needs its own decode
+/// boundary to stay visible.
+#[hotpath::measure(label = "hooks.native.decode_plugin_event")]
 pub fn decode_opencode_plugin_event(
     surface: OpenCodePluginSurfaceV1,
     payload: &[u8],
@@ -222,6 +226,9 @@ pub fn decode_opencode_plugin_event(
     finish_decoded_native_event(NativeHostIdentityV1::OpenCode, signal, &raw)
 }
 
+/// Project-scoped LSP decode also bypasses [`decode_native_hook_event`] and
+/// runs as a probe on every OpenCode dispatch, so it is measured separately.
+#[hotpath::measure(label = "hooks.native.decode_lsp_event")]
 pub fn decode_opencode_lsp_event(
     payload: &[u8],
 ) -> Result<DecodedOpenCodeLspEventV1, NativeHookDecodeError> {

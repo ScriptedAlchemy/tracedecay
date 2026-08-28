@@ -57,7 +57,7 @@ pub(crate) fn lookup(
     Ok(Some(receipt))
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "rusqlite.ledger.inbox_insert")]
 pub(crate) fn insert(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,

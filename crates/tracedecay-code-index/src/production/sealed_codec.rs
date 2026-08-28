@@ -154,6 +154,113 @@ struct PersistedPublishedGenerationFormatProbeV1 {
     format_revision: u32,
 }
 
+/// Materialize one sealed envelope with the fewest corpus-scale passes,
+/// returning `None` for incompatible format revisions.
+///
+/// The V1 happy path is exactly one boundary parse (isolating the payload
+/// bytes), one payload digest, and one typed materialization. The standalone
+/// format probe used to re-scan the entire corpus-sized envelope before every
+/// decode; it now runs only when this single-pass decode cannot accept the
+/// bytes, where [`classify_unaccepted_envelope`] reproduces the historical
+/// probe-first outcomes exactly. The digest is computed and compared before
+/// the payload is materialized, so a corrupt V1 envelope is still rejected
+/// without building corpus-scale structures from unverified bytes.
+fn materialize_compatible_envelope(
+    bytes: &[u8],
+) -> Result<Option<SealedPublishedGenerationEnvelopeV1>, CodeIndexProductionErrorV1> {
+    let raw: SealedPublishedGenerationRawEnvelopeV1 = match hotpath::measure_block!(
+        "code_index.generation.decode.raw_envelope_parse",
+        serde_json::from_slice(bytes)
+    ) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return classify_unaccepted_envelope(
+                bytes,
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation decoding failed: {error}"
+                )),
+            );
+        }
+    };
+    let payload_digest = hotpath::measure_block!(
+        "code_index.sealed_decode.v6_payload_digest",
+        json_generation_digest(raw.generation.get().as_bytes())
+    )?;
+    if payload_digest != raw.state_digest {
+        // Expected under the legacy canonical-digest rule, corrupt under the
+        // V1 raw-bytes rule. The probe — never the digest — decides which, so
+        // the format-revision gate stays authoritative.
+        return classify_unaccepted_envelope(
+            bytes,
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation state digest does not match its payload".to_owned(),
+            ),
+        );
+    }
+    let generation: PersistedPublishedGenerationV1 = match hotpath::measure_block!(
+        "code_index.sealed_decode.persisted_materialization",
+        serde_json::from_str(raw.generation.get())
+    ) {
+        Ok(generation) => generation,
+        Err(error) => {
+            return classify_unaccepted_envelope(
+                bytes,
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation payload decoding failed: {error}"
+                )),
+            );
+        }
+    };
+    if generation.format_revision.0 == SEALED_GENERATION_FORMAT_REVISION_V1 {
+        return Ok(Some(SealedPublishedGenerationEnvelopeV1 {
+            state_digest: raw.state_digest,
+            generation,
+        }));
+    }
+    // A compatible non-V1 revision whose raw payload bytes coincide with its
+    // canonical serialization: restore through the strict legacy envelope
+    // parse so envelope-level admission stays identical to the legacy reader.
+    decode_legacy_envelope(bytes).map(Some)
+}
+
+/// Historical probe-first classification for bytes the single-pass V1 decode
+/// did not accept: a legacy revision restores through the strict legacy
+/// envelope parse, an incompatible revision is `Ok(None)`, and a V1 revision
+/// keeps the exact typed rejection that interrupted the decode.
+fn classify_unaccepted_envelope(
+    bytes: &[u8],
+    v1_rejection: CodeIndexProductionErrorV1,
+) -> Result<Option<SealedPublishedGenerationEnvelopeV1>, CodeIndexProductionErrorV1> {
+    let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
+        "code_index.generation.decode.format_probe",
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation format probe failed: {error}"
+            ))
+        })
+    )?;
+    match probe.generation.format_revision {
+        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
+            decode_legacy_envelope(bytes).map(Some)
+        }
+        SEALED_GENERATION_FORMAT_REVISION_V1 => Err(v1_rejection),
+        _ => Ok(None),
+    }
+}
+
+fn decode_legacy_envelope(
+    bytes: &[u8],
+) -> Result<SealedPublishedGenerationEnvelopeV1, CodeIndexProductionErrorV1> {
+    hotpath::measure_block!(
+        "code_index.sealed_decode.persisted_materialization",
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation decoding failed: {error}"
+            ))
+        })
+    )
+}
+
 #[cfg(test)]
 fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
     reader: R,
@@ -555,64 +662,8 @@ impl CodeIndexPublishedGenerationV1 {
             admit_sealed_generation_bytes(bytes, admitted_len)
         )?;
         crate::hotpath_observe::record_seal_bytes(admitted_len);
-        let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
-            "code_index.generation.decode.format_probe",
-            serde_json::from_slice(bytes).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation format probe failed: {error}"
-                ))
-            })
-        )?;
-        let envelope = match probe.generation.format_revision {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => hotpath::measure_block!(
-                "code_index.sealed_decode.persisted_materialization",
-                serde_json::from_slice::<SealedPublishedGenerationEnvelopeV1>(bytes).map_err(
-                    |error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed generation decoding failed: {error}"
-                        ))
-                    }
-                )
-            )?,
-            SEALED_GENERATION_FORMAT_REVISION_V1 => {
-                let raw: SealedPublishedGenerationRawEnvelopeV1 = hotpath::measure_block!(
-                    "code_index.generation.decode.raw_envelope_parse",
-                    serde_json::from_slice(bytes).map_err(|error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed generation decoding failed: {error}"
-                        ))
-                    })
-                )?;
-                let expected_digest = hotpath::measure_block!(
-                    "code_index.sealed_decode.v6_payload_digest",
-                    json_generation_digest(raw.generation.get().as_bytes())
-                )?;
-                if expected_digest != raw.state_digest {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "sealed generation state digest does not match its payload".to_owned(),
-                    ));
-                }
-                let generation: PersistedPublishedGenerationV1 = hotpath::measure_block!(
-                    "code_index.sealed_decode.persisted_materialization",
-                    serde_json::from_str(raw.generation.get()).map_err(|error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed generation payload decoding failed: {error}"
-                        ))
-                    })
-                )?;
-                if generation.format_revision.0 != SEALED_GENERATION_FORMAT_REVISION_V1 {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "sealed generation format revision is incompatible".to_owned(),
-                    ));
-                }
-                SealedPublishedGenerationEnvelopeV1 {
-                    state_digest: raw.state_digest,
-                    generation,
-                }
-            }
-            _ => {
-                return Ok(None);
-            }
+        let Some(envelope) = materialize_compatible_envelope(bytes)? else {
+            return Ok(None);
         };
         let expected_digest = match envelope.generation.format_revision.0 {
             LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => sealed_generation_payload_digest(
@@ -662,33 +713,43 @@ impl CodeIndexPublishedGenerationV1 {
                 ignored_source_admissions,
                 ignored_source_admissions_digest,
             )?;
-            let mut files = Vec::with_capacity(persisted_files.len());
-            for file in persisted_files {
+            // Restoring one file's exact authority re-derives a canonical
+            // digest for every chunk, and the generation-level chunk/symbol
+            // aggregates need their own owned rows (their constructors take
+            // flattened owned vectors while each file artifact keeps its own
+            // copy). Both are independent per file, so one ordered fan-out on
+            // the reserved indexing pool restores every authority and
+            // materializes the aggregate rows at machine width instead of one
+            // serial corpus-scale sweep. Failure semantics stay sequential:
+            // the reported error is the lowest-index file's.
+            let restored = collect_bounded_ordered(&persisted_files, |file, _worker| {
                 let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
                     .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                Ok::<_, CodeIndexProductionErrorV1>((
+                    exact_authority,
+                    file.artifacts.chunks.clone(),
+                    file.artifacts.symbols.clone(),
+                ))
+            })?;
+            let mut files = Vec::with_capacity(persisted_files.len());
+            let mut chunk_rows = Vec::with_capacity(persisted_files.len());
+            let mut symbol_rows = Vec::new();
+            for (file, (exact_authority, file_chunks, file_symbols)) in
+                persisted_files.into_iter().zip(restored)
+            {
                 files.push(Arc::new(FileGenerationArtifactsV1 {
                     authority: file.authority,
                     extraction: file.extraction,
                     artifacts: file.artifacts,
                     exact_authority,
                 }));
+                chunk_rows.push(file_chunks);
+                symbol_rows.extend(file_symbols);
             }
-            let chunks = GenerationChunkManifestV1::new(
-                manifest.generation_id.clone(),
-                files
-                    .iter()
-                    .map(|file| file.artifacts.chunks.clone())
-                    .collect(),
-            )
-            .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = GenerationSymbolIndexV1::new(
-                manifest.generation_id.clone(),
-                files
-                    .iter()
-                    .flat_map(|file| file.artifacts.symbols.clone())
-                    .collect(),
-            )
-            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
+                .map_err(CodeIndexProductionErrorV1::Lineage)?;
             let imports = derive_import_evidence(&files);
             let (edges, edge_abstentions) = collect_edge_evidence(&files);
             let projection =
@@ -952,6 +1013,68 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(message))
                 if message.contains("admitted length")
         ));
+    }
+
+    fn sealed_fixture(state_digest: &ManifestDigest, generation: &str) -> Vec<u8> {
+        format!(
+            "{{\"state_digest\":{},\"generation\":{}}}",
+            serde_json::to_string(state_digest).expect("fixture digest serialization"),
+            generation
+        )
+        .into_bytes()
+    }
+
+    /// An incompatible revision must stay `Ok(None)` on every classification
+    /// path: with a payload digest that matches the V1 raw-bytes rule (the
+    /// single-pass decode fails inside materialization) and with one that does
+    /// not (the digest gate fails first).
+    #[test]
+    fn incompatible_revision_stays_none_with_and_without_a_matching_payload_digest() {
+        let generation = "{\"format_revision\":9}";
+        let matching = json_generation_digest(generation.as_bytes()).expect("fixture digest");
+        let mismatched = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
+
+        for state_digest in [matching, mismatched] {
+            let sealed = sealed_fixture(&state_digest, generation);
+            assert!(matches!(
+                CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&sealed),
+                Ok(None)
+            ));
+            assert!(matches!(
+                CodeIndexPublishedGenerationV1::decode_sealed(&sealed),
+                Err(CodeIndexProductionErrorV1::Contract(message))
+                    if message.contains("format revision is incompatible")
+            ));
+        }
+    }
+
+    #[test]
+    fn undecodable_bytes_are_rejected_as_a_format_probe_failure() {
+        let error = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(b"not sealed json")
+            .expect_err("garbage bytes must not decode");
+
+        assert!(
+            error.to_string().contains("format probe failed"),
+            "garbage bytes reached the wrong rejection: {error}"
+        );
+    }
+
+    /// A revision-six envelope whose digest verifies but whose payload does
+    /// not materialize must keep the payload-decoding rejection, never the
+    /// probe or digest one.
+    #[test]
+    fn v1_payload_that_fails_materialization_keeps_the_payload_rejection() {
+        let generation = format!("{{\"format_revision\":{SEALED_GENERATION_FORMAT_REVISION_V1}}}");
+        let state_digest = json_generation_digest(generation.as_bytes()).expect("fixture digest");
+        let sealed = sealed_fixture(&state_digest, &generation);
+
+        let error = CodeIndexPublishedGenerationV1::decode_sealed(&sealed)
+            .expect_err("an incomplete revision-six payload must not decode");
+
+        assert!(
+            error.to_string().contains("payload decoding failed"),
+            "incomplete revision-six payload reached the wrong rejection: {error}"
+        );
     }
 
     #[test]

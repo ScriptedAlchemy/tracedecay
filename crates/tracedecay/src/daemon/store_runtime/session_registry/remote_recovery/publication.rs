@@ -114,6 +114,10 @@ impl RemoteRecoveryPublicationContextV1 {
             .await
     }
 
+    #[hotpath::measure(
+        label = "daemon.session_registry.remote_recovery.retire_to_vacancy",
+        future = true
+    )]
     async fn retire_replacement_to_vacancy(
         &self,
         project_id: &ProjectId,
@@ -272,11 +276,15 @@ impl RemoteRecoveryPublicationContextV1 {
         Ok(vacancy)
     }
 
+    #[hotpath::measure(label = "daemon.store.project_sessions.open_restored", future = true)]
     async fn open_candidate_owner(
         &self,
         project_id: ProjectId,
         expected_opened_file_identity: u64,
     ) -> Result<RegisteredSessionOwnerV1> {
+        #[cfg(feature = "hotpath")]
+        let _mount_observation =
+            crate::daemon::store_runtime::session_registry::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -314,6 +322,10 @@ impl RemoteRecoveryPublicationContextV1 {
         ))
     }
 
+    #[hotpath::measure(
+        label = "daemon.session_registry.remote_recovery.activate_candidate",
+        future = true
+    )]
     async fn activate_candidate(
         &self,
         project_id: &ProjectId,
@@ -496,6 +508,10 @@ impl RemoteRecoveryPublicationContextV1 {
         ))
     }
 
+    #[hotpath::measure(
+        label = "daemon.session_registry.remote_recovery.rollback",
+        future = true
+    )]
     pub(super) async fn rollback_published_restore(
         &self,
         project_id: &ProjectId,
@@ -660,15 +676,22 @@ impl RemoteRecoveryPublicationContextV1 {
                 "remote restore was interrupted after native retirement".to_owned(),
             ));
         }
-        crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-            &staging,
-            &destination,
-            &rollback,
-            old_identity,
-            expected_staging_identity,
+        hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.file_swap",
+            crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically(
+                &staging,
+                &destination,
+                &rollback,
+                old_identity,
+                expected_staging_identity,
+            )
         )
         .map_err(|error| session_registry_error("publish remote restore", error.to_string()))?;
-        PrivateStoreIo::sync_sqlite_family(&destination).map_err(|error| {
+        hotpath::measure_block!(
+            "daemon.session_registry.remote_recovery.restore.file_swap",
+            PrivateStoreIo::sync_sqlite_family(&destination)
+        )
+        .map_err(|error| {
             session_registry_error("sync published remote restore", error.to_string())
         })?;
         reservation.finish_deleted().map_err(|error| {

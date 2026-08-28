@@ -2107,6 +2107,19 @@ fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArt
     Ok(())
 }
 
+/// One reused read buffer for the whole-file digest passes. The TOCTOU
+/// contract hashes a corpus-sized artifact twice per content-addressed
+/// reopen, so each pass must stay I/O-shaped: 64 KiB chunks cost tens of
+/// thousands of read syscalls and cancellation probes per gibibyte and pass.
+/// Four mebibytes keeps the syscall count negligible while the transient
+/// buffer stays far below the reader's page-cache authority.
+const ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1: usize = 4 * 1024 * 1024;
+
+/// Hash every byte the retained handle serves. Cancellation and deadline are
+/// checked once per buffer, so interruption latency is bounded by one
+/// [`ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1`] read-and-hash step. The read and
+/// hash phases carry separate spans so a profile can attribute a slow pass
+/// to I/O wait or to SHA-256 work.
 #[inline]
 fn hash_artifact_file(
     file: &mut File,
@@ -2114,17 +2127,20 @@ fn hash_artifact_file(
     mut record_bytes: impl FnMut(u64),
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 16];
+    let mut buffer = vec![0u8; ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1];
     loop {
         checkpoint(control)?;
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let read = hotpath::measure_block!("query.artifact.digest.file_read", {
+            file.read(&mut buffer)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
+        })?;
         if read == 0 {
             break;
         }
         record_bytes(read as u64);
-        hasher.update(&buffer[..read]);
+        hotpath::measure_block!("query.artifact.digest.sha256_update", {
+            hasher.update(&buffer[..read]);
+        });
     }
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
@@ -2364,6 +2380,7 @@ mod tests {
 
     use roaring::RoaringBitmap;
     use rusqlite::{Connection, params};
+    use sha2::{Digest, Sha256};
     use tracedecay_domain::ManifestDigest;
     use tracedecay_private_fs::open_private_file;
 
@@ -2423,6 +2440,34 @@ mod tests {
                     .expect("mutate the same artifact inode through SQLite");
             }
             false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct CancelFromObservation {
+        cancel_from_observation: usize,
+        observations: AtomicUsize,
+    }
+
+    impl CancelFromObservation {
+        fn new(cancel_from_observation: usize) -> Self {
+            Self {
+                cancel_from_observation,
+                observations: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelFromObservation {
+        fn is_cancelled(&self) -> bool {
+            let observation = self
+                .observations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            observation >= self.cancel_from_observation
         }
 
         fn is_deadline_exceeded(&self) -> bool {
@@ -2589,6 +2634,124 @@ mod tests {
         .expect_err("content-addressed reader must require the private artifact authority");
 
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
+    }
+
+    /// The buffered digest loop must hash exactly the bytes each read
+    /// returns: a fixture larger than two read buffers with an odd tail
+    /// exposes stale-tail reuse, whole-buffer hashing, or dropped chunks.
+    #[test]
+    fn whole_file_digest_matches_a_one_shot_hash_across_read_buffer_boundaries() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("multi-buffer.bin");
+        let mut bytes = vec![0u8; super::ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1 * 2 + 4097];
+        for (ordinal, byte) in bytes.iter_mut().enumerate() {
+            *byte = (ordinal % 251) as u8;
+        }
+        std::fs::write(&path, &bytes).expect("write multi-buffer fixture");
+        let mut file = std::fs::File::open(&path).expect("open multi-buffer fixture");
+
+        let chunked = super::digest_content_addressed_file(&mut file, &AlwaysActiveControl)
+            .expect("hash the fixture through the buffered loop");
+
+        let one_shot =
+            ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+                .expect("one-shot fixture digest");
+        assert_eq!(
+            chunked, one_shot,
+            "the buffered digest loop must hash exactly the bytes each read returns"
+        );
+    }
+
+    /// Cancellation is observed between read buffers: a control that cancels
+    /// from its second observation must interrupt a digest spanning multiple
+    /// buffers instead of completing it.
+    #[test]
+    fn digest_cancellation_interrupts_between_read_buffers() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("cancel-mid-digest.bin");
+        std::fs::write(
+            &path,
+            vec![7u8; super::ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1 * 2 + 1],
+        )
+        .expect("write fixture spanning multiple read buffers");
+        let mut file = std::fs::File::open(&path).expect("open multi-buffer fixture");
+        let control = CancelFromObservation::new(2);
+
+        let error = super::digest_content_addressed_file(&mut file, &control)
+            .expect_err("cancellation after the first buffer must interrupt the digest");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Interrupted(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_addressed_open_refuses_a_durable_head_digest_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        std::fs::write(&artifact_path, b"durable artifact bytes").expect("write artifact fixture");
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make the artifact private");
+        let size = std::fs::metadata(&artifact_path)
+            .expect("artifact metadata")
+            .len();
+        let foreign =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("foreign digest");
+
+        let error = CodeLexicalArtifactReaderV1::open_content_addressed(
+            &artifact_path,
+            &foreign,
+            size,
+            1024 * 1024,
+            &AlwaysActiveControl,
+        )
+        .expect_err("bytes that miss the durable head digest must be refused before SQLite opens");
+
+        assert!(matches!(
+            &error,
+            CodeLexicalArtifactErrorV1::Corrupt(message)
+                if message.contains("do not match the durable head digest")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_addressed_open_refuses_a_truncated_artifact_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        std::fs::write(&artifact_path, b"durable artifact bytes before truncation")
+            .expect("write artifact fixture");
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make the artifact private");
+        let mut intact = open_private_file(&artifact_path).expect("retain the intact artifact");
+        let digest = super::digest_content_addressed_file(&mut intact, &AlwaysActiveControl)
+            .expect("hash the intact artifact");
+        let size = intact.metadata().expect("intact artifact metadata").len();
+        drop(intact);
+        let truncating = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&artifact_path)
+            .expect("reopen the artifact for truncation");
+        truncating.set_len(size - 1).expect("truncate the artifact");
+        drop(truncating);
+
+        let error = CodeLexicalArtifactReaderV1::open_content_addressed(
+            &artifact_path,
+            &digest,
+            size,
+            1024 * 1024,
+            &AlwaysActiveControl,
+        )
+        .expect_err("a truncated artifact must be refused before SQLite opens it");
+
+        assert!(matches!(
+            &error,
+            CodeLexicalArtifactErrorV1::Corrupt(message)
+                if message.contains("the durable head names")
+        ));
     }
 
     #[test]

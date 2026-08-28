@@ -114,15 +114,18 @@ impl DaemonSessionRuntimeRegistryV1 {
         })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
-        let profile_runtime = open_runtime(
-            &registry,
-            resolver.as_ref(),
-            profile_shard.clone(),
-            incarnation,
-            None,
-            None,
-            true,
-            "mount profile authority store",
+        let profile_runtime = hotpath::future!(
+            open_runtime(
+                &registry,
+                resolver.as_ref(),
+                profile_shard.clone(),
+                incarnation,
+                None,
+                None,
+                true,
+                "mount profile authority store",
+            ),
+            label = "daemon.store.profile_authority.open"
         )
         .await?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
@@ -168,6 +171,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(registry)
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.mount_remote_nodes", future = true)]
     async fn mount_registered_remote_nodes(&self) -> Result<()> {
         let nodes_root = self.identity.profile_root().join("remote").join("nodes");
         if !nodes_root.exists() {
@@ -322,6 +326,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.profile_authority.mount_reuse_total").inc(1_u64);
             return lease;
         }
         let _mount = self.profile_database_mount.lock().await;
@@ -340,21 +346,28 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.profile_authority.mount_reuse_total").inc(1_u64);
             return lease;
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            None,
-            None,
-            true,
-            "mount profile authority store",
+        let runtime = hotpath::future!(
+            open_runtime(
+                &self.registry,
+                self.resolver.as_ref(),
+                shard_id,
+                self.incarnation,
+                None,
+                None,
+                true,
+                "mount profile authority store",
+            ),
+            label = "daemon.store.profile_authority.open"
         )
         .await?;
         let database = self
@@ -387,6 +400,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.profile_sessions.mount_reuse_total").inc(1_u64);
             return lease;
         }
         let _mount = self.profile_sessions_mount.lock().await;
@@ -403,24 +418,31 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.profile_sessions.mount_reuse_total").inc(1_u64);
             return lease;
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id.clone(),
-            self.incarnation,
-            Some(
-                self.profile_authority_pin("mount profile session store")
-                    .await?,
+        let pin = self
+            .profile_authority_pin("mount profile session store")
+            .await?;
+        let runtime = hotpath::future!(
+            open_runtime(
+                &self.registry,
+                self.resolver.as_ref(),
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+                None,
+                true,
+                "mount profile session store",
             ),
-            None,
-            true,
-            "mount profile session store",
+            label = "daemon.store.profile_sessions.open"
         )
         .await?;
         let database = self
@@ -450,7 +472,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 format!("{error:?}"),
             )
         })?;
-        crate::db::migrations::ensure_schema_current(&database).await?;
+        hotpath::future!(
+            crate::db::migrations::ensure_schema_current(&database),
+            label = "daemon.session_registry.mount.schema_migrate"
+        )
+        .await?;
         let database_issuer = owner.weak_lease_issuer();
         let graph = Arc::new(std::sync::Mutex::new(
             MemoryGraphAttachmentStateV1::Warming {
@@ -589,24 +615,31 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(database) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.profile_memory.mount_reuse_total").inc(1_u64);
             return database;
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_memory(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id.clone(),
-            self.incarnation,
-            Some(
-                self.profile_authority_pin("mount profile memory store")
-                    .await?,
+        let pin = self
+            .profile_authority_pin("mount profile memory store")
+            .await?;
+        let runtime = hotpath::future!(
+            open_runtime(
+                &self.registry,
+                self.resolver.as_ref(),
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+                None,
+                true,
+                "mount profile memory store",
             ),
-            None,
-            true,
-            "mount profile memory store",
+            label = "daemon.store.profile_memory.open"
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -666,27 +699,36 @@ impl DaemonSessionRuntimeRegistryV1 {
         provision_if_new: bool,
     ) -> Result<RemoteSqliteStorageV1> {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
-            super::RemoteNodeOwnerAdmissionV1::Existing(database) => (database, false, true),
+            super::RemoteNodeOwnerAdmissionV1::Existing(database) => {
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("daemon.store.remote_node.mount_reuse_total").inc(1_u64);
+                (database, false, true)
+            }
             super::RemoteNodeOwnerAdmissionV1::Opening(mut admission) => {
+                #[cfg(feature = "hotpath")]
+                let _mount_observation = super::StoreMountObservationV1::enter();
                 let shard_id = StoreShardIdV1::remote_node(
                     self.identity.brain_id().clone(),
                     self.identity.profile_id().clone(),
                     node_id.clone(),
                 );
-                let (runtime, existed) = open_runtime_with_presence(
-                    &self.registry,
-                    self.resolver.as_ref(),
-                    shard_id,
-                    self.incarnation,
-                    Some(
-                        self.profile_authority_pin("mount Remote Brain node store")
-                            .await?,
+                let pin = self
+                    .profile_authority_pin("mount Remote Brain node store")
+                    .await?;
+                let (runtime, existed) = hotpath::future!(
+                    open_runtime_with_presence(
+                        &self.registry,
+                        self.resolver.as_ref(),
+                        shard_id,
+                        self.incarnation,
+                        Some(pin),
+                        None,
+                        true,
+                        false,
+                        None,
+                        "mount Remote Brain node store",
                     ),
-                    None,
-                    true,
-                    false,
-                    None,
-                    "mount Remote Brain node store",
+                    label = "daemon.store.remote_node.open"
                 )
                 .await?;
                 let owner = RemoteNodeStoreOwnerV1 {
@@ -712,14 +754,17 @@ impl DaemonSessionRuntimeRegistryV1 {
             session_registry_error("attach Remote Brain node store", error.to_string())
         })?;
         if newly_mounted {
-            storage
-                .recover_interrupted_replay_attempts(tracedecay_application::clock::now_micros())
-                .map_err(|error| {
-                    session_registry_error(
-                        "recover interrupted Remote Brain replay",
-                        error.to_string(),
-                    )
-                })?;
+            hotpath::measure_block!(
+                "daemon.session_registry.mount.remote_replay_recovery",
+                storage
+                    .recover_interrupted_replay_attempts(tracedecay_application::clock::now_micros())
+            )
+            .map_err(|error| {
+                session_registry_error(
+                    "recover interrupted Remote Brain replay",
+                    error.to_string(),
+                )
+            })?;
         }
         self.remote_credential_authority
             .register_storage(node_id.clone(), storage.clone())
@@ -787,14 +832,16 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         let projects = self.project_owners.ready_session_projects()?;
         for project_id in projects {
-            recovery
-                .reconcile_interrupted_promotions(&project_id)
-                .map_err(|error| {
-                    session_registry_error(
-                        "reconcile interrupted remote promotion",
-                        format!("{error:?}"),
-                    )
-                })?;
+            hotpath::measure_block!(
+                "daemon.session_registry.mount.remote_promotion_reconcile",
+                recovery.reconcile_interrupted_promotions(&project_id)
+            )
+            .map_err(|error| {
+                session_registry_error(
+                    "reconcile interrupted remote promotion",
+                    format!("{error:?}"),
+                )
+            })?;
         }
         Ok(storage)
     }
@@ -1084,6 +1131,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             match mounted.get(&project_id) {
                 Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.sessions.as_ref() {
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("daemon.store.project_sessions.mount_reuse_total")
+                            .inc(1_u64);
                         return self.issue_session_owner_lease(
                             owner,
                             SessionRelationScope::project_sessions(project_id.clone()),
@@ -1092,6 +1142,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true
                 }
                 Some(ProjectRuntimeOwnerStateV1::Opening) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -1105,6 +1157,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_retiring",
                         true,
@@ -1140,29 +1194,36 @@ impl DaemonSessionRuntimeRegistryV1 {
                         "Project runtime is opening its session authority",
                     ));
                 };
+                #[cfg(feature = "hotpath")]
+                hotpath::gauge!("daemon.store.project_sessions.mount_reuse_total").inc(1_u64);
                 return self.issue_session_owner_lease(
                     owner,
                     SessionRelationScope::project_sessions(project_id.clone()),
                 );
             }
         };
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id.clone(),
-            self.incarnation,
-            Some(
-                self.profile_authority_pin("mount project session store")
-                    .await?,
+        let pin = self
+            .profile_authority_pin("mount project session store")
+            .await?;
+        let runtime = hotpath::future!(
+            open_runtime(
+                &self.registry,
+                self.resolver.as_ref(),
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+                None,
+                true,
+                "mount project session store",
             ),
-            None,
-            true,
-            "mount project session store",
+            label = "daemon.store.project_sessions.open"
         )
         .await?;
         let database = self
@@ -1204,14 +1265,16 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
             .collect::<Vec<_>>();
         for recovery in recoveries {
-            recovery
-                .reconcile_interrupted_promotions(&project_id)
-                .map_err(|error| {
-                    session_registry_error(
-                        "reconcile interrupted remote promotion",
-                        format!("{error:?}"),
-                    )
-                })?;
+            hotpath::measure_block!(
+                "daemon.session_registry.mount.remote_promotion_reconcile",
+                recovery.reconcile_interrupted_promotions(&project_id)
+            )
+            .map_err(|error| {
+                session_registry_error(
+                    "reconcile interrupted remote promotion",
+                    format!("{error:?}"),
+                )
+            })?;
         }
         Ok(lease)
     }
@@ -1256,28 +1319,40 @@ impl DaemonSessionRuntimeRegistryV1 {
                         Ok((true, None))
                     }
                 }
-                Some(ProjectRuntimeOwnerStateV1::Opening) => Err(TraceDecayError::project_route(
-                    "project_runtime_opening",
-                    true,
-                    "Project runtime is already opening",
-                )),
+                Some(ProjectRuntimeOwnerStateV1::Opening) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    Err(TraceDecayError::project_route(
+                        "project_runtime_opening",
+                        true,
+                        "Project runtime is already opening",
+                    ))
+                }
                 Some(
                     ProjectRuntimeOwnerStateV1::Retiring
                     | ProjectRuntimeOwnerStateV1::ReplacingSessions
                     | ProjectRuntimeOwnerStateV1::Recovering
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_),
-                ) => Err(TraceDecayError::project_route(
-                    "project_runtime_retiring",
-                    true,
-                    "Project runtime is unavailable while retirement is terminal or in progress",
-                )),
+                ) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    Err(TraceDecayError::project_route(
+                        "project_runtime_retiring",
+                        true,
+                        "Project runtime is unavailable while retirement is terminal or in progress",
+                    ))
+                }
                 None => Ok((false, None)),
             }
         }?;
         if let Some(database) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.project_memory.mount_reuse_total").inc(1_u64);
             return Ok(database);
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
@@ -1297,18 +1372,21 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.profile_id().clone(),
             project_id.clone(),
         );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id.clone(),
-            self.incarnation,
-            Some(
-                self.profile_authority_pin("mount project memory store")
-                    .await?,
+        let pin = self
+            .profile_authority_pin("mount project memory store")
+            .await?;
+        let runtime = hotpath::future!(
+            open_runtime(
+                &self.registry,
+                self.resolver.as_ref(),
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+                None,
+                true,
+                "mount project memory store",
             ),
-            None,
-            true,
-            "mount project memory store",
+            label = "daemon.store.project_memory.open"
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -1373,24 +1451,29 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         }?;
         if let Some(database) = existing {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("daemon.store.project_memory.mount_reuse_total").inc(1_u64);
             return Ok(database);
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
             project_id,
         );
-        let runtime = match self
-            .registry
-            .open(StoreRuntimeOpenRequest::new_read_only(
+        let pin = self
+            .profile_authority_pin("mount project memory store read-only")
+            .await?;
+        let runtime = match hotpath::future!(
+            self.registry.open(StoreRuntimeOpenRequest::new_read_only(
                 shard_id.clone(),
                 self.incarnation,
-                Some(
-                    self.profile_authority_pin("mount project memory store read-only")
-                        .await?,
-                ),
-            ))
-            .await
+                Some(pin),
+            )),
+            label = "daemon.store.project_memory.open_read_only"
+        )
+        .await
         {
             StoreRuntimeOpenResult::Published(runtime) => runtime,
             StoreRuntimeOpenResult::Failed(failure) => {

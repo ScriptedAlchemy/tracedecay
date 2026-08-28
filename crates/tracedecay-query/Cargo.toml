@@ -35,6 +35,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
+    "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-code-index/hotpath",
@@ -44,6 +45,7 @@ hotpath = [
     "tracedecay-temporal-query/hotpath",
 ]
 hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
@@ -54,6 +56,7 @@ hotpath-alloc = [
     "tracedecay-temporal-query/hotpath-alloc",
 ]
 hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",

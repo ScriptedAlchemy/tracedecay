@@ -1044,58 +1044,60 @@ impl CodeIndexPublishedGenerationV1 {
                 Ok(())
             })
         )?;
-        validate_import_evidence(&files, &self.imports)?;
-        let mut chunks = files
-            .iter()
-            .flat_map(|file| file.artifacts.chunks.chunks.iter())
-            .collect::<Vec<_>>();
-        chunks.sort_by(|left, right| left.id.cmp(&right.id));
-        let chunks_match = chunks.len() == self.chunks.chunks().len()
-            && chunks
+        hotpath::measure_block!("code_index.collect.validate_aggregates", {
+            validate_import_evidence(&files, &self.imports)?;
+            let mut chunks = files
                 .iter()
-                .zip(self.chunks.chunks())
-                .all(|(left, right)| *left == right);
-        let mut symbols = files
-            .iter()
-            .flat_map(|file| file.artifacts.symbols.iter())
-            .collect::<Vec<_>>();
-        symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-        let symbols_match = symbols.len() == self.symbols.symbols.len()
-            && symbols
+                .flat_map(|file| file.artifacts.chunks.chunks.iter())
+                .collect::<Vec<_>>();
+            chunks.sort_by(|left, right| left.id.cmp(&right.id));
+            let chunks_match = chunks.len() == self.chunks.chunks().len()
+                && chunks
+                    .iter()
+                    .zip(self.chunks.chunks())
+                    .all(|(left, right)| *left == right);
+            let mut symbols = files
                 .iter()
-                .zip(&self.symbols.symbols)
-                .all(|(left, right)| *left == right);
-        if !chunks_match || !symbols_match {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "published generation does not match file artifacts".to_owned(),
-            ));
-        }
-        let mut edges = files
-            .iter()
-            .flat_map(|file| file.artifacts.edges.iter())
-            .collect::<Vec<_>>();
-        edges.sort_by(|left, right| edge_order(left, right));
-        let edges_match = edges.len() == self.edges.len()
-            && edges
+                .flat_map(|file| file.artifacts.symbols.iter())
+                .collect::<Vec<_>>();
+            symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+            let symbols_match = symbols.len() == self.symbols.symbols.len()
+                && symbols
+                    .iter()
+                    .zip(&self.symbols.symbols)
+                    .all(|(left, right)| *left == right);
+            if !chunks_match || !symbols_match {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "published generation does not match file artifacts".to_owned(),
+                ));
+            }
+            let mut edges = files
                 .iter()
-                .zip(&self.edges)
-                .all(|(left, right)| *left == right);
-        let mut edge_abstentions = files
-            .iter()
-            .flat_map(|file| file.artifacts.edge_abstentions.iter())
-            .collect::<Vec<_>>();
-        edge_abstentions.sort();
-        let abstentions_match = edge_abstentions.len() == self.edge_abstentions.len()
-            && edge_abstentions
+                .flat_map(|file| file.artifacts.edges.iter())
+                .collect::<Vec<_>>();
+            edges.sort_by(|left, right| edge_order(left, right));
+            let edges_match = edges.len() == self.edges.len()
+                && edges
+                    .iter()
+                    .zip(&self.edges)
+                    .all(|(left, right)| *left == right);
+            let mut edge_abstentions = files
                 .iter()
-                .zip(&self.edge_abstentions)
-                .all(|(left, right)| *left == right);
-        if !edges_match || !abstentions_match {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "published graph evidence does not match file artifacts".to_owned(),
-            ));
-        }
-        Ok(())
+                .flat_map(|file| file.artifacts.edge_abstentions.iter())
+                .collect::<Vec<_>>();
+            edge_abstentions.sort();
+            let abstentions_match = edge_abstentions.len() == self.edge_abstentions.len()
+                && edge_abstentions
+                    .iter()
+                    .zip(&self.edge_abstentions)
+                    .all(|(left, right)| *left == right);
+            if !edges_match || !abstentions_match {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "published graph evidence does not match file artifacts".to_owned(),
+                ));
+            }
+            Ok::<_, CodeIndexProductionErrorV1>(())
+        })
     }
 }
 
@@ -1265,7 +1267,7 @@ where
     /// Build one complete generation and atomically publish it only after
     /// intake, parser evidence, lineage, exact admission, projection receipt,
     /// and capability validation have all succeeded.
-    #[hotpath::measure(label = "code_index.build.publish")]
+    #[hotpath::measure(label = "code_index.build.and_publish")]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,
@@ -1407,52 +1409,55 @@ where
         };
         Self::checkpoint(control)?;
 
-        let coverage = coverage_summary(&validated.snapshot, &staged.files);
-        let capability = BaseCapabilityEmitter::new(
-            registry_for_snapshot(&validated.snapshot)?,
-            coverage,
-            validated.snapshot.sanitization_receipts.clone(),
-        )
-        .emit(&manifest)
-        .map_err(CodeIndexProductionErrorV1::Capability)?;
-        let changes =
-            plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-        let projection_request = projection_request(
-            active.as_ref(),
-            increment.as_ref(),
-            request.target_projection_key,
-            changes,
-        )?;
-        Self::checkpoint(control)?;
-        let projection = project_for_publication(&mut self.projection, projection_request)
-            .map_err(CodeIndexProductionErrorV1::Projection)?;
-        Self::checkpoint(control)?;
+        let candidate = hotpath::measure_block!("code_index.build.assemble", {
+            let coverage = coverage_summary(&validated.snapshot, &staged.files);
+            let capability = BaseCapabilityEmitter::new(
+                registry_for_snapshot(&validated.snapshot)?,
+                coverage,
+                validated.snapshot.sanitization_receipts.clone(),
+            )
+            .emit(&manifest)
+            .map_err(CodeIndexProductionErrorV1::Capability)?;
+            let changes =
+                plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
+                    .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let projection_request = projection_request(
+                active.as_ref(),
+                increment.as_ref(),
+                request.target_projection_key,
+                changes,
+            )?;
+            Self::checkpoint(control)?;
+            let projection = project_for_publication(&mut self.projection, projection_request)
+                .map_err(CodeIndexProductionErrorV1::Projection)?;
+            Self::checkpoint(control)?;
 
-        let imports = derive_import_evidence(&staged.files);
-        let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
-        let candidate = CodeIndexPublishedGenerationV1 {
-            manifest,
-            snapshot: validated.snapshot,
-            repository_parse_identity: request.repository_parse_identity.clone(),
-            ignored_source_roster,
-            files: staged.files,
-            chunks: staged.chunks,
-            symbols: staged.symbols,
-            lineage: staged.lineage,
-            imports,
-            edges,
-            edge_abstentions,
-            coverage,
-            capability,
-            projection,
-            validated: OnceLock::new(),
-            admitted: OnceLock::new(),
-            attribution: OnceLock::new(),
-            chunk_policy: OnceLock::new(),
-            graph_manifest: OnceLock::new(),
-        };
-        candidate.validate()?;
+            let imports = derive_import_evidence(&staged.files);
+            let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
+            let candidate = CodeIndexPublishedGenerationV1 {
+                manifest,
+                snapshot: validated.snapshot,
+                repository_parse_identity: request.repository_parse_identity.clone(),
+                ignored_source_roster,
+                files: staged.files,
+                chunks: staged.chunks,
+                symbols: staged.symbols,
+                lineage: staged.lineage,
+                imports,
+                edges,
+                edge_abstentions,
+                coverage,
+                capability,
+                projection,
+                validated: OnceLock::new(),
+                admitted: OnceLock::new(),
+                attribution: OnceLock::new(),
+                chunk_policy: OnceLock::new(),
+                graph_manifest: OnceLock::new(),
+            };
+            candidate.validate()?;
+            Ok::<_, CodeIndexProductionErrorV1>(candidate)
+        })?;
         #[cfg(feature = "hotpath")]
         if let Ok(statistics) = candidate.generation_statistics() {
             crate::hotpath_observe::record_source_bytes(statistics.source_total_bytes);
@@ -1467,8 +1472,10 @@ where
         // Shared rather than cloned: the publication store caches the same
         // immutable generation the caller receives.
         let candidate = Arc::new(candidate);
-        self.publication
-            .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
+        hotpath::measure_block!("code_index.build.publish", {
+            self.publication
+                .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))
+        })?;
         crate::hotpath_observe::record_generation_state("queryable");
         crate::hotpath_observe::record_build_to_queryable(started);
         Ok(candidate)

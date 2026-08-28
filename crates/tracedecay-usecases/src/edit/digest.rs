@@ -57,7 +57,10 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
     for relative in files {
         let state = match crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))?
         {
-            Some(bytes) => Some(hash_source_edit_content(&bytes)?),
+            Some(bytes) => {
+                hotpath::gauge!("usecases.edit.digest_bytes").inc(bytes.len() as f64);
+                Some(hash_source_edit_content(&bytes)?)
+            }
             None => None,
         };
         states.push((relative, state));
@@ -71,6 +74,7 @@ pub(super) fn source_edit_recovery_digest(
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
 
+#[hotpath::measure(label = "usecases.edit.planned_state_digest")]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
     planned_files: &[crate::tracedecay::PlannedSourceEditFile],

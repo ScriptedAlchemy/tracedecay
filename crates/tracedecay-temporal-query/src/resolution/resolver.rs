@@ -509,6 +509,7 @@ fn order_evolution(
     Ok(ordered)
 }
 
+#[hotpath::measure(label = "temporal.resolve")]
 pub fn resolve_temporal_with_checkpoints(
     occurrences: &[ResolutionOccurrence],
     copies: &[LogicalCopyRecordV1],

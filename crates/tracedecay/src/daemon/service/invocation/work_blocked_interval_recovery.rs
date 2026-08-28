@@ -94,8 +94,21 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
         })
     }
 
-    pub(in crate::daemon::service) async fn shutdown(&self) {
+    /// Stop this owner from starting another recovery cycle, synchronously.
+    ///
+    /// The half of [`Self::shutdown`] that must run at shutdown *prepare*
+    /// time rather than when the drain finally reaches this project: the
+    /// owner is joined deep inside the project-runtime drain, so an
+    /// un-cancelled loop keeps scanning while earlier phases run (settled
+    /// blocked-interval scans were still logging seconds after the daemon
+    /// began shutting down). Idempotent, so the join below stays correct
+    /// whether or not it already ran.
+    pub(in crate::daemon::service) fn cancel(&self) {
         self.inner.cancellation.cancel();
+    }
+
+    pub(in crate::daemon::service) async fn shutdown(&self) {
+        self.cancel();
         let task = self
             .inner
             .task

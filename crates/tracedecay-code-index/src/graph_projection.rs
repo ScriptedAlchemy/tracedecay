@@ -700,17 +700,21 @@ fn build_code_graph_manifest_inputs_checked(
             "code graph projection identity uses a foreign projector".to_owned(),
         ));
     }
-    let built = build_projection(&projection, generation, edges, chunks, production, check)?;
-    GraphGenerationManifest::new_checked(
-        projection,
-        code_graph_generation_id(generation, projector_revision)?,
-        source_generation(generation)?,
-        built.watermark,
-        vec![],
-        built.entities,
-        built.relations,
-        check,
-    )
+    let built = hotpath::measure_block!("code_index.graph.build_projection", {
+        build_projection(&projection, generation, edges, chunks, production, check)
+    })?;
+    hotpath::measure_block!("code_index.graph.seal_manifest", {
+        GraphGenerationManifest::new_checked(
+            projection,
+            code_graph_generation_id(generation, projector_revision)?,
+            source_generation(generation)?,
+            built.watermark,
+            vec![],
+            built.entities,
+            built.relations,
+            check,
+        )
+    })
     .map_err(Into::into)
 }
 

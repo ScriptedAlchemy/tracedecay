@@ -92,6 +92,7 @@ pub(in crate::daemon) async fn record_project_open_adoption_census(
     let observations = match adoption_eligibility_census() {
         Ok(observations) => observations,
         Err(error) => {
+            hotpath::gauge!("daemon.adoption.census_unavailable_total").inc(1_u64);
             log_daemon_event(
                 "adoption_observation",
                 &[
@@ -107,18 +108,22 @@ pub(in crate::daemon) async fn record_project_open_adoption_census(
         let family = observation.capability.clone();
         // The census enumerated the whole composed catalog, so each family
         // observation is a complete count of its eligible population.
-        if let Err(error) =
-            record_adoption_eligibility(db, CoverageStateV1::Known, observation).await
-        {
-            log_daemon_event(
-                "adoption_observation",
-                &[
-                    ("project", project_root.display().to_string()),
-                    ("family", family),
-                    ("outcome", "failed".to_owned()),
-                    ("reason", format!("{error:?}")),
-                ],
-            );
+        match record_adoption_eligibility(db, CoverageStateV1::Known, observation).await {
+            Ok(_) => {
+                hotpath::gauge!("daemon.adoption.recorded_total").inc(1_u64);
+            }
+            Err(error) => {
+                hotpath::gauge!("daemon.adoption.record_failed_total").inc(1_u64);
+                log_daemon_event(
+                    "adoption_observation",
+                    &[
+                        ("project", project_root.display().to_string()),
+                        ("family", family),
+                        ("outcome", "failed".to_owned()),
+                        ("reason", format!("{error:?}")),
+                    ],
+                );
+            }
         }
     }
 }

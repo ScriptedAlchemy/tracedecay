@@ -365,6 +365,13 @@ where
             self.storage
                 .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
                 .map_err(storage_problem)?;
+            // Committed fence evidence: how many live attempts one pause
+            // fences and how many workflow-step intervals it opens. Recorded
+            // only after the compare-and-swap publishes.
+            hotpath::gauge!("application.work.run_control.pause.fenced_attempts")
+                .set(frontier.admission.live_attempts.len() as u64);
+            hotpath::gauge!("application.work.run_control.intervals.opened")
+                .inc(blocked_intervals.len() as u64);
             Ok(WorkRunControlTransitionReceiptV1 {
                 control: next,
                 blocked_intervals,
@@ -430,6 +437,8 @@ where
             self.storage
                 .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
                 .map_err(storage_problem)?;
+            hotpath::gauge!("application.work.run_control.intervals.closed")
+                .inc(blocked_intervals.len() as u64);
             Ok(WorkRunControlTransitionReceiptV1 {
                 control: next,
                 blocked_intervals,
@@ -484,10 +493,17 @@ where
                 .load_run_control(&authority, task_id, run_id)
                 .map_err(storage_problem)?;
             match control {
-                Some(control) if !control.admits_reservation() => Err(conflict_problem(
-                    "application.work-run-control.paused",
-                    "The Work run is paused, so no new attempt reservation is admitted.",
-                )),
+                Some(control) if !control.admits_reservation() => {
+                    // The fence working as designed is still work being
+                    // refused; without this counter a paused run's refusals
+                    // are indistinguishable from an idle one.
+                    hotpath::gauge!("application.work.run_control.reservation.denied_paused")
+                        .inc(1u64);
+                    Err(conflict_problem(
+                        "application.work-run-control.paused",
+                        "The Work run is paused, so no new attempt reservation is admitted.",
+                    ))
+                }
                 Some(_) | None => Ok(()),
             }
         })

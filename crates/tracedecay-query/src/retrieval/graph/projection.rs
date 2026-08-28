@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tracedecay_code_index::graph_projection::{CodeGraphEvidenceReader, CodeGraphProjectionError};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphTraversalBatchV1,
+};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
     FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
@@ -57,24 +59,40 @@ fn read_graph_evidence(
             control: Arc::clone(&control),
             deadline_micros: request.budget.deadline_micros,
         });
-    let raw = reader
-        .traverse(
-            &request.generation,
-            &seed_symbols,
-            &request.edge_kinds,
-            request.max_depth,
-            cancellation,
-        )
-        .map_err(|error| {
-            if matches!(error, CodeGraphProjectionError::Cancelled) {
-                check_request_control(request, control.as_ref())
-                    .err()
-                    .unwrap_or(RetrievalPortError::Cancelled)
-            } else {
-                map_projection_error(error)
-            }
-        })?;
+    let raw = hotpath::measure_block!("query.graph.traverse", {
+        reader
+            .traverse(
+                &request.generation,
+                &seed_symbols,
+                &request.edge_kinds,
+                request.max_depth,
+                cancellation,
+            )
+            .map_err(|error| {
+                if matches!(error, CodeGraphProjectionError::Cancelled) {
+                    check_request_control(request, control.as_ref())
+                        .err()
+                        .unwrap_or(RetrievalPortError::Cancelled)
+                } else {
+                    map_projection_error(error)
+                }
+            })
+    })?;
     check_request_control(request, control.as_ref())?;
+    let batch = project_graph_batch(reader, request, control.as_ref(), raw)?;
+    check_request_control(request, control.as_ref())?;
+    hotpath::gauge!("query.graph.project.candidates").set(batch.candidates.len());
+    hotpath::gauge!("query.graph.project.examined").set(batch.coverage.examined);
+    Ok(RetrieverOutcome::Complete(batch))
+}
+
+#[hotpath::measure(label = "query.graph.project")]
+fn project_graph_batch(
+    reader: &CodeGraphEvidenceReader,
+    request: &GraphLaneRequest,
+    control: &dyn GraphExecutionControl,
+    raw: CodeGraphTraversalBatchV1,
+) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
     let retriever_revision =
         ComponentRevision::new(crate::retrieval::QUERY_GRAPH_RETRIEVER_REVISION_V1)
             .map_err(contract_error)?;
@@ -85,7 +103,7 @@ fn read_graph_evidence(
     let mut candidates = Vec::with_capacity(raw_candidate_count.min(cap));
     let mut evidence_by_occurrence = BTreeMap::new();
     for (ordinal, raw_candidate) in raw.candidates.into_iter().take(cap).enumerate() {
-        check_request_control(request, control.as_ref())?;
+        check_request_control(request, control)?;
         let target = raw_candidate.target;
         let occurrence = format!("code-graph:{}", target.as_str());
         let evidence_id = format!("code-symbol:{}", target.as_str());
@@ -134,7 +152,7 @@ fn read_graph_evidence(
         evidence_by_occurrence.insert(source_occurrence_id, evidence);
         candidates.push(candidate);
     }
-    let batch = RetrieverBatch {
+    Ok(RetrieverBatch {
         candidates,
         evidence_by_occurrence,
         coverage: RetrieverCoverage {
@@ -145,11 +163,7 @@ fn read_graph_evidence(
             unknown: raw.coverage.unknown,
         },
         continuation: None,
-    };
-    check_request_control(request, control.as_ref())?;
-    hotpath::gauge!("query.graph.project.candidates").set(batch.candidates.len());
-    hotpath::gauge!("query.graph.project.examined").set(batch.coverage.examined);
-    Ok(RetrieverOutcome::Complete(batch))
+    })
 }
 
 struct GraphTraversalCancellationV1 {

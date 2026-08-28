@@ -372,9 +372,12 @@ impl LatestCompleteCodeIndexV1 {
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let authority = retained.authority();
-        let snapshot = retained
-            .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
-            .map_err(CodeGraphProjectionError::from)?;
+        let snapshot = hotpath::measure_block!(
+            "code_graph.activation.publish_verified_snapshot",
+            retained
+                .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
+                .map_err(CodeGraphProjectionError::from)
+        )?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
@@ -442,13 +445,16 @@ impl LatestCompleteCodeIndexV1 {
             // thread.
             store.mark_interactive_catalog_warming()?;
         }
-        let reader = store.evidence_reader_with_cancellation(
-            &generation_id,
-            Some(self.generation.snapshot().repository.clone()),
-            self.source_freshness()
-                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
-            Arc::clone(&graph_cancellation),
-        )?;
+        let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
+            store.evidence_reader_with_cancellation(
+                &generation_id,
+                Some(self.generation.snapshot().repository.clone()),
+                self.source_freshness().map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                })?,
+                Arc::clone(&graph_cancellation),
+            )
+        })?;
         self.install_graph_serving(
             reader,
             Some(Arc::clone(&store)),

@@ -55,11 +55,15 @@ impl DaemonSessionRuntimeRegistryV1 {
                                 ),
                             ));
                         }
+                        #[cfg(feature = "hotpath")]
+                        hotpath::gauge!("daemon.store.project_graph.mount_reuse_total").inc(1_u64);
                         return Ok(database);
                     }
                     true
                 }
                 Some(super::ProjectRuntimeOwnerStateV1::Opening) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -73,6 +77,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | super::ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => {
+                    #[cfg(feature = "hotpath")]
+                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_retiring",
                         true,
@@ -83,22 +89,26 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
         if !writable {
+            #[cfg(feature = "hotpath")]
+            let _mount_observation = super::StoreMountObservationV1::enter();
             let shard_id = StoreShardIdV1::project(
                 self.identity.brain_id().clone(),
                 self.identity.profile_id().clone(),
                 project_id,
             );
-            let runtime = match self
-                .registry
-                .open(super::StoreRuntimeOpenRequest::new_read_only(
-                    shard_id,
-                    self.incarnation,
-                    Some(
-                        self.profile_authority_pin("mount project graph store read-only")
-                            .await?,
-                    ),
-                ))
-                .await
+            let pin = self
+                .profile_authority_pin("mount project graph store read-only")
+                .await?;
+            let runtime = match hotpath::future!(
+                self.registry
+                    .open(super::StoreRuntimeOpenRequest::new_read_only(
+                        shard_id,
+                        self.incarnation,
+                        Some(pin),
+                    )),
+                label = "daemon.store.project_graph.open_read_only"
+            )
+            .await
             {
                 super::StoreRuntimeOpenResult::Published(runtime) => runtime,
                 super::StoreRuntimeOpenResult::Failed(failure) => {
@@ -128,6 +138,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                     )
                 });
         }
+        #[cfg(feature = "hotpath")]
+        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
@@ -150,18 +162,21 @@ impl DaemonSessionRuntimeRegistryV1 {
         );
         let runtime = match database_authority {
             Some(authority) => {
-                open_runtime(
-                    &self.registry,
-                    self.resolver.as_ref(),
-                    shard_id.clone(),
-                    self.incarnation,
-                    Some(
-                        self.profile_authority_pin("mount project graph store")
-                            .await?,
+                let pin = self
+                    .profile_authority_pin("mount project graph store")
+                    .await?;
+                hotpath::future!(
+                    open_runtime(
+                        &self.registry,
+                        self.resolver.as_ref(),
+                        shard_id.clone(),
+                        self.incarnation,
+                        Some(pin),
+                        Some(authority),
+                        matches!(&access, DatabaseAccessMode::ReadWrite),
+                        "mount project graph store",
                     ),
-                    Some(authority),
-                    matches!(&access, DatabaseAccessMode::ReadWrite),
-                    "mount project graph store",
+                    label = "daemon.store.project_graph.open"
                 )
                 .await?
             }

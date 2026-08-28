@@ -293,6 +293,10 @@ pub(super) struct AutomationReservationClaim {
 
 impl Drop for AutomationReservationClaim {
     fn drop(&mut self) {
+        // Each claim incremented the in-flight gauge exactly once at
+        // acquisition; dropping the owner (settled, abandoned, panicked, or
+        // cancelled) is the one release point.
+        hotpath::gauge!("daemon.automation.effect.in_flight").dec(1_u64);
         let mut claims = reservation_claims_guard();
         if claims
             .get(&self.path)
@@ -324,6 +328,7 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
     }
     let token = Arc::new(());
     claims.insert(path.to_path_buf(), Arc::downgrade(&token));
+    hotpath::gauge!("daemon.automation.effect.in_flight").inc(1_u64);
     Ok(AutomationReservationClaim {
         path: path.to_path_buf(),
         token,
@@ -1172,6 +1177,7 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.journal_write")]
 fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
     write_record_with_publisher(path, record, |temporary, destination| {
         replace_automation_file_atomically(temporary, destination, "automation terminal journal")
@@ -1264,6 +1270,7 @@ fn terminal_binding(
     writer.finish()
 }
 
+#[hotpath::measure(label = "daemon.automation.effect.sidecar_write")]
 fn write_terminal_sidecar(
     journal_path: &Path,
     terminal: &AutomationSettledTerminal,

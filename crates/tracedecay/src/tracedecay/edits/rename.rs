@@ -273,32 +273,35 @@ impl TraceDecay {
         dry_run: bool,
     ) -> Result<RenameResult> {
         let identity = preview_id(binding, new_name)?;
-        let refused = |message: String, kind: RenameHazardKindV1| RenameResult {
-            success: false,
-            preview_id: Some(identity.clone()),
-            preview_digest: None,
-            plan_digest: None,
-            repository_revision: None,
-            graph_revision: None,
-            symbol: binding.qualified_name.clone(),
-            old_name: binding.old_name.clone(),
-            new_name: new_name.to_owned(),
-            files: Vec::new(),
-            reference_count: 0,
-            sites: Vec::new(),
-            dispositions: RenameDispositionCountsV1::default(),
-            hazards: vec![RenameHazardV1 {
-                kind,
-                blocking: true,
-                message: message.clone(),
-                site_id: None,
-            }],
-            protected_values: Vec::new(),
-            impact: RenameImpactV1::default(),
-            dry_run,
-            rolled_back: false,
-            diff: None,
-            message,
+        let refused = |message: String, kind: RenameHazardKindV1| {
+            hotpath::gauge!("edits.rename.refused_total").inc(1u64);
+            RenameResult {
+                success: false,
+                preview_id: Some(identity.clone()),
+                preview_digest: None,
+                plan_digest: None,
+                repository_revision: None,
+                graph_revision: None,
+                symbol: binding.qualified_name.clone(),
+                old_name: binding.old_name.clone(),
+                new_name: new_name.to_owned(),
+                files: Vec::new(),
+                reference_count: 0,
+                sites: Vec::new(),
+                dispositions: RenameDispositionCountsV1::default(),
+                hazards: vec![RenameHazardV1 {
+                    kind,
+                    blocking: true,
+                    message: message.clone(),
+                    site_id: None,
+                }],
+                protected_values: Vec::new(),
+                impact: RenameImpactV1::default(),
+                dry_run,
+                rolled_back: false,
+                diff: None,
+                message,
+            }
         };
 
         if !is_valid_identifier(new_name, &binding.file)
@@ -344,56 +347,57 @@ impl TraceDecay {
         let mut hazards = Vec::new();
         let mut protected_values = Vec::new();
         let mut affected_files = BTreeSet::new();
-        for record in evidence.files {
-            if record.disposition != SnapshotFileDispositionV1::Present {
-                continue;
-            }
-            ensure_active(&graph)?;
-            let relative_path = record.path;
-            let authority =
-                SourceEditFileAuthority::open(&self.project_root, Path::new(&relative_path))?;
-            let (source, _) = authority.read_to_string(&relative_path)?;
-            let metadata = authority.metadata()?;
-            let readonly = metadata.permissions().readonly();
-            #[cfg(unix)]
-            let unix_mode = {
-                use cap_std::fs::PermissionsExt;
-                Some(metadata.permissions().mode())
-            };
-            #[cfg(not(unix))]
-            let unix_mode = None;
-            if ContentDigest::of_bytes(source.as_bytes()) != record.content_digest {
-                hazards.push(RenameHazardV1 {
-                    kind: RenameHazardKindV1::StaleEvidence,
-                    blocking: true,
-                    message: format!(
-                        "{relative_path} no longer matches the admitted graph generation"
-                    ),
-                    site_id: None,
-                });
-            }
-            if !source.contains(&binding.old_name)
-                && !target_sites.contains_key(&relative_path)
-                && !other_sites.contains_key(&relative_path)
-            {
-                continue;
-            }
-            let lines = source_lines(&source);
-            let old_name_ranges = identifier_ranges(&source, &binding.old_name);
-            let mut exact_target = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
-            let mut exact_other = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
-            for evidence in target_sites.remove(&relative_path).unwrap_or_default() {
-                match resolve_graph_site(&source, &old_name_ranges, &evidence) {
-                    EvidenceResolution::Exact(site) => {
-                        if site.kind == RenameSiteKindV1::Reexport {
-                            reexports.insert(site.source_qualified_name.clone());
-                        }
-                        let range = (site.start, site.end);
-                        if exact_target
-                            .get(&range)
-                            .is_some_and(|prior| prior.source_node_id != site.source_node_id)
-                        {
-                            hazards.push(RenameHazardV1 {
+        hotpath::measure_block!("edits.rename.plan_build", {
+            for record in evidence.files {
+                if record.disposition != SnapshotFileDispositionV1::Present {
+                    continue;
+                }
+                ensure_active(&graph)?;
+                let relative_path = record.path;
+                let authority =
+                    SourceEditFileAuthority::open(&self.project_root, Path::new(&relative_path))?;
+                let (source, _) = authority.read_to_string(&relative_path)?;
+                let metadata = authority.metadata()?;
+                let readonly = metadata.permissions().readonly();
+                #[cfg(unix)]
+                let unix_mode = {
+                    use cap_std::fs::PermissionsExt;
+                    Some(metadata.permissions().mode())
+                };
+                #[cfg(not(unix))]
+                let unix_mode = None;
+                if ContentDigest::of_bytes(source.as_bytes()) != record.content_digest {
+                    hazards.push(RenameHazardV1 {
+                        kind: RenameHazardKindV1::StaleEvidence,
+                        blocking: true,
+                        message: format!(
+                            "{relative_path} no longer matches the admitted graph generation"
+                        ),
+                        site_id: None,
+                    });
+                }
+                if !source.contains(&binding.old_name)
+                    && !target_sites.contains_key(&relative_path)
+                    && !other_sites.contains_key(&relative_path)
+                {
+                    continue;
+                }
+                let lines = source_lines(&source);
+                let old_name_ranges = identifier_ranges(&source, &binding.old_name);
+                let mut exact_target = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
+                let mut exact_other = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
+                for evidence in target_sites.remove(&relative_path).unwrap_or_default() {
+                    match resolve_graph_site(&source, &old_name_ranges, &evidence) {
+                        EvidenceResolution::Exact(site) => {
+                            if site.kind == RenameSiteKindV1::Reexport {
+                                reexports.insert(site.source_qualified_name.clone());
+                            }
+                            let range = (site.start, site.end);
+                            if exact_target
+                                .get(&range)
+                                .is_some_and(|prior| prior.source_node_id != site.source_node_id)
+                            {
+                                hazards.push(RenameHazardV1 {
                                 kind: RenameHazardKindV1::AmbiguousSymbol,
                                 blocking: true,
                                 message: format!(
@@ -401,22 +405,22 @@ impl TraceDecay {
                                 ),
                                 site_id: None,
                             });
-                        } else {
-                            exact_target.entry(range).or_insert(site);
+                            } else {
+                                exact_target.entry(range).or_insert(site);
+                            }
                         }
-                    }
-                    EvidenceResolution::Missing => {
-                        hazards.push(RenameHazardV1 {
-                            kind: RenameHazardKindV1::StaleEvidence,
-                            blocking: true,
-                            message: format!(
-                                "target graph evidence no longer resolves in {relative_path}"
-                            ),
-                            site_id: None,
-                        });
-                    }
-                    EvidenceResolution::Ambiguous => {
-                        hazards.push(RenameHazardV1 {
+                        EvidenceResolution::Missing => {
+                            hazards.push(RenameHazardV1 {
+                                kind: RenameHazardKindV1::StaleEvidence,
+                                blocking: true,
+                                message: format!(
+                                    "target graph evidence no longer resolves in {relative_path}"
+                                ),
+                                site_id: None,
+                            });
+                        }
+                        EvidenceResolution::Ambiguous => {
+                            hazards.push(RenameHazardV1 {
                             kind: RenameHazardKindV1::AmbiguousSymbol,
                             blocking: true,
                             message: format!(
@@ -424,18 +428,18 @@ impl TraceDecay {
                             ),
                             site_id: None,
                         });
+                        }
                     }
                 }
-            }
-            for evidence in other_sites.remove(&relative_path).unwrap_or_default() {
-                match resolve_graph_site(&source, &old_name_ranges, &evidence) {
-                    EvidenceResolution::Exact(site) => {
-                        let range = (site.start, site.end);
-                        if exact_other
-                            .get(&range)
-                            .is_some_and(|prior| prior.source_node_id != site.source_node_id)
-                        {
-                            hazards.push(RenameHazardV1 {
+                for evidence in other_sites.remove(&relative_path).unwrap_or_default() {
+                    match resolve_graph_site(&source, &old_name_ranges, &evidence) {
+                        EvidenceResolution::Exact(site) => {
+                            let range = (site.start, site.end);
+                            if exact_other
+                                .get(&range)
+                                .is_some_and(|prior| prior.source_node_id != site.source_node_id)
+                            {
+                                hazards.push(RenameHazardV1 {
                                 kind: RenameHazardKindV1::AmbiguousSymbol,
                                 blocking: true,
                                 message: format!(
@@ -443,12 +447,12 @@ impl TraceDecay {
                                 ),
                                 site_id: None,
                             });
-                        } else {
-                            exact_other.entry(range).or_insert(site);
+                            } else {
+                                exact_other.entry(range).or_insert(site);
+                            }
                         }
-                    }
-                    EvidenceResolution::Missing => {
-                        hazards.push(RenameHazardV1 {
+                        EvidenceResolution::Missing => {
+                            hazards.push(RenameHazardV1 {
                             kind: RenameHazardKindV1::StaleEvidence,
                             blocking: true,
                             message: format!(
@@ -456,9 +460,9 @@ impl TraceDecay {
                             ),
                             site_id: None,
                         });
-                    }
-                    EvidenceResolution::Ambiguous => {
-                        hazards.push(RenameHazardV1 {
+                        }
+                        EvidenceResolution::Ambiguous => {
+                            hazards.push(RenameHazardV1 {
                             kind: RenameHazardKindV1::AmbiguousSymbol,
                             blocking: true,
                             message: format!(
@@ -466,38 +470,38 @@ impl TraceDecay {
                             ),
                             site_id: None,
                         });
+                        }
                     }
                 }
-            }
-            if exact_target
-                .keys()
-                .any(|range| exact_other.contains_key(range))
-            {
-                hazards.push(RenameHazardV1 {
-                    kind: RenameHazardKindV1::AmbiguousSymbol,
-                    blocking: true,
-                    message: format!(
-                        "target and same-name symbol evidence overlap in {relative_path}"
-                    ),
-                    site_id: None,
-                });
-            }
-            if !exact_target.is_empty()
-                && lines.iter().any(|(_, line)| {
-                    identifier_ranges(line, new_name)
-                        .into_iter()
-                        .any(|(start, _)| {
-                            !string_literal_at(line, start, &relative_path)
-                                && !comment_at(line, start)
-                        })
-                })
-            {
-                for kind in [
-                    RenameHazardKindV1::NamespaceCollision,
-                    RenameHazardKindV1::Shadowing,
-                    RenameHazardKindV1::ChangedResolution,
-                ] {
+                if exact_target
+                    .keys()
+                    .any(|range| exact_other.contains_key(range))
+                {
                     hazards.push(RenameHazardV1 {
+                        kind: RenameHazardKindV1::AmbiguousSymbol,
+                        blocking: true,
+                        message: format!(
+                            "target and same-name symbol evidence overlap in {relative_path}"
+                        ),
+                        site_id: None,
+                    });
+                }
+                if !exact_target.is_empty()
+                    && lines.iter().any(|(_, line)| {
+                        identifier_ranges(line, new_name)
+                            .into_iter()
+                            .any(|(start, _)| {
+                                !string_literal_at(line, start, &relative_path)
+                                    && !comment_at(line, start)
+                            })
+                    })
+                {
+                    for kind in [
+                        RenameHazardKindV1::NamespaceCollision,
+                        RenameHazardKindV1::Shadowing,
+                        RenameHazardKindV1::ChangedResolution,
+                    ] {
+                        hazards.push(RenameHazardV1 {
                         kind,
                         blocking: true,
                         message: format!(
@@ -505,154 +509,157 @@ impl TraceDecay {
                         ),
                         site_id: None,
                     });
-                }
-            }
-
-            let mut changed_ranges = Vec::new();
-            for (line_index, (line_offset, line)) in lines.iter().copied().enumerate() {
-                let ranges = identifier_ranges(line, &binding.old_name);
-                for (line_start, line_end) in ranges {
-                    let start = line_offset + line_start;
-                    let end = line_offset + line_end;
-                    let mut disposition = RenameSiteDispositionV1::Blocked;
-                    let mut kind = RenameSiteKindV1::UnresolvedText;
-                    let mut reason = "unresolved code spelling may bind this symbol".to_owned();
-                    let mut source_node_id = None;
-                    let bound = exact_target.get(&(start, end));
-                    let other = exact_other.get(&(start, end));
-                    if bound.is_some() && other.is_some() {
-                        "target and same-name graph evidence conflict at this occurrence"
-                            .clone_into(&mut reason);
-                    } else if let Some(bound) = bound {
-                        kind = bound.kind;
-                        source_node_id = Some(bound.source_node_id.clone());
-                        if is_generated_path(&relative_path) {
-                            "required site is generated or vendored".clone_into(&mut reason);
-                        } else if !bound.apply_grade {
-                            "graph edge authority is not safe for an apply-grade rename"
-                                .clone_into(&mut reason);
-                        } else if macro_syntax_at(line, line_start) {
-                            "required site is inside unsupported macro syntax"
-                                .clone_into(&mut reason);
-                        } else {
-                            disposition = RenameSiteDispositionV1::Changed;
-                            "exact graph-bound occurrence".clone_into(&mut reason);
-                            changed_ranges.push((start, end));
-                        }
-                    } else if let Some(other) = other {
-                        kind = other.kind;
-                        source_node_id = Some(other.source_node_id.clone());
-                        if other.apply_grade {
-                            disposition = RenameSiteDispositionV1::Unchanged;
-                            "same spelling belongs to a different canonical symbol"
-                                .clone_into(&mut reason);
-                        } else {
-                            "same-name graph edge authority cannot safely exempt this occurrence"
-                                .clone_into(&mut reason);
-                        }
-                    } else if string_literal_at(line, line_start, &relative_path) {
-                        disposition = RenameSiteDispositionV1::Skipped;
-                        kind = RenameSiteKindV1::ProtectedValue;
-                        "byte-exact string or wire value is protected".clone_into(&mut reason);
-                    } else if comment_at(line, line_start) {
-                        disposition = RenameSiteDispositionV1::Skipped;
-                        kind = RenameSiteKindV1::Documentation;
-                        "text-only prose is never guessed as a reference".clone_into(&mut reason);
-                    } else if is_generated_path(&relative_path) {
-                        disposition = RenameSiteDispositionV1::Skipped;
-                        "unbound occurrence is generated or vendored".clone_into(&mut reason);
-                    } else if macro_syntax_at(line, line_start) {
-                        "unbound occurrence is inside unsupported macro syntax"
-                            .clone_into(&mut reason);
                     }
-                    let id = site_id(&relative_path, start, end, kind)?;
-                    if kind == RenameSiteKindV1::ProtectedValue {
-                        protected_values.push(RenameProtectedValueV1 {
-                            site_id: id.clone(),
+                }
+
+                let mut changed_ranges = Vec::new();
+                for (line_index, (line_offset, line)) in lines.iter().copied().enumerate() {
+                    let ranges = identifier_ranges(line, &binding.old_name);
+                    for (line_start, line_end) in ranges {
+                        let start = line_offset + line_start;
+                        let end = line_offset + line_end;
+                        let mut disposition = RenameSiteDispositionV1::Blocked;
+                        let mut kind = RenameSiteKindV1::UnresolvedText;
+                        let mut reason = "unresolved code spelling may bind this symbol".to_owned();
+                        let mut source_node_id = None;
+                        let bound = exact_target.get(&(start, end));
+                        let other = exact_other.get(&(start, end));
+                        if bound.is_some() && other.is_some() {
+                            "target and same-name graph evidence conflict at this occurrence"
+                                .clone_into(&mut reason);
+                        } else if let Some(bound) = bound {
+                            kind = bound.kind;
+                            source_node_id = Some(bound.source_node_id.clone());
+                            if is_generated_path(&relative_path) {
+                                "required site is generated or vendored".clone_into(&mut reason);
+                            } else if !bound.apply_grade {
+                                "graph edge authority is not safe for an apply-grade rename"
+                                    .clone_into(&mut reason);
+                            } else if macro_syntax_at(line, line_start) {
+                                "required site is inside unsupported macro syntax"
+                                    .clone_into(&mut reason);
+                            } else {
+                                disposition = RenameSiteDispositionV1::Changed;
+                                "exact graph-bound occurrence".clone_into(&mut reason);
+                                changed_ranges.push((start, end));
+                            }
+                        } else if let Some(other) = other {
+                            kind = other.kind;
+                            source_node_id = Some(other.source_node_id.clone());
+                            if other.apply_grade {
+                                disposition = RenameSiteDispositionV1::Unchanged;
+                                "same spelling belongs to a different canonical symbol"
+                                    .clone_into(&mut reason);
+                            } else {
+                                "same-name graph edge authority cannot safely exempt this occurrence"
+                                .clone_into(&mut reason);
+                            }
+                        } else if string_literal_at(line, line_start, &relative_path) {
+                            disposition = RenameSiteDispositionV1::Skipped;
+                            kind = RenameSiteKindV1::ProtectedValue;
+                            "byte-exact string or wire value is protected".clone_into(&mut reason);
+                        } else if comment_at(line, line_start) {
+                            disposition = RenameSiteDispositionV1::Skipped;
+                            kind = RenameSiteKindV1::Documentation;
+                            "text-only prose is never guessed as a reference"
+                                .clone_into(&mut reason);
+                        } else if is_generated_path(&relative_path) {
+                            disposition = RenameSiteDispositionV1::Skipped;
+                            "unbound occurrence is generated or vendored".clone_into(&mut reason);
+                        } else if macro_syntax_at(line, line_start) {
+                            "unbound occurrence is inside unsupported macro syntax"
+                                .clone_into(&mut reason);
+                        }
+                        let id = site_id(&relative_path, start, end, kind)?;
+                        if kind == RenameSiteKindV1::ProtectedValue {
+                            protected_values.push(RenameProtectedValueV1 {
+                                site_id: id.clone(),
+                                file: relative_path.clone(),
+                                start_byte: start as u64,
+                                end_byte: end as u64,
+                                category: protected_category(line),
+                                exact_bytes: binding.old_name.clone(),
+                            });
+                        }
+                        if disposition == RenameSiteDispositionV1::Blocked {
+                            hazards.push(RenameHazardV1 {
+                                kind: if bound.is_some() && other.is_some() {
+                                    RenameHazardKindV1::AmbiguousSymbol
+                                } else if is_generated_path(&relative_path) {
+                                    RenameHazardKindV1::GeneratedSource
+                                } else if bound.is_some_and(|site| !site.apply_grade)
+                                    || other.is_some_and(|site| !site.apply_grade)
+                                {
+                                    RenameHazardKindV1::UnsupportedSyntax
+                                } else if macro_syntax_at(line, line_start) {
+                                    RenameHazardKindV1::MacroExpansion
+                                } else {
+                                    RenameHazardKindV1::AmbiguousSymbol
+                                },
+                                blocking: true,
+                                message: reason.clone(),
+                                site_id: Some(id.clone()),
+                            });
+                        }
+                        sites.push(RenameSiteV1 {
+                            site_id: id,
+                            kind,
+                            disposition,
                             file: relative_path.clone(),
+                            line: line_index as u32 + 1,
                             start_byte: start as u64,
                             end_byte: end as u64,
-                            category: protected_category(line),
-                            exact_bytes: binding.old_name.clone(),
-                        });
-                    }
-                    if disposition == RenameSiteDispositionV1::Blocked {
-                        hazards.push(RenameHazardV1 {
-                            kind: if bound.is_some() && other.is_some() {
-                                RenameHazardKindV1::AmbiguousSymbol
-                            } else if is_generated_path(&relative_path) {
-                                RenameHazardKindV1::GeneratedSource
-                            } else if bound.is_some_and(|site| !site.apply_grade)
-                                || other.is_some_and(|site| !site.apply_grade)
-                            {
-                                RenameHazardKindV1::UnsupportedSyntax
-                            } else if macro_syntax_at(line, line_start) {
-                                RenameHazardKindV1::MacroExpansion
+                            expected_bytes: binding.old_name.clone(),
+                            replacement_bytes: if disposition == RenameSiteDispositionV1::Changed {
+                                new_name.to_owned()
                             } else {
-                                RenameHazardKindV1::AmbiguousSymbol
+                                binding.old_name.clone()
                             },
-                            blocking: true,
-                            message: reason.clone(),
-                            site_id: Some(id.clone()),
+                            reason,
+                            source_node_id,
                         });
                     }
-                    sites.push(RenameSiteV1 {
-                        site_id: id,
-                        kind,
-                        disposition,
-                        file: relative_path.clone(),
-                        line: line_index as u32 + 1,
-                        start_byte: start as u64,
-                        end_byte: end as u64,
-                        expected_bytes: binding.old_name.clone(),
-                        replacement_bytes: if disposition == RenameSiteDispositionV1::Changed {
-                            new_name.to_owned()
-                        } else {
-                            binding.old_name.clone()
-                        },
-                        reason,
-                        source_node_id,
+                }
+                changed_ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
+                for pair in changed_ranges.windows(2) {
+                    if pair[0].0 < pair[1].1 {
+                        hazards.push(RenameHazardV1 {
+                            kind: RenameHazardKindV1::OverlappingSite,
+                            blocking: true,
+                            message: format!("overlapping sites in {relative_path}"),
+                            site_id: None,
+                        });
+                    }
+                }
+                let mut modified = source.clone();
+                for (start, end) in &changed_ranges {
+                    modified.replace_range(*start..*end, new_name);
+                }
+                if !changed_ranges.is_empty() {
+                    affected_files.insert(relative_path.clone());
+                    if looks_like_test(&relative_path, None) {
+                        affected_tests.insert(relative_path.clone());
+                    }
+                    planned.push(PlannedRenameFile {
+                        relative_path,
+                        original: source,
+                        modified,
+                        readonly,
+                        unix_mode,
+                        replaced_count: changed_ranges.len(),
                     });
                 }
             }
-            changed_ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
-            for pair in changed_ranges.windows(2) {
-                if pair[0].0 < pair[1].1 {
-                    hazards.push(RenameHazardV1 {
-                        kind: RenameHazardKindV1::OverlappingSite,
-                        blocking: true,
-                        message: format!("overlapping sites in {relative_path}"),
-                        site_id: None,
-                    });
-                }
-            }
-            let mut modified = source.clone();
-            for (start, end) in &changed_ranges {
-                modified.replace_range(*start..*end, new_name);
-            }
-            if !changed_ranges.is_empty() {
-                affected_files.insert(relative_path.clone());
-                if looks_like_test(&relative_path, None) {
-                    affected_tests.insert(relative_path.clone());
-                }
-                planned.push(PlannedRenameFile {
-                    relative_path,
-                    original: source,
-                    modified,
-                    readonly,
-                    unix_mode,
-                    replaced_count: changed_ranges.len(),
+            for (path, evidence) in target_sites.into_iter().chain(other_sites) {
+                hazards.push(RenameHazardV1 {
+                    kind: RenameHazardKindV1::StaleEvidence,
+                    blocking: true,
+                    message: format!("{} site(s) refer to missing file {path}", evidence.len()),
+                    site_id: None,
                 });
             }
-        }
-        for (path, evidence) in target_sites.into_iter().chain(other_sites) {
-            hazards.push(RenameHazardV1 {
-                kind: RenameHazardKindV1::StaleEvidence,
-                blocking: true,
-                message: format!("{} site(s) refer to missing file {path}", evidence.len()),
-                site_id: None,
-            });
-        }
+        });
+        hotpath::gauge!("edits.rename.sites_examined_total").inc(sites.len() as u64);
 
         planned.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         sites.sort_by(|left, right| {
@@ -732,6 +739,7 @@ impl TraceDecay {
             });
         }
         if hazards.iter().any(|hazard| hazard.blocking) {
+            hotpath::gauge!("edits.rename.blocked_total").inc(1u64);
             return Ok(RenameResult {
                 success: false,
                 preview_id: Some(identity),
@@ -831,21 +839,26 @@ impl TraceDecay {
             message: "rename applied".to_owned(),
         };
         ensure_active(&graph)?;
-        for file in &rollback_files {
-            ensure_active(&graph)?;
-            let intended = file
-                .intended
-                .as_deref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: format!("rename plan lost its postimage for {}", file.relative_path),
-                })?;
-            publish_planned_source_edit(
-                &self.project_root,
-                &file.relative_path,
-                file.expected.as_deref(),
-                intended,
-            )?;
-        }
+        hotpath::measure_block!("edits.rename.apply", {
+            for file in &rollback_files {
+                ensure_active(&graph)?;
+                let intended = file
+                    .intended
+                    .as_deref()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: format!(
+                            "rename plan lost its postimage for {}",
+                            file.relative_path
+                        ),
+                    })?;
+                publish_planned_source_edit(
+                    &self.project_root,
+                    &file.relative_path,
+                    file.expected.as_deref(),
+                    intended,
+                )?;
+            }
+        });
         Ok(outcome)
     }
 }

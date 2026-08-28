@@ -360,6 +360,10 @@ impl ProjectFeedbackObservationSinkV1 {
     }
 
     fn record_drop(&self) {
+        // Enqueue-side losses (queue full, sink closed, delivery assignment
+        // refused) are the waste being diagnosed; count them even though the
+        // durable drop tally also travels inside later envelopes.
+        hotpath::gauge!("usecases.feedback.observations_dropped").inc(1.0);
         saturating_increment(&self.dropped_count);
     }
 

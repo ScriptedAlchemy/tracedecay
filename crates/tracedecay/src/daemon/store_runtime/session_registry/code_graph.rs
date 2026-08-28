@@ -702,6 +702,23 @@ impl Drop for MemoryGraphOperationRetirementReservationV1<'_> {
     }
 }
 
+/// Pre-gate outputs of one sealed code-generation publication: everything
+/// that is a pure function of the immutable published generation and this
+/// runtime's identity. Computed before the cross-instance publication gate is
+/// taken so racing publishers project concurrently and the gate serializes
+/// only the storage-ordered phase.
+struct PreparedSealedPublicationV1 {
+    projection_deadline: Duration,
+    deadline_at: Instant,
+    manifest: Arc<GraphGenerationManifest>,
+    relational_projection: GraphProjectionIdentityV1,
+    source: SealedCodeGenerationReplay,
+    idempotency_key: GraphIdempotencyKey,
+    publication_key: GraphPublicationKeyV1,
+    durable_stage_boundary: bool,
+    request_cancelled: Arc<AtomicBool>,
+}
+
 impl RetainedCodeGraphRuntimeV1 {
     pub(crate) fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1> {
         Arc::clone(&self.authority)
@@ -776,16 +793,15 @@ impl RetainedCodeGraphRuntimeV1 {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
-        // One publisher per code shard at a time, across every retained
-        // runtime instance. The seat pass and the background reconcile both
-        // reach this path for the same sealed generation; the loser waits
-        // here (this runs inside spawn_blocking), then finds the verified
-        // head already advanced and takes the idempotent recovery arm below
-        // instead of racing the graph database into a Conflict.
-        let _publication = self
-            .publication_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Everything up to `prepared` below is a pure function of the
+        // immutable published generation and this runtime's identity — no
+        // publication storage is read or written — so racing publishers
+        // compute it concurrently instead of serializing manifest projection
+        // behind the per-shard publication gate. The manifest build memoizes
+        // on the generation handle (first complete build wins), so the seat
+        // pass and the background reconcile still share one projection. The
+        // deadline window consequently also spans the gate wait; under the
+        // background budget, cancellation stays the governing mechanism.
         let projection_deadline = sealed_projection_deadline(sealed_bytes);
         let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
@@ -827,17 +843,6 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
-        let registration = || GraphDbRegistration {
-            authority_lease: Arc::clone(&authority_lease),
-            cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &request_cancelled,
-            ))),
-            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &self.lifecycle_cancelled,
-            ))),
-            deadline: deadline_at,
-        };
         let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
             self.authority.namespace().clone(),
         )
@@ -866,13 +871,6 @@ impl RetainedCodeGraphRuntimeV1 {
             projection: GraphProjectionIdV1::new(projection.projection.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
-        self.graph_manifest_provider.bind(
-            self.authority.binding().shard_id.clone(),
-            self.project_id.clone(),
-            self.repository_id.clone(),
-            self.generations_root.clone(),
-            self.replay_root.clone(),
-        )?;
         let source = SealedCodeGenerationReplay {
             repository: self.repository_id.clone(),
             generation: self.generation_id.clone(),
@@ -880,6 +878,91 @@ impl RetainedCodeGraphRuntimeV1 {
             projector_revision: GraphProjectorRevision::try_from(
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )?,
+        };
+        let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+            &self.generation_id,
+            &source.projector_revision,
+        )
+        .map_err(map_code_graph_error)?;
+        let publication_key = GraphPublicationKeyV1::new(
+            relational_projection.clone(),
+            GraphGenerationIdV1::new(manifest.generation.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        );
+        let prepared = PreparedSealedPublicationV1 {
+            projection_deadline,
+            deadline_at,
+            manifest,
+            relational_projection,
+            source,
+            idempotency_key,
+            publication_key,
+            durable_stage_boundary,
+            request_cancelled,
+        };
+        // One publisher per code shard at a time, across every retained
+        // runtime instance. The seat pass and the background reconcile both
+        // reach this path for the same sealed generation; the loser waits
+        // here (this runs inside spawn_blocking), then finds the verified
+        // head already advanced and takes the idempotent recovery arm inside
+        // the gated phase instead of racing the graph database into a
+        // Conflict. The wait and hold spans below are what future profiles
+        // key on to attribute gate contention.
+        let _publication = hotpath::measure_block!(
+            "daemon.session_registry.publish_snapshot.gate_wait",
+            self.publication_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        );
+        self.publish_prepared_sealed_generation(&prepared, &probe, &context)
+    }
+
+    /// The gate-held phase of one sealed publication: manifest-provider
+    /// binding, replay lookup, the journaled resume/recovery arms, pending
+    /// predecessor completion, and the final publish. The caller holds the
+    /// cross-instance per-shard publication gate across exactly this call, so
+    /// the `hotpath` label measures the gate's hold time and complements the
+    /// `gate_wait` span at the single call site.
+    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.gate_hold")]
+    fn publish_prepared_sealed_generation(
+        &self,
+        prepared: &PreparedSealedPublicationV1,
+        probe: &GraphPublicationProbeV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        // The loser of the gate may have waited out the winner's entire
+        // publication; a request cancelled or expired during that wait must
+        // answer its typed interruption before touching the publication
+        // authority.
+        match probe.interruption() {
+            Some(RuntimeInterruptionV1::Cancelled) => return Err(GraphDbError::Cancelled),
+            Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                return Err(GraphDbError::DeadlineExceeded);
+            }
+            None => {}
+        }
+        // Binding stays under the gate: it mutates the shared manifest
+        // provider, and the gate is what orders this write before the
+        // publish/recover reads that resolve sealed sources through it.
+        self.graph_manifest_provider.bind(
+            self.authority.binding().shard_id.clone(),
+            self.project_id.clone(),
+            self.repository_id.clone(),
+            self.generations_root.clone(),
+            self.replay_root.clone(),
+        )?;
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
+        let registration = || GraphDbRegistration {
+            authority_lease: Arc::clone(&authority_lease),
+            cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &prepared.request_cancelled,
+            ))),
+            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &self.lifecycle_cancelled,
+            ))),
+            deadline: prepared.deadline_at,
         };
         let verify_durable_source = || {
             let replay_pool_lock = lock_project_graph_replay_pool(
@@ -910,23 +993,11 @@ impl RetainedCodeGraphRuntimeV1 {
             .project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
-            &self.generation_id,
-            &source.projector_revision,
-        )
-        .map_err(map_code_graph_error)?;
-        let publication_key = GraphPublicationKeyV1::new(
-            relational_projection.clone(),
-            GraphGenerationIdV1::new(manifest.generation.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        );
         let publish = |storage: &mut dyn GraphPublicationStoreV1,
                        key: &GraphPublicationKeyV1,
                        manifest: Option<Arc<GraphGenerationManifest>>|
          -> std::result::Result<_, GraphDbError> {
-            let deadline_at = Instant::now() + projection_deadline;
+            let deadline_at = Instant::now() + prepared.projection_deadline;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
                 cancellation_id: RuntimeCancellationIdV1::new(format!(
                     "graph-publish-commit:{}",
@@ -943,7 +1014,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             };
             let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
-                AtomicGraphCancellationV1::new(Arc::clone(&request_cancelled)),
+                AtomicGraphCancellationV1::new(Arc::clone(&prepared.request_cancelled)),
             );
             let probe = GraphPublicationProbeV1 {
                 request_cancellation: Arc::clone(&request_cancellation),
@@ -977,7 +1048,7 @@ impl RetainedCodeGraphRuntimeV1 {
             // journaled by an interrupted publisher carries no in-hand
             // manifest, so publication reconstructs it from the journaled
             // canonical replay source.
-            if durable_stage_boundary {
+            if prepared.durable_stage_boundary {
                 self.graph_registry
                     .publish_verified_with_durable_stage_boundary(
                         registration,
@@ -992,22 +1063,29 @@ impl RetainedCodeGraphRuntimeV1 {
             }
         };
         match storage
-            .replay(&publication_key, &context)
+            .replay(&prepared.publication_key, context)
             .map_err(map_publication_error)?
         {
             GraphPublicationReplayLookupV1::Active(_) => {
                 let head = storage
-                    .verified_head(&relational_projection, &context)
+                    .verified_head(&prepared.relational_projection, context)
                     .map_err(map_publication_error)?;
                 if head
                     .as_ref()
-                    .is_some_and(|head| head.key == publication_key)
+                    .is_some_and(|head| head.key == prepared.publication_key)
                 {
+                    // The idempotent recovery arm: this publication already
+                    // owns the verified head (the gate loser after the winner
+                    // published, or a re-activation before replay retirement).
+                    // Recovery resolves against the mounted database's
+                    // retained verified-generation lease and never re-reads
+                    // the sealed source at this layer; re-proof depth is the
+                    // graph registry's own recovery contract.
                     return self.graph_registry.recover_verified_snapshot(
                         registration(),
                         &mut storage,
-                        &context,
-                        &relational_projection,
+                        context,
+                        &prepared.relational_projection,
                     );
                 }
                 let _replay_pool_lock = verify_durable_source()?;
@@ -1017,7 +1095,11 @@ impl RetainedCodeGraphRuntimeV1 {
                 let staged_bundle = self.stage_sealed_read_bundle(&manifest, &request_cancelled);
                 let publication = observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
-                    publish(&mut storage, &publication_key, Some(manifest)),
+                    publish(
+                        &mut storage,
+                        &prepared.publication_key,
+                        Some(Arc::clone(&prepared.manifest)),
+                    ),
                 )?;
                 self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
                 return Ok(publication.snapshot);
@@ -1033,20 +1115,20 @@ impl RetainedCodeGraphRuntimeV1 {
         let replay_pool_lock = verify_durable_source()?;
         let input = canonical_sha256(&(
             "tracedecay.code-graph-publication-input.v1",
-            &source,
-            &manifest.generation,
-            &manifest.source_generation,
-            &manifest.watermark,
+            &prepared.source,
+            &prepared.manifest.generation,
+            &prepared.manifest.source_generation,
+            &prepared.manifest.watermark,
         ))
         .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let build_replay = |prior: Option<GraphVerifiedHeadV1>| {
-            manifest.relational_sealed_replay(
+            prepared.manifest.relational_sealed_replay(
                 self.authority.binding().shard_id.clone(),
-                idempotency_key.clone(),
+                prepared.idempotency_key.clone(),
                 GraphPublicationInputDigestV1::new(input.as_str())
                     .map_err(|error| GraphDbError::invalid(error.to_string()))?,
                 prior,
-                source.clone(),
+                prepared.source.clone(),
                 &|| match probe.interruption() {
                     Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
                     Some(RuntimeInterruptionV1::DeadlineExceeded) => {
@@ -1057,7 +1139,7 @@ impl RetainedCodeGraphRuntimeV1 {
             )
         };
         let prior = storage
-            .verified_head(&relational_projection, &context)
+            .verified_head(&prepared.relational_projection, context)
             .map_err(map_publication_error)?;
         let mut replay = build_replay(prior)?;
         // The relational journal is an ordered log: a replay journaled by an
@@ -1075,7 +1157,7 @@ impl RetainedCodeGraphRuntimeV1 {
         let mut completed_predecessors = 0usize;
         loop {
             match storage
-                .append_replay(&replay, &context)
+                .append_replay(&replay, context)
                 .map_err(map_publication_error)?
             {
                 GraphReplayAppendOutcomeV1::Appended(_)
@@ -1094,7 +1176,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         publish(&mut storage, &pending.publication.key, None),
                     )?;
                     let prior = storage
-                        .verified_head(&relational_projection, &context)
+                        .verified_head(&prepared.relational_projection, context)
                         .map_err(map_publication_error)?;
                     replay = build_replay(prior)?;
                 }
@@ -1127,7 +1209,11 @@ impl RetainedCodeGraphRuntimeV1 {
         let staged_bundle = self.stage_sealed_read_bundle(&manifest, &request_cancelled);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
-            publish(&mut storage, &replay.key, Some(manifest)),
+            publish(
+                &mut storage,
+                &replay.key,
+                Some(Arc::clone(&prepared.manifest)),
+            ),
         )?;
         self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
         Ok(publication.snapshot)

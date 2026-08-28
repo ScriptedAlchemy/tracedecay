@@ -363,12 +363,20 @@ pub async fn compute_verified_health_delta(
 ) -> Result<HealthDeltaResult> {
     let scope = health_delta_scope(project_id, path_prefix)?;
     let pinned_before = if let Some(cursor) = before_cursor {
-        let stored = load_health_delta_point(db, &scope, cursor).await?;
+        let stored = hotpath::future!(
+            load_health_delta_point(db, &scope, cursor),
+            label = "usecases.graph.health_delta.load"
+        )
+        .await?;
         Some((stored, cursor.to_owned()))
     } else {
         None
     };
-    let snapshot = compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()).await?;
+    let snapshot = hotpath::future!(
+        compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()),
+        label = "usecases.graph.health_delta.snapshot"
+    )
+    .await?;
     let observed_at = health_delta_now();
     let dimensions = health_delta_dimensions(&snapshot);
     let watermark = health_delta_watermark(
@@ -387,7 +395,11 @@ pub async fn compute_verified_health_delta(
         function_denominator: snapshot.total_fns as u64,
         dimensions,
     };
-    let after_cursor = persist_health_delta_point(db, &scope, &after).await?;
+    let after_cursor = hotpath::future!(
+        persist_health_delta_point(db, &scope, &after),
+        label = "usecases.graph.health_delta.persist"
+    )
+    .await?;
     let (before, before_cursor) =
         pinned_before.unwrap_or_else(|| (after.clone(), after_cursor.clone()));
     let delta = i64::from(after.quality_signal) - i64::from(before.quality_signal);

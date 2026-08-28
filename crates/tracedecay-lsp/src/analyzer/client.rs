@@ -969,6 +969,9 @@ async fn wait_for_initialize(
     }
 }
 
+/// Send phase of one analyzer round-trip: JSON encoding plus the framed
+/// stdin write, including any backpressure wait, bounded by `timeout`.
+#[hotpath::measure(label = "lsp.analyzer.request_write")]
 async fn write_message_with_timeout(
     stdin: &mut FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
     value: Value,
@@ -1014,6 +1017,10 @@ fn cancel_request_message(request_id: u64) -> Value {
     })
 }
 
+/// Wait phase of one analyzer round-trip: the futures lane separates time
+/// suspended on analyzer stdout from poll (frame-decode) time, which a wall
+/// span alone cannot distinguish.
+#[hotpath::measure(label = "lsp.analyzer.response_wait", future = true)]
 async fn read_message_until(
     reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     deadline: tokio::time::Instant,
@@ -1027,6 +1034,7 @@ async fn read_message_until(
     }
 }
 
+#[hotpath::measure(label = "lsp.analyzer.response_parse")]
 fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
     serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
         message: format!("failed to parse LSP message: {e}"),

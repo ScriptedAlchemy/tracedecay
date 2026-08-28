@@ -327,6 +327,10 @@ async fn insert_canonical_node(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.session_temporal.publication.verify_replay"
+)]
 async fn exact_replay_receipt(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,

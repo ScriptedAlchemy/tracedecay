@@ -242,6 +242,9 @@ pub(super) fn read_optional_cap_file(
     }
 }
 
+/// Canonical durable-write primitive (temp write + fsync + rename + directory
+/// fsync) behind every inventory and staging-meta save.
+#[hotpath::measure(label = "semantic.artifact.atomic_write")]
 pub(super) fn atomic_write_cap_file(
     dir: &Dir,
     ambient_parent: &Path,
