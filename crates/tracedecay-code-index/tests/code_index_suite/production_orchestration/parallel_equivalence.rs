@@ -5,7 +5,7 @@ use tracedecay_code_index::{
     parallelism,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-        CodeIndexRepositoryParseIdentityV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     },
 };
 use tracedecay_domain::{
@@ -112,5 +112,81 @@ pub(super) fn assert_parallel_and_sequential_generations_are_byte_identical() {
     assert_eq!(
         canonical_sha256(&sequential).expect("sequential digest"),
         canonical_sha256(&parallel).expect("parallel digest"),
+    );
+}
+
+/// The row census a decoded generation exposes, so a width change that
+/// silently dropped, duplicated, or reordered restored rows cannot pass by
+/// re-encoding to the same length.
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedCensus {
+    generation_id: String,
+    state_digest: String,
+    chunks: usize,
+    symbols: usize,
+    imports: usize,
+    edges: usize,
+    edge_abstentions: usize,
+    lineage: usize,
+    snapshot_files: usize,
+}
+
+fn decode_at_width(width: usize, sealed: &[u8]) -> (Vec<u8>, DecodedCensus) {
+    parallelism::force_indexing_workers_for_test(width);
+    let generation =
+        CodeIndexPublishedGenerationV1::decode_sealed(sealed).expect("sealed generation decodes");
+    let census = DecodedCensus {
+        generation_id: generation.manifest().generation_id.as_str().to_owned(),
+        state_digest: generation
+            .projection()
+            .publication_digest()
+            .as_str()
+            .to_owned(),
+        chunks: generation.chunks().chunks().len(),
+        symbols: generation.symbols().symbols.len(),
+        imports: generation.imports().len(),
+        edges: generation.edges().len(),
+        edge_abstentions: generation.edge_abstentions().len(),
+        lineage: generation.lineage().len(),
+        snapshot_files: generation.snapshot().files.len(),
+    };
+    // Re-encoding is canonical, so identical re-encoded bytes prove the whole
+    // decoded state — every restored row, in order — is identical, not just
+    // the fields the census names.
+    let reencoded = generation.encode_sealed().expect("sealed re-encoding");
+    parallelism::clear_forced_indexing_workers_for_test();
+    (reencoded, census)
+}
+
+/// Width is sizing policy on the way in as well as on the way out. Restoring
+/// each file's exact-extraction authority fans out across the indexing pool,
+/// so a generation decoded with that sweep running inline must restore exactly
+/// the state a full-width decode restores — same rows, same order, same bytes.
+pub(super) fn assert_parallel_and_sequential_decodes_are_byte_identical() {
+    const FILES: usize = 64;
+
+    let sealed = sealed_bytes_at_width(1, FILES);
+
+    let (sequential_bytes, sequential_census) = decode_at_width(1, &sealed);
+    let (parallel_bytes, parallel_census) =
+        decode_at_width(parallelism::indexing_worker_target(64), &sealed);
+
+    assert_eq!(
+        sequential_census, parallel_census,
+        "decoded generation census changed with indexing width"
+    );
+    assert!(
+        sequential_bytes == parallel_bytes,
+        "re-encoded generation bytes changed with decode width"
+    );
+    // A width-1 decode must reproduce the exact bytes it was handed, so the
+    // sequential path is pinned to the seal itself and not merely to itself.
+    assert!(
+        sequential_bytes == sealed,
+        "width-1 decode did not round-trip the sealed bytes"
+    );
+    assert_eq!(
+        canonical_sha256(&sequential_bytes).expect("sequential digest"),
+        canonical_sha256(&parallel_bytes).expect("parallel digest"),
     );
 }

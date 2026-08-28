@@ -2510,3 +2510,12 @@ fn production_owner_never_activates_a_generation_after_projection_failure() {
 fn parallel_and_sequential_generations_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_generations_are_byte_identical();
 }
+
+/// Restoring a sealed generation fans each file's exact-extraction authority
+/// out across the indexing pool, so width must not change what comes back:
+/// a decode with that sweep inline and a decode at full machine width must
+/// restore the same rows in the same order, re-encoding to the same bytes.
+#[test]
+fn parallel_and_sequential_decodes_are_byte_identical() {
+    parallel_equivalence::assert_parallel_and_sequential_decodes_are_byte_identical();
+}
