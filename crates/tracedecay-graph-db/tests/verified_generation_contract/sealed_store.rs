@@ -225,9 +225,10 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
-/// Rows carrying Bytes properties seal in compact form and still read exactly.
+/// Rows carrying Bytes properties seal in replay form (the pinned engine's
+/// columnar Dict codec does not round-trip Bytes) and still read exactly.
 #[test]
-fn bytes_rows_seal_in_compact_form_and_read_exactly() {
+fn bytes_rows_seal_in_replay_form_and_read_exactly() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -259,8 +260,8 @@ fn bytes_rows_seal_in_compact_form_and_read_exactly() {
     let receipt = receipt_for_generation(temp.path(), "bytes-g1")
         .expect("seal must write the artifact receipt");
     assert!(
-        receipt.contains("\"form\": \"compact\""),
-        "Bytes rows must seal in compact form on the pinned engine: {receipt}"
+        receipt.contains("\"form\": \"replay\""),
+        "Bytes rows must seal in replay form on the pinned engine: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
     let entity = commit
