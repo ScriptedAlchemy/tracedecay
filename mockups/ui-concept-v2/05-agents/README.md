@@ -2,46 +2,34 @@
 
 ## Purpose
 
-Agent relationships through independent usage, tree, handoff, token, and failure authorities.
+Scalable parent/subagent delegation topology with independently sourced handoffs, tokens, work products, statuses, failures, and cross-page evidence.
 
 Route: `/agents`.
+
+## Authoritative final set
+
+The reviewed implementation reference is [final/README.md](final/README.md). Historical lookbook plates remain in this folder for provenance but are superseded.
 
 ## Production authorities
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/agents/AgentsPage.tsx` decodes `Analytics*PayloadV1Schema` from `/api/plugins/analytics`; `SubagentTree.tsx`, `AgentHandoffs.tsx`, `AgentHandoffTokens.tsx`, and `AgentFailureContext.tsx` own the named panels.
-- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and evidence-grade language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
+- `dashboard/src/workspaces/agents/AgentsPage.tsx` reads independently typed analytics projections; the subagent tree, handoff, handoff-token, and failure components own their respective evidence.
+- Sessions, Work, Code/Git, and Delivery remain the authorities for conversations, tasks/products, code changes, and PR outcomes.
 
 ## Canonical semantic-state matrix
 
-| Depicted semantic state or interaction | Current explainer | Entry condition |
+| Semantic state or interaction | Current explainer | Coverage |
 |---|---|---|
-| Usage ready | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Diagnostics stale | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Subagent tree ready | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Work graph ready | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Handoff tokens schema refusal | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Managed-agent counts | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Failure unavailable | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Failure failed | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Failure recovery | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| Failure timeout | [v3-authority-tree.md](v3-authority-tree.md) | Depicted by this selected still. |
-| A delegated handoff transition | No current plate | Required interaction/result is not depicted. |
+| Parent/subagent delegation topology | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Depicted by generation. |
+| Selected handoff and work product | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Depicted. |
+| Activity/category/tool window and capped coverage | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Depicted. |
+| Failure, partial, stale, refused, and unavailable authority states | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Product contract; selected partial failure is depicted. |
+| Sessions, Loom, Work, Code, and Delivery pivots | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Required drill-through contract. |
+| Hundred-plus-agent bundling, semantic zoom, and branch navigator | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Required scale contract; overview sample is smaller. |
+| Exact / explicit / inferred / ambiguous / stale / unavailable | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Required product contract. |
+| Keyboard, reduced motion, 200% zoom, dense data, exact fallback | [final/01-delegation-topology.md](final/01-delegation-topology.md) | Required acceptance gates. |
 
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
+## Historical provenance
 
-## Asset ledger
-
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-host-tree.png](v1-host-tree.png) | [v1-host-tree.md](v1-host-tree.md) | `superseded` | Earlier Agents lookbook iteration; replaced by canonical `v3-authority-tree`. |
-| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Earlier Agents lookbook iteration; replaced by canonical `v3-authority-tree`. |
-| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Earlier Agents lookbook iteration; replaced by canonical `v3-authority-tree`. |
-| [v3-authority-tree.png](v3-authority-tree.png) | [v3-authority-tree.md](v3-authority-tree.md) | `current` | Pre-Task-1 canonical selection for Agents. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v3; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

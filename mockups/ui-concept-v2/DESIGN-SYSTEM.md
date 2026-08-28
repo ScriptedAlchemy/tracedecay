@@ -95,6 +95,31 @@ purple gradients, uniformly glowing borders, and ambient particle theatre.
 - Reduced motion removes travel, breathing, entrance staging, scanlines, and
   zoom interpolation. Static heat and labels preserve the meaning.
 
+### Loaded-page playback language
+
+Playback is bounded by the events currently loaded into the client. Use
+`FOLLOW LOADED TAIL` for the mode that keeps the playback cursor on the newest
+event in that loaded page, and `RETURN TO LOADED TAIL` for the action that
+restores that position after paused inspection. `NOW` means the newest event
+in the loaded page. It is not a promise of a live connection, continuous
+streaming, complete history, or automatic arrival of newer events. Feed and
+pagination state must remain visible beside playback state.
+
+### Accessibility acceptance floor
+
+- Every pointer operation has a keyboard path with visible focus, logical
+  order, and no hover-only information. Dense visualizations provide a
+  keyboard-navigable exact list, tree, table, transcript, or diff fallback.
+- Color is never the sole carrier of identity, grade, status, selection,
+  activity, branch, or causality. Pair it with text, shape, line style,
+  pattern, or position.
+- Reduced motion preserves chronology, causality, selection, activity, and
+  evidence grade through static states; it never removes information.
+- At 200% browser zoom, primary navigation, labels, controls, evidence text,
+  inspectors, diffs, and feedback remain readable and operable. Regions
+  reflow, resize, collapse, or enter a dedicated focus mode rather than clip
+  essential content or force the canvas to scale text illegibly.
+
 ## Typed-state language
 
 Color supplements text and shape; it never carries state alone.
@@ -118,6 +143,40 @@ measured activity or degraded attention only when adjacent text and pattern
 name which meaning applies. Violet is restricted, red is refused/failed, and
 gray dashed is disconnected or unknown. The same meanings bind the rail,
 aperture, inspector, and bottom strip.
+
+## Evidence-grade ladder
+
+Every causal link, attribution, identity, count, finding, and status shown in
+a concept or shipping surface uses exactly one of these evidence grades. Grade
+is an ordered description of the support available for the displayed claim;
+it is not a confidence percentage.
+
+| Grade | Meaning | Required treatment |
+|---|---|---|
+| `EXACT` | A direct source fact or stable identity read from its owning authority. | Name and link the exact source record; use a solid relation. |
+| `EXPLICIT` | A persisted user or agent claim, rationale, assumption, or decision artifact. | Attribute the speaker/artifact and time; present it as a claim or decision, not automatically as repository truth. |
+| `INFERRED` | A relation derived by correlation rather than stated by a source authority. | Name the correlation basis and use an inferred/dashed relation without decimal confidence theatre. |
+| `AMBIGUOUS` | Multiple plausible source records, identities, or causal candidates remain. | Preserve the candidates and the unresolved choice; never select one silently. |
+| `STALE` | A source exists, but its declared freshness window has elapsed. | Show the source timestamp and freshness boundary; do not silently substitute cached state for current state. |
+| `UNAVAILABLE` | Evidence is missing, denied, private, not ingested, or otherwise inaccessible. | Name the reason when known and leave an honest gap; never reconstruct private reasoning or fabricate a source. |
+
+`EXACT` and `EXPLICIT` distinguish direct authoritative facts from persisted
+claims. A commit identity can be `EXACT` while rationale written in its commit
+message is `EXPLICIT`. `INFERRED` never becomes `EXACT` through visual polish.
+`AMBIGUOUS`, `STALE`, and `UNAVAILABLE` remain visible states until new source
+evidence changes the grade.
+
+Source classes are orthogonal metadata, not competing grades. Labels such as
+`RETAINED`, `OBSERVED`, `PR BODY`, `COMMIT`, `TRANSCRIPT`, and `CHECK RESULT`
+say where or how evidence was persisted or observed. They must appear beside a
+grade when useful, but they never replace one. For example, a repository-read
+commit SHA may be `COMMIT / EXACT`; rationale in the same message is
+`COMMIT / EXPLICIT`; a linkage from a transcript episode to that commit may be
+`TRANSCRIPT + COMMIT / INFERRED`; a missing provider transcript is
+`TRANSCRIPT / UNAVAILABLE`.
+
+All grades remain legible without color, under reduced motion, from the
+keyboard-accessible fallback, and at 200% browser zoom.
 
 ## Prompt floor
 

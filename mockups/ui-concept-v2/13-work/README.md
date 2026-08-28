@@ -2,49 +2,47 @@
 
 ## Purpose
 
-Six cameras over one immutable product-graph version; unavailable cameras stay unserved.
+Work is the dependency-aware planning and admission surface: users inspect one
+immutable task graph revision through a Kanban board or causal camera,
+understand readiness and placement, admit work through typed production
+commands, and compare the plan with observed attempts and outcomes.
 
 Route: `/work`.
+
+## Authoritative final set
+
+[`final/README.md`](final/README.md) is the implementation authority for the
+reviewed Work state set. Its selected-task DAG plate and same-stem brief define
+the current product, evidence, interaction, scale, and accessibility contract.
+
+Historical plates below are retained for design provenance only. None is a
+current implementation reference.
 
 ## Production authorities
 
 - [NAVIGATION.md](../NAVIGATION.md) owns shell, route, scope behavior, and persistent regions.
-- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual/typed-state language; [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage.
-- At `975a0acb`, `dashboard/src/workspaces/work/WorkPage.tsx` uses `useWorkGraphViews`, `useWorkAttempts`, and `useWorkTopology`; `dashboard/src/workspaces/work/views/WorkProjectionSwitcher.tsx`, `WorkBoard.tsx`, and `workViewsModel.ts` bind projections to one graph read.
-- The concept plate remains synthetic; these source paths identify the production authority, not a claim that the pictured fixture data is live.
+- [DESIGN-SYSTEM.md](../DESIGN-SYSTEM.md) owns visual and evidence language;
+  [INTERACTION-STATES.md](../INTERACTION-STATES.md) owns required coverage;
+  [IMPLEMENTATION.md](../IMPLEMENTATION.md) owns the browser/scene boundary.
+- `dashboard/src/workspaces/work/WorkPage.tsx` uses `useWorkGraphViews`,
+  `useWorkAttempts`, and `useWorkTopology`; `WorkProjectionSwitcher.tsx`,
+  `WorkBoard.tsx`, and `workViewsModel.ts` bind projections to one graph read.
+- The final plate remains concept/synthetic. These source paths identify
+  production authorities, not proof that the pictured data or controls are live.
 
 ## Canonical semantic-state matrix
 
-| Depicted semantic state or interaction | Current explainer | Entry condition |
+| Semantic state or interaction | Authoritative brief | Entry condition |
 |---|---|---|
-| Board selected | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Immutable graph revision | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Ready task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Blocked task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Unavailable task | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Measured empty | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| DAG unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Timeline unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Causal unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Workload unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| Topology unavailable | [v4-six-cameras.md](v4-six-cameras.md) | Depicted by this selected still. |
-| A projection switch result | No current plate | Required interaction/result is not depicted. |
-| A task-selection result | No current plate | Required interaction/result is not depicted. |
+| Board/DAG projection | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Open Work after an immutable graph revision is served. |
+| Selected task and dependency neighborhood | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Select a stable task identity from graph or exact table. |
+| Ready, blocked, admitted, pending, stale, or unavailable task | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Render the typed state from Work authority. |
+| Admission and relation replan | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Daemon serves a prepared command and permission result. |
+| Placement | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Placement authority serves candidate, selected, refused, or unavailable state. |
+| Planned versus observed work | [final/01-task-dag-board.md](final/01-task-dag-board.md) | Attempt/session/agent/code evidence correlates to a task or remains unmatched. |
+| Outcome drill-through | [final/01-task-dag-board.md](final/01-task-dag-board.md) | An exact or graded link exists to tests, review, or Delivery. |
+| Projection unavailable | [final/README.md](final/README.md) | A camera authority does not serve the selected revision. |
 
-“Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
+## Historical provenance
 
-## Asset ledger
-
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-nine-routes.png](v1-nine-routes.png) | [v1-nine-routes.md](v1-nine-routes.md) | `superseded` | Earlier Work lookbook iteration; replaced by canonical `v4-six-cameras`. |
-| [v2-six-cameras.png](v2-six-cameras.png) | [v2-six-cameras.md](v2-six-cameras.md) | `superseded` | Earlier Work lookbook iteration; replaced by canonical `v4-six-cameras`. |
-| [v3-hud-pass-dark.png](v3-hud-pass-dark.png) | [v3-hud-pass-dark.md](v3-hud-pass-dark.md) | `superseded` | Earlier Work lookbook iteration; replaced by canonical `v4-six-cameras`. |
-| [v3-hud-pass-light.png](v3-hud-pass-light.png) | [v3-hud-pass-light.md](v3-hud-pass-light.md) | `superseded` | Earlier Work lookbook iteration; replaced by canonical `v4-six-cameras`. |
-| [v4-six-cameras.png](v4-six-cameras.png) | [v4-six-cameras.md](v4-six-cameras.md) | `current` | Pre-Task-1 canonical selection for Work. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v4; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

@@ -1,10 +1,12 @@
 ---
 design_status: current
-evidence_class: recovered_session_and_repository_evidence
+evidence_class: real_evidence_reconstruction
 source_html: 10-decision-to-code-pr743-source.html
 ---
 
 # PR #743 Decision to Code
+
+Rendered plate: [10-decision-to-code-pr743.png](10-decision-to-code-pr743.png). Deterministic review source: [10-decision-to-code-pr743-source.html](10-decision-to-code-pr743-source.html).
 
 ## User job
 
@@ -40,3 +42,10 @@ The observed profile run exercised only `head_bench_available=false`; no timing 
 - Journey and evidence panes are resizable/collapsible; the central diff can claim the entire workspace.
 - Keyboard order, 200% zoom, reduced motion, text/table fallbacks, and non-color source labels are required implementation acceptance criteria.
 - The checked-in HTML is an isolated concept source used to render the deterministic plate. It is not a production UI or runtime integration.
+
+## Production authorities
+
+- The recovered Claude transcript owns persisted user messages, assistant summaries, subagent reports, timestamps, and transcript availability; private provider reasoning remains unavailable.
+- Local Git and the exact repository diff own the two workflow files, line changes, commit identities, merge identity, and the #707 mirror.
+- GitHub PR/check evidence owns opened/merged times, check outcomes, artifacts, and review findings; provider actions remain read-only.
+- The Decision-to-Code reconstruction links these source classes chronologically while preserving exact facts, explicit persisted rationale, inferred relations, ambiguous attribution, and unavailable evidence. It is a best-available reconstruction, never a hidden thought trace.

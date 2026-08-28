@@ -17,31 +17,18 @@ Route: `/observatory`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Doctor findings | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Doctor partial/stale | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Observed/omitted/unavailable families | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Budget under/over/unmeasured | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Hook coverage partial | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Store measured | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Store unavailable | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
-| Registry/stream/pulse matrix | [v4-overview-honest.md](v4-overview-honest.md) | Depicted by this selected still. |
+| Doctor findings | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Open `/observatory`; select a Doctor finding to bind the inspector. |
+| Doctor partial/stale | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | A Doctor source reports incomplete coverage or an expired observation time. |
+| Measured/partial/stale/denied/unavailable sources | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Each daemon, store, provider, index, and runtime source reports its own typed state. |
+| Budget under/over/unmeasured | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | A named performance budget and comparison are served, or measurement is absent. |
+| Hook coverage partial | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Hook evidence supplies a covered/total boundary and rejected-argument categories. |
+| Store measured or unavailable | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Storage telemetry responds with measurements or a typed failure. |
+| Code-index stage progress | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | The index freshness/progress authority reports per-stage status. |
+| Timeline-range filtering and finding inspection | [final/01-system-evidence-overview.md](final/01-system-evidence-overview.md) | Select a canonical observation/range or finding while preserving project scope. |
 | A refetch or recovery result | No current plate | Required interaction/result is not depicted. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v0-radial-first.png](v0-radial-first.png) | [v0-radial-first.md](v0-radial-first.md) | `superseded` | Earlier Observatory lookbook iteration; replaced by canonical `v4-overview-honest`. |
-| [v1-radial.png](v1-radial.png) | [v1-radial.md](v1-radial.md) | `superseded` | Earlier Observatory lookbook iteration; replaced by canonical `v4-overview-honest`. |
-| [v2-overview-stack.png](v2-overview-stack.png) | [v2-overview-stack.md](v2-overview-stack.md) | `superseded` | Earlier Observatory lookbook iteration; replaced by canonical `v4-overview-honest`. |
-| [v3-hud-pass-dark.png](v3-hud-pass-dark.png) | [v3-hud-pass-dark.md](v3-hud-pass-dark.md) | `superseded` | Earlier Observatory lookbook iteration; replaced by canonical `v4-overview-honest`. |
-| [v3-hud-pass-light.png](v3-hud-pass-light.png) | [v3-hud-pass-light.md](v3-hud-pass-light.md) | `superseded` | Earlier Observatory lookbook iteration; replaced by canonical `v4-overview-honest`. |
-| [v4-overview-honest.png](v4-overview-honest.png) | [v4-overview-honest.md](v4-overview-honest.md) | `current` | Pre-Task-1 canonical selection for Observatory. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v4; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

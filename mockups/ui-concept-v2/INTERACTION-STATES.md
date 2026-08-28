@@ -11,6 +11,14 @@ Hover inspects; click scopes or selects only where a production path exists;
 only real admitted activity blooms. Missing, served empty, partial, stale,
 offline, denied, and unavailable remain visibly distinct.
 
+Every state also applies the canonical evidence-grade ladder from
+`DESIGN-SYSTEM.md`: `EXACT`, `EXPLICIT`, `INFERRED`, `AMBIGUOUS`, `STALE`, or
+`UNAVAILABLE`. Source classes—including `RETAINED`, `OBSERVED`, `PR BODY`,
+`COMMIT`, `TRANSCRIPT`, and `CHECK RESULT`—identify provenance and do not
+replace the grade. State sets must remain fully operable by keyboard, retain
+non-color encodings and exact text/table/transcript fallbacks, preserve meaning
+under reduced motion, and reflow or provide focus modes at 200% browser zoom.
+
 ## Priority sequences
 
 ### Brain
@@ -41,7 +49,9 @@ offline, denied, and unavailable remain visibly distinct.
 4. Thread chain: canonical transcript/summary plus provider-qualified commits,
    edited files, and branch/worktree spans with separate source coverage.
 5. Replay: loaded LCM page only; paused initially; previous/next, range seek,
-   0.5-4x presentation speed, follow loaded tail, return to latest.
+   0.5-4x presentation speed, `FOLLOW LOADED TAIL`, and
+   `RETURN TO LOADED TAIL`. `NOW` labels the newest event in the loaded page;
+   it does not promise streaming or complete history.
 6. Honest states: loading, served empty, undated partial, stale, offline, store
    unavailable, source partial/unavailable, chain unavailable, linked-boundary
    partial.
@@ -58,7 +68,7 @@ offline, denied, and unavailable remain visibly distinct.
   `dashboard/src/workspaces/loom/WeaveCanvas.tsx` and
   `dashboard/src/workspaces/loom/WeaveCanvas.dom.test.tsx`.
 - Loom loaded-page replay, pause/play, previous/next, seek, 0.5-4x presentation
-  speed, follow-loaded-tail, and return-to-latest:
+  speed, follow-loaded-tail, and return-to-loaded-tail:
   `dashboard/src/workspaces/loom/ThreadPlayback.tsx`,
   `dashboard/src/workspaces/loom/playback.ts`,
   `dashboard/src/workspaces/loom/playback.test.ts`, and

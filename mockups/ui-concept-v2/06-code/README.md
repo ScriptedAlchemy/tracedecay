@@ -1,8 +1,10 @@
 # Code concept plates
 
+**Authoritative final set:** [final/README.md](final/README.md)
+
 ## Purpose
 
-CORTEX, TRACE, and CORE with named graph, symbol, freshness, and diagnostic boundaries.
+Cortex, Trace, and Core semantic lenses with symbol, file, call, impact, test, freshness, and diagnostic drill-through to exact evidence.
 
 Route: `/code`.
 
@@ -17,33 +19,15 @@ Route: `/code`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Trace lens selected | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Direct-lens graph | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Selected-symbol evidence | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Served strata | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Fresh branch/index | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Build progress | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Diagnostics warming | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Diagnostics stale | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Unavailable generation | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Diagnostics ready | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Registry/stream state matrix | [v3-lenses.md](v3-lenses.md) | Depicted by this selected still. |
-| Loaded Cortex content | No current plate | Required interaction/result is not depicted. |
-| Loaded Core content | No current plate | Required interaction/result is not depicted. |
+| Loaded Cortex topology | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Open `/code` with a served graph overview. |
+| Search and selected symbol | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Search or select a graph/table result. |
+| Callers and callees | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Inspect the selected symbol's explicit relationships. |
+| File, source, impact, and tests | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Drill from selection into exact evidence modes. |
+| Fresh, stale, warming, partial, unavailable diagnostics | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Read each independent authority state. |
+| Loaded Trace or Core lens | No current plate | Required interaction/result is specified but not pictured as a separate still. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-cortex.png](v1-cortex.png) | [v1-cortex.md](v1-cortex.md) | `superseded` | Earlier Code lookbook iteration; replaced by canonical `v3-lenses`. |
-| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Earlier Code lookbook iteration; replaced by canonical `v3-lenses`. |
-| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Earlier Code lookbook iteration; replaced by canonical `v3-lenses`. |
-| [v3-lenses.png](v3-lenses.png) | [v3-lenses.md](v3-lenses.md) | `current` | Pre-Task-1 canonical selection for Code. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v3; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

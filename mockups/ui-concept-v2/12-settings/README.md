@@ -17,31 +17,17 @@ Route: `/settings`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Effective values | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Writable rows | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| System-locked rows | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Multi-root advertised/no query | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Remote Brain reachable | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Registry loading | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Stream partial | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Multi-root stale | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| Remote Brain state matrix | [v4-effective-only.md](v4-effective-only.md) | Depicted by this selected still. |
-| A filter, review, or CAS result | No current plate | Required interaction/result is not depicted. |
+| Effective values and layer provenance | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Open `/settings`; the effective projection returns each key and any served source layer/origin. |
+| Writable, locked, denied, or unavailable rows | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | The write authority reports capability for the exact key and target layer. |
+| Proposed edit and validation | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Edit a writable value; schema validation returns a typed result before apply. |
+| Compare-and-swap review and conflict | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Review against the current config revision; reject a changed revision as conflict. |
+| Apply requirement | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | A successful persisted change reports immediate, restart, reindex, reconnect, or next-run adoption. |
+| Multi-root operational state | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Multi-root authority reports configured, unconfigured, stale, denied, or unavailable roots. |
+| Remote Brain operational state | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Remote authority reports connected, idle, unavailable, unconfigured, denied, or stale. |
+| Search/filter and exact fallback | [final/01-effective-configuration-review.md](final/01-effective-configuration-review.md) | Search by key/value/source or switch to the accessible configuration table. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-layer-cake.png](v1-layer-cake.png) | [v1-layer-cake.md](v1-layer-cake.md) | `superseded` | Earlier Settings lookbook iteration; replaced by canonical `v4-effective-only`. |
-| [v2-effective-values.png](v2-effective-values.png) | [v2-effective-values.md](v2-effective-values.md) | `superseded` | Earlier Settings lookbook iteration; replaced by canonical `v4-effective-only`. |
-| [v3-hud-pass-dark.png](v3-hud-pass-dark.png) | [v3-hud-pass-dark.md](v3-hud-pass-dark.md) | `superseded` | Earlier Settings lookbook iteration; replaced by canonical `v4-effective-only`. |
-| [v3-hud-pass-light.png](v3-hud-pass-light.png) | [v3-hud-pass-light.md](v3-hud-pass-light.md) | `superseded` | Earlier Settings lookbook iteration; replaced by canonical `v4-effective-only`. |
-| [v4-effective-only.png](v4-effective-only.png) | [v4-effective-only.md](v4-effective-only.md) | `current` | Pre-Task-1 canonical selection for Settings. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v4; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

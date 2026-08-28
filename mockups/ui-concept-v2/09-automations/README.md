@@ -1,8 +1,10 @@
 # Automations concept plates
 
+**Authoritative final set:** [final/README.md](final/README.md)
+
 ## Purpose
 
-Scheduler ledger and run evidence without an invented approvals surface.
+Scheduler, managed jobs, permissions, skips, retries, runs, receipts, and artifact integrity without fake execution controls.
 
 Route: `/automations`.
 
@@ -17,31 +19,16 @@ Route: `/automations`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Scheduler paused/configured | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Write-scope lock | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Scheduler unavailable retry | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Due and skip readings | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Malformed job error | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Managed skills active/disabled | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Receipt applied/quarantined | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Run outcomes and write denial | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Artifact integrity failed | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
-| Authority/state key | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | Depicted by this selected still. |
+| Scheduler configured/running/paused/unavailable | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Read configuration and observed runtime authorities separately. |
+| Due, overdue, running, skipped, partial, failed | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Inspect named job and ledger windows. |
+| Managed jobs, skills, and permissions | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Select a job or run. |
+| Attempts, retries, and concurrency lineage | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Expand the selected run lineage. |
+| Receipts, artifacts, and integrity | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Inspect exact run evidence. |
+| Denied, malformed, stale, disconnected, unavailable | [final/01-scheduler-run-ledger.md](final/01-scheduler-run-ledger.md) | Read each independent authority state. |
 | A pause or resume mutation | No current plate | Required interaction/result is not depicted. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-cron-strip.png](v1-cron-strip.png) | [v1-cron-strip.md](v1-cron-strip.md) | `superseded` | Earlier Automations lookbook iteration; replaced by canonical `v3-scheduler-ledger`. |
-| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Earlier Automations lookbook iteration; replaced by canonical `v3-scheduler-ledger`. |
-| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Earlier Automations lookbook iteration; replaced by canonical `v3-scheduler-ledger`. |
-| [v3-scheduler-ledger.png](v3-scheduler-ledger.png) | [v3-scheduler-ledger.md](v3-scheduler-ledger.md) | `current` | Pre-Task-1 canonical selection for Automations. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v3; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

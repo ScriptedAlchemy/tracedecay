@@ -1,8 +1,10 @@
 # Knowledge concept plates
 
+**Authoritative final set:** [final/README.md](final/README.md)
+
 ## Purpose
 
-Independent Facts, Geometry, Curation, and Oplog cameras without invented geometry or trust.
+Independent Facts, Geometry, Curation, and Oplog cameras for source, redaction, trust, recency, and durable fact history without invented memory.
 
 Route: `/knowledge`.
 
@@ -17,32 +19,16 @@ Route: `/knowledge`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Facts admitted/disputed/withheld | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Geometry unavailable | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Method not PCA | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Curation partial | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Curation pending/applied/rejected | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Oplog loading | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Oplog partial | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Oplog stale | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Oplog unavailable | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
-| Registry/stream state matrix | [v4-four-cameras.md](v4-four-cameras.md) | Depicted by this selected still. |
+| Facts ledger and constellation | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | Open `/knowledge` with served fact overview authority. |
+| Selected fact content and provenance | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | Select a fact row or constellation node. |
+| Trust history and recency | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | Inspect the selected fact's sourced observation history. |
+| Redacted, withheld, disputed, stale, or unavailable | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | Read the fact and camera authorities independently. |
+| Geometry unavailable | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | No supported projection is served. |
+| Curation and Oplog cameras | [final/01-fact-provenance-cameras.md](final/01-fact-provenance-cameras.md) | Switch camera; behavior is specified by the final brief. |
 | A completed curation mutation | No current plate | Required interaction/result is not depicted. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-single-view.png](v1-single-view.png) | [v1-single-view.md](v1-single-view.md) | `superseded` | Earlier Knowledge lookbook iteration; replaced by canonical `v4-four-cameras`. |
-| [v2-four-cameras.png](v2-four-cameras.png) | [v2-four-cameras.md](v2-four-cameras.md) | `superseded` | Earlier Knowledge lookbook iteration; replaced by canonical `v4-four-cameras`. |
-| [v3-hud-pass-dark.png](v3-hud-pass-dark.png) | [v3-hud-pass-dark.md](v3-hud-pass-dark.md) | `superseded` | Earlier Knowledge lookbook iteration; replaced by canonical `v4-four-cameras`. |
-| [v3-hud-pass-light.png](v3-hud-pass-light.png) | [v3-hud-pass-light.md](v3-hud-pass-light.md) | `superseded` | Earlier Knowledge lookbook iteration; replaced by canonical `v4-four-cameras`. |
-| [v4-four-cameras.png](v4-four-cameras.png) | [v4-four-cameras.md](v4-four-cameras.md) | `current` | Pre-Task-1 canonical selection for Knowledge. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v4; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.

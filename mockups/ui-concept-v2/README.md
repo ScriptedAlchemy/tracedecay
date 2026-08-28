@@ -4,8 +4,10 @@ Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
 dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
 attention, cyan signal, and measured fields—without copying Marvel marks.
 
-These are synthetic lookbook stills, not runtime evidence or visual-audit
-goldens. Do not use them as `dashboard/audit-baselines/`.
+These are implementation-facing concept plates, not runtime receipts or
+visual-audit goldens. Sample data is synthetic unless a same-stem brief names a
+reviewed real-evidence packet and binds each visible claim to its exact source.
+Do not use these images as `dashboard/audit-baselines/`.
 
 ## Shared authorities
 
@@ -15,10 +17,19 @@ goldens. Do not use them as `dashboard/audit-baselines/`.
   order, routes, and persistent shell behavior.
 - [INTERACTION-STATES.md](INTERACTION-STATES.md) owns the semantic-state and
   interaction coverage expected for each workspace.
-- Each `<NN>-<workspace>/README.md` owns that workspace's explicit semantic-
-  state manifest and asset history.
-- Each PNG's exact same-stem Markdown file owns that plate's intent, entry
-  condition, visible state, interactions, truth boundary, and history.
+- [IMPLEMENTATION.md](IMPLEMENTATION.md) owns the hybrid React/DOM and shared
+  scene architecture, deterministic layout, density strategy, exact fallbacks,
+  and renderer proof-of-capability decision.
+- [CLEANUP.md](CLEANUP.md) records the exact retained authority and removed
+  superseded/rejected concept-only assets.
+- [GALLERY.md](GALLERY.md) renders every authoritative final plate in one
+  reviewable sequence.
+- Each `<NN>-<workspace>/final/README.md` is that workspace's authoritative
+  final state manifest and shared product/interaction contract.
+- Each final PNG's exact same-stem Markdown file owns that state's user job,
+  behavior, evidence boundary, acceptance gates, and production authorities.
+- Each `<NN>-<workspace>/README.md` routes to the final manifest and names the
+  workspace's production authorities.
 
 The more specific authority may add workspace detail but may not contradict a
 shared authority. When a proposed plate exposes behavior the shipping product
@@ -27,47 +38,51 @@ cannot supply the missing integration.
 
 ## Layout and lifecycle
 
-Keep every asset in its numbered workspace folder:
+Keep every asset in its numbered workspace folder. Reviewed implementation
+references live only in `final/`; rejected and superseded studies are removed
+from the branch tip after replacement acceptance and remain recoverable in Git
+history:
 
 ```text
 mockups/ui-concept-v2/
   <NN>-<workspace>/
     README.md
-    <image-stem>.png
-    <image-stem>.md
+    final/
+      README.md
+      <state-stem>.png
+      <state-stem>.md
 ```
 
-Version prefixes record iteration order only. They do not declare an asset
-current, make a later asset preferable, or supersede an earlier semantic state.
-Do not flatten plates into the root, create a parallel `drafts/` tree, overwrite
-an older image, or add Git symlinks.
+`final/README.md` is the only authoritative state manifest. Do not flatten
+plates into the root, overwrite an accepted image without its brief and
+manifest update, or add Git symlinks.
 
-Every screen README declares status explicitly in two coordinated sections:
+Each workspace's `final/README.md` lists every approved state, image, same-stem
+product brief, and review status. [CLEANUP.md](CLEANUP.md) is the branch-tip
+deletion receipt for superseded and rejected studies.
 
-1. **Canonical semantic-state matrix:** one row per required semantic state,
-   linking the current same-stem explainer and naming its entry condition.
-2. **Asset ledger:** every PNG in the folder exactly once, with an explicit
-   `current`, `superseded`, or `rejected` lifecycle and a short reason.
-
-An image is eligible for `current` only after both its PNG and exact same-stem
-explainer exist. A state can retain its current plate while a later-numbered
-experiment is rejected, and one workspace can have several current plates when
-they represent different semantic states.
+A final image is eligible for `current` only after its PNG, exact same-stem
+brief, and `final/README.md` manifest entry exist and the plate has been
+visually reviewed. One workspace may have several final plates when each
+represents a distinct semantic or interaction state.
 
 ## Contribution rules
 
 1. Start from the shared prompt floor and the workspace coverage in
    `INTERACTION-STATES.md`. Preserve the normalized shell and route order.
-2. Add the PNG and `<image-stem>.md` together. The explainer must record intent,
-   entry condition, visible state, supported interactions, production truth
-   boundary, synthetic-data disclosure, and lifecycle history.
-3. Update the screen README in the same change. Link the new explainer from the
-   canonical matrix only if it is the chosen plate for that semantic state, and
-   add the PNG exactly once to the asset ledger.
+2. Add the final PNG and `<state-stem>.md` together. The brief must record user
+   job, product behavior, interaction and evidence contract, production truth
+   boundary, acceptance gates, and named authorities.
+3. Update `final/README.md` and the parent README in the same change. A final
+   state must appear exactly once in the final manifest.
 4. When replacing a state, mark the prior asset `superseded`; when an image
    invents behavior or fails the visual brief, mark it `rejected` and say why.
-   Never derive either result from its filename or version number.
-5. Use synthetic data only and visibly stamp every final plate
-   `CONCEPT / SYNTHETIC`. Never use production, customer, operator, repository,
-   session, or event data. Do not claim counts, topology, freshness, health,
-   controls, or success that no named production authority supplies.
+   After the replacement is accepted, remove the rejected/superseded pair from
+   the branch tip and update `CLEANUP.md`. Never derive lifecycle from a
+   filename or version number.
+5. Visibly stamp synthetic plates `CONCEPT / SYNTHETIC DATA`. A reviewed real-
+   evidence plate must label its evidence packet and source classes; never use
+   unreviewed customer/operator data or claim counts, topology, freshness,
+   health, controls, or success that no named production authority supplies.
+6. Every final state includes keyboard, reduced-motion, 200%-zoom/reflow,
+   dense-real-data, and exact text/table/transcript fallback gates.

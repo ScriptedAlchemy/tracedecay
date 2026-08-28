@@ -17,26 +17,16 @@ Route: `/costs`.
 
 | Depicted semantic state or interaction | Current explainer | Entry condition |
 |---|---|---|
-| Priced provider spend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
-| Unpriced/null spend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
-| Absent provider values | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
-| Count-only saved tokens | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
-| Loading/partial/stale/unavailable/denied/measured-empty legend | [v3-provider-spend.md](v3-provider-spend.md) | Depicted by this selected still. |
+| Priced provider spend | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | Canonical usage joins an applicable provider/model price for the selected UTC range. |
+| Unpriced, null/unknown, or unavailable pricing | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | Usage exists but no canonical applicable price, value, or pricing source is available. |
+| Project/model/session attribution | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | Select a provider, project, model, session, or topology row. |
+| Count-only saved tokens | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | Avoided usage can be counted but cannot be priced on a common canonical basis. |
+| Budget status and coverage | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | A budget is configured and spend coverage for its scope is known or explicitly partial. |
+| Loading/partial/stale/unavailable/denied/measured-empty | [final/01-provider-spend-attribution.md](final/01-provider-spend-attribution.md) | Usage, pricing, budget, or attribution authority reports its independent typed state. |
 | A time-range change result | No current plate | Required interaction/result is not depicted. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 
-## Asset ledger
+## Historical provenance
 
-Every existing PNG is indexed exactly once. Lifecycle is explicit and never inferred from filename version order.
-
-| PNG | Explainer | Lifecycle | Decision |
-|---|---|---|---|
-| [v1-provider-burn.png](v1-provider-burn.png) | [v1-provider-burn.md](v1-provider-burn.md) | `superseded` | Earlier Costs lookbook iteration; replaced by canonical `v3-provider-spend`. |
-| [v2-hud-pass-dark.png](v2-hud-pass-dark.png) | [v2-hud-pass-dark.md](v2-hud-pass-dark.md) | `superseded` | Earlier Costs lookbook iteration; replaced by canonical `v3-provider-spend`. |
-| [v2-hud-pass-light.png](v2-hud-pass-light.png) | [v2-hud-pass-light.md](v2-hud-pass-light.md) | `superseded` | Earlier Costs lookbook iteration; replaced by canonical `v3-provider-spend`. |
-| [v3-provider-spend.png](v3-provider-spend.png) | [v3-provider-spend.md](v3-provider-spend.md) | `current` | Pre-Task-1 canonical selection for Costs. |
-
-## Historical decisions
-
-The pre-Task-1 canonical table selects v3; previous studies are superseded.
+Superseded and rejected lookbook iterations were removed from the branch tip after the reviewed `final/` set became authoritative. Git history through `e9a30ad1d` remains the recovery source for those assets and sidecars.
