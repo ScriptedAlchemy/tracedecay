@@ -2138,10 +2138,19 @@ mod recent_first_discovery_tests {
 
         let mut frontier = CodexDiscoveryFrontier::initial();
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        // Reaching the watermark is a long-lived scheduler's job, so this
+        // setup drives the retained traversal the scheduler uses. The
+        // standalone helper documents that it does not converge past one pass:
+        // its cursor lives in `CodexDiscoveryState`, not in the durable
+        // frontier. The restart the test is actually about is still a fresh
+        // `CodexSource` with fresh state below, reading only the persisted
+        // admission offsets.
+        let mut state = CodexDiscoveryState::default();
         for _pass in 0..64 {
             let pass = source
-                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .discover_transcript_paths_with_state(bounds, frontier, &mut state)
                 .unwrap();
+            state.acknowledge();
             covered.extend(pass.report.paths.iter().cloned());
             persist_codex_history_frontier(&admission, &scope, frontier, pass.next_frontier)
                 .await

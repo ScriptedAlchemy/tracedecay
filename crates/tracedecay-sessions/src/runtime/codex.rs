@@ -110,11 +110,32 @@ const MAX_SCAN_DEPTH: u8 = 6;
 /// Bound on enumerated transcript directories (a decade of daily Codex
 /// directories is ~3700; this cap only guards against pathological trees).
 const MAX_BUCKET_DIRS: usize = 8192;
+/// Per-pass entry budget for the structural (bucket-shaping) walk.
+///
+/// The structural walk retains directories, not candidates, so bounding it by
+/// the candidate-retention budget (`max_files`) starves it: a dated
+/// `sessions/YYYY/MM/DD` tree spends the whole pass learning its own shape and
+/// the pass then reports truncation with nothing retained, even for a corpus
+/// far under the cap. Bound it by the directory budget it actually enforces so
+/// a tree that fits under [`MAX_BUCKET_DIRS`] is shaped in one pass and the
+/// retention budget is spent on candidates.
+const MAX_STRUCTURAL_ENTRIES_PER_PASS: usize = MAX_BUCKET_DIRS;
 /// Unchanged idle probes use cheap retained identities on every scheduler
 /// tick. A full emit-suppressed sweep is intentionally much less frequent so
 /// old-file rewrites are eventually detected without continuously rereading
 /// the entire corpus while idle.
 const IDLE_FULL_VALIDATION_CYCLES: u16 = 256;
+/// Retained directories revalidated on *every* idle poll, ahead of the
+/// round-robin rotation.
+///
+/// Creating or removing a transcript changes exactly one directory identity —
+/// its parent. A uniform rotation over the whole retained authority therefore
+/// hides a brand-new session behind an O(corpus) rotation, so recent-first
+/// discovery would only notice today's session after several scheduler ticks
+/// on a large corpus. Retained directories are ordered newest-first, so the
+/// newest bucket plus its ancestor chain (bounded by [`MAX_SCAN_DEPTH`]) is
+/// probed every poll; everything older still rotates.
+const IDLE_HOT_DIRECTORIES: usize = MAX_SCAN_DEPTH as usize + 2;
 
 /// Process-retained bounded directory traversal for Codex discovery.
 ///
@@ -1590,7 +1611,22 @@ impl CodexSource {
                 .directories
                 .len()
                 .saturating_add(idle.active_files.len());
-            let probes = work_limit.min(authority_len.max(1));
+            // Hot prefix first: the newest bucket and its ancestors are where a
+            // new session lands, and only the parent directory's identity moves
+            // when one appears. Rotation alone would defer that discovery by a
+            // whole cycle, so probe the hot prefix on every poll.
+            let hot = idle.directories.len().min(IDLE_HOT_DIRECTORIES);
+            for directory in idle.directories.iter().take(hot) {
+                if codex_directory_identity(&directory.path)? != directory.identity {
+                    changed = true;
+                    break;
+                }
+            }
+            let probes = if changed {
+                0
+            } else {
+                work_limit.min(authority_len.max(1))
+            };
             for _ in 0..probes {
                 if authority_len == 0 {
                     break;
@@ -1676,7 +1712,16 @@ impl CodexSource {
                     });
                 }
             } else {
-                restart_idle = Some(false);
+                // The probe only proves *that* the corpus moved, not *where*.
+                // Restarting straight into an emit sweep hands back whatever
+                // the first `max_files` directory entries happen to be, so a
+                // session created in a bucket that already holds more files
+                // than the pass cap could be starved behind arbitrary
+                // same-bucket siblings. Restart into a validation sweep: it
+                // measures the whole corpus and reports the newest retained
+                // window, and the emit sweep it hands off to still covers the
+                // rest across later passes.
+                restart_idle = Some(true);
             }
         }
         if let Some(validation) = restart_idle {
@@ -1894,7 +1939,14 @@ fn retained_scan_step(
             detail: "retained Codex scan state is missing",
         })?;
     let work_limit = bounds.max_files.max(1);
-    let mut work = 0usize;
+    // The structural walk and the candidate walk are distinct bounded budgets.
+    // Charging both against one counter lets a deep-but-small tree spend the
+    // whole pass discovering its own bucket layout, leaving nothing to retain
+    // candidates with — a corpus far under `max_files` then reports truncation
+    // forever. Each phase is bounded independently.
+    let directory_work_limit = work_limit.max(MAX_STRUCTURAL_ENTRIES_PER_PASS);
+    let mut directory_work = 0usize;
+    let mut file_work = 0usize;
     let mut paths = Vec::new();
     let mut selected_sources = Vec::new();
     let mut bytes_charged = 0u64;
@@ -1904,7 +1956,7 @@ fn retained_scan_step(
     loop {
         match &mut scan.phase {
             CodexScanPhase::Directories { queued, current } => {
-                if work >= work_limit {
+                if directory_work >= directory_work_limit {
                     break;
                 }
                 if !scan.directories.is_empty()
@@ -1943,7 +1995,7 @@ fn retained_scan_step(
                         };
                         continue;
                     };
-                    work += 1;
+                    directory_work += 1;
                     let charge = if retained_charge == 0 {
                         candidate_charge(&path, metadata_charge)?
                     } else {
@@ -1951,14 +2003,46 @@ fn retained_scan_step(
                     };
                     if path_byte_len(&path) > bounds.max_path_bytes
                         || metadata_charge > bounds.max_metadata_bytes
-                        || (retained_charge == 0
-                            && scan
-                                .directory_bytes
-                                .checked_add(charge)
-                                .is_none_or(|total| total > bounds.max_discovery_bytes))
                     {
+                        // Unrepresentable under these bounds: the directory can
+                        // never be retained, so the sweep is genuinely partial.
                         scan.complete = false;
                         discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
+                        continue;
+                    }
+                    if retained_charge == 0
+                        && scan
+                            .directory_bytes
+                            .checked_add(charge)
+                            .is_none_or(|total| total > bounds.max_discovery_bytes)
+                    {
+                        // Merely out of retention bytes for this chunk. Dropping
+                        // the directory here permanently poisoned `complete`, so
+                        // a tight byte budget could cover every file and still
+                        // never earn the sweep-complete watermark. Defer it the
+                        // same way an over-budget child directory is deferred:
+                        // drain what is retained, then resume from this entry.
+                        if scan.directories.is_empty() {
+                            return Err(TranscriptIngestError::ScanIo {
+                                operation: "retain Codex transcript directory authority",
+                                path,
+                                source: std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "Codex discovery byte budget cannot retain one directory",
+                                ),
+                            });
+                        }
+                        queued.push_front((path, depth, root_order, 0));
+                        let resume_directories = CodexDirectoryResume {
+                            queued: std::mem::take(queued),
+                            current: current.take(),
+                        };
+                        scan.phase = CodexScanPhase::Files {
+                            next_directory: 0,
+                            current: None,
+                            deferred: None,
+                            resume_directories: Some(resume_directories),
+                        };
                         continue;
                     }
                     if retained_charge == 0 {
@@ -1994,7 +2078,7 @@ fn retained_scan_step(
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        work += 1;
+                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2094,7 +2178,13 @@ fn retained_scan_step(
                 deferred,
                 resume_directories,
             } => {
-                if paths.len() >= bounds.max_files || work >= work_limit {
+                // A validation pass is the "full emit-suppressed sweep": it
+                // retains no bytes and its whole purpose is to recompute the
+                // corpus epoch, so the retention budget must not cut it short.
+                // Capping it here meant any corpus larger than `max_files`
+                // could never re-earn the sweep-complete watermark.
+                if !scan.validation && (paths.len() >= bounds.max_files || file_work >= work_limit)
+                {
                     break;
                 }
                 let candidate = if let Some(candidate) = deferred.take() {
@@ -2123,12 +2213,12 @@ fn retained_scan_step(
                                 detail: "retained Codex file iterator disappeared",
                             },
                         )?;
-                        if work >= work_limit {
+                        if !scan.validation && file_work >= work_limit {
                             break None;
                         }
                         match listed.next() {
                             Some(entry) => {
-                                work += 1;
+                                file_work += 1;
                                 let entry =
                                     entry.map_err(|source| TranscriptIngestError::ScanIo {
                                         operation: "read Codex transcript directory entry",
@@ -2168,6 +2258,23 @@ fn retained_scan_step(
                             continue;
                         }
                         if scan.validation && scan.epoch != frontier.epoch {
+                            // Report the newest retained window rather than the
+                            // readdir-order prefix: `active_files` is the
+                            // bounded top-`max_files` set by path, and Codex
+                            // rollout names are timestamp-ordered, so this is
+                            // the recent-first slice within a bucket as well as
+                            // across buckets.
+                            selected_sources = scan
+                                .active_files
+                                .clone()
+                                .into_sorted_vec()
+                                .into_iter()
+                                .map(|Reverse(file)| file)
+                                .collect();
+                            paths = selected_sources
+                                .iter()
+                                .map(|file| file.path.clone())
+                                .collect();
                             let report = FileDiscoveryReport {
                                 paths,
                                 truncated: Some(FileDiscoveryLimit::FileCount),
@@ -2175,15 +2282,30 @@ fn retained_scan_step(
                                 bytes_charged,
                                 files_considered: scan.files_considered,
                             };
+                            let observed = scan.epoch;
                             *scan = CodexRetainedScan::new(source, false);
                             return Ok(CodexDiscoveryPass {
                                 report,
-                                next_frontier: frontier.for_coverage(false),
+                                // The sweep observed the whole corpus, so the
+                                // observed epoch is the authority now. Keeping
+                                // the contradicted incoming epoch left the
+                                // frontier unable to advance across a
+                                // same-path/same-size replacement.
+                                next_frontier: CodexDiscoveryFrontier::in_progress(observed),
                                 selected_sources,
                                 _shared_page_pin: None,
                             });
                         }
-                        let next_frontier = if scan.complete {
+                        // A frontier that already claimed completion at epoch E
+                        // is contradicted by a sweep that observes E' != E: the
+                        // corpus grew or was rewritten under the watermark, and
+                        // this pass emitted at most `max_files` of it. Keep
+                        // catch-up scheduled rather than re-claiming completion
+                        // on the spot; the next pass, entering in-progress, may
+                        // claim it once a sweep observes no further change.
+                        let grew_under_watermark =
+                            frontier.is_complete() && scan.epoch != frontier.epoch;
+                        let next_frontier = if scan.complete && !grew_under_watermark {
                             CodexDiscoveryFrontier::complete(scan.epoch)
                         } else {
                             CodexDiscoveryFrontier::in_progress(scan.epoch)
@@ -2282,7 +2404,11 @@ fn retained_scan_step(
             bytes_charged,
             files_considered: scan.files_considered,
         },
-        next_frontier: frontier,
+        // This pass ran out of budget mid-sweep. Echoing a Complete frontier
+        // back would let a truncated pass keep a sweep-complete watermark the
+        // sweep has not earned, so coverage stays in-progress until a pass
+        // actually finishes the walk.
+        next_frontier: frontier.for_coverage(false),
         selected_sources,
         _shared_page_pin: None,
     })
