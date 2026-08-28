@@ -651,6 +651,10 @@ impl GraphDbRegistry {
                             database.verify_existing_generation(&identity, sealed_digest, &check)?
                         }
                     };
+                // Seal implies an isolated compact store: adopt or build the
+                // per-generation artifact from the rows the digest just
+                // proved, before this head starts serving reads.
+                database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
                 visiting.clear();
                 self.load_verified_head(
                     operation,
@@ -760,6 +764,12 @@ impl GraphDbRegistry {
         };
         database
             .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
+        // Seal implies an isolated compact store. Built after the recovered
+        // digest proved the staged rows and before the relational CAS, so a
+        // build failure is a typed, retryable publication error rather than a
+        // post-linearization surprise. The artifact is digest-bound to this
+        // exact generation, so a competing publisher adopting it is safe.
+        database.ensure_sealed_generation_store(&identity, sealed_digest, &check)?;
         operation.check(self, context)?;
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
@@ -1081,6 +1091,10 @@ impl GraphDbRegistry {
             Err(error) => return Err(error),
         }
         drop(guard);
+        // Recovery adopts a matching sealed compact artifact from disk when
+        // one exists; anything stale or unreadable is discarded and reads
+        // stay on the staging rows just verified above.
+        database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
         let lease = generation_lease(&identity, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);

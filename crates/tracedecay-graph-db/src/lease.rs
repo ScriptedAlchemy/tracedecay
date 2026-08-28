@@ -279,11 +279,17 @@ impl VerifiedGraphSnapshot {
     ) -> Result<Option<GraphEntity>, GraphDbError> {
         self.with_operation(|| {
             let lease = self.lease_for_projection(&reference.projection)?;
-            self.database.entity(
-                &lease.locator.physical_namespace()?,
-                &reference.identity,
-                cancellation,
-            )
+            let namespace = lease.locator.physical_namespace()?;
+            // A sealed generation's point reads serve from its compacted
+            // per-generation store; the digest proved the exact row set, so
+            // a miss there is authoritative and never re-read from staging.
+            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+                return sealed
+                    .database()
+                    .entity(&namespace, &reference.identity, cancellation);
+            }
+            self.database
+                .entity(&namespace, &reference.identity, cancellation)
         })
     }
 
@@ -293,6 +299,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         self.with_operation(|| {
+            let lease = self.lease_for_projection(&reference.projection)?;
+            // The owning generation's sealed store holds the relation, its
+            // edge, and full copies of any dependency-generation endpoints,
+            // so the endpoint decode below stays inside one store.
+            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+                return sealed
+                    .database()
+                    .generation_relation(self, reference, cancellation);
+            }
             self.database
                 .generation_relation(self, reference, cancellation)
         })
@@ -323,7 +338,19 @@ impl VerifiedGraphSnapshot {
         if request.namespace != self.head.locator.projection.namespace {
             return Err(GraphDbError::Conflict);
         }
-        self.with_operation(|| self.database.traverse_generation(self, request))
+        self.with_operation(|| {
+            // A dependency-free snapshot's whole closure is one generation,
+            // so its sealed store holds every node and edge a traversal can
+            // reach and the walk runs on the compacted CSR adjacency. A
+            // closure that spans generations keeps the staging database,
+            // whose native edges cross physical namespaces.
+            if self.head.dependency_identities.is_empty()
+                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
+            {
+                return sealed.database().traverse_generation(self, request);
+            }
+            self.database.traverse_generation(self, request)
+        })
     }
 
     pub fn vector_search(
