@@ -1225,30 +1225,87 @@ impl ProductionSemanticRuntimeV1 {
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
     ) -> Result<SemanticCompatibleCurrentGenerationSnapshotV1, SemanticRuntimeBackendErrorV1> {
-        let retained = self
-            .graph
-            .graph_for_current()
-            .await
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        let cancellation = Arc::clone(retained.cancellation());
-        let store = GraphVectorGenerationStoreV1::read_only_generation(
-            &retained,
-            &required.vector_generation_id,
+        let retained = hotpath::future!(
+            self.graph.graph_for_current(),
+            label = "semantic.evaluation.snapshot.current_graph"
         )
-        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-        .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
-        let verified = store
-            .generation_snapshot_for(
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "current_graph",
+                outcome = "unavailable",
+            );
+            SemanticRuntimeBackendErrorV1::Unavailable
+        })?;
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = hotpath::measure_block!(
+            "semantic.evaluation.snapshot.vector_store",
+            GraphVectorGenerationStoreV1::read_only_generation(
+                &retained,
+                &required.vector_generation_id,
+            )
+        )
+        .map_err(|_| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "vector_store",
+                outcome = "unavailable",
+            );
+            SemanticRuntimeBackendErrorV1::Unavailable
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "vector_store",
+                outcome = "missing",
+            );
+            SemanticRuntimeBackendErrorV1::Rejected
+        })?;
+        let verified = hotpath::future!(
+            store.generation_snapshot_for(
                 &required.vector_generation_id,
                 &required.projection,
                 source_generation,
                 source_manifest_digest,
                 Arc::clone(&cancellation),
-            )
-            .await
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        let verified = verified.ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
-        let executable_lease = self.inspect_generation(required).await?;
+            ),
+            label = "semantic.evaluation.snapshot.vector_generation"
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "vector_snapshot",
+                outcome = "unavailable",
+            );
+            SemanticRuntimeBackendErrorV1::Unavailable
+        })?;
+        let verified = verified.ok_or_else(|| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "vector_snapshot",
+                outcome = "missing",
+            );
+            SemanticRuntimeBackendErrorV1::Rejected
+        })?;
+        let executable_lease = hotpath::future!(
+            self.inspect_generation(required),
+            label = "semantic.evaluation.snapshot.executable_generation"
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                event = "semantic_evaluation_target_snapshot",
+                stage = "executable_generation",
+                outcome = match error {
+                    SemanticRuntimeBackendErrorV1::Unavailable => "unavailable",
+                    SemanticRuntimeBackendErrorV1::Rejected => "rejected",
+                    SemanticRuntimeBackendErrorV1::Conflict => "conflict",
+                },
+            );
+            error
+        })?;
         // Publication identity stays i64 on the wire; the graph adapter's
         // monotonic u64 revision maps 1:1 into it and can only overflow after
         // ~9.2e18 mutations, which we treat as a rejected protocol state.
