@@ -39,21 +39,27 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-capture/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
 ]
 hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
 ]
 hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
 ]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
