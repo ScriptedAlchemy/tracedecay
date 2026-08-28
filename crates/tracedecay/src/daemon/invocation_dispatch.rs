@@ -27,6 +27,41 @@ fn semantic_invocation_interruption_response(
         })
 }
 
+fn record_project_open_refusal(operation: &str, error: &crate::errors::TraceDecayError) {
+    hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
+    tracing::warn!(
+        event = "daemon_invocation_route",
+        outcome = "refused",
+        stage = "project_open",
+        operation,
+        error = %error,
+        "daemon invocation project owner could not be opened"
+    );
+}
+
+fn record_project_route_refusal(operation: &str, error: &crate::errors::TraceDecayError) {
+    hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
+    tracing::warn!(
+        event = "daemon_invocation_route",
+        outcome = "refused",
+        stage = "project_route",
+        operation,
+        error = %error,
+        "daemon invocation project route could not be resolved"
+    );
+}
+
+fn record_admitted_root_refusal(operation: &str) {
+    hotpath::gauge!("daemon.invocation.route.admitted_root_failed_total").inc(1_u64);
+    tracing::warn!(
+        event = "daemon_invocation_route",
+        outcome = "refused",
+        stage = "admitted_root",
+        operation,
+        "daemon invocation project route could not form an admitted root"
+    );
+}
+
 async fn await_project_open_with_semantic_control<Output>(
     control: Option<&SemanticInvocationControlV1>,
     request_cancellation: Option<&CancellationToken>,
@@ -273,6 +308,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             }
         };
         if let Err(error) = project_server {
+            record_project_open_refusal(request.operation().as_str(), &error);
             return DaemonInvocationResponse::problem(
                 request_id,
                 project_open_problem(&error, workflow_application, git_operation),
@@ -284,11 +320,15 @@ pub(super) async fn execute_portable_daemon_invocation(
         {
             return response;
         }
-        let Ok((mut resolved_project_path, route)) = project_route else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        let (mut resolved_project_path, route) = match project_route {
+            Ok(route) => route,
+            Err(error) => {
+                record_project_route_refusal(request.operation().as_str(), &error);
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
         };
         if let (Some((deadline, _)), Some(request_cancellation)) =
             (request.lsp_open_control(), lsp_cancellation.as_ref())
@@ -355,6 +395,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             return response;
         }
         if admitted_root.is_none() {
+            record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -568,6 +609,7 @@ pub(super) async fn execute_daemon_invocation(
             }
         };
         if let Err(error) = project_server {
+            record_project_open_refusal(request.operation().as_str(), &error);
             return DaemonInvocationResponse::problem(
                 request_id,
                 project_open_problem(&error, workflow_application, git_operation),
@@ -579,11 +621,15 @@ pub(super) async fn execute_daemon_invocation(
         {
             return response;
         }
-        let Ok((mut resolved_project_path, route)) = project_route else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        let (mut resolved_project_path, route) = match project_route {
+            Ok(route) => route,
+            Err(error) => {
+                record_project_route_refusal(request.operation().as_str(), &error);
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
         };
         if let (Some((deadline, _)), Some(request_cancellation)) =
             (request.lsp_open_control(), lsp_cancellation.as_ref())
@@ -640,6 +686,7 @@ pub(super) async fn execute_daemon_invocation(
             return response;
         }
         if admitted_root.is_none() {
+            record_admitted_root_refusal(request.operation().as_str());
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
