@@ -193,3 +193,18 @@ required-features = ["test-helpers"]
 [[test]]
 name = "tiered_storage_rss"
 required-features = ["test-helpers"]
+
+# At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay
+# vs a columnar CompactStore base. Also `#[ignore]`d. The `compact` half needs
+# `graph-disk-tier` for `GrafeoDB::compact()`; the `replay` baseline runs under
+# either feature state. See `docs/graph-at-rest/README.md`.
+[[test]]
+name = "at_rest_snapshot"
+required-features = ["test-helpers"]
+
+# Schema-neutral companion to `at_rest_snapshot`: the same close/reopen cycle
+# straight against grafeo, under a handful of shared labels instead of
+# TraceDecay's one-key-label-per-entity index. Prices the schema change.
+[[test]]
+name = "at_rest_grafeo_probe"
+required-features = ["test-helpers"]
