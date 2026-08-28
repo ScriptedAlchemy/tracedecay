@@ -292,7 +292,10 @@ impl CatalogScan {
         Ok(())
     }
 
-    fn record_import_link(&mut self, relation: GraphRelation) -> Result<(), CodeGraphProjectionError> {
+    fn record_import_link(
+        &mut self,
+        relation: GraphRelation,
+    ) -> Result<(), CodeGraphProjectionError> {
         if self
             .import_links
             .insert(relation.to.clone(), relation)

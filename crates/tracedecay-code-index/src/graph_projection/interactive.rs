@@ -41,8 +41,8 @@ mod catalog;
 mod imports;
 mod models;
 
-use self::models::CatalogSymbol;
 pub use self::artifact::{INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact};
+use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
@@ -53,7 +53,6 @@ pub use self::models::{
 /// Symbols measured per bulk degree read while ranking a generation. Bounds
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
-
 
 enum InteractiveCatalogState {
     Cold,

@@ -1091,8 +1091,9 @@ impl RetainedCodeGraphRuntimeV1 {
                 let _replay_pool_lock = verify_durable_source()?;
                 // Seal-time bundle: stage from the in-hand rows before the
                 // publish consumes them, commit only after it succeeds.
-                let bundle_identity = manifest.identity();
-                let staged_bundle = self.stage_sealed_read_bundle(&manifest, &request_cancelled);
+                let bundle_identity = prepared.manifest.identity();
+                let staged_bundle =
+                    self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
                 let publication = observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(
@@ -1205,8 +1206,9 @@ impl RetainedCodeGraphRuntimeV1 {
         drop(replay_pool_lock);
         // Seal-time bundle: stage from the in-hand rows before the publish
         // consumes them, commit only after it succeeds.
-        let bundle_identity = manifest.identity();
-        let staged_bundle = self.stage_sealed_read_bundle(&manifest, &request_cancelled);
+        let bundle_identity = prepared.manifest.identity();
+        let staged_bundle =
+            self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
             publish(

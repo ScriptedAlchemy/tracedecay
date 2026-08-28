@@ -7,8 +7,7 @@ use tracedecay_graph_db::NeverCancelled;
 use super::*;
 use crate::graph_projection::interactive::artifact::decode_interactive_catalog_artifact;
 use crate::graph_projection::{
-    INTERACTIVE_CATALOG_ARTIFACT_NAME, code_graph_generation_id,
-    write_interactive_catalog_artifact,
+    INTERACTIVE_CATALOG_ARTIFACT_NAME, code_graph_generation_id, write_interactive_catalog_artifact,
 };
 
 fn encoded_fixture_artifact() -> Vec<u8> {

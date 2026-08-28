@@ -720,10 +720,7 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     let store = CodeGraphProjectionStore::from_verified_snapshot(snapshot, generation_id.clone())
         .expect("projection store over the sealed snapshot");
     store
-        .install_interactive_catalog_artifact(
-            &bytes,
-            Arc::new(tracedecay_graph_db::NeverCancelled),
-        )
+        .install_interactive_catalog_artifact(&bytes, Arc::new(tracedecay_graph_db::NeverCancelled))
         .expect("install the bundled catalog");
     assert!(
         store
@@ -769,11 +766,11 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     let fallback_store =
         CodeGraphProjectionStore::from_verified_snapshot(fallback_snapshot, generation_id.clone())
             .expect("projection store for the fallback");
-    fallback_store.mark_interactive_catalog_warming().expect("mark warming");
     fallback_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(
-            tracedecay_graph_db::NeverCancelled,
-        ))
+        .mark_interactive_catalog_warming()
+        .expect("mark warming");
+    fallback_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
         .expect("the old-generation fallback warm must still serve");
     assert_eq!(
         fallback_store.interactive_catalog_scan_builds(),
@@ -999,7 +996,10 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     )
     .expect("project source");
     git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "concurrent publication fixture"]);
+    git(
+        &project_root,
+        &["commit", "-qm", "concurrent publication fixture"],
+    );
     let project_id = ProjectId::new("project.concurrent-code-publication").expect("project id");
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
@@ -1119,7 +1119,9 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         });
         (
             seat_worker.join().expect("join the seat publisher"),
-            reconcile_worker.join().expect("join the reconcile publisher"),
+            reconcile_worker
+                .join()
+                .expect("join the reconcile publisher"),
         )
     });
     let seat_snapshot = seat_outcome.expect("seat publication");

@@ -629,16 +629,16 @@ pub fn code_graph_manifest_identity(
     generation: &CodeGenerationId,
     projector_revision: &GraphProjectorRevision,
 ) -> Result<tracedecay_graph_db::GraphGenerationManifestIdentity, CodeGraphProjectionError> {
-    Ok(tracedecay_graph_db::GraphGenerationManifestIdentity {
-        projection: code_graph_projection_identity(namespace)?,
-        generation: code_graph_generation_id(generation, projector_revision)?,
-        source_generation: source_generation(generation)?,
-        watermark: tracedecay_graph_db::GraphWatermark::new(stable_identity(
+    Ok(tracedecay_graph_db::GraphGenerationManifestIdentity::new(
+        code_graph_projection_identity(namespace)?,
+        code_graph_generation_id(generation, projector_revision)?,
+        source_generation(generation)?,
+        tracedecay_graph_db::GraphWatermark::new(stable_identity(
             "watermark",
             generation.as_str(),
         ))?,
-        dependencies: vec![],
-    })
+        vec![],
+    ))
 }
 
 pub fn build_code_graph_manifest(

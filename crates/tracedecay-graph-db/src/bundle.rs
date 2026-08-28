@@ -135,7 +135,11 @@ impl SealedReadBundleWriterV1 {
                 "sealed read bundle artifact count exceeds its bound",
             ));
         }
-        if self.staged.iter().any(|(artifact, _)| artifact.name == name) {
+        if self
+            .staged
+            .iter()
+            .any(|(artifact, _)| artifact.name == name)
+        {
             return Err(GraphDbError::invalid(
                 "sealed read bundle artifact name is already staged",
             ));
@@ -173,7 +177,10 @@ impl SealedReadBundleWriterV1 {
             })?;
             Ok(SealedReadBundleArtifactV1 {
                 name: name.to_owned(),
-                digest: format!("sha256:{}", encode_lowercase_hex(&hashing.digest.finalize())),
+                digest: format!(
+                    "sha256:{}",
+                    encode_lowercase_hex(&hashing.digest.finalize())
+                ),
                 bytes: hashing.bytes,
             })
         });
@@ -223,9 +230,10 @@ impl SealedReadBundleWriterV1 {
                 "failed to encode sealed read bundle manifest: {error}"
             ))
         })?;
-        let temporary = self
-            .root
-            .join(format!(".read-bundle-{hex}.manifest.{}.tmp", std::process::id()));
+        let temporary = self.root.join(format!(
+            ".read-bundle-{hex}.manifest.{}.tmp",
+            std::process::id()
+        ));
         remove_stale_regular_file(&temporary)?;
         let write_manifest = || -> Result<(), GraphDbError> {
             let mut file = std::fs::OpenOptions::new()
@@ -237,11 +245,13 @@ impl SealedReadBundleWriterV1 {
                         "failed to create sealed read bundle manifest stage: {error}"
                     ))
                 })?;
-            file.write_all(&encoded).and_then(|()| file.sync_all()).map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to write sealed read bundle manifest: {error}"
-                ))
-            })
+            file.write_all(&encoded)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    GraphDbError::unavailable(format!(
+                        "failed to write sealed read bundle manifest: {error}"
+                    ))
+                })
         };
         if let Err(error) = write_manifest() {
             let _ = std::fs::remove_file(&temporary);
@@ -477,7 +487,10 @@ fn verify_manifest_binding(
             "sealed read bundle manifest names a different sealed state digest".to_owned(),
         ));
     }
-    let expected = format!("sha256:{}", generation_identity_frames_digest(identity, check)?);
+    let expected = format!(
+        "sha256:{}",
+        generation_identity_frames_digest(identity, check)?
+    );
     if manifest.generation_identity_digest != expected {
         return Ok(Some(format!(
             "sealed read bundle is bound to generation identity `{}`, expected `{expected}`",
@@ -619,16 +632,16 @@ mod tests {
     };
 
     fn identity(generation: &str) -> GraphGenerationManifestIdentity {
-        GraphGenerationManifestIdentity {
-            projection: GraphProjectionIdentity::new(
+        GraphGenerationManifestIdentity::new(
+            GraphProjectionIdentity::new(
                 GraphNamespace::new("bundle-probe").unwrap(),
                 GraphProjectionId::new("code-graph").unwrap(),
             ),
-            generation: GraphGenerationId::new(generation).unwrap(),
-            source_generation: SourceGeneration::new(format!("source-{generation}")).unwrap(),
-            watermark: GraphWatermark::new(format!("watermark-{generation}")).unwrap(),
-            dependencies: vec![],
-        }
+            GraphGenerationId::new(generation).unwrap(),
+            SourceGeneration::new(format!("source-{generation}")).unwrap(),
+            GraphWatermark::new(format!("watermark-{generation}")).unwrap(),
+            vec![],
+        )
     }
 
     fn sealed() -> SealedGraphStateDigest {

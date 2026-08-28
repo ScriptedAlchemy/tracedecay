@@ -14,9 +14,7 @@ use tracedecay_domain::{SanitizedCodeFileV1, SymbolOccurrenceId};
 use tracedecay_graph_db::{GraphCancellation, GraphGenerationManifest};
 
 use super::super::schema::{SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label};
-use super::super::{
-    CodeGraphProjectionError, CodeGraphSymbolBindingV1, validate_symbol_record,
-};
+use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, validate_symbol_record};
 use super::catalog::{build_interactive_catalog_from_manifest, check_cancelled};
 use super::models::{CatalogSymbol, InteractiveCatalog};
 use crate::chunks::CodeIndexImportEvidenceV1;
@@ -25,8 +23,7 @@ use crate::lineage::LineageSymbolRecordV1;
 /// Bundle artifact name of the interactive catalog.
 pub const INTERACTIVE_CATALOG_ARTIFACT_NAME: &str = "interactive-catalog";
 
-const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str =
-    "tracedecay.code-graph-interactive-catalog.v1";
+const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v1";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -82,8 +79,7 @@ pub fn write_interactive_catalog_artifact(
     }
     if symbols.len() != catalog.symbols.len() {
         return Err(CodeGraphProjectionError::Corrupt(
-            "code graph catalog artifact symbol rows diverged from the derived catalog"
-                .to_owned(),
+            "code graph catalog artifact symbol rows diverged from the derived catalog".to_owned(),
         ));
     }
     let artifact = InteractiveCatalogArtifactV1 {
@@ -107,11 +103,12 @@ pub(super) fn decode_interactive_catalog_artifact(
     expected_graph_generation: &str,
     cancellation: &dyn GraphCancellation,
 ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
-    let artifact: InteractiveCatalogArtifactV1 = serde_json::from_slice(bytes).map_err(|error| {
-        CodeGraphProjectionError::Corrupt(format!(
-            "code graph interactive catalog artifact is corrupt: {error}"
-        ))
-    })?;
+    let artifact: InteractiveCatalogArtifactV1 =
+        serde_json::from_slice(bytes).map_err(|error| {
+            CodeGraphProjectionError::Corrupt(format!(
+                "code graph interactive catalog artifact is corrupt: {error}"
+            ))
+        })?;
     if artifact.format != INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1 {
         return Err(CodeGraphProjectionError::Corrupt(format!(
             "code graph interactive catalog artifact format `{}` is not `{INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1}`",
