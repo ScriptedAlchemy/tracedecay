@@ -112,7 +112,9 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
 /// A registered background-recovery cancellation standing in for the owners
 /// `RegisteredWorkRuntime` mounts.
 ///
-/// It carries a real [`CancellationToken`] — the same handle the production
+/// It carries a real
+/// [`tracedecay_runtime_core::cancellation::CancellationToken`] — the same
+/// handle the production
 /// recovery owners cancel through — so a test can observe the synchronous
 /// shutdown sweep without assembling a whole Work runtime (a registered
 /// database lease, grant, topology policy, and routing authority) around it.
