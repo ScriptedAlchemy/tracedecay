@@ -455,7 +455,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// Stream the complete sealed generation into one seekable immutable-store
     /// sink. Writes and the total envelope are bounded independently, and the
     /// payload digest is patched in place after the generation has been hashed.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.sealed_encode.write")]
     pub fn write_sealed<W: Write + Seek>(
         &self,
         writer: &mut W,
@@ -503,7 +503,7 @@ impl CodeIndexPublishedGenerationV1 {
     }
 
     /// Restore and revalidate a complete sealed generation.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.sealed_decode")]
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
         let admitted_len = u64::try_from(bytes.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())

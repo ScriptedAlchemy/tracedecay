@@ -559,7 +559,7 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
 /// [`with_background_cpu_permit`] or [`with_background_cpu_permits`], allowing
 /// indexing, semantic inference, and session preparation to share idle width.
 /// A standalone caller without registration gets a scoped automatic pool.
-#[hotpath::measure]
+#[hotpath::measure(label = "code_index.workers.install")]
 pub fn install<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
     F: FnOnce() -> R + Send,

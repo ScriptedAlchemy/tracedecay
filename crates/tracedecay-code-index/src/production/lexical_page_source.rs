@@ -888,7 +888,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.open")]
     pub fn open(
         mut reader: R,
         admitted_len: u64,
@@ -945,7 +945,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// in the durable generation index while the same bounded scan discovers
     /// the lexical layout. The caller can therefore pass a `File` directly;
     /// no whole-generation `Vec` is required merely to authenticate it.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.open_content_addressed")]
     pub fn open_content_addressed(
         reader: R,
         admitted_len: u64,
@@ -973,7 +973,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// Open a content-addressed source while reporting authenticated scan
     /// bytes. The callback is invoked at zero, bounded byte intervals, and
     /// exactly once with the admitted total before metadata is exposed.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.open_content_addressed_progress")]
     pub fn open_content_addressed_with_progress<F>(
         mut reader: R,
         admitted_len: u64,
@@ -1061,7 +1061,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     /// Adopt a persisted cursor after binding it to this source and validating
     /// its first unread file. This deliberately never walks earlier files.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.restore_cursor")]
     pub fn restore_cursor(
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
@@ -1191,7 +1191,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         std::mem::size_of::<u64>().saturating_mul(4)
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.next_page")]
     pub fn next_page(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1806,7 +1806,7 @@ struct SealedLexicalLayoutV1 {
     temporary_string_allocations: u64,
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "code_index.lexical_source.scan_layout")]
 fn scan_layout<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
@@ -2389,7 +2389,7 @@ fn read_verified_text_metadata<R: Read + Seek>(
     layout: &SealedLexicalLayoutV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "code_index.lexical_source.decode_range")]
     fn decode_range<T: serde::de::DeserializeOwned, R: Read + Seek>(
         reader: &mut R,
         range: (u64, u64),
