@@ -105,3 +105,79 @@ async fn commit_event_load_preserves_receipt_order_across_chunks() {
         "batched read returned storage order instead of receipt order: {sequences:?}",
     );
 }
+
+/// A durable receipt holding the correct event ids in a noncanonical order, with
+/// `last_event_id` and `replay_event_id` retargeted to the new tail, is entirely
+/// self-consistent: it deserializes, keeps its event count, and keeps its
+/// `active_assertion_id`. The sibling reversal asserted in `tests.rs` is refused at
+/// deserialization because it leaves the old tail behind, so it never reaches the
+/// replay verifier at all. This one does, and the only check left to catch it is the
+/// verifier's strictly increasing `event_sequence` run over `load_commit_events_tx`.
+/// Re-sorting the batched rows by `event_sequence` would hand that verifier canonical
+/// order whatever the receipt said, laundering the tamper into a successful replay.
+#[tokio::test]
+async fn replay_rejects_a_self_consistent_reordered_commit_event_receipt() {
+    let fixture = Fixture::new("commit-event-reordered-receipt").await;
+    let normalized = fixture.seed("reordered-commit-subject", 10).await;
+    let evidence = fixture.seed("reordered-commit-evidence", 20).await;
+    let operation_id = provenance_id("fixture.normalize.reordered-commit-events");
+    let request = normalize_request(
+        &fixture.db,
+        &fixture.owner,
+        operation_id.as_str(),
+        None,
+        &normalized,
+        vec!["cache-policy".to_owned(), "canonical-tag".to_owned()],
+        vec![evidence],
+        0.9,
+    )
+    .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    let committed = store
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+        .await
+        .expect("commit normalized tags");
+
+    // Two canonical events, so receipt order and storage order can disagree at all.
+    let commit = primary_commit(&committed.operation_effects()[0]);
+    assert_eq!(commit.committed_event_ids().len(), 2);
+    let reordered_tail = commit.committed_event_ids()[0].clone();
+
+    let receipts = operation_receipts(&fixture.db, &fixture.owner, &operation_id).await;
+    let mut reordered = receipts[0].receipt.clone();
+    reordered["operation_effects"][0]["commit"]["committed_event_ids"]
+        .as_array_mut()
+        .expect("committed event array")
+        .reverse();
+    reordered["operation_effects"][0]["commit"]["last_event_id"] = json!(reordered_tail.as_str());
+    reordered["replay_event_id"] = json!(reordered_tail.as_str());
+    assert!(
+        curation_receipt_from_value(&reordered).is_ok(),
+        "the tampered receipt must stay self-consistent, or it is refused before the \
+         canonical sequence check and proves nothing",
+    );
+    rebind_curation_operation_receipt(
+        &fixture.db,
+        &fixture.owner,
+        &operation_id,
+        &reordered_tail,
+        &reordered,
+    )
+    .await;
+    let before_events = lineage_events_for_fact(&fixture.db, &fixture.owner, &normalized).await;
+
+    assert!(
+        matches!(
+            store
+                .apply_project_memory_fact_curation(request, &fixture.control)
+                .await,
+            Err(FactStoreError::Storage { .. })
+        ),
+        "reordered commit receipt replayed successfully instead of failing the canonical \
+         projection-history check",
+    );
+    assert_eq!(
+        lineage_events_for_fact(&fixture.db, &fixture.owner, &normalized).await,
+        before_events
+    );
+}
