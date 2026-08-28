@@ -182,7 +182,11 @@ where
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::measure_block!("api.http.handler", owner.invoke_handoff(request).await)
+    hotpath::future!(
+        async move { owner.invoke_handoff(request).await },
+        label = "api.http.handler"
+    )
+    .await
 }
 
 pub fn handoff_invalid_request_response(request_id: RequestId) -> Response {

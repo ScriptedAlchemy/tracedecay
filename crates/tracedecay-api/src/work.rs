@@ -483,7 +483,11 @@ where
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::measure_block!("api.http.handler", owner.invoke_work(request).await)
+    hotpath::future!(
+        async move { owner.invoke_work(request).await },
+        label = "api.http.handler"
+    )
+    .await
 }
 
 /// Refuse a body that does not satisfy the operation's request contract.
