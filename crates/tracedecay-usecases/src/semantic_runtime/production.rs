@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{
-    CalibrationProfileId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
-    CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
-    LogicalEvidenceId, ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
-    ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
+    CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
+    ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
+    QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
     SemanticSearchIndexProfileV1, SourceOccurrenceId, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
@@ -2531,7 +2531,6 @@ fn validate_evaluation_target_search_index(
     }
 }
 
-const EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1: &str = "calibration.semantic.runtime.v1";
 const EVALUATION_SEMANTIC_CALIBRATION_COHORT_DOMAIN_V1: &str =
     "tracedecay.semantic.evaluation-calibration-cohort.v1";
 const EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1: u64 = 0;
@@ -2597,10 +2596,7 @@ fn canonical_evaluation_calibration(
     ))
     .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
     Ok(SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new(
-            EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1,
-        )
-        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?,
+        calibration_profile_id: candidate.calibration.calibration_profile_id.clone(),
         cohort_digest,
         projection_key: candidate.projection.projection_key().clone(),
         vector_generation: candidate.vector_generation_id.clone(),
@@ -3883,7 +3879,7 @@ mod tests {
             vector_generation_id: vector_generation_id.clone(),
             calibration: SemanticCalibrationProfileV1 {
                 calibration_profile_id: CalibrationProfileId::new(
-                    EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1,
+                    "calibration.semantic.runtime.v1",
                 )
                 .expect("calibration profile"),
                 cohort_digest: test_digest('c'),
@@ -3979,6 +3975,35 @@ mod tests {
                 UNCALIBRATED_MAXIMUM_DISTANCE_MICROS - 1,
             ),
             Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+    }
+
+    #[test]
+    fn preacceptance_preserves_the_evaluated_calibration_profile() {
+        let source_generation = source_generation('c');
+        let source_manifest_digest = test_digest('d');
+        let capability_manifest_digest = test_digest('e');
+        let mut candidate = evaluation_target_pins(
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+        );
+        candidate.calibration.calibration_profile_id =
+            CalibrationProfileId::new("calibration.semantic.hybrid-conservative")
+                .expect("evaluated calibration profile");
+
+        let certified = certify_evaluation_target_compatibility(
+            &candidate,
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+            UNCALIBRATED_MAXIMUM_DISTANCE_MICROS,
+        )
+        .expect("evaluated calibration remains independently certifiable");
+
+        assert_eq!(
+            certified.calibration.calibration_profile_id,
+            candidate.calibration.calibration_profile_id
         );
     }
 
