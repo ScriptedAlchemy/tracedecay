@@ -30,6 +30,7 @@ impl HookSpoolV1 {
     /// [`HookSpoolError::WriterLeaseLost`] forever.
     pub(super) fn ensure_live_lease(&self, now: UtcMicros) -> Result<(), HookSpoolError> {
         if self.lease.expires_at.0 <= now.0 {
+            hotpath::gauge!("hooks.spool.lease.lost").inc(1);
             return Err(HookSpoolError::WriterLeaseLost);
         }
         Ok(())
@@ -97,7 +98,10 @@ pub(super) fn acquire_lease(
 
 pub(super) fn map_try_lock_error(error: std::fs::TryLockError) -> HookSpoolError {
     match error {
-        std::fs::TryLockError::WouldBlock => HookSpoolError::WriterLeaseHeld,
+        std::fs::TryLockError::WouldBlock => {
+            hotpath::gauge!("hooks.spool.lease.contended").inc(1);
+            HookSpoolError::WriterLeaseHeld
+        }
         std::fs::TryLockError::Error(_) => HookSpoolError::Io,
     }
 }

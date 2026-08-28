@@ -372,6 +372,16 @@ const fn route_for_rollback(
     Ok(rollback.route)
 }
 
+#[cfg(feature = "hotpath")]
+fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {
+    hotpath::gauge!(match outcome {
+        HookFeedbackDeliveryOutcomeV1::Delivered => "hooks.feedback.delivered",
+        HookFeedbackDeliveryOutcomeV1::Duplicate => "hooks.feedback.duplicate",
+        HookFeedbackDeliveryOutcomeV1::Unavailable => "hooks.feedback.unavailable",
+    })
+    .inc(1);
+}
+
 #[hotpath::measure(label = "hooks.runtime.deliver_feedback_rollback")]
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
@@ -381,10 +391,13 @@ pub fn deliver_feedback_with_rollback<T, P>(
 where
     P: HookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    Ok(match route_for_rollback(rollback)? {
+    let outcome = match route_for_rollback(rollback)? {
         HookFeedbackDeliveryRouteV1::HookV2 => port.deliver_hook_v2(feedback),
         HookFeedbackDeliveryRouteV1::Legacy => port.deliver_legacy(feedback),
-    })
+    };
+    #[cfg(feature = "hotpath")]
+    record_feedback_outcome(outcome);
+    Ok(outcome)
 }
 
 pub type HookDeliveryFutureV1<'a> =
@@ -422,14 +435,17 @@ pub async fn deliver_feedback_with_rollback_async<T, P>(
 where
     P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    Ok(match route_for_rollback(rollback)? {
+    let outcome = match route_for_rollback(rollback)? {
         HookFeedbackDeliveryRouteV1::HookV2 => {
             port.deliver_hook_v2(envelope, feedback, deadline).await
         }
         HookFeedbackDeliveryRouteV1::Legacy => {
             port.deliver_legacy(envelope, feedback, deadline).await
         }
-    })
+    };
+    #[cfg(feature = "hotpath")]
+    record_feedback_outcome(outcome);
+    Ok(outcome)
 }
 
 /// Typed hook feedback that can prove it was minted for the exact admitted
