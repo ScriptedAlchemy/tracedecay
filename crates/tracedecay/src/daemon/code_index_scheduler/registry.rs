@@ -1101,6 +1101,54 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
     }
 
+    /// Serving slot only — no Git open, no freshness ladder, no wake.
+    #[cfg(test)]
+    pub(super) async fn latest_complete_serving_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let serving = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&project_root)?.serving_generation)
+        };
+        serving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Text slot only — no Git open, no freshness ladder, no wake.
+    #[cfg(test)]
+    pub(super) async fn latest_text_serving_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let text = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&project_root)?.text_generation)
+        };
+        text.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Outstanding worker arrival for one mounted root.
+    #[cfg(test)]
+    pub(super) async fn has_pending_arrival_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let pending_wake = {
+            let mounted = self.mounted.lock().await;
+            mounted
+                .get(&project_root)
+                .map(|worktree| Arc::clone(&worktree.pending_wake))
+        };
+        pending_wake.is_some_and(|pending_wake| pending_wake.has_pending_arrival())
+    }
+
     #[cfg(test)]
     pub(super) fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
         let project_root = project_root
@@ -1931,6 +1979,30 @@ impl CodeIndexSchedulerRegistryV1 {
         state.trigger = Self::pack_trigger(trigger);
     }
 
+    /// Acquire the per-worktree scheduler mutex without parking shutdown behind
+    /// a holder. `lock()` would wait out an in-flight test/peer owner; polling
+    /// `try_lock` lets the worker observe `shutting_down` and return cancelled.
+    fn lock_scheduler_unless_shutting_down<'a>(
+        scheduler: &'a Mutex<CodeIndexWorktreeSchedulerV1>,
+        shutting_down: &AtomicBool,
+    ) -> Result<std::sync::MutexGuard<'a, CodeIndexWorktreeSchedulerV1>, CodeIndexSchedulerErrorV1>
+    {
+        loop {
+            if shutting_down.load(Ordering::Acquire) {
+                return Err(super::cancelled_code_index_reconcile());
+            }
+            match scheduler.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Ok(poisoned.into_inner());
+                }
+            }
+        }
+    }
+
     /// Returns the pass's service time so the caller can attach the same
     /// measurement to the canonical index-lifecycle observation.
     /// Project one terminal source-reconcile outcome onto the installed
@@ -2672,17 +2744,22 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_none()
                 {
                     let text_scheduler = Arc::clone(&scheduler);
+                    let shutting_down = Arc::clone(&worker_shutting_down);
                     let retained_text = hotpath::future!(
                         tokio::task::spawn_blocking(move || {
-                            text_scheduler
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .servable_retained_text_generation()
+                            Self::lock_scheduler_unless_shutting_down(
+                                &text_scheduler,
+                                &shutting_down,
+                            )
+                            .map(|mut scheduler| scheduler.servable_retained_text_generation())
                         }),
                         label = "daemon.code_index.text_restore"
                     )
                     .await;
-                    if let Ok(Some(retained_text)) = retained_text {
+                    if worker_shutting_down.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if let Ok(Ok(Some(retained_text))) = retained_text {
                         *worker_text_generation
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -2716,11 +2793,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     .clone();
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
+                let shutting_down = Arc::clone(&worker_shutting_down);
                 let source_result = hotpath::future!(
                     tokio::task::spawn_blocking(move || {
-                        let mut scheduler = scheduler
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut scheduler =
+                            Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
                         // One arrival per attempted pass, before the branch: the
                         // three reconcile entry points below are alternatives, so
                         // hooking them individually would under- or double-count.
@@ -2744,11 +2821,21 @@ impl CodeIndexSchedulerRegistryV1 {
                     label = "daemon.code_index.reconcile"
                 )
                 .await;
+                if worker_shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
+                    Self::publish_generation(
+                        &worker_generation_publications,
+                        worker_project_root.clone(),
+                        evidence,
+                    );
+                }
                 // Source reconciliation is complete: release the public
-                // freshness guard before the published-pass text reopen and
-                // graph seating below. Holding it through those phases
-                // reports a just-published current generation as refreshing,
-                // and every reader in that window serves it as stale.
+                // freshness guard and the background-reconcile admission
+                // permit before HeadOpening / graph work. Holding either
+                // through those phases reports a just-published current
+                // generation as refreshing and serializes sibling stores.
                 drop(_reconcile_pass);
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
@@ -2758,6 +2845,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                     );
                 }
+                drop(_background_reconcile_admission);
                 // A publication must first reopen and finish its own
                 // lightweight text owner: publication moved the durable
                 // pointer, so the prior owner is no longer authoritative even
@@ -2774,14 +2862,16 @@ impl CodeIndexSchedulerRegistryV1 {
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     let text_scheduler = Arc::clone(&worker_scheduler);
+                    let shutting_down = Arc::clone(&worker_shutting_down);
                     let published_text = tokio::task::spawn_blocking(move || {
-                        text_scheduler
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .servable_retained_text_generation()
+                        Self::lock_scheduler_unless_shutting_down(&text_scheduler, &shutting_down)
+                            .map(|mut scheduler| scheduler.servable_retained_text_generation())
                     })
                     .await;
-                    graph_text = if let Ok(Some(published_text)) = published_text {
+                    if worker_shutting_down.load(Ordering::Acquire) {
+                        return;
+                    }
+                    graph_text = if let Ok(Ok(Some(published_text))) = published_text {
                         *worker_text_generation
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -2790,10 +2880,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     } else {
                         None
                     };
-                    // A successful open advances B's bounded projection; an
-                    // unavailable open retries the durable pointer without
-                    // resurrecting A.
-                    worker_wake.notify_one();
                     // The replacement text owner finishes its bounded
                     // projection here, before the optional O(store) graph
                     // decode: exact and lexical serving must never inherit
@@ -2851,6 +2937,12 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                         }
                     }
+                    let published_text_finished = graph_text
+                        .as_ref()
+                        .is_some_and(|text| !text.text_serving_needs_work());
+                    if !published_text_finished {
+                        worker_wake.notify_one();
+                    }
                 }
                 // Graph seating must not wait for the checkout to hold still.
                 // Requiring a `Noop` outcome made tree quiescence the seat
@@ -2877,6 +2969,24 @@ impl CodeIndexSchedulerRegistryV1 {
                         .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready),
                 );
                 let prepare_graph = gate == GraphSeatGateV1::Prepare;
+                if gate == GraphSeatGateV1::RetainedTextOwnerWarming && !published_pass {
+                    let text_empty = worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_none();
+                    let serving_empty = worker_serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_none();
+                    if text_empty && serving_empty {
+                        // Restore the arrival so warming is not terminal, then
+                        // fall through to record this Noop. `continue` skipped
+                        // the receipt and left latest_generation_id observers
+                        // without event-to-ready evidence.
+                        Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                        worker_wake.notify_one();
+                    }
+                }
                 if let Some(reason) = gate.skip_reason() {
                     tracing::debug!(
                         event = "code_index_graph_seat_skipped",
@@ -2908,12 +3018,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok(mut outcome) if prepare_graph => {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = graph_text.clone();
+                        let shutting_down = Arc::clone(&worker_shutting_down);
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
-                                let decoder = graph_scheduler
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .active_generation_decoder();
+                                let decoder = Self::lock_scheduler_unless_shutting_down(
+                                    &graph_scheduler,
+                                    &shutting_down,
+                                )?
+                                .active_generation_decoder();
                                 if decoder.is_none() {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_decoder",
@@ -2935,23 +3047,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                         }
                                     }
                                 });
-                                let latest = generation.and_then(|generation| {
-                                    graph_scheduler
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .servable_decoded_retained_generation(
-                                            generation,
-                                            graph_text.as_ref(),
-                                        )
-                                });
-                                let replay_binding = latest.as_ref().map(|latest| {
-                                    graph_scheduler
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                let latest = match generation {
+                                    Some(generation) => Self::lock_scheduler_unless_shutting_down(
+                                        &graph_scheduler,
+                                        &shutting_down,
+                                    )?
+                                    .servable_decoded_retained_generation(
+                                        generation,
+                                        graph_text.as_ref(),
+                                    ),
+                                    None => None,
+                                };
+                                let replay_binding = match latest.as_ref() {
+                                    Some(latest) => Some(
+                                        Self::lock_scheduler_unless_shutting_down(
+                                            &graph_scheduler,
+                                            &shutting_down,
+                                        )?
                                         .code_graph_replay_binding(
                                             &latest.generation().manifest().generation_id,
-                                        )
-                                });
+                                        ),
+                                    ),
+                                    None => None,
+                                };
                                 replay_binding.transpose().map(|binding| (latest, binding))
                             }),
                             label = "daemon.code_index.graph_prepare"
@@ -3088,11 +3206,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
+                    let shutting_down = Arc::clone(&worker_shutting_down);
                     let serving_swap = hotpath::future!(
                         tokio::task::spawn_blocking(move || {
-                            let scheduler = scheduler
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let scheduler = Self::lock_scheduler_unless_shutting_down(
+                                &scheduler,
+                                &shutting_down,
+                            )?;
                             // A generation that sealed while the checkout kept
                             // moving is stale the moment it completes, and the
                             // durable pointer may already name its successor.
@@ -3193,13 +3313,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     // reproducing, so both bounded retry states restart.
                     panic_guard.record_progress();
                     capacity_retry.record_progress();
-                    if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
-                        Self::publish_generation(
-                            &worker_generation_publications,
-                            worker_project_root.clone(),
-                            evidence,
-                        );
-                    }
                     let _service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
