@@ -992,7 +992,11 @@ mod encoder_group_tests {
         }
     }
 
-    fn group_sizes(chunks: &[CodeSearchChunkV1]) -> Vec<usize> {
+    /// Exact group membership, as chunk IDs, for one in-memory changed set.
+    ///
+    /// Membership — not just the shape — is projection identity, so the tests
+    /// below assert on this rather than on sizes alone.
+    fn encoder_groups(chunks: &[CodeSearchChunkV1]) -> Vec<Vec<String>> {
         let changes = chunks
             .iter()
             .map(|chunk| ChangedCodeChunkV1 {
@@ -1011,28 +1015,124 @@ mod encoder_group_tests {
         })
         .expect("fixture groups")
         .iter()
-        .map(|group| group.changes.len())
+        .map(|group| {
+            group
+                .changes
+                .iter()
+                .map(|change| change.chunk_id.as_str().to_owned())
+                .collect()
+        })
         .collect()
     }
 
-    #[test]
-    fn multi_chunk_files_keep_distinct_encoder_groups() {
-        let chunks = (0..6u32)
-            .flat_map(|file| (0..5u32).map(move |ordinal| chunk(&format!("multi{file}"), ordinal)))
-            .collect::<Vec<_>>();
-
-        assert_eq!(group_sizes(&chunks), vec![5, 5, 5, 5, 5, 5]);
+    fn group_sizes(chunks: &[CodeSearchChunkV1]) -> Vec<usize> {
+        encoder_groups(chunks).iter().map(Vec::len).collect()
     }
 
+    /// Every multi-chunk file flushes the pending singleton run and then emits
+    /// its own group, so no two files ever share one.
+    ///
+    /// The fixture corpus is deliberately smaller than one admitted batch: a
+    /// grouping that packed greedily across file boundaries would emit a
+    /// single full group of 30. The per-file flush instead yields one partial
+    /// group per multi-chunk file — the achieved fill sits below the admitted
+    /// batch width, and the forward-pass count tracks the multi-chunk file
+    /// count rather than the corpus size. That under-fill is the documented,
+    /// deliberate cost of keeping copied file tensors invariant.
     #[test]
-    fn singleton_runs_coalesce_around_multi_chunk_files() {
-        let mut chunks = (0..40u32)
-            .map(|file| chunk(&format!("single{file:03}"), 0))
-            .collect::<Vec<_>>();
-        assert_eq!(group_sizes(&chunks), vec![32, 8]);
+    fn multi_chunk_files_each_contribute_one_partial_group() {
+        const FILES: usize = 6;
+        const CHUNKS_PER_FILE: usize = 5;
 
-        chunks.push(chunk("pair", 0));
-        chunks.push(chunk("pair", 1));
-        assert_eq!(group_sizes(&chunks), vec![2, 32, 8]);
+        let chunks = (0..FILES)
+            .flat_map(|file| {
+                (0..CHUNKS_PER_FILE)
+                    .map(move |ordinal| chunk(&format!("multi{file}"), ordinal as u32))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() < BATCH_SIZE,
+            "the whole corpus must fit one admitted batch for this test to bite"
+        );
+
+        let groups = encoder_groups(&chunks);
+        let expected = (0..FILES)
+            .map(|file| {
+                (0..CHUNKS_PER_FILE)
+                    .map(|ordinal| format!("grouping.chunk.multi{file}.{ordinal}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(groups, expected);
+
+        // The group count tracks the multi-chunk file count, and every group
+        // is under-filled relative to the admitted batch width.
+        assert_eq!(groups.len(), FILES);
+        for group in &groups {
+            assert_eq!(group.len(), CHUNKS_PER_FILE);
+            assert!(group.len() < BATCH_SIZE);
+        }
+    }
+
+    /// Consecutive one-chunk files coalesce into shared groups bounded by the
+    /// admitted batch width, but an interleaved multi-chunk file breaks the
+    /// run into a before-group, its own group, and an after-group.
+    #[test]
+    fn singleton_runs_coalesce_but_multi_chunk_files_break_the_run() {
+        // A pure run of one-chunk files packs up to the admitted count bound
+        // (the byte ceiling is far out of reach for these fixtures), then
+        // flushes the trailing remainder.
+        let run = (0..40u32)
+            .map(|file| chunk(&format!("s{file:03}"), 0))
+            .collect::<Vec<_>>();
+        assert_eq!(group_sizes(&run), vec![BATCH_SIZE, 8]);
+        assert_eq!(
+            encoder_groups(&run),
+            vec![
+                (0..32u32)
+                    .map(|file| format!("grouping.chunk.s{file:03}.0"))
+                    .collect::<Vec<_>>(),
+                (32..40u32)
+                    .map(|file| format!("grouping.chunk.s{file:03}.0"))
+                    .collect::<Vec<_>>(),
+            ]
+        );
+
+        // Now interleave one three-chunk file `b` between two singleton runs
+        // `a*` and `c*`. Input order is scrambled on purpose: grouping is a
+        // function of the canonical file/span order, not of the changed set's
+        // arrival order.
+        let mut interleaved = Vec::new();
+        for file in 0..4u32 {
+            interleaved.push(chunk(&format!("c{file:02}"), 0));
+        }
+        interleaved.push(chunk("b", 2));
+        for file in 0..5u32 {
+            interleaved.push(chunk(&format!("a{file:02}"), 0));
+        }
+        interleaved.push(chunk("b", 0));
+        interleaved.push(chunk("b", 1));
+
+        assert!(
+            interleaved.len() < BATCH_SIZE,
+            "all twelve chunks would fit one batch if the run were never broken"
+        );
+        assert_eq!(
+            encoder_groups(&interleaved),
+            vec![
+                // The `a*` run, flushed by the arrival of multi-chunk `b`.
+                (0..5u32)
+                    .map(|file| format!("grouping.chunk.a{file:02}.0"))
+                    .collect::<Vec<_>>(),
+                // `b`'s own partial group, in source-span order.
+                (0..3u32)
+                    .map(|ordinal| format!("grouping.chunk.b.{ordinal}"))
+                    .collect::<Vec<_>>(),
+                // The trailing `c*` run, flushed at the end.
+                (0..4u32)
+                    .map(|file| format!("grouping.chunk.c{file:02}.0"))
+                    .collect::<Vec<_>>(),
+            ]
+        );
     }
 }
