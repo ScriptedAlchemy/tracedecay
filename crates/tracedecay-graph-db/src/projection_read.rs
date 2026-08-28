@@ -92,7 +92,7 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let page = read_projection(database, request)?;
+        let page = read_projection(self, database, request)?;
         crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
         crate::hotpath_observe::record_hydration_source(
             crate::hotpath_observe::HydrationSource::Live,
@@ -108,7 +108,7 @@ impl GraphDb {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let telemetry = projection_telemetry(database, request)?;
+        let telemetry = projection_telemetry(self, database, request)?;
         if let Some(telemetry) = &telemetry {
             crate::hotpath_observe::record_counts(
                 usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
@@ -140,9 +140,16 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(namespace, projection)?;
         let owner_label = entity_projection_domain_label(namespace, projection, label);
-        let total_entities =
-            count_labeled_nodes(database, &owner_label, ENTITY_LABEL, cancellation.as_ref())?;
+        let total_entities = count_labeled_nodes(
+            self,
+            database,
+            &owner_label,
+            ENTITY_LABEL,
+            ENTITY_ID_PROPERTY,
+            cancellation.as_ref(),
+        )?;
         let identities = query_identity_page(
+            self,
             database,
             &owner_label,
             ENTITY_LABEL,
@@ -204,6 +211,7 @@ impl GraphSnapshot {
 }
 
 fn projection_telemetry(
+    handle: &GraphDb,
     database: &GrafeoDB,
     request: GraphProjectionTelemetryRequest,
 ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
@@ -213,15 +221,19 @@ fn projection_telemetry(
         return Ok(None);
     };
     let entity_count = count_labeled_nodes(
+        handle,
         database,
         &entity_projection_label(&request.namespace, &request.projection),
         ENTITY_LABEL,
+        ENTITY_ID_PROPERTY,
         request.cancellation.as_ref(),
     )?;
     let relation_count = count_labeled_nodes(
+        handle,
         database,
         &relation_projection_label(&request.namespace, &request.projection),
         RELATION_LABEL,
+        RELATION_ID_PROPERTY,
         request.cancellation.as_ref(),
     )?;
     check_cancelled(request.cancellation.as_ref())?;
@@ -235,6 +247,7 @@ fn projection_telemetry(
 }
 
 fn read_projection(
+    handle: &GraphDb,
     database: &GrafeoDB,
     request: GraphProjectionReadRequest,
 ) -> Result<GraphProjectionPage, GraphDbError> {
@@ -248,9 +261,9 @@ fn read_projection(
     validate_optional_page_limit(request.max_entities)?;
     validate_optional_page_limit(request.max_relations)?;
 
-    let (entities, next_entity) = read_entity_page(database, &request)?;
+    let (entities, next_entity) = read_entity_page(handle, database, &request)?;
     check_cancelled(request.cancellation.as_ref())?;
-    let (relations, next_relation) = read_relation_page(database, &request)?;
+    let (relations, next_relation) = read_relation_page(handle, database, &request)?;
     check_cancelled(request.cancellation.as_ref())?;
     Ok(GraphProjectionPage {
         entities,
@@ -261,6 +274,7 @@ fn read_projection(
 }
 
 fn read_entity_page(
+    handle: &GraphDb,
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
 ) -> Result<(Vec<GraphEntity>, Option<GraphEntityId>), GraphDbError> {
@@ -270,6 +284,7 @@ fn read_entity_page(
     authenticate_entity_cursor(database, request)?;
     let owner_label = entity_projection_label(&request.namespace, &request.projection);
     let identities = query_identity_page(
+        handle,
         database,
         &owner_label,
         ENTITY_LABEL,
@@ -303,6 +318,7 @@ fn read_entity_page(
 }
 
 fn read_relation_page(
+    handle: &GraphDb,
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
 ) -> Result<(Vec<GraphRelation>, Option<GraphRelationId>), GraphDbError> {
@@ -312,6 +328,7 @@ fn read_relation_page(
     authenticate_relation_cursor(database, request)?;
     let owner_label = relation_projection_label(&request.namespace, &request.projection);
     let identities = query_identity_page(
+        handle,
         database,
         &owner_label,
         RELATION_LABEL,
@@ -387,10 +404,15 @@ fn authenticate_relation_cursor(
 /// the page would come back silently empty. [`labeled_projection_nodes`] reads
 /// through the composite instead.
 ///
-/// The bounded `BTreeSet` keeps the page's own `limit` rows rather than every
-/// identity in the projection, so paging a large projection stays O(limit) in
-/// memory while preserving the ordering, cursor, and limit the query had.
+/// Pages are answered from a cached ordered identity index rather than by
+/// rescanning the projection, so paging N identities costs one O(N log N) build
+/// plus O(log N + limit) per page instead of the O(N) scan *per page* — an
+/// O(N^2) catalog warm — this used to run. See
+/// [`crate::projection_identity_index`]. A projection too large to index falls
+/// back to the bounded streaming scan below.
+#[hotpath::measure(label = "graph_db.projection.identity_index.seek")]
 fn query_identity_page(
+    handle: &GraphDb,
     database: &GrafeoDB,
     owner_label: &str,
     record_label: &str,
@@ -403,6 +425,40 @@ fn query_identity_page(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let page = match handle.inner.identity_indexes.ordered_identities(
+        database,
+        owner_label,
+        record_label,
+        identity_property,
+        cancellation,
+    )? {
+        Some(index) => index.page(after, limit),
+        None => streaming_identity_page(
+            database,
+            owner_label,
+            record_label,
+            identity_property,
+            after,
+            limit,
+            cancellation,
+        )?,
+    };
+    check_cancelled(cancellation)?;
+    Ok(page)
+}
+
+/// The pre-index page scan, kept for projections whose identities exceed the
+/// index's retention budget. Bounded in memory by `limit` rather than by the
+/// projection's size.
+fn streaming_identity_page(
+    database: &GrafeoDB,
+    owner_label: &str,
+    record_label: &str,
+    identity_property: &str,
+    after: Option<&str>,
+    limit: usize,
+    cancellation: &dyn GraphCancellation,
+) -> Result<Vec<String>, GraphDbError> {
     let nodes = labeled_projection_nodes(database, owner_label, record_label)?;
     let store = database.graph_store();
     let mut page: BTreeSet<String> = BTreeSet::new();
@@ -431,20 +487,32 @@ fn query_identity_page(
         }
         page.insert(identity.to_owned());
     }
-    check_cancelled(cancellation)?;
     Ok(page.into_iter().collect())
 }
 
-/// How many nodes carry both `owner_label` and `record_label`. Reads the store
-/// for the same reason [`query_identity_page`] does.
+/// How many nodes carry both `owner_label` and `record_label`.
+///
+/// Answered from the same ordered index the pages are served from, so a count
+/// alongside a page scans the projection once rather than twice.
 fn count_labeled_nodes(
+    handle: &GraphDb,
     database: &GrafeoDB,
     owner_label: &str,
     record_label: &str,
+    identity_property: &str,
     cancellation: &dyn GraphCancellation,
 ) -> Result<u64, GraphDbError> {
     check_cancelled(cancellation)?;
-    let count = labeled_projection_nodes(database, owner_label, record_label)?.len();
+    let count = match handle.inner.identity_indexes.ordered_identities(
+        database,
+        owner_label,
+        record_label,
+        identity_property,
+        cancellation,
+    )? {
+        Some(index) => index.node_count(),
+        None => labeled_projection_nodes(database, owner_label, record_label)?.len(),
+    };
     let count = u64::try_from(count).map_err(|_| GraphDbError::Corrupt {
         message: "projection count query returned a negative cardinality".to_owned(),
     })?;

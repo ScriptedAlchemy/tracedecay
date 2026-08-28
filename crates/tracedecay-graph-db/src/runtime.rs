@@ -63,6 +63,10 @@ pub(crate) struct Inner {
     pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
     pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
     pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
+    /// Ordered identity access path for projection pagination. Rebuilt lazily
+    /// after every database write claim; see
+    /// [`crate::projection_identity_index`].
+    pub(crate) identity_indexes: crate::projection_identity_index::IdentityIndexCache,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
@@ -134,6 +138,8 @@ impl GraphDb {
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(quarantined_projections),
+                identity_indexes:
+                    crate::projection_identity_index::IdentityIndexCache::default(),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -651,6 +657,7 @@ impl GraphDb {
                 });
             }
         };
+        self.inner.identity_indexes.invalidate();
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return if was_uncertain {
@@ -947,6 +954,9 @@ impl GraphDb {
             || self.inner.database.write(),
         )
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        // Anything holding this guard may rewrite the rows a cached ordered
+        // identity index was built from, so the index is stale from here on.
+        self.inner.identity_indexes.invalidate();
         self.ensure_available()?;
         Ok(guard)
     }
