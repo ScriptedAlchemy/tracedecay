@@ -662,17 +662,35 @@ impl CodeIndexPublishedGenerationV1 {
                 ignored_source_admissions,
                 ignored_source_admissions_digest,
             )?;
-            let mut files = Vec::with_capacity(persisted_files.len());
-            for file in persisted_files {
-                let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                files.push(Arc::new(FileGenerationArtifactsV1 {
-                    authority: file.authority,
-                    extraction: file.extraction,
-                    artifacts: file.artifacts,
-                    exact_authority,
-                }));
-            }
+            // Restoring one file's exact-extraction authority re-digests every
+            // chunk it owns, and no file's digests can observe another's, so
+            // the sweep is order-independent CPU work over immutable sealed
+            // rows. Fan it out through the same bounded authority the
+            // validation sweep uses: results come back in file order, the
+            // reported failure is the lowest-index one, and a width of 1 walks
+            // the identical sequential path this replaces. Entering the pool
+            // also keeps `ExactExtractionAuthorityV1::restore`'s nested
+            // chunk-level fan-out inside the worker reservation instead of
+            // spilling onto rayon's global all-cores pool.
+            let exact_authorities =
+                collect_bounded_ordered(&persisted_files, |file, _worker| {
+                    ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+                        .map_err(CodeIndexProductionErrorV1::Chunk)
+                })?;
+            // Re-uniting each authority with the rows it was minted from is a
+            // move, not a copy, so the corpus is never cloned to parallelize.
+            let files = persisted_files
+                .into_iter()
+                .zip(exact_authorities)
+                .map(|(file, exact_authority)| {
+                    Arc::new(FileGenerationArtifactsV1 {
+                        authority: file.authority,
+                        extraction: file.extraction,
+                        artifacts: file.artifacts,
+                        exact_authority,
+                    })
+                })
+                .collect::<Vec<_>>();
             let chunks = GenerationChunkManifestV1::new(
                 manifest.generation_id.clone(),
                 files
