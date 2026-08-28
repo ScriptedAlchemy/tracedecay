@@ -36,35 +36,39 @@ impl Driver for TscDriver {
         project_root: &'a Path,
         _scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut cmd = tokio::process::Command::new("tsc");
-            cmd.arg("--noEmit")
-                .arg("--pretty")
-                .arg("false")
-                .current_dir(project_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
+        Box::pin(hotpath::future!(
+            async move {
+                let mut cmd = tokio::process::Command::new("tsc");
+                cmd.arg("--noEmit")
+                    .arg("--pretty")
+                    .arg("false")
+                    .current_dir(project_root)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
 
-            // Spawn errors (tsc not on PATH) fall through to empty rather
-            // than killing the call. Same reasoning as the Python driver:
-            // a tsconfig.json's presence doesn't guarantee tsc is installed,
-            // and a Rust project with a JS sibling shouldn't be punished.
-            let Ok(output) = cmd.output().await else {
-                return Ok(Vec::new());
-            };
+                // Spawn errors (tsc not on PATH) fall through to empty rather
+                // than killing the call. Same reasoning as the Python driver:
+                // a tsconfig.json's presence doesn't guarantee tsc is installed,
+                // and a Rust project with a JS sibling shouldn't be punished.
+                let Ok(output) = cmd.output().await else {
+                    return Ok(Vec::new());
+                };
 
-            // tsc exits with status 1 when there are errors; status 0 means
-            // "no diagnostics." Either way, stdout has the diagnostic stream.
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Ok(parse_tsc_output(&stdout))
-        })
+                // tsc exits with status 1 when there are errors; status 0 means
+                // "no diagnostics." Either way, stdout has the diagnostic stream.
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                Ok(parse_tsc_output(&stdout))
+            },
+            label = "diagnostics.typescript.tsc"
+        ))
     }
 }
 
 /// Parse the full tsc stdout into a flat diagnostic list. Top-level so it
 /// can be unit-tested without spawning tsc.
+#[hotpath::measure(label = "diagnostics.typescript.parse")]
 pub fn parse_tsc_output(stdout: &str) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new();
     for line in stdout.lines() {

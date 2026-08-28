@@ -299,6 +299,7 @@ pub(crate) struct RedundancyScanV1 {
 const REDUNDANCY_PAIR_SLICE: usize = 2048;
 
 /// Run the full redundancy pipeline for `options`.
+#[hotpath::measure(label = "graph.redundancy_scan", future = true)]
 pub(crate) async fn redundancy_scan(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

@@ -73,6 +73,7 @@ pub fn gini_label(gini: f64) -> &'static str {
 /// Computes the acyclicity score for a directed graph.
 /// Uses Tarjan's SCC algorithm. Score = 1.0 - (`edges_in_nontrivial_SCCs` / `total_edges`).
 /// Returns (score, `number_of_edges_in_cycles`).
+#[hotpath::measure(label = "graph.health.acyclicity")]
 pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
@@ -115,6 +116,7 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 
 /// Computes longest dependency chains. Breaks cycles via Tarjan's SCC
 /// (collapses each SCC to a single node), then runs topo sort + DP.
+#[hotpath::measure(label = "graph.health.dependency_depth")]
 pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
@@ -249,6 +251,7 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
 /// Groups the file adjacency by parent directory and orders clusters by
 /// cross-boundary coupling, then cluster size. This is the shared authority for
 /// both the MCP DSM tool and dashboard graph strata.
+#[hotpath::measure(label = "graph.health.dsm_clusters")]
 pub fn dsm_clusters<AdjHasher, EdgeHasher>(
     adj: &HashMap<String, HashSet<String, EdgeHasher>, AdjHasher>,
 ) -> Vec<DsmCluster>
@@ -326,6 +329,7 @@ pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
 /// Hub nodes = files with (fan\_in + fan\_out) > mean + 2\*stddev.
 /// Score = 1.0 - (1.0 / component\_count), clamped to \[0, 1\].
 /// Returns (score, component\_count\_after\_hub\_removal).
+#[hotpath::measure(label = "graph.health.modularity")]
 pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
