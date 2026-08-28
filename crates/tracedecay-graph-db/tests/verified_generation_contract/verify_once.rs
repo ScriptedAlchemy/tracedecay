@@ -93,6 +93,18 @@ fn marker_path(root: &std::path::Path) -> std::path::PathBuf {
     support::graph_path(root).with_extension("verified")
 }
 
+/// The shared `registration` helper carries a 30s deadline, which a
+/// production-width publication legitimately outruns. Only the measurement
+/// harness needs this; every contract test above stays on the default.
+fn unhurried_registration(
+    binding: tracedecay_store::StoreRuntimeBindingV1,
+    root: &std::path::Path,
+) -> tracedecay_graph_db::GraphDbRegistration {
+    let mut registration = registration(binding, root);
+    registration.deadline = std::time::Instant::now() + std::time::Duration::from_secs(3_600);
+    registration
+}
+
 /// A publication proves the generation in full and files that proof, so the
 /// marker is on disk once the store closes. Nothing is skipped here -- this is
 /// the write that makes the *next* open cheap.
@@ -261,6 +273,183 @@ fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
     assert!(
         counters.full_verifications >= 1,
         "refusing the forgery must fall through to the full proof, saw {counters:?}"
+    );
+}
+
+/// Measurement harness: activation wall with and without the marker, over one
+/// store, one set of bytes, and one warm page cache.
+///
+/// The two recovers differ in exactly one thing -- whether the marker beside
+/// the container is present -- so the gap between them *is* the verify
+/// component, isolated without a profiler and without comparing across builds.
+/// The "no marker" number is what every open cost before this change.
+///
+/// Rows come from `TRACEDECAY_VERIFY_ROWS`. Publication goes through the
+/// metadata-replay path with a supplied manifest, which is how production
+/// publishes a generation too large to inline into its journaled replay, so
+/// the generation width here is not capped by
+/// `MAX_GRAPH_REPLAY_SOURCE_BYTES_V1`.
+///
+/// ```text
+/// TRACEDECAY_VERIFY_ROWS=500000 cargo test -p tracedecay-graph-db \
+///   --features test-helpers --test verified_generation_contract \
+///   verify_once::activation_verify_cost_probe -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "activation measurement harness; run explicitly with TRACEDECAY_VERIFY_ROWS"]
+fn activation_verify_cost_probe() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let rows: usize = std::env::var("TRACEDECAY_VERIFY_ROWS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(50_000);
+    let relations = rows / 4;
+
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("verify:probe", "work");
+
+    let entities = (0..rows)
+        .map(|index| {
+            GraphEntity::new(
+                GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
+                BTreeSet::new(),
+                BTreeMap::from([(
+                    GraphPropertyName::new("marker").unwrap(),
+                    GraphProperty::String(format!("row-{index:08}-payload")),
+                )]),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let edges = (0..relations)
+        .map(|index| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(format!("relation:{index:08}")).unwrap(),
+                GraphEntityRef::new(
+                    identity.clone(),
+                    GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
+                ),
+                GraphEntityRef::new(
+                    identity.clone(),
+                    GraphEntityId::new(format!("entity:{:08}", index + 1)).unwrap(),
+                ),
+                GraphRelationKind::new("probe").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let generation = Arc::new(
+        GraphGenerationManifest::new(
+            identity,
+            GraphGenerationId::new("probe-g1").unwrap(),
+            SourceGeneration::new("source:probe-g1").unwrap(),
+            GraphWatermark::new("watermark:probe-g1").unwrap(),
+            vec![],
+            entities,
+            edges,
+        )
+        .unwrap(),
+    );
+
+    let record = authority.stage(
+        generation
+            .relational_metadata_replay(
+                registered.binding.shard_id.clone(),
+                GraphIdempotencyKey::new("publish:probe-g1").unwrap(),
+                digest('a'),
+                None,
+                &|| Ok(()),
+            )
+            .unwrap(),
+    );
+    let key = record.publication.key.clone();
+
+    let publish_started = Instant::now();
+    registered
+        .registry
+        .publish_verified(
+            unhurried_registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &key,
+            Some(Arc::clone(&generation)),
+        )
+        .unwrap();
+    let publish_wall = publish_started.elapsed();
+    drop(generation);
+    assert!(registered.close().unwrap());
+
+    let marker = marker_path(temp.path());
+    assert!(marker.is_file(), "the publication must leave a marker");
+    let marker_bytes = fs::metadata(&marker).unwrap().len();
+    let container_bytes = fs::metadata(support::graph_path(temp.path())).unwrap().len();
+    let retained = fs::read(&marker).unwrap();
+
+    // --- activation with the marker present ---
+    let _ = take_graph_db_verification_counters();
+    registered.mount().unwrap();
+    let fresh_started = Instant::now();
+    registered
+        .registry
+        .recover_verified_snapshot(
+            unhurried_registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &key.projection,
+        )
+        .unwrap();
+    let fresh_wall = fresh_started.elapsed();
+    let fresh_counters = take_graph_db_verification_counters();
+    assert!(registered.close().unwrap());
+
+    // --- the same activation with the marker withheld ---
+    fs::remove_file(&marker).unwrap();
+    registered.mount().unwrap();
+    let full_started = Instant::now();
+    registered
+        .registry
+        .recover_verified_snapshot(
+            unhurried_registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &key.projection,
+        )
+        .unwrap();
+    let full_wall = full_started.elapsed();
+    let full_counters = take_graph_db_verification_counters();
+    assert!(registered.close().unwrap());
+    drop(retained);
+
+    assert_eq!(fresh_counters.full_verifications, 0);
+    assert!(fresh_counters.marker_hits >= 1);
+    assert!(full_counters.full_verifications >= 1);
+
+    let saved = full_wall.saturating_sub(fresh_wall);
+    eprintln!(
+        "\n\
+         rows                 : {rows} entities + {relations} relations\n\
+         container on disk    : {:.1} MiB\n\
+         marker on disk       : {marker_bytes} B\n\
+         publish wall         : {:.3}s\n\
+         recover, marker hit  : {:.3}s   <- after\n\
+         recover, full proof  : {:.3}s   <- before\n\
+         verify component     : {:.3}s saved ({:.1}x)\n\
+         canonical bytes      : {} hashed by the full proof\n",
+        container_bytes as f64 / (1024.0 * 1024.0),
+        publish_wall.as_secs_f64(),
+        fresh_wall.as_secs_f64(),
+        full_wall.as_secs_f64(),
+        saved.as_secs_f64(),
+        full_wall.as_secs_f64() / fresh_wall.as_secs_f64().max(f64::MIN_POSITIVE),
+        full_counters.full_verification_bytes,
     );
 }
 
