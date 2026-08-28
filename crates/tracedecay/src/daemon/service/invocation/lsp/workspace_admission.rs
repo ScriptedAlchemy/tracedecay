@@ -120,6 +120,7 @@ impl DaemonInvocationService {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.service.lsp.authorize_federated", future = true)]
     async fn authorize_federated_lsp_workspace(
         &self,
         roots: &[(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)],

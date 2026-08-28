@@ -15,6 +15,7 @@ use crate::{
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
 };
 
+#[hotpath::measure(label = "store.projection.derive_canonical")]
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {

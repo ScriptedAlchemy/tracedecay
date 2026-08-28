@@ -63,6 +63,20 @@ pub(crate) struct Inner {
     pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
     pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
     pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
+    /// Per-generation sealed compact stores serving verified reads for
+    /// generations this database sealed. Derived artifacts: see
+    /// `crate::sealed_store`.
+    pub(crate) sealed_generations: RwLock<
+        BTreeMap<
+            crate::lease::GenerationLocator,
+            Arc<crate::sealed_store::SealedGenerationStore>,
+        >,
+    >,
+    /// Set on a reopened sealed store handle: every write path behind
+    /// [`GraphDb::write_guard`] then refuses with the typed
+    /// [`GraphDbError::SealedStoreImmutable`] instead of mutating rows a
+    /// digest already proved immutable.
+    pub(crate) sealed_read_only: AtomicBool,
     /// Ordered identity access path for projection pagination. Rebuilt lazily
     /// after every database write claim; see
     /// [`crate::projection_identity_index`].
@@ -151,6 +165,8 @@ impl GraphDb {
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(quarantined_projections),
+                sealed_generations: RwLock::new(BTreeMap::new()),
+                sealed_read_only: AtomicBool::new(false),
                 identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
@@ -1028,6 +1044,12 @@ impl GraphDb {
     pub(crate) fn write_guard(
         &self,
     ) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
+        if self.inner.sealed_read_only.load(Ordering::Acquire) {
+            return Err(GraphDbError::SealedStoreImmutable {
+                message: "this handle serves a sealed compacted generation and accepts no writes"
+                    .to_owned(),
+            });
+        }
         self.ensure_available()?;
         let guard = crate::hotpath_observe::wait_lock(
             crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
@@ -1067,6 +1089,37 @@ impl GraphDb {
         database
             .compact()
             .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
+    }
+
+    /// Freezes this database's live store into a columnar `CompactStore` base
+    /// plus a fresh overlay. Production path for a **single-generation sealed
+    /// store only** — the whole-database scope of `GrafeoDB::compact()` then
+    /// coincides exactly with the one immutable generation the store holds.
+    /// The multi-generation staging database is never compacted.
+    #[cfg(feature = "graph-sealed-store")]
+    #[hotpath::measure(label = "graph_db.sealed_store.compact", impl_type = "GraphDb")]
+    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
+        let mut guard = self.write_guard()?;
+        let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
+        database
+            .compact()
+            .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
+    }
+
+    /// Feature-off stub: the sealed-store lane is compiled out, so nothing
+    /// can reach a compaction request; a call is a wiring bug, not a state.
+    #[cfg(not(feature = "graph-sealed-store"))]
+    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
+        Err(GraphDbError::unavailable(
+            "sealed generation compaction requires the graph-sealed-store feature",
+        ))
+    }
+
+    /// Marks this handle as a reopened sealed store: every later write
+    /// attempt through [`Self::write_guard`] is refused with the typed
+    /// [`GraphDbError::SealedStoreImmutable`]. Physical close stays allowed.
+    pub(crate) fn mark_sealed_read_only(&self) {
+        self.inner.sealed_read_only.store(true, Ordering::Release);
     }
 
     pub(crate) fn state_write_guard(

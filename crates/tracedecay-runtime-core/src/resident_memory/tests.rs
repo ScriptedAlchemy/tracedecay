@@ -5,8 +5,12 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    process_resident_memory_limit_for_system_v1,
+    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
+    RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
+    ResidentMemoryPressureV1, process_resident_memory_limit_for_system_v1,
+    resident_memory_watermark_bytes_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -72,7 +76,7 @@ fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
         .expect_err("neither ownership kind can overcommit the process ceiling");
     assert_eq!(
         error,
-        ResidentMemoryAdmissionFailureV1 {
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
             used_bytes: 100,
             requested_bytes: 1,
             limit_bytes: 100,
@@ -175,7 +179,7 @@ fn rejection_reports_final_used_requested_and_limit_bytes() {
 
     assert_eq!(
         error,
-        ResidentMemoryAdmissionFailureV1 {
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
             used_bytes: 80,
             requested_bytes: 30,
             limit_bytes: 100,
@@ -327,4 +331,242 @@ fn concurrent_reservations_never_overcommit_the_process_ceiling() {
         drop(task.join().expect("reservation task"));
     }
     assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+/// A one-gigabyte authority whose measured-RSS cell is fed by the test rather
+/// than by `/proc`. Production wires the same cell to the daemon's existing
+/// `VmRSS` sampler; nothing here reads the filesystem.
+const PRESSURE_TEST_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn pressure_authority() -> (Arc<ProcessResidentMemoryV1>, Arc<ResidentMemoryPressureV1>) {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    (authority, pressure)
+}
+
+/// Comfortably above the admission floor, so refusal is about pressure rather
+/// than about the request being small enough to always let through.
+fn growth_request() -> NonZeroU64 {
+    bytes(RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 * 2)
+}
+
+#[test]
+fn watermarks_derive_from_the_configured_limit_and_keep_low_below_high() {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let pressure = ResidentMemoryPressureV1::new(limit);
+    assert_eq!(
+        pressure.high_watermark_bytes(),
+        resident_memory_watermark_bytes_v1(limit, RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1)
+    );
+    assert_eq!(
+        pressure.low_watermark_bytes(),
+        resident_memory_watermark_bytes_v1(limit, RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1)
+    );
+    assert!(pressure.low_watermark_bytes() < pressure.high_watermark_bytes());
+    assert_eq!(pressure.state(), ResidentMemoryPressureStateV1::Unobserved);
+}
+
+#[test]
+fn unobserved_rss_leaves_admission_on_the_reservation_ceiling_alone() {
+    let (authority, _pressure) = pressure_authority();
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            growth_request(),
+        )
+        .expect("no measured sample means no measured refusal");
+}
+
+#[test]
+fn measured_rss_above_the_high_watermark_refuses_growth_with_a_typed_state() {
+    let (authority, pressure) = pressure_authority();
+    let observed = pressure.high_watermark_bytes() + 1;
+    assert!(
+        pressure
+            .publish_observed_resident_bytes(observed)
+            .is_over_budget()
+    );
+
+    let failure = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            growth_request(),
+        )
+        .expect_err("measured RSS over the high watermark refuses new growth");
+
+    assert_eq!(
+        failure,
+        ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+            observed_bytes: observed,
+            limit_bytes: PRESSURE_TEST_LIMIT_BYTES,
+            high_watermark_bytes: pressure.high_watermark_bytes(),
+            requested_bytes: growth_request().get(),
+            floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+        }
+    );
+    assert!(failure.is_observed_over_budget());
+    // The refusal names observed and configured bytes rather than stalling.
+    let rendered = failure.to_string();
+    assert!(rendered.contains(&observed.to_string()), "{rendered}");
+    assert!(
+        rendered.contains(&PRESSURE_TEST_LIMIT_BYTES.to_string()),
+        "{rendered}"
+    );
+    // Reservations were never charged, so nothing leaked into the model.
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn process_shared_admission_refuses_under_the_same_measured_pressure() {
+    let (authority, pressure) = pressure_authority();
+    let component = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+
+    let failure = authority
+        .reserve_process_shared(component, growth_request())
+        .expect_err("process-shared growth is refused under measured pressure");
+    assert!(failure.is_observed_over_budget());
+}
+
+#[test]
+fn admissions_at_or_below_the_floor_survive_measured_pressure() {
+    let (authority, pressure) = pressure_authority();
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            bytes(RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1),
+        )
+        .expect("floor-sized admissions keep the daemon serving under pressure");
+}
+
+#[test]
+fn already_admitted_reservations_are_never_revoked_by_measured_pressure() {
+    let (authority, pressure) = pressure_authority();
+    let held = key("project-a", "worktree-a", "generation-a", "canonical");
+    let reservation = authority
+        .reserve(held.clone(), growth_request())
+        .expect("admitted before pressure");
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 4096);
+
+    assert_eq!(
+        authority.snapshot().charge_for(&held),
+        growth_request().get(),
+        "pressure refuses new growth; it does not revoke live work"
+    );
+    assert_eq!(reservation.reserved_bytes(), growth_request().get());
+    drop(reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn measured_pressure_holds_between_watermarks_then_clears_at_the_low_watermark() {
+    let (authority, pressure) = pressure_authority();
+    let request = key("project-a", "worktree-a", "generation-a", "canonical");
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+    assert!(
+        authority
+            .reserve(request.clone(), growth_request())
+            .is_err(),
+        "at the high watermark admission refuses"
+    );
+
+    // Hysteresis: between the watermarks the previous verdict stands, so a
+    // sample that merely dips below high does not resume admitting.
+    let between = (pressure.low_watermark_bytes() + pressure.high_watermark_bytes()) / 2;
+    assert!(between > pressure.low_watermark_bytes());
+    assert!(between < pressure.high_watermark_bytes());
+    for _ in 0..4 {
+        assert!(
+            pressure
+                .publish_observed_resident_bytes(between)
+                .is_over_budget(),
+            "state must not flap between the watermarks"
+        );
+        assert!(
+            authority
+                .reserve(request.clone(), growth_request())
+                .is_err(),
+            "admission must not flap between the watermarks"
+        );
+    }
+
+    // Falling to the low watermark clears the latch and re-admits.
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(pressure.low_watermark_bytes())
+            .is_over_budget()
+    );
+    let readmitted = authority
+        .reserve(request.clone(), growth_request())
+        .expect("admission is retryable once measured pressure falls");
+    drop(readmitted);
+
+    // Climbing back through the middle does not re-latch either.
+    for _ in 0..4 {
+        assert!(
+            !pressure
+                .publish_observed_resident_bytes(between)
+                .is_over_budget(),
+            "a cleared latch must not re-arm between the watermarks"
+        );
+        authority
+            .reserve(request.clone(), growth_request())
+            .expect("still admitting between the watermarks after clearing");
+    }
+}
+
+#[test]
+fn reaching_the_high_watermark_runs_pressure_reclaimers_with_the_measurement() {
+    let (_authority, pressure) = pressure_authority();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let callback_seen = Arc::clone(&seen);
+    let _registration = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |request| {
+                callback_seen.lock().expect("call log").push(request);
+                4096
+            }),
+        )
+        .expect("pressure reclaimer registration");
+
+    // Below the watermark nothing is released.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert!(seen.lock().expect("call log").is_empty());
+
+    let observed = pressure.high_watermark_bytes() + 8192;
+    pressure.publish_observed_resident_bytes(observed);
+    let calls = seen.lock().expect("call log").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].observed_bytes, observed);
+    assert_eq!(calls[0].limit_bytes, PRESSURE_TEST_LIMIT_BYTES);
+    assert_eq!(calls[0].excess_bytes, 8192);
+}
+
+#[test]
+fn dropped_pressure_reclaimer_registration_is_not_called() {
+    let (_authority, pressure) = pressure_authority();
+    let calls = Arc::new(Mutex::new(0_u64));
+    let callback_calls = Arc::clone(&calls);
+    let registration = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |_| {
+                *callback_calls.lock().expect("call count") += 1;
+                0
+            }),
+        )
+        .expect("pressure reclaimer registration");
+    drop(registration);
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+    assert_eq!(*calls.lock().expect("call count"), 0);
 }

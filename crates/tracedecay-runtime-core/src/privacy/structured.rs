@@ -96,6 +96,10 @@ pub(crate) enum StructuredSanitizationError {
     SanitizerUnavailable,
 }
 
+/// Runs on every structured payload the privacy boundary admits (including
+/// each LCM hydration), so this entry span is the per-call cost authority;
+/// per-value work inside stays span-free and is aggregated by gauges.
+#[hotpath::measure(label = "runtime_core.privacy.sanitize_structured")]
 pub(crate) fn sanitize_structured_payload(
     raw: &[u8],
     limits: StructuredSanitizationLimits,

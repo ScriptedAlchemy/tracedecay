@@ -74,6 +74,7 @@ where
 
         if let Some(original_receipt) = &record.terminal_receipt {
             if original_receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection {
+                hotpath::gauge!("daemon.git.tx.recovery.replayed_total").inc(1_u64);
                 return Ok(original_receipt.clone());
             }
             let proof = self.reconcile_or_quarantine(record, observed_at)?;
@@ -94,6 +95,7 @@ where
                 &record.journal.transaction_id,
                 proof.clone(),
             )?;
+            hotpath::gauge!("daemon.git.tx.recovery.recovered_total").inc(1_u64);
             return Ok(proof);
         }
 
@@ -133,6 +135,7 @@ where
             return Err(GitIndexRecoveryError::Indeterminate);
         }
         if let Ok(stored) = self.store.write_terminal(write) {
+            hotpath::gauge!("daemon.git.tx.recovery.recovered_total").inc(1_u64);
             Ok(stored)
         } else {
             quarantine(self.store, record)?;
@@ -145,7 +148,13 @@ where
         record: &GitIndexTransactionRecordV1,
         observed_at: UtcMicros,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
-        if let Ok(receipt) = self.native.reconcile(record) {
+        // Native reconciliation observes real repository state; measuring it
+        // apart from `recover_record` separates git observation cost from the
+        // journal-advance and terminal-write I/O around it.
+        if let Ok(receipt) = hotpath::measure_block!(
+            "daemon.git.tx.recovery.reconcile",
+            self.native.reconcile(record)
+        ) {
             Ok(receipt)
         } else {
             quarantine(self.store, record)?;
@@ -252,6 +261,7 @@ fn quarantine<S>(
 where
     S: GitIndexTransactionStore,
 {
+    hotpath::gauge!("daemon.git.tx.recovery.quarantined_total").inc(1_u64);
     store.quarantine_repository(
         &record.journal.repository_id,
         &record.journal.transaction_id,

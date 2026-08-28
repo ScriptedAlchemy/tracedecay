@@ -209,8 +209,7 @@ fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredSto
     }
     hotpath::gauge!("retention.orphan.unregistered.collected_total")
         .inc(report.outcome.collected.len());
-    hotpath::gauge!("retention.orphan.unregistered.failed_total")
-        .inc(report.outcome.errors.len());
+    hotpath::gauge!("retention.orphan.unregistered.failed_total").inc(report.outcome.errors.len());
     hotpath::gauge!("retention.orphan.unregistered.reclaimed_bytes_total")
         .inc(report.outcome.reclaimed_bytes);
     report

@@ -346,6 +346,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(recovered)
     }
 
+    #[hotpath::measure(label = "usecases.store.verify_state")]
     fn verify_existing_state(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -401,6 +402,7 @@ impl GraphVectorGenerationStoreV1 {
         read_cataloged_generation_records(&snapshot, generation_id, cancellation, Some(recover))
     }
 
+    #[hotpath::measure(label = "usecases.store.recover_lineage")]
     fn preload_published_lineage(
         &self,
         start: Option<&VectorGenerationIdV1>,
@@ -426,6 +428,7 @@ impl GraphVectorGenerationStoreV1 {
                 ))?;
             current = peek_generation_base(&snapshot, &generation_id, Arc::clone(&cancellation))?;
         }
+        crate::hotpath_observe::vector_lineage_depth(chain.len());
         let mut cache = BTreeMap::new();
         for generation_id in chain.into_iter().rev() {
             let snapshot = self
@@ -449,6 +452,7 @@ impl GraphVectorGenerationStoreV1 {
         Ok(cache)
     }
 
+    #[hotpath::measure(label = "usecases.store.recover_published")]
     fn load_published_generation_snapshot(
         &self,
         generation_id: &VectorGenerationIdV1,
@@ -547,6 +551,7 @@ impl GraphVectorGenerationStoreV1 {
 
     /// Read one exact semantic generation from an already identity-selected
     /// verified physical snapshot.
+    #[hotpath::measure(label = "usecases.store.generation_snapshot", future = true)]
     pub async fn generation_snapshot_for(
         &self,
         generation_id: &VectorGenerationIdV1,

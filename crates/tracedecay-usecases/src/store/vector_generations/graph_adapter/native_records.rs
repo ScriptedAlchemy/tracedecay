@@ -87,6 +87,7 @@ pub(super) fn read_cataloged_generation_records(
                     "semantic vector generation catalog record is inconsistent",
                 ));
             }
+            crate::hotpath_observe::vector_generation_hydrated(catalog.rows, catalog.vector_bytes);
             Ok(Some(records))
         }
         _ => Err(corrupt(

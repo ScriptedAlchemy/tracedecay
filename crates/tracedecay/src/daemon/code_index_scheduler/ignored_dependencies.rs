@@ -151,6 +151,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         }))
     }
 
+    /// One wall span covers the whole entrypoint resolution — package-root
+    /// containment, `package.json` read, bounded entrypoint read, sanitize,
+    /// and the gix ignore proof. The per-file reads inside are never
+    /// individually spanned.
+    #[hotpath::measure(label = "daemon.code_index.ignored_dependency.resolve")]
     fn resolve_ignored_dependency_admission(
         &self,
         import: &CodeIndexImportEvidenceV1,
@@ -278,10 +283,16 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.ignored_source_admissions = generation.ignored_source_admissions().to_vec();
     }
 
+    /// One wall span covers the whole roster verification sweep — it re-reads
+    /// and re-captures every admitted dependency entrypoint — with an entries
+    /// gauge for the roster size. Entries are never individually spanned.
+    #[hotpath::measure(label = "daemon.code_index.ignored_dependency.roster_verify")]
     pub(super) fn ignored_source_roster_matches_generation(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> bool {
+        hotpath::gauge!("daemon.code_index.ignored_dependency.roster_verify.entries")
+            .set(generation.ignored_source_admissions().len() as u64);
         let registry = StaticLanguageRegistry::new();
         generation
             .ignored_source_admissions()

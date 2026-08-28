@@ -9,8 +9,8 @@ use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
 
 use crate::schema::decode_entity;
 use crate::state::{
-    EndpointIdentityCache, load_relation_by_locator_cached,
-    projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
+    EndpointIdentityCache, load_relation_by_locator_cached, projection_entity_nodes_sorted_checked,
+    projection_relation_nodes_sorted_checked,
 };
 use crate::{GraphDbError, GraphNamespace};
 
@@ -201,8 +201,14 @@ mod tests {
                             property_name("name"),
                             GraphProperty::String(format!("symbol_{index}")),
                         ),
-                        (property_name("arity"), GraphProperty::I64(i64::from(index % 5))),
-                        (property_name("exported"), GraphProperty::Bool(index % 2 == 0)),
+                        (
+                            property_name("arity"),
+                            GraphProperty::I64(i64::from(index % 5)),
+                        ),
+                        (
+                            property_name("exported"),
+                            GraphProperty::Bool(index % 2 == 0),
+                        ),
                         (
                             property_name("score"),
                             GraphProperty::F64(f64::from(index) / 3.0),

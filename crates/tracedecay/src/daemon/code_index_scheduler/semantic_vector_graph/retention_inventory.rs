@@ -99,6 +99,13 @@ impl From<tracedecay_usecases::store::vector_generations::VectorGenerationStoreE
     }
 }
 
+/// One wall span covers the whole paginated inventory sweep; the page counter
+/// records how much of the configuration corpus it walked. Pages are never
+/// individually spanned.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.configuration_sweep",
+    future = true
+)]
 pub(super) async fn complete_configuration_inventory(
     configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
 ) -> Result<
@@ -118,6 +125,10 @@ pub(super) async fn complete_configuration_inventory(
             .configuration_inventory_page(&request)
             .await
             .map_err(ProjectVectorRetentionFailure::from_configuration)?;
+        hotpath::gauge!(
+            "daemon.code_index.semantic_vector.retention.configuration_sweep.pages_total"
+        )
+        .inc(1_u64);
         match (page.continuation, page.complete_receipt) {
             (Some(cursor), None) => {
                 request = SemanticConfigurationInventoryPageRequestV1::after(
@@ -136,6 +147,13 @@ pub(super) async fn complete_configuration_inventory(
     }
 }
 
+/// One wall span covers the whole configured-root validation sweep; the root
+/// counter records how many entries the sweep resolved against the published
+/// dependency index. Roots are never individually spanned.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.root_sweep",
+    future = true
+)]
 pub(super) async fn validate_configured_vector_roots(
     configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     store: &GraphVectorGenerationStoreV1,
@@ -164,6 +182,10 @@ pub(super) async fn validate_configured_vector_roots(
             .configured_vector_roots_page(&request)
             .await
             .map_err(ProjectVectorRetentionFailure::from_configuration)?;
+        hotpath::gauge!(
+            "daemon.code_index.semantic_vector.retention.root_sweep.roots_scanned_total"
+        )
+        .inc(page.roots.len() as u64);
         for root in &page.roots {
             let dependency = store
                 .published_generation_dependency(

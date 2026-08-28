@@ -8,7 +8,12 @@ pub(super) async fn reconcile_configuration_runtime(
     receipt: &tracedecay_usecases::configuration::ConfigurationMutationReceipt,
     now: UtcMicros,
 ) {
-    let current = match registered.runtime.client().current().await {
+    let current = match hotpath::future!(
+        registered.runtime.client().current(),
+        label = "daemon.service.configuration.reconcile_read"
+    )
+    .await
+    {
         Ok(current) => current,
         Err(error) => {
             tracing::warn!(
@@ -19,12 +24,14 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
-    let installation = crate::config::root_runtime_configuration(&current)
-        .map_err(|error| error.to_string())
-        .and_then(|root| {
-            crate::config::install_pinned_runtime_configuration(root)
-                .map_err(|error| error.to_string())
-        });
+    let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
+        crate::config::root_runtime_configuration(&current)
+            .map_err(|error| error.to_string())
+            .and_then(|root| {
+                crate::config::install_pinned_runtime_configuration(root)
+                    .map_err(|error| error.to_string())
+            })
+    });
     let (observed_revision_id, activation_error_code) = match installation {
         Ok(()) => (Some(current.revision_id), None),
         Err(error) => {

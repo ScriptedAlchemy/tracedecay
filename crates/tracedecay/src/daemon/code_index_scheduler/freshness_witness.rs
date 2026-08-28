@@ -16,6 +16,7 @@ const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
 /// A cheap stat-level signature over every ordinary or explicitly admitted
 /// source candidate. Ignored admissions are part of the signature even though
 /// gix deliberately omits them from its ordinary candidate set.
+#[hotpath::measure(label = "daemon.code_index.freshness.stat_signature")]
 pub(super) fn worktree_stat_signature_for(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
@@ -31,6 +32,10 @@ pub(super) fn worktree_stat_signature_for(
             .iter()
             .map(|admission| admission.logical_path.clone()),
     );
+    // One sweep span plus an entries gauge: the stat walk is O(candidates) and
+    // must never publish one profiler event per file.
+    hotpath::gauge!("daemon.code_index.freshness.stat_signature.candidates")
+        .set(candidate_paths.len() as u64);
     let mut buf = Vec::new();
     for logical_path in candidate_paths {
         let absolute = project_root.join(&logical_path);

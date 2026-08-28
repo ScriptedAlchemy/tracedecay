@@ -305,7 +305,9 @@ impl GraphDb {
                     {
                         return Ok(GraphBatchPlan::Settled(existing.commit, ()));
                     }
-                    return Err(GraphDbError::Conflict);
+                    return Err(self
+                        .sealed_write_refusal(&context.locator)
+                        .unwrap_or(GraphDbError::Conflict));
                 }
                 if let Some(predecessor) = predecessor {
                     let (prior_key, prior_input) =
@@ -336,7 +338,9 @@ impl GraphDb {
                         && existing.commit.watermark == identity.watermark
                         && existing.commit.generation_dependency_digest.is_none();
                     if !exact_incomplete_legacy {
-                        return Err(GraphDbError::Conflict);
+                        return Err(self
+                            .sealed_write_refusal(&context.locator)
+                            .unwrap_or(GraphDbError::Conflict));
                     }
                 }
                 let (batch, endpoint_namespaces) =
@@ -435,7 +439,9 @@ impl GraphDb {
                     {
                         return Ok(GraphBatchPlan::Settled(existing.commit, ()));
                     }
-                    return Err(GraphDbError::Conflict);
+                    return Err(self
+                        .sealed_write_refusal(&context.locator)
+                        .unwrap_or(GraphDbError::Conflict));
                 }
                 if let Some(last_page) = last_page {
                     let (last_key, last_input) =
@@ -763,6 +769,8 @@ impl GraphDb {
             state.stored.remove(locator);
             state.retiring.remove(locator);
             state.collected.insert(locator.clone());
+            drop(state);
+            self.retire_sealed_generation_store(locator);
             return Ok(());
         };
         self.delete_projection_checked(
@@ -778,6 +786,8 @@ impl GraphDb {
         state.stored.remove(locator);
         state.retiring.remove(locator);
         state.collected.insert(locator.clone());
+        drop(state);
+        self.retire_sealed_generation_store(locator);
         Ok(())
     }
 
@@ -1158,7 +1168,11 @@ impl GraphDb {
         *projection_quarantine = recovered_quarantine;
         *database_guard = Some(recovered);
         let mut state = self.wait_verified_generations_write()?;
-        state.quarantine(locator);
+        state.quarantine(locator.clone());
+        drop(state);
+        // A quarantined generation's rows are in doubt; its derived sealed
+        // artifact must not outlive that doubt.
+        self.retire_sealed_generation_store(&locator);
         Ok(())
     }
 }

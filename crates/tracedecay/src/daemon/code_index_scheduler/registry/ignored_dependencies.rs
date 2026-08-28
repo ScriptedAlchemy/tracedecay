@@ -225,6 +225,14 @@ impl AdmissionFlightOwnerV1 {
         mut self,
         result: Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
+        match &result {
+            Ok(_) => {
+                hotpath::gauge!("daemon.code_index.ignored_dependency.admitted_total").inc(1_u64);
+            }
+            Err(_) => {
+                hotpath::gauge!("daemon.code_index.ignored_dependency.refused_total").inc(1_u64);
+            }
+        }
         self.flight.finish(&result);
         self.remove_flight();
         self.finished = true;
@@ -260,9 +268,13 @@ impl AdmissionFlightOwnerV1 {
 
 impl Drop for AdmissionFlightOwnerV1 {
     fn drop(&mut self) {
+        // The owner is the RAII holder of the in-flight admission slot, so the
+        // gauge cannot leak on cancellation, panic, or shutdown.
+        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").dec(1_u64);
         if self.finished {
             return;
         }
+        hotpath::gauge!("daemon.code_index.ignored_dependency.cancelled_total").inc(1_u64);
         self.bridge.cancel();
         let cancellation = Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
         self.flight.finish(&cancellation);
@@ -374,9 +386,11 @@ impl CodeIndexSchedulerRegistryV1 {
         };
 
         if !owns_flight {
+            hotpath::gauge!("daemon.code_index.ignored_dependency.coalesced_total").inc(1_u64);
             return await_flight(flight, control.as_ref()).await;
         }
         let bridge = Arc::new(AdmissionControlBridgeV1::new());
+        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").inc(1_u64);
         let owner = AdmissionFlightOwnerV1 {
             key: flight_key,
             flight,
@@ -394,6 +408,13 @@ impl CodeIndexSchedulerRegistryV1 {
         owner.finish(result)
     }
 
+    /// The owning flight's full admission lifetime: gate waits, the blocking
+    /// build/publication, graph activation, and the serving CAS. Followers
+    /// coalesce onto this flight and are counted, not spanned.
+    #[hotpath::measure(
+        label = "daemon.code_index.ignored_dependency.admission",
+        future = true
+    )]
     async fn run_ignored_dependency_admission(
         &self,
         project_root: &Path,

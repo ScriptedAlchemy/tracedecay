@@ -709,9 +709,8 @@ pub async fn collect_unregistered_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    hotpath::gauge!("daemon.doctor.unregistered_stores_total").inc(
-        (report.plan.collect.len() + report.plan.retained_immature.len()) as u64,
-    );
+    hotpath::gauge!("daemon.doctor.unregistered_stores_total")
+        .inc((report.plan.collect.len() + report.plan.retained_immature.len()) as u64);
     storage_family_read(
         report
             .plan

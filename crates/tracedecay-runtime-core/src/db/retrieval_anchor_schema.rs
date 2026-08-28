@@ -394,6 +394,7 @@ async fn restore_legacy_aliases(conn: &(impl Executor + Sync), operation: &str) 
         .map_err(|error| database_error(operation, error))
 }
 
+#[hotpath::measure(label = "runtime_core.db.anchor_alias_upgrade")]
 async fn upgrade_aliases_if_needed(conn: &(impl Executor + Sync), operation: &str) -> Result<()> {
     let aliases_exist = table_exists(conn, ALIASES_TABLE, operation).await?;
     let legacy_exists = table_exists(conn, LEGACY_ALIASES_TABLE, operation).await?;
@@ -677,6 +678,7 @@ async fn validate_disposition_rows(
     Ok(())
 }
 
+#[hotpath::measure(label = "runtime_core.db.anchor_disposition_upgrade")]
 async fn upgrade_dispositions_if_needed(
     conn: &(impl Executor + Sync),
     operation: &str,
@@ -722,6 +724,7 @@ async fn upgrade_dispositions_if_needed(
 /// Existing one-column alias foreign keys are upgraded with a resumable,
 /// validated copy; conflicting or ownerless rows are retained and reported
 /// rather than discarded.
+#[hotpath::measure(label = "runtime_core.db.anchor_schema_install")]
 pub async fn install_retrieval_anchor_schema(
     conn: &(impl Executor + Sync),
     operation: &str,

@@ -27,6 +27,7 @@ use tracedecay_store::{
 
 const CURRENT_FACTS_BATCH_SIZE: usize = 400;
 
+#[hotpath::measure(label = "runtime_core.memory.query_current")]
 pub(in crate::store::memory) async fn query_current_facts_tx(
     snapshot: &Transaction<'_>,
     query: &CurrentFactsQuery,
@@ -136,6 +137,7 @@ pub(in crate::store::memory) async fn query_current_facts_tx(
         })?;
         facts.push(fact);
     }
+    hotpath::gauge!("runtime_core.memory.query_rows").inc(facts.len() as f64);
     Ok(facts)
 }
 
@@ -911,7 +913,7 @@ impl DatabaseFactStore<'_> {
         let write_control = write_control.clone();
         // The task owns every commit input so caller-future cancellation cannot
         // interrupt SQLite after the control admits the commit-start transition.
-        tokio::spawn(async move {
+        let outcome = tokio::spawn(async move {
             if write_control.interrupted() {
                 return Err(storage_message(
                     COMMIT_OPERATION,
@@ -972,6 +974,10 @@ impl DatabaseFactStore<'_> {
             Ok(outcome)
         })
         .await
-        .map_err(|error| storage_error(COMMIT_OPERATION, error))?
+        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+        if outcome.is_err() {
+            hotpath::gauge!("runtime_core.memory.commit_failures").inc(1.0);
+        }
+        outcome
     }
 }

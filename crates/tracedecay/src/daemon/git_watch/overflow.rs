@@ -67,6 +67,9 @@ impl OverflowRoster {
             return OverflowAdmission::AlreadyCovered;
         }
         if self.entries.len() >= bound {
+            // The repository loses coverage entirely until the next handshake.
+            // Dropped evidence must be counted, not only retained successes.
+            hotpath::gauge!("daemon.git.watch.overflow.dropped_total").inc(1_u64);
             return OverflowAdmission::RosterFull;
         }
         let due = next_due(now, &config);
@@ -78,11 +81,15 @@ impl OverflowRoster {
                 due,
             },
         );
+        hotpath::gauge!("daemon.git.watch.overflow.covered_total").inc(1_u64);
+        hotpath::gauge!("daemon.git.watch.overflow.depth").set(self.entries.len());
         OverflowAdmission::Covered
     }
 
     pub(super) fn remove(&mut self, root: &Path) {
-        self.entries.remove(root);
+        if self.entries.remove(root).is_some() {
+            hotpath::gauge!("daemon.git.watch.overflow.depth").set(self.entries.len());
+        }
     }
 
     pub(super) fn contains(&self, root: &Path) -> bool {
@@ -171,6 +178,9 @@ pub(super) async fn cover_overflowed_repositories(watcher: &GitWatcher) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         roster.take_due(Instant::now())
     };
+    // Coalesced batch size per backstop pass, so a profile separates roster
+    // pressure from the per-root admission and scheduler-ingress cost below.
+    hotpath::gauge!("daemon.git.watch.overflow.due_per_pass").set(due.len());
     for (root, identity, config) in due {
         if watcher.inner.cancellation.is_cancelled() {
             return;
@@ -183,6 +193,7 @@ pub(super) async fn cover_overflowed_repositories(watcher: &GitWatcher) {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&root);
+                hotpath::gauge!("daemon.git.watch.overflow.recovered_total").inc(1_u64);
                 log_daemon_event(
                     "git_watch_overflow_recovered",
                     &[("project", root.display().to_string())],

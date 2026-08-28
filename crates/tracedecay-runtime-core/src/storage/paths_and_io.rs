@@ -226,7 +226,11 @@ impl PrivateStoreIo {
         reject_symlink_components(path, "private store file")?;
         let mut options = fs::OpenOptions::new();
         options.append(true);
-        let mut file = Self::open_private(path, &mut options)?;
+        // One canonical handle: the append file itself, no buffer wrapper.
+        let mut file = hotpath::io!(
+            Self::open_private(path, &mut options)?,
+            label = "runtime_core.storage.append_line"
+        );
         file.write_all(format!("{line}\n").as_bytes())?;
         file.flush()?;
         drop(file);
@@ -278,6 +282,7 @@ impl PrivateStoreIo {
     /// `path`. Callers that require rollback must retain and restore their prior
     /// value under their own stable serialization authority; this primitive
     /// never unlinks a destination it cannot prove it still owns.
+    #[hotpath::measure(label = "runtime_core.storage.durable_write")]
     pub fn write_file_atomically_durable(
         path: &Path,
         temp_path: &Path,
@@ -298,28 +303,46 @@ impl PrivateStoreIo {
             options.write(true).truncate(true);
             let mut temp = Self::open_private(temp_path, &mut options)?;
             temp.write_all(contents)?;
-            temp.sync_all()?;
+            hotpath::measure_block!("runtime_core.storage.fsync_temp", temp.sync_all())
+                .inspect_err(|_| {
+                    hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
+                })?;
         }
         set_owner_private_file_mode(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
-        crate::db::DatabaseAuthority::replace_file_atomically(
-            temp_path,
-            path,
-            "private store durable file",
+        hotpath::measure_block!(
+            "runtime_core.storage.rename",
+            crate::db::DatabaseAuthority::replace_file_atomically(
+                temp_path,
+                path,
+                "private store durable file",
+            )
+            .map_err(io::Error::other)
         )
-        .map_err(io::Error::other)?;
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .and_then(|file| file.sync_all())
-            .and_then(|()| inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename))
-            .and_then(|()| sync_parent_directory(path))?;
+        .inspect_err(|_| {
+            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
+        })?;
+        hotpath::measure_block!(
+            "runtime_core.storage.fsync_publish",
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .and_then(|file| file.sync_all())
+                .and_then(|()| {
+                    inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename)
+                })
+                .and_then(|()| sync_parent_directory(path))
+        )
+        .inspect_err(|_| {
+            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
+        })?;
         Ok(())
     }
 
     /// Synchronizes the durable members of one `SQLite` WAL family. The SHM
     /// coordination file is intentionally excluded because `SQLite` rebuilds it.
+    #[hotpath::measure(label = "runtime_core.storage.sqlite_family_sync")]
     pub fn sync_sqlite_family(path: &Path) -> io::Result<()> {
         reject_symlink_components(path, "private SQLite store")?;
         for member in [
@@ -350,6 +373,7 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
+        hotpath::gauge!("runtime_core.storage.copy_bytes").inc(bytes as f64);
         set_owner_private_file_mode(target)?;
         Ok(bytes)
     }

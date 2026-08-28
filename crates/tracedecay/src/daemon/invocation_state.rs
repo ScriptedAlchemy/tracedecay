@@ -231,8 +231,7 @@ impl DaemonInvocationState {
             tokio::time::Instant::now() + super::DAEMON_TASK_ABORT_DEADLINE;
         for retirement in semantic_projection_retirements {
             if !retirement.wait_until(semantic_projection_deadline).await {
-                hotpath::gauge!("daemon.invocation_state.drain.semantic_refused_total")
-                    .inc(1_u64);
+                hotpath::gauge!("daemon.invocation_state.drain.semantic_refused_total").inc(1_u64);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "semantic projection work for {retirement_kind} project '{}' did not drain",
@@ -472,8 +471,7 @@ impl DaemonInvocationState {
             )
             .await
             .map_err(|error| {
-                hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total")
-                    .inc(1_u64);
+                hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
                 TraceDecayError::Config {
                     message: format!("code-index scheduler could not be mounted: {error}"),
                 }

@@ -1038,8 +1038,7 @@ fn record_stack_preflight_outcome(
             hotpath::gauge!("daemon.native_integration.stack_preflight.cancelled").inc(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.coordinator_error")
-                .inc(1.0);
+            hotpath::gauge!("daemon.native_integration.stack_preflight.coordinator_error").inc(1.0);
         }
     }
 }

@@ -47,25 +47,48 @@ impl DaemonSemanticActivationReconcilerV1 {
                     handled_epoch = Some(event.epoch);
                     let mut backoff = REOBSERVATION_INITIAL_BACKOFF;
                     loop {
+                        // One static label times each bounded reobservation
+                        // attempt (the deadline-timeout drop included), beside
+                        // the whole-loop lifetime span on the spawned task.
                         let observed = tokio::select! {
                             () = worker_cancellation.cancelled() => return,
                             observed = tokio::time::timeout(
                                 REOBSERVATION_UNIT_DEADLINE,
-                                coordinator.reobserve_current_activation(),
+                                hotpath::future!(
+                                    coordinator.reobserve_current_activation(),
+                                    label = "daemon.semantic.activation_reconciler.reobserve"
+                                ),
                             ) => observed,
                         };
                         match observed {
-                            Ok(Ok(Some(_) | None)) => break,
+                            Ok(Ok(Some(_) | None)) => {
+                                hotpath::gauge!(
+                                    "daemon.semantic.activation_reconciler.reobserve.settled_total"
+                                )
+                                .inc(1_u64);
+                                break;
+                            }
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Rejected
                                 | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
                                 | SemanticActivationCoordinationErrorV1::Conflict,
-                            )) => break,
+                            )) => {
+                                hotpath::gauge!(
+                                    "daemon.semantic.activation_reconciler.reobserve.refused_total"
+                                )
+                                .inc(1_u64);
+                                break;
+                            }
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Unavailable
                                 | SemanticActivationCoordinationErrorV1::Runtime(_),
                             ))
-                            | Err(_) => {}
+                            | Err(_) => {
+                                hotpath::gauge!(
+                                    "daemon.semantic.activation_reconciler.reobserve.retried_total"
+                                )
+                                .inc(1_u64);
+                            }
                         }
                         tokio::select! {
                             () = worker_cancellation.cancelled() => return,

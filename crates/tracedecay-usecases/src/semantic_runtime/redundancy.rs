@@ -345,9 +345,54 @@ fn record_retained_generation_count(retained: &BTreeMap<PathBuf, RetainedProject
     }
 }
 
+#[cfg(feature = "hotpath")]
+static REDUNDANCY_READS_ACTIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Additive lifecycle guard for the active redundancy-read gauge. Drop runs
+/// on completion, cancellation, and panic alike, so an abandoned read can
+/// never leak an "active" count.
+#[cfg(feature = "hotpath")]
+struct RedundancyReadObservationV1;
+
+#[cfg(feature = "hotpath")]
+impl RedundancyReadObservationV1 {
+    fn enter() -> Self {
+        use std::sync::atomic::Ordering;
+        let active = REDUNDANCY_READS_ACTIVE
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        hotpath::gauge!("usecases.semantic.redundancy.reads_active").set(active);
+        Self
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for RedundancyReadObservationV1 {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let _ =
+            REDUNDANCY_READS_ACTIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                active.checked_sub(1)
+            });
+        hotpath::gauge!("usecases.semantic.redundancy.reads_active")
+            .set(REDUNDANCY_READS_ACTIVE.load(Ordering::Relaxed));
+    }
+}
+
 /// Read only the exact complete cosine generation selected by committed pins.
 #[hotpath::measure(label = "usecases.semantic.redundancy_generation", future = true)]
 pub async fn project_semantic_redundancy_generation(
+    project_root: &Path,
+) -> Option<SemanticRedundancyGenerationV1> {
+    #[cfg(feature = "hotpath")]
+    let _active = RedundancyReadObservationV1::enter();
+    let generation = read_project_semantic_redundancy_generation(project_root).await;
+    crate::hotpath_observe::semantic_redundancy_read(generation.is_some());
+    generation
+}
+
+async fn read_project_semantic_redundancy_generation(
     project_root: &Path,
 ) -> Option<SemanticRedundancyGenerationV1> {
     let authority = {
@@ -397,6 +442,7 @@ pub async fn project_semantic_redundancy_generation(
         .iter()
         .map(|symbol| (&symbol.occurrence, symbol.qualified_name.as_str()))
         .collect::<HashMap<_, _>>();
+    let scanned = vectors.vectors().len();
     let mut admitted = Vec::new();
     for (chunk_id, vector) in vectors.vectors() {
         let chunk = chunks.get(chunk_id)?;
@@ -419,6 +465,7 @@ pub async fn project_semantic_redundancy_generation(
             values: vector.values.clone(),
         });
     }
+    crate::hotpath_observe::semantic_redundancy_scan(scanned, admitted.len());
     Some(SemanticRedundancyGenerationV1 {
         vector_generation: vectors.generation_id().as_digest().as_str().to_owned(),
         source_generation: source_generation.as_str().to_owned(),

@@ -756,14 +756,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         if newly_mounted {
             hotpath::measure_block!(
                 "daemon.session_registry.mount.remote_replay_recovery",
-                storage
-                    .recover_interrupted_replay_attempts(tracedecay_application::clock::now_micros())
+                storage.recover_interrupted_replay_attempts(
+                    tracedecay_application::clock::now_micros()
+                )
             )
             .map_err(|error| {
-                session_registry_error(
-                    "recover interrupted Remote Brain replay",
-                    error.to_string(),
-                )
+                session_registry_error("recover interrupted Remote Brain replay", error.to_string())
             })?;
         }
         self.remote_credential_authority

@@ -13,6 +13,52 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
+/// In-flight accounting for the daemon invocation front door. Entering counts
+/// one request; dropping settles it, so cancellation, panic, and every early
+/// denial path release the in-flight gauge.
+struct InvocationDispatchGaugeGuard;
+
+impl InvocationDispatchGaugeGuard {
+    fn enter() -> Self {
+        hotpath::gauge!("daemon.service.invocation.active").inc(1_u64);
+        hotpath::gauge!("daemon.service.invocation.requests_total").inc(1_u64);
+        Self
+    }
+}
+
+impl Drop for InvocationDispatchGaugeGuard {
+    fn drop(&mut self) {
+        hotpath::gauge!("daemon.service.invocation.active").dec(1_u64);
+        hotpath::gauge!("daemon.service.invocation.settled_total").inc(1_u64);
+    }
+}
+
+/// Counts a request the front door denied before any payload handler ran.
+/// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
+/// key is static and bounded.
+fn observe_front_door_denial(problem: DaemonInvocationProblem) {
+    match problem {
+        DaemonInvocationProblem::InvalidRequest => {
+            hotpath::gauge!("daemon.service.invocation.denied.invalid_request").inc(1_u64);
+        }
+        DaemonInvocationProblem::UnsupportedRevision => {
+            hotpath::gauge!("daemon.service.invocation.denied.unsupported_revision").inc(1_u64);
+        }
+        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            hotpath::gauge!("daemon.service.invocation.denied.not_authorized").inc(1_u64);
+        }
+        DaemonInvocationProblem::ResetRequired => {
+            hotpath::gauge!("daemon.service.invocation.denied.reset_required").inc(1_u64);
+        }
+        DaemonInvocationProblem::ApplicationContractViolation => {
+            hotpath::gauge!("daemon.service.invocation.denied.contract_violation").inc(1_u64);
+        }
+        DaemonInvocationProblem::Unavailable => {
+            hotpath::gauge!("daemon.service.invocation.denied.unavailable").inc(1_u64);
+        }
+    }
+}
+
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
@@ -131,9 +177,11 @@ impl DaemonInvocationService {
             &crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
         >,
     ) -> DaemonInvocationResponse {
+        let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = crate::daemon::request_cancellation::register(&request_id) else {
+                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -147,6 +195,7 @@ impl DaemonInvocationService {
             (Some(token), _) => token,
             (None, Some(lease)) => lease.token(),
             (None, None) => {
+                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -175,9 +224,12 @@ impl DaemonInvocationService {
                 )
             }
             _ => {
-                self.project_runtimes
-                    .request_runtimes(project_root, canonical_root.as_deref())
-                    .await
+                hotpath::future!(
+                    self.project_runtimes
+                        .request_runtimes(project_root, canonical_root.as_deref()),
+                    label = "daemon.service.invocation.admission_wait"
+                )
+                .await
             }
         };
         let project_runtime_admitted = runtimes.is_admitted();
@@ -187,7 +239,9 @@ impl DaemonInvocationService {
             .map(|runtime| runtime.source_observation_port());
         let observation_subject =
             invocation_observation_subject(&request_id, operation, delivery_route);
-        if let Err(problem) = request.validate() {
+        let validated =
+            hotpath::measure_block!("daemon.service.invocation.validate", request.validate());
+        if let Err(problem) = validated {
             if is_observable_operation(operation)
                 && let Some((argument, rejection)) = invocation_problem_rejected_argument(problem)
             {
@@ -205,6 +259,7 @@ impl DaemonInvocationService {
                     },
                 );
             }
+            observe_front_door_denial(problem);
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let pre_admission_response = match &request.payload {
@@ -219,6 +274,7 @@ impl DaemonInvocationService {
             return *response;
         }
         if request.requires_project() && !project_runtime_admitted {
+            observe_front_door_denial(DaemonInvocationProblem::Unavailable);
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -239,7 +295,11 @@ impl DaemonInvocationService {
             );
         }
         let now_ms = now_millis();
-        self.expire_sessions(now_ms).await;
+        hotpath::future!(
+            self.expire_sessions(now_ms),
+            label = "daemon.service.invocation.expire_sessions"
+        )
+        .await;
         let feedback_service = runtimes.feedback_owner;
         let advisory_cycle = runtimes.advisory_cycle;
         let configuration_runtime = runtimes.configuration;
@@ -913,13 +973,16 @@ impl DaemonInvocationService {
             },
         };
         if is_observable_operation(operation) {
-            observe_invocation_response(
-                observations.as_ref(),
-                observation_subject.as_ref(),
-                operation,
-                delivery_route,
-                dispatched_at,
-                &response,
+            hotpath::measure_block!(
+                "daemon.service.invocation.observe_response",
+                observe_invocation_response(
+                    observations.as_ref(),
+                    observation_subject.as_ref(),
+                    operation,
+                    delivery_route,
+                    dispatched_at,
+                    &response,
+                )
             );
         }
         response

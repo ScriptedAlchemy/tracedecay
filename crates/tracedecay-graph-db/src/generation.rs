@@ -145,6 +145,26 @@ pub struct GraphGenerationManifestIdentity {
 }
 
 impl GraphGenerationManifestIdentity {
+    /// An identity reconstructed from its metadata parts, with a cold
+    /// dependency-closure memo: the digest is recomputed on first use exactly
+    /// as a cloned identity would.
+    pub fn new(
+        projection: GraphProjectionIdentity,
+        generation: GraphGenerationId,
+        source_generation: SourceGeneration,
+        watermark: GraphWatermark,
+        dependencies: Vec<GraphGenerationDependency>,
+    ) -> Self {
+        Self {
+            projection,
+            generation,
+            source_generation,
+            watermark,
+            dependencies,
+            digest_memo: DependencyClosureDigestMemo::default(),
+        }
+    }
+
     pub fn dependency_closure_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -871,6 +891,32 @@ pub(crate) fn verify_recovered_generation(
 ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     #[cfg(test)]
     RECOVERED_GENERATION_ENUMERATIONS.with(|count| count.set(count.get() + 1));
+    verify_recovered_rows(database, identity, expected, check)
+}
+
+/// The same proof run over a **sealed per-generation copy** rather than the
+/// staging database (`crate::sealed_store`). Kept apart so the staging
+/// enumeration count the publication tests pin ("stream the proof exactly
+/// once") stays a statement about the authority's rows; the sealed copy pays
+/// its own proofs (pre-compact and post-reopen), counted separately.
+#[hotpath::measure(label = "graph_db.sealed_store.verify")]
+pub(crate) fn verify_sealed_copy_generation(
+    database: &GrafeoDB,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    #[cfg(test)]
+    SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
+    verify_recovered_rows(database, identity, expected, check)
+}
+
+fn verify_recovered_rows(
+    database: &GrafeoDB,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     check()?;
     let physical_namespace = identity.physical_namespace()?;
     let recovered_commit = latest_projection(
@@ -926,6 +972,8 @@ pub(crate) fn verify_recovered_generation(
 thread_local! {
     static RECOVERED_GENERATION_ENUMERATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static SEALED_COPY_PROOFS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
     static MANIFEST_CANONICALIZATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     static CANONICAL_BUFFER_ALLOCATION_GROWTHS: std::cell::Cell<usize> =
@@ -942,6 +990,18 @@ pub(crate) fn reset_recovered_generation_enumerations() {
 #[cfg(test)]
 pub(crate) fn recovered_generation_enumerations() -> usize {
     RECOVERED_GENERATION_ENUMERATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_sealed_copy_proofs() {
+    SEALED_COPY_PROOFS.with(|count| count.set(0));
+}
+
+/// Recovered-digest proofs run over sealed per-generation copies on this
+/// thread (build: pre-compact + post-reopen; adoption: post-reopen only).
+#[cfg(test)]
+pub(crate) fn sealed_copy_proofs() -> usize {
+    SEALED_COPY_PROOFS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -974,7 +1034,33 @@ pub(crate) fn dependency_closure_canonicalizations() -> usize {
     DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(std::cell::Cell::get)
 }
 
-fn physical_namespace_projection_map(
+/// Digest of the generation identity frames alone, in the exact byte layout
+/// the recovered-generation proof hashes before its entity and relation
+/// frames. This is the binding digest for derived read artifacts (the sealed
+/// read bundle): it reuses [`write_generation_identity_frames`] so there is
+/// exactly one canonical encoding of a generation's identity, never a
+/// parallel authority.
+pub(crate) fn generation_identity_frames_digest(
+    identity: &GraphGenerationManifestIdentity,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<String, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_generation_identity_frames(
+        &mut writer,
+        &mut canonical,
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
+    )?;
+    writer.finish()?;
+    Ok(encode_lowercase_hex(&digest.finalize()))
+}
+
+pub(crate) fn physical_namespace_projection_map(
     identity: &GraphGenerationManifestIdentity,
 ) -> Result<BTreeMap<GraphNamespace, GraphProjectionIdentity>, GraphDbError> {
     let mut map = BTreeMap::from([(identity.physical_namespace()?, identity.projection.clone())]);
@@ -991,7 +1077,7 @@ fn physical_namespace_projection_map(
     Ok(map)
 }
 
-fn recovered_entity_ref(
+pub(crate) fn recovered_entity_ref(
     store: &dyn grafeo_core::graph::GraphStore,
     node: grafeo_common::types::NodeId,
     namespace_projection: &BTreeMap<GraphNamespace, GraphProjectionIdentity>,
@@ -1524,7 +1610,10 @@ mod manifest_digest_memo_tests {
         .unwrap()
     }
 
-    fn manifest(namespace: &str, dependencies: Vec<GraphGenerationDependency>) -> GraphGenerationManifest {
+    fn manifest_fixture(
+        namespace: &str,
+        dependencies: Vec<GraphGenerationDependency>,
+    ) -> GraphGenerationManifest {
         GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
                 GraphNamespace::new(namespace).unwrap(),
@@ -1554,7 +1643,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn produce_and_hydrate_flow_canonicalizes_each_digest_once_per_instance() {
-        let manifest = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        let manifest = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
         reset_manifest_canonicalizations();
         reset_dependency_closure_canonicalizations();
 
@@ -1573,7 +1662,10 @@ mod manifest_digest_memo_tests {
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
         let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         assert_eq!(sealed, replay.expected_recovered_digest);
-        assert_eq!(dependency_digest, replay.dependency_generation_closure_digest);
+        assert_eq!(
+            dependency_digest,
+            replay.dependency_generation_closure_digest
+        );
         assert_eq!(
             manifest_canonicalizations(),
             1,
@@ -1615,8 +1707,11 @@ mod manifest_digest_memo_tests {
 
         // Byte identity: a cold instance built from the same inputs computes
         // the exact digests the memoized reads served.
-        let control = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
-        assert_eq!(control.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
+        let control = manifest_fixture("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        assert_eq!(
+            control.expected_recovered_digest(&|| Ok(())).unwrap(),
+            sealed
+        );
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
             dependency_digest
@@ -1633,7 +1728,7 @@ mod manifest_digest_memo_tests {
         })
         .unwrap();
         let database = owner.issue_lease().unwrap();
-        let manifest = Arc::new(manifest("digest-memo-verify", vec![]));
+        let manifest = Arc::new(manifest_fixture("digest-memo-verify", vec![]));
         database
             .apply_generation_unverified(Arc::clone(&manifest), &|| Ok(()))
             .unwrap();
@@ -1667,7 +1762,8 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn mutation_after_a_digest_read_recomputes_instead_of_serving_the_memo() {
-        let mut manifest = manifest("digest-memo-mutation", vec![dependency(1), dependency(2)]);
+        let mut manifest =
+            manifest_fixture("digest-memo-mutation", vec![dependency(1), dependency(2)]);
         let dependency_before = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let recovered_before = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
 
@@ -1717,7 +1813,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn identity_mutation_recomputes_the_propagated_digest() {
-        let manifest = manifest("digest-memo-identity", vec![dependency(1), dependency(2)]);
+        let manifest = manifest_fixture("digest-memo-identity", vec![dependency(1), dependency(2)]);
         let seeded = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let mut identity = manifest.identity();
         identity.dependencies.pop();
@@ -1730,7 +1826,7 @@ mod manifest_digest_memo_tests {
 
     #[test]
     fn a_clone_starts_with_a_cold_memo() {
-        let manifest = manifest("digest-memo-clone", vec![dependency(1)]);
+        let manifest = manifest_fixture("digest-memo-clone", vec![dependency(1)]);
         let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
 

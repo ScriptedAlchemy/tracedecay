@@ -239,6 +239,7 @@ impl StoreRuntimeRegistry {
         }))
     }
 
+    #[hotpath::measure(label = "runtime_core.registry.graph_retain")]
     pub async fn retain_graph_store(
         &self,
         key: StoreRuntimeKey,

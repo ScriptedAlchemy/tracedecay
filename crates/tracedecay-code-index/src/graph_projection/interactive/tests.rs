@@ -23,6 +23,7 @@ use crate::graph_projection::{
     code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+mod bundle_artifact;
 mod imports;
 mod warm_catalog;
 

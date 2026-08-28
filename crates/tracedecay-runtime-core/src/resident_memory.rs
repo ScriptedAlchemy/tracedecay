@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
@@ -68,6 +69,328 @@ pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
     limit
 }
 
+/// Fraction of the configured limit, in permille, at or above which *measured*
+/// process RSS is treated as over budget.
+///
+/// Reservations model what TraceDecay knows it is about to allocate. They do
+/// not see the embedding runtime, grafeo stores, decoded generations, or
+/// publish transients, so a process can sit far inside its reservation ceiling
+/// while real RSS runs several times past the configured limit. This watermark
+/// is where the admission decision stops trusting the model and starts
+/// trusting the measurement.
+pub const RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1: u64 = 900;
+
+/// Fraction of the configured limit, in permille, at or below which measured
+/// RSS clears the over-budget latch.
+///
+/// Strictly below the high watermark so a process hovering at the boundary
+/// does not alternate admit/refuse on consecutive samples. Between the two
+/// watermarks the previous verdict stands.
+pub const RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1: u64 = 750;
+
+/// Largest request still admitted while measured RSS is over budget.
+///
+/// Over-budget is a refusal of *growth*, not a process-wide stop: small
+/// bookkeeping reservations still complete so the daemon can keep serving,
+/// retiring, and releasing. Anything larger than this floor is exactly the
+/// class of admission that turned a 16GiB configured limit into a 42GiB
+/// resident process, so it waits for pressure to fall.
+pub const RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1: u64 = 8 * 1024 * 1024;
+
+/// Resolve one watermark in bytes from a permille fraction of the limit.
+#[must_use]
+pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64) -> u64 {
+    let scaled = u128::from(limit_bytes.get()) * u128::from(permille) / 1_000;
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
+/// What the last measured RSS sample says about this process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentMemoryPressureStateV1 {
+    /// No sample has been published yet, so admission has nothing measured to
+    /// consult and falls back to the reservation ceiling alone. An abstention,
+    /// never a claim that the process is small.
+    Unobserved,
+    /// Measured RSS is below the pressure watermarks, or between them with the
+    /// latch clear.
+    Nominal {
+        observed_bytes: u64,
+        limit_bytes: u64,
+        high_watermark_bytes: u64,
+    },
+    /// Measured RSS reached the high watermark and has not yet fallen back to
+    /// the low watermark.
+    OverBudget {
+        observed_bytes: u64,
+        limit_bytes: u64,
+        high_watermark_bytes: u64,
+        low_watermark_bytes: u64,
+    },
+}
+
+impl ResidentMemoryPressureStateV1 {
+    #[must_use]
+    pub const fn is_over_budget(self) -> bool {
+        matches!(self, Self::OverBudget { .. })
+    }
+
+    /// The last measured RSS, or `None` when nothing has been sampled.
+    #[must_use]
+    pub const fn observed_bytes(self) -> Option<u64> {
+        match self {
+            Self::Unobserved => None,
+            Self::Nominal { observed_bytes, .. } | Self::OverBudget { observed_bytes, .. } => {
+                Some(observed_bytes)
+            }
+        }
+    }
+}
+
+/// The measurement handed to pressure reclaimers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentMemoryPressureReleaseRequestV1 {
+    pub observed_bytes: u64,
+    pub limit_bytes: u64,
+    pub high_watermark_bytes: u64,
+    /// Measured bytes above the high watermark.
+    pub excess_bytes: u64,
+}
+
+/// Releases retained state that is reclaimable without losing durable truth,
+/// returning the bytes it dropped. Reclaimers must never revoke work that is
+/// already admitted and running.
+pub type ResidentMemoryPressureReclaimerV1 =
+    dyn Fn(ResidentMemoryPressureReleaseRequestV1) -> u64 + Send + Sync + 'static;
+
+#[derive(Default)]
+struct ResidentMemoryPressureReclaimerStateV1 {
+    reclaimers: BTreeMap<(u32, u64), Arc<ResidentMemoryPressureReclaimerV1>>,
+    next_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("resident-memory pressure reclaimer registration sequence exhausted")]
+pub struct ResidentMemoryPressureRegistrationFailureV1;
+
+/// The measured side of the memory accounting loop.
+///
+/// One reader samples real RSS (`/proc/self/status` `VmRSS` on Linux, from the
+/// daemon retention tick that already publishes the
+/// `daemon.process.resident_bytes` gauge) and publishes it here. Admission
+/// reads this cell; there is no second parser and no second timer.
+pub struct ResidentMemoryPressureV1 {
+    limit_bytes: NonZeroU64,
+    high_watermark_bytes: u64,
+    low_watermark_bytes: u64,
+    observed_bytes: AtomicU64,
+    observed: AtomicBool,
+    over_budget: AtomicBool,
+    state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
+}
+
+impl fmt::Debug for ResidentMemoryPressureV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentMemoryPressureV1")
+            .field("limit_bytes", &self.limit_bytes)
+            .field("high_watermark_bytes", &self.high_watermark_bytes)
+            .field("low_watermark_bytes", &self.low_watermark_bytes)
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResidentMemoryPressureV1 {
+    #[must_use]
+    pub fn new(limit_bytes: NonZeroU64) -> Self {
+        let high_watermark_bytes = resident_memory_watermark_bytes_v1(
+            limit_bytes,
+            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
+        );
+        let low_watermark_bytes = resident_memory_watermark_bytes_v1(
+            limit_bytes,
+            RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1,
+        )
+        .min(high_watermark_bytes);
+        Self {
+            limit_bytes,
+            high_watermark_bytes,
+            low_watermark_bytes,
+            observed_bytes: AtomicU64::new(0),
+            observed: AtomicBool::new(false),
+            over_budget: AtomicBool::new(false),
+            state: hotpath::mutex!(
+                Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
+                label = "runtime_core.resident.pressure"
+            ),
+        }
+    }
+
+    #[must_use]
+    pub const fn limit_bytes(&self) -> u64 {
+        self.limit_bytes.get()
+    }
+
+    #[must_use]
+    pub const fn high_watermark_bytes(&self) -> u64 {
+        self.high_watermark_bytes
+    }
+
+    #[must_use]
+    pub const fn low_watermark_bytes(&self) -> u64 {
+        self.low_watermark_bytes
+    }
+
+    /// Publish one measured RSS sample and return the resulting state.
+    ///
+    /// The latch rises at the high watermark and clears only at the low
+    /// watermark; between them the previous verdict stands, so admission does
+    /// not flap while RSS hovers. Reaching the high watermark also runs the
+    /// registered pressure reclaimers as the emergency response, because
+    /// refusing new admissions alone cannot shrink state that is already
+    /// retained.
+    pub fn publish_observed_resident_bytes(
+        &self,
+        observed_bytes: u64,
+    ) -> ResidentMemoryPressureStateV1 {
+        self.observed_bytes.store(observed_bytes, Ordering::Release);
+        self.observed.store(true, Ordering::Release);
+        hotpath::gauge!("daemon.memory.observed_resident_bytes").set(observed_bytes as f64);
+        if observed_bytes >= self.high_watermark_bytes {
+            self.over_budget.store(true, Ordering::Release);
+            self.run_pressure_reclaimers(observed_bytes);
+        } else if observed_bytes <= self.low_watermark_bytes {
+            self.over_budget.store(false, Ordering::Release);
+        }
+        hotpath::gauge!("daemon.memory.over_budget")
+            .set(f64::from(u8::from(self.over_budget.load(Ordering::Acquire))));
+        self.state()
+    }
+
+    #[must_use]
+    pub fn state(&self) -> ResidentMemoryPressureStateV1 {
+        if !self.observed.load(Ordering::Acquire) {
+            return ResidentMemoryPressureStateV1::Unobserved;
+        }
+        let observed_bytes = self.observed_bytes.load(Ordering::Acquire);
+        if self.over_budget.load(Ordering::Acquire) {
+            return ResidentMemoryPressureStateV1::OverBudget {
+                observed_bytes,
+                limit_bytes: self.limit_bytes.get(),
+                high_watermark_bytes: self.high_watermark_bytes,
+                low_watermark_bytes: self.low_watermark_bytes,
+            };
+        }
+        ResidentMemoryPressureStateV1::Nominal {
+            observed_bytes,
+            limit_bytes: self.limit_bytes.get(),
+            high_watermark_bytes: self.high_watermark_bytes,
+        }
+    }
+
+    /// Register a reclaimer run when measured RSS reaches the high watermark.
+    /// Lower priorities run first; the registration unregisters on drop.
+    pub fn register_pressure_reclaimer(
+        self: &Arc<Self>,
+        priority: u32,
+        callback: Arc<ResidentMemoryPressureReclaimerV1>,
+    ) -> Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1>
+    {
+        let mut state = self.lock_state();
+        let sequence = state.next_sequence;
+        state.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(ResidentMemoryPressureRegistrationFailureV1)?;
+        state.reclaimers.insert((priority, sequence), callback);
+        Ok(ResidentMemoryPressureRegistrationV1 {
+            pressure: Arc::downgrade(self),
+            priority,
+            sequence,
+        })
+    }
+
+    /// Run every registered pressure reclaimer, outside the registry lock, and
+    /// report the bytes they released.
+    pub fn release_under_pressure(&self, observed_bytes: u64) -> u64 {
+        self.run_pressure_reclaimers(observed_bytes)
+    }
+
+    fn run_pressure_reclaimers(&self, observed_bytes: u64) -> u64 {
+        let reclaimers: Vec<Arc<ResidentMemoryPressureReclaimerV1>> = {
+            let state = self.lock_state();
+            state.reclaimers.values().map(Arc::clone).collect()
+        };
+        if reclaimers.is_empty() {
+            return 0;
+        }
+        let request = ResidentMemoryPressureReleaseRequestV1 {
+            observed_bytes,
+            limit_bytes: self.limit_bytes.get(),
+            high_watermark_bytes: self.high_watermark_bytes,
+            excess_bytes: observed_bytes.saturating_sub(self.high_watermark_bytes),
+        };
+        let mut released_bytes = 0_u64;
+        for reclaimer in reclaimers {
+            released_bytes = released_bytes.saturating_add(reclaimer(request));
+        }
+        hotpath::gauge!("daemon.memory.pressure_released_bytes").set(released_bytes as f64);
+        released_bytes
+    }
+
+    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryPressureReclaimerStateV1> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+pub struct ResidentMemoryPressureRegistrationV1 {
+    pressure: Weak<ResidentMemoryPressureV1>,
+    priority: u32,
+    sequence: u64,
+}
+
+impl fmt::Debug for ResidentMemoryPressureRegistrationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentMemoryPressureRegistrationV1")
+            .field("priority", &self.priority)
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ResidentMemoryPressureRegistrationV1 {
+    fn drop(&mut self) {
+        let Some(pressure) = self.pressure.upgrade() else {
+            return;
+        };
+        pressure
+            .lock_state()
+            .reclaimers
+            .remove(&(self.priority, self.sequence));
+    }
+}
+
+static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV1>> =
+    OnceLock::new();
+
+/// The one measured-RSS cell for this process.
+///
+/// RSS is a process fact, not a per-authority one: every authority in the
+/// process shares the same kernel accounting, so the cell is a process
+/// singleton rather than an `Arc` threaded through the store runtime. Tests
+/// build isolated cells and pass them to
+/// [`ProcessResidentMemoryV1::with_pressure`] instead of touching this.
+#[must_use]
+pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPressureV1> {
+    PROCESS_RESIDENT_MEMORY_PRESSURE_V1.get_or_init(|| {
+        Arc::new(ResidentMemoryPressureV1::new(
+            detected_process_resident_memory_limit_v1(),
+        ))
+    })
+}
+
 /// Stable component label inside one exact generation identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidentMemoryComponentIdV1(&'static str);
@@ -103,14 +426,64 @@ pub struct ResidentMemoryKeyV1 {
 }
 
 /// Typed refusal after one bounded reclaim pass.
+///
+/// Two distinct refusals, never collapsed into one: the modeled reservations
+/// are full, or the *measured* process is over budget while the model still
+/// claims room. Both name the exact bytes that produced them so no caller has
+/// to guess, and neither is ever a silent stall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "resident-memory admission denied: used={used_bytes} requested={requested_bytes} limit={limit_bytes}"
-)]
-pub struct ResidentMemoryAdmissionFailureV1 {
-    pub used_bytes: u64,
-    pub requested_bytes: u64,
-    pub limit_bytes: u64,
+pub enum ResidentMemoryAdmissionFailureV1 {
+    /// Admitted reservations plus this request exceed the configured limit.
+    #[error(
+        "resident-memory admission denied: used={used_bytes} requested={requested_bytes} limit={limit_bytes}"
+    )]
+    ReservationCeiling {
+        used_bytes: u64,
+        requested_bytes: u64,
+        limit_bytes: u64,
+    },
+    /// Measured process RSS is at or above the high watermark. Reservations
+    /// say there is room; the kernel says otherwise, and the measurement wins.
+    #[error(
+        "resident-memory admission over budget: observed_rss={observed_bytes} configured_limit={limit_bytes} high_watermark={high_watermark_bytes} requested={requested_bytes} floor={floor_bytes}"
+    )]
+    ObservedOverBudget {
+        observed_bytes: u64,
+        limit_bytes: u64,
+        high_watermark_bytes: u64,
+        requested_bytes: u64,
+        floor_bytes: u64,
+    },
+}
+
+impl ResidentMemoryAdmissionFailureV1 {
+    #[must_use]
+    pub const fn requested_bytes(&self) -> u64 {
+        match self {
+            Self::ReservationCeiling {
+                requested_bytes, ..
+            }
+            | Self::ObservedOverBudget {
+                requested_bytes, ..
+            } => *requested_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn limit_bytes(&self) -> u64 {
+        match self {
+            Self::ReservationCeiling { limit_bytes, .. }
+            | Self::ObservedOverBudget { limit_bytes, .. } => *limit_bytes,
+        }
+    }
+
+    /// Whether this refusal came from measured RSS rather than the modeled
+    /// ceiling. Over-budget refusals clear as pressure falls, so callers retry
+    /// them instead of treating the input as permanently unservable.
+    #[must_use]
+    pub const fn is_observed_over_budget(&self) -> bool {
+        matches!(self, Self::ObservedOverBudget { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -190,6 +563,8 @@ struct ResidentMemoryStateV1 {
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
     state: ProfiledMutex<ResidentMemoryStateV1>,
+    /// Measured RSS this admission consults before trusting its own model.
+    pressure: Arc<ResidentMemoryPressureV1>,
 }
 
 impl fmt::Debug for ProcessResidentMemoryV1 {
@@ -204,14 +579,43 @@ impl fmt::Debug for ProcessResidentMemoryV1 {
 }
 
 impl ProcessResidentMemoryV1 {
+    /// Production constructor: binds the one process-wide measured-RSS cell.
     pub fn new(limit_bytes: NonZeroU64) -> Self {
+        Self::with_pressure(
+            limit_bytes,
+            Arc::clone(process_resident_memory_pressure_v1()),
+        )
+    }
+
+    /// Bind an explicit measured-RSS cell instead of the process singleton.
+    ///
+    /// Production always uses [`Self::new`], whose cell is fed by the daemon's
+    /// `/proc/self/status` sampler. Tests use this to inject a fake RSS series
+    /// without a `/proc` read and without leaking pressure between cases.
+    pub fn with_pressure(
+        limit_bytes: NonZeroU64,
+        pressure: Arc<ResidentMemoryPressureV1>,
+    ) -> Self {
         Self {
             limit_bytes,
             state: hotpath::mutex!(
                 Mutex::new(ResidentMemoryStateV1::default()),
                 label = "runtime_core.resident.state"
             ),
+            pressure,
         }
+    }
+
+    /// The measured-RSS cell this admission consults.
+    #[must_use]
+    pub fn pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
+        &self.pressure
+    }
+
+    /// What the last measured sample says. `Unobserved` until one is published.
+    #[must_use]
+    pub fn pressure_state(&self) -> ResidentMemoryPressureStateV1 {
+        self.pressure.state()
     }
 
     #[hotpath::measure(label = "runtime_core.resident.reserve")]
@@ -220,6 +624,9 @@ impl ProcessResidentMemoryV1 {
         key: ResidentMemoryKeyV1,
         requested_bytes: NonZeroU64,
     ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
+            return Err(failure);
+        }
         if let Some(reservation) = self.try_reserve(&key, requested_bytes) {
             return Ok(reservation);
         }
@@ -246,6 +653,9 @@ impl ProcessResidentMemoryV1 {
         component: ResidentMemoryComponentIdV1,
         requested_bytes: NonZeroU64,
     ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
+            return Err(failure);
+        }
         let mut state = self.lock_state();
         let Some(next_used) = state.used_bytes.checked_add(requested_bytes.get()) else {
             hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
@@ -364,6 +774,39 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
+    /// Refuse growth while measured RSS is over budget.
+    ///
+    /// Only *new* admissions are refused. Nothing already reserved is revoked,
+    /// shrunk, or released by this path: the reservation guards outlive
+    /// pressure exactly as before, and the refusal clears on its own once a
+    /// later sample falls to the low watermark.
+    fn observed_over_budget_refusal(
+        &self,
+        requested_bytes: NonZeroU64,
+    ) -> Option<ResidentMemoryAdmissionFailureV1> {
+        let ResidentMemoryPressureStateV1::OverBudget {
+            observed_bytes,
+            limit_bytes,
+            high_watermark_bytes,
+            ..
+        } = self.pressure.state()
+        else {
+            return None;
+        };
+        if requested_bytes.get() <= RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 {
+            return None;
+        }
+        hotpath::gauge!("daemon.memory.admission_refused").inc(1.0);
+        hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
+        Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+            observed_bytes,
+            limit_bytes,
+            high_watermark_bytes,
+            requested_bytes: requested_bytes.get(),
+            floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+        })
+    }
+
     fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
         hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
         self.admission_failure_from_used(self.lock_state().used_bytes, requested_bytes)
@@ -374,7 +817,7 @@ impl ProcessResidentMemoryV1 {
         used_bytes: u64,
         requested_bytes: NonZeroU64,
     ) -> ResidentMemoryAdmissionFailureV1 {
-        ResidentMemoryAdmissionFailureV1 {
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
             used_bytes,
             requested_bytes: requested_bytes.get(),
             limit_bytes: self.limit_bytes.get(),

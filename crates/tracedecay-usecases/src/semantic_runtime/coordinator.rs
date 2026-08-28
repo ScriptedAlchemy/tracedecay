@@ -216,7 +216,11 @@ impl ProductionSemanticActivationCoordinatorV1 {
                 .map(|pins| pins.vector_generation_id.clone()),
         )
         .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-        self.owner.activate(request).await.map_err(Into::into)
+        self.owner
+            .activate(request)
+            .await
+            .map_err(SemanticActivationCoordinationErrorV1::from)
+            .inspect_err(crate::hotpath_observe::semantic_coordination_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -270,7 +274,11 @@ impl ProductionSemanticActivationCoordinatorV1 {
             None => SemanticRollbackRequestV1::disable(expected_active),
         }
         .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-        self.owner.rollback(request).await.map_err(Into::into)
+        self.owner
+            .rollback(request)
+            .await
+            .map_err(SemanticActivationCoordinationErrorV1::from)
+            .inspect_err(crate::hotpath_observe::semantic_coordination_error)
     }
 }
 
@@ -299,7 +307,7 @@ impl SemanticRuntimeIntegrationPortV1 for ProductionSemanticActivationCoordinato
 fn map_configuration_error(
     error: SemanticConfigurationBackendErrorV1,
 ) -> SemanticActivationCoordinationErrorV1 {
-    match error {
+    let mapped = match error {
         SemanticConfigurationBackendErrorV1::Unavailable => {
             SemanticActivationCoordinationErrorV1::Unavailable
         }
@@ -309,7 +317,9 @@ fn map_configuration_error(
         SemanticConfigurationBackendErrorV1::Conflict => {
             SemanticActivationCoordinationErrorV1::Conflict
         }
-    }
+    };
+    crate::hotpath_observe::semantic_coordination_error(&mapped);
+    mapped
 }
 
 #[cfg(test)]

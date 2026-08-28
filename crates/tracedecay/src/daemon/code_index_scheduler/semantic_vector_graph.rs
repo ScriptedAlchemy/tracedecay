@@ -109,7 +109,66 @@ pub(crate) enum ProjectSemanticVectorCodeScopeLiveness {
 
 /// Converge at most one semantic-vector cleanup or retirement action while
 /// returning one bounded project-wide census page.
+///
+/// The wall span is the latency authority for one retention step; the census
+/// gauges and per-outcome counters below record what the step actually
+/// decided, so a stalled retirement loop is distinguishable from one that is
+/// truthfully finding nothing to retire.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.retire",
+    future = true
+)]
 pub(crate) async fn retire_one_project_vector_generation(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
+) -> ProjectSemanticVectorRetentionStep {
+    let step =
+        converge_one_project_vector_generation(schedulers, project_root, configuration, after)
+            .await;
+    #[cfg(feature = "hotpath")]
+    observe_retention_step(&step);
+    step
+}
+
+#[cfg(feature = "hotpath")]
+fn observe_retention_step(step: &ProjectSemanticVectorRetentionStep) {
+    match step {
+        ProjectSemanticVectorRetentionStep::Ready(census) => {
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.retire.ready_total")
+                .inc(1_u64);
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.census.pending")
+                .set(census.pending);
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.census.ready")
+                .set(census.ready);
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.census.published")
+                .set(census.published);
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.census.cancelled")
+                .set(census.cancelled);
+        }
+        ProjectSemanticVectorRetentionStep::ResetRequired(_) => {
+            hotpath::gauge!(
+                "daemon.code_index.semantic_vector.retention.retire.reset_required_total"
+            )
+            .inc(1_u64);
+        }
+        ProjectSemanticVectorRetentionStep::Corrupt(_) => {
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.retire.corrupt_total")
+                .inc(1_u64);
+        }
+        ProjectSemanticVectorRetentionStep::Unavailable(_) => {
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.retire.unavailable_total")
+                .inc(1_u64);
+        }
+        ProjectSemanticVectorRetentionStep::Denied(_) => {
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.retire.denied_total")
+                .inc(1_u64);
+        }
+    }
+}
+
+async fn converge_one_project_vector_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
@@ -441,6 +500,10 @@ pub(crate) async fn remove_project_vector_code_scope_binding(
 /// justify the inventory and never prunes process-local code handles. Only the
 /// daemon maintenance owner may apply that separate mutation after its full
 /// revision-bound proof succeeds.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.inventory",
+    future = true
+)]
 pub(crate) async fn project_vector_readable_sources(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -481,11 +544,15 @@ pub(crate) async fn project_vector_readable_sources(
     )
     .await
     {
-        Ok((configured_root_receipt, sources)) => ProjectVectorReadableSources::Ready {
-            sources,
-            configuration_receipt,
-            configured_root_receipt,
-        },
+        Ok((configured_root_receipt, sources)) => {
+            hotpath::gauge!("daemon.code_index.semantic_vector.retention.readable_sources")
+                .set(sources.len() as u64);
+            ProjectVectorReadableSources::Ready {
+                sources,
+                configuration_receipt,
+                configured_root_receipt,
+            }
+        }
         Err(failure) => failure.readable_sources(),
     }
 }
@@ -527,6 +594,14 @@ impl DaemonSemanticVectorGraphProviderV1 {
             })
     }
 
+    /// Activation of one semantic-vector graph runtime: replay-binding
+    /// resolution plus retaining the code-graph runtime that owns the durable
+    /// projection. The graph-side `graph_db.generation.*` spans time the store
+    /// work underneath; this span is the daemon activation boundary above it.
+    #[hotpath::measure(
+        label = "daemon.code_index.semantic_vector.activation.retain",
+        future = true
+    )]
     async fn retain(
         &self,
         scope: &CodeIndexServingScopeV1,

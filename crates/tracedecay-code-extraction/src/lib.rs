@@ -457,10 +457,15 @@ impl LanguageRegistry {
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let ext = path.rsplit('.').next()?;
-        self.by_extension
-            .get(ext)
-            .map(|&index| self.extractors[index].as_ref())
+        let extractor = path.rsplit('.').next().and_then(|ext| {
+            self.by_extension
+                .get(ext)
+                .map(|&index| self.extractors[index].as_ref())
+        });
+        if extractor.is_none() {
+            crate::hotpath_observe::record_dispatch_no_extractor();
+        }
+        extractor
     }
 
     /// Returns all supported file extensions across all extractors.

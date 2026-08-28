@@ -273,7 +273,10 @@ fn publish_current_transaction_status(
 /// coordinator's own cancellation map keeps a running apply cancellable
 /// through the separate cancel operation.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.native_integration.apply", future = true)]
+#[hotpath::measure(
+    label = "daemon.service.native_integration.owner_execute",
+    future = true
+)]
 async fn execute_with_owner(
     wire_request_id: &str,
     owner: DaemonNativeIntegrationOwner,
@@ -286,10 +289,13 @@ async fn execute_with_owner(
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
-            let outcome = tokio::task::spawn_blocking(move || {
-                let resolution = registered_topology_request(&owner, *snapshot, observed_at)?;
-                owner.stack_snapshot(resolution, &signal)
-            })
+            let outcome = hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    let resolution = registered_topology_request(&owner, *snapshot, observed_at)?;
+                    owner.stack_snapshot(resolution, &signal)
+                }),
+                label = "daemon.service.native_integration.stack_snapshot"
+            )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
@@ -312,36 +318,41 @@ async fn execute_with_owner(
             );
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                let stack_runtime = owner.github_stack_runtime(context.scope())?;
-                let topology =
-                    registered_topology_request(&owner, preflight.snapshot, observed_at)?;
-                let application_request = NativeIntegrationPreflightRequestV1 {
-                    context,
-                    topology,
-                    evidence: preflight.evidence.into(),
-                    preview_id,
-                    preferred_mode: preflight.preferred_mode,
-                    preview_expires_at,
-                    observed_at,
-                };
-                let outcome = match stack_runtime.as_ref() {
-                    Some(runtime) => runtime
-                        .preflight(&application_request, &signal)
-                        .map_err(stack_coordinator_contract_error),
-                    None => owner.service().preflight(application_request, &signal),
-                };
-                if let (Some(runtime), Ok(NativeIntegrationPreflightOutcomeV1::Preview(preview))) =
-                    (stack_runtime.as_ref(), &outcome)
-                    && let Some(stack_signal) = signal_from_preflight(&signal_scope, preview)
-                        .map_err(stack_coordinator_contract_error)?
-                {
-                    runtime
-                        .enqueue_from_preflight(stack_signal, &signal_context)
-                        .map_err(stack_coordinator_contract_error)?;
-                }
-                outcome
-            })
+            let outcome = hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    let stack_runtime = owner.github_stack_runtime(context.scope())?;
+                    let topology =
+                        registered_topology_request(&owner, preflight.snapshot, observed_at)?;
+                    let application_request = NativeIntegrationPreflightRequestV1 {
+                        context,
+                        topology,
+                        evidence: preflight.evidence.into(),
+                        preview_id,
+                        preferred_mode: preflight.preferred_mode,
+                        preview_expires_at,
+                        observed_at,
+                    };
+                    let outcome = match stack_runtime.as_ref() {
+                        Some(runtime) => runtime
+                            .preflight(&application_request, &signal)
+                            .map_err(stack_coordinator_contract_error),
+                        None => owner.service().preflight(application_request, &signal),
+                    };
+                    if let (
+                        Some(runtime),
+                        Ok(NativeIntegrationPreflightOutcomeV1::Preview(preview)),
+                    ) = (stack_runtime.as_ref(), &outcome)
+                        && let Some(stack_signal) = signal_from_preflight(&signal_scope, preview)
+                            .map_err(stack_coordinator_contract_error)?
+                    {
+                        runtime
+                            .enqueue_from_preflight(stack_signal, &signal_context)
+                            .map_err(stack_coordinator_contract_error)?;
+                    }
+                    outcome
+                }),
+                label = "daemon.service.native_integration.preflight"
+            )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
@@ -381,71 +392,74 @@ async fn execute_with_owner(
                 apply_operation.capability_id().as_str().to_owned(),
             )
             .map_err(|_| invalid())?;
-            tokio::task::spawn_blocking(move || {
-                let store = owner.store();
-                let preview = match store.read_preview(&approve.preview_id) {
-                    Ok(Some(preview)) if preview.preview_digest == approve.preview_digest => {
-                        preview
+            hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    let store = owner.store();
+                    let preview = match store.read_preview(&approve.preview_id) {
+                        Ok(Some(preview)) if preview.preview_digest == approve.preview_digest => {
+                            preview
+                        }
+                        Ok(_) => {
+                            return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                                NativeIntegrationSurfaceUnavailableV1::Denied,
+                            ));
+                        }
+                        Err(_) => return Err(unavailable_native_integration()),
+                    };
+                    if preview.expires_at.0 <= observed_at.0 {
+                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                            NativeIntegrationSurfaceUnavailableV1::Stale,
+                        ));
                     }
-                    Ok(_) => {
+                    // A preview frozen under a superseded grant lineage is stale
+                    // evidence; approving it would silently re-authorize it.
+                    if preview.grant_digest != context.grant().digest {
+                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                            NativeIntegrationSurfaceUnavailableV1::Stale,
+                        ));
+                    }
+                    // Only a mechanically eligible preview is approvable; the
+                    // apply validator enforces the same predicate and issuance
+                    // must not manufacture approvals apply will reject.
+                    if !matches!(
+                        preview.disposition,
+                        NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+                    ) {
                         return Ok(NativeIntegrationSurfaceResultV1::unavailable(
                             NativeIntegrationSurfaceUnavailableV1::Denied,
                         ));
                     }
-                    Err(_) => return Err(unavailable_native_integration()),
-                };
-                if preview.expires_at.0 <= observed_at.0 {
-                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                        NativeIntegrationSurfaceUnavailableV1::Stale,
-                    ));
-                }
-                // A preview frozen under a superseded grant lineage is stale
-                // evidence; approving it would silently re-authorize it.
-                if preview.grant_digest != context.grant().digest {
-                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                        NativeIntegrationSurfaceUnavailableV1::Stale,
-                    ));
-                }
-                // Only a mechanically eligible preview is approvable; the
-                // apply validator enforces the same predicate and issuance
-                // must not manufacture approvals apply will reject.
-                if !matches!(
-                    preview.disposition,
-                    NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
-                ) {
-                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                        NativeIntegrationSurfaceUnavailableV1::Denied,
-                    ));
-                }
-                let pending_digest =
-                    tracedecay_domain::canonical_sha256(&"pending native integration approval")
-                        .map_err(|_| invalid_native_integration_request())?;
-                let approval = NativeIntegrationApprovalV1 {
-                    approval_id,
-                    preview_id: preview.preview_id.clone(),
-                    preview_digest: preview.preview_digest.clone(),
-                    principal: context.actor().clone(),
-                    delegated_agent: None,
-                    capability,
-                    grant_digest: context.grant().digest.clone(),
-                    issued_at: observed_at,
-                    expires_at: preview.expires_at,
-                    approval_digest: pending_digest,
-                }
-                .seal()
-                .map_err(|_| invalid_native_integration_request())?;
-                match store.save_approval(approval.clone()) {
-                    Ok(()) => Ok(NativeIntegrationSurfaceResultV1::Approval(
-                        NativeIntegrationApprovalProjectionV1::project(&approval),
-                    )),
-                    Err(tracedecay_store::NativeIntegrationStoreError::ApprovalConflict) => {
-                        Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                            NativeIntegrationSurfaceUnavailableV1::ApprovalConflict,
-                        ))
+                    let pending_digest =
+                        tracedecay_domain::canonical_sha256(&"pending native integration approval")
+                            .map_err(|_| invalid_native_integration_request())?;
+                    let approval = NativeIntegrationApprovalV1 {
+                        approval_id,
+                        preview_id: preview.preview_id.clone(),
+                        preview_digest: preview.preview_digest.clone(),
+                        principal: context.actor().clone(),
+                        delegated_agent: None,
+                        capability,
+                        grant_digest: context.grant().digest.clone(),
+                        issued_at: observed_at,
+                        expires_at: preview.expires_at,
+                        approval_digest: pending_digest,
                     }
-                    Err(_) => Err(unavailable_native_integration()),
-                }
-            })
+                    .seal()
+                    .map_err(|_| invalid_native_integration_request())?;
+                    match store.save_approval(approval.clone()) {
+                        Ok(()) => Ok(NativeIntegrationSurfaceResultV1::Approval(
+                            NativeIntegrationApprovalProjectionV1::project(&approval),
+                        )),
+                        Err(tracedecay_store::NativeIntegrationStoreError::ApprovalConflict) => {
+                            Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                                NativeIntegrationSurfaceUnavailableV1::ApprovalConflict,
+                            ))
+                        }
+                        Err(_) => Err(unavailable_native_integration()),
+                    }
+                }),
+                label = "daemon.service.native_integration.approve"
+            )
             .await
             .map_err(|_| unavailable_native_integration())?
             .map(NativeIntegrationExecutionV1::without_preview)
@@ -456,78 +470,86 @@ async fn execute_with_owner(
                 .map_err(|_| unavailable_native_integration())?;
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            tokio::task::spawn_blocking(move || {
-                // The caller names its preview and one-use approval by exact
-                // identity and digest; both must already be durable. A
-                // missing or mismatched fact is denied without disclosing
-                // whether the target was absent or denied.
-                let store = owner.store();
-                let preview = match store.read_preview(&apply.preview_id) {
-                    Ok(Some(preview)) if preview.preview_digest == apply.preview_digest => preview,
-                    Ok(_) => {
-                        return Ok(NativeIntegrationExecutionV1::without_preview(
-                            NativeIntegrationSurfaceResultV1::unavailable(
-                                NativeIntegrationSurfaceUnavailableV1::Denied,
-                            ),
-                        ));
-                    }
-                    Err(_) => return Err(unavailable_native_integration()),
-                };
-                let approval = match store.read_approval(&apply.approval_id) {
-                    Ok(Some(approval)) if approval.approval_digest == apply.approval_digest => {
-                        approval
-                    }
-                    Ok(_) => {
-                        return Ok(NativeIntegrationExecutionV1::without_preview(
-                            NativeIntegrationSurfaceResultV1::unavailable(
-                                NativeIntegrationSurfaceUnavailableV1::Denied,
-                            ),
-                        ));
-                    }
-                    Err(_) => return Err(unavailable_native_integration()),
-                };
-                let signal_preview = preview.clone();
-                let signal_approval = approval.clone();
-                let applied_transaction_id = apply.transaction_id.clone();
-                let application_request = NativeIntegrationApplyRequestV1 {
-                    context,
-                    transaction_id: apply.transaction_id,
-                    preview,
-                    approval,
-                    observed_at,
-                };
-                let apply_outcome = owner.service().apply(application_request, &signal);
-                publish_current_transaction_status(
-                    status_broadcast.as_ref(),
-                    &owner,
-                    &applied_transaction_id,
-                );
-                match apply_outcome {
-                    Ok(receipt) => {
-                        if let Some(runtime) = stack_runtime.as_ref()
-                            && let Some(stack_signal) =
-                                signal_from_receipt(&signal_scope, &signal_preview, &receipt)
-                                    .map_err(|_| unavailable_native_integration())?
-                        {
-                            runtime
-                                .enqueue_from_approval(
-                                    stack_signal,
-                                    &signal_approval,
-                                    &signal_context,
-                                )
-                                .map_err(|_| unavailable_native_integration())?;
+            hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    // The caller names its preview and one-use approval by exact
+                    // identity and digest; both must already be durable. A
+                    // missing or mismatched fact is denied without disclosing
+                    // whether the target was absent or denied.
+                    let store = owner.store();
+                    let preview = match store.read_preview(&apply.preview_id) {
+                        Ok(Some(preview)) if preview.preview_digest == apply.preview_digest => {
+                            preview
                         }
-                        NativeIntegrationReceiptProjectionV1::project(&receipt)
-                            .map(NativeIntegrationSurfaceResultV1::Receipt)
-                            .map(|result| {
-                                NativeIntegrationExecutionV1::with_preview(result, signal_preview)
-                            })
-                            .map_err(|_| invalid_native_integration_request())
+                        Ok(_) => {
+                            return Ok(NativeIntegrationExecutionV1::without_preview(
+                                NativeIntegrationSurfaceResultV1::unavailable(
+                                    NativeIntegrationSurfaceUnavailableV1::Denied,
+                                ),
+                            ));
+                        }
+                        Err(_) => return Err(unavailable_native_integration()),
+                    };
+                    let approval = match store.read_approval(&apply.approval_id) {
+                        Ok(Some(approval)) if approval.approval_digest == apply.approval_digest => {
+                            approval
+                        }
+                        Ok(_) => {
+                            return Ok(NativeIntegrationExecutionV1::without_preview(
+                                NativeIntegrationSurfaceResultV1::unavailable(
+                                    NativeIntegrationSurfaceUnavailableV1::Denied,
+                                ),
+                            ));
+                        }
+                        Err(_) => return Err(unavailable_native_integration()),
+                    };
+                    let signal_preview = preview.clone();
+                    let signal_approval = approval.clone();
+                    let applied_transaction_id = apply.transaction_id.clone();
+                    let application_request = NativeIntegrationApplyRequestV1 {
+                        context,
+                        transaction_id: apply.transaction_id,
+                        preview,
+                        approval,
+                        observed_at,
+                    };
+                    let apply_outcome = owner.service().apply(application_request, &signal);
+                    publish_current_transaction_status(
+                        status_broadcast.as_ref(),
+                        &owner,
+                        &applied_transaction_id,
+                    );
+                    match apply_outcome {
+                        Ok(receipt) => {
+                            if let Some(runtime) = stack_runtime.as_ref()
+                                && let Some(stack_signal) =
+                                    signal_from_receipt(&signal_scope, &signal_preview, &receipt)
+                                        .map_err(|_| unavailable_native_integration())?
+                            {
+                                runtime
+                                    .enqueue_from_approval(
+                                        stack_signal,
+                                        &signal_approval,
+                                        &signal_context,
+                                    )
+                                    .map_err(|_| unavailable_native_integration())?;
+                            }
+                            NativeIntegrationReceiptProjectionV1::project(&receipt)
+                                .map(NativeIntegrationSurfaceResultV1::Receipt)
+                                .map(|result| {
+                                    NativeIntegrationExecutionV1::with_preview(
+                                        result,
+                                        signal_preview,
+                                    )
+                                })
+                                .map_err(|_| invalid_native_integration_request())
+                        }
+                        Err(error) => surface_result_from_contract_error(error)
+                            .map(NativeIntegrationExecutionV1::without_preview),
                     }
-                    Err(error) => surface_result_from_contract_error(error)
-                        .map(NativeIntegrationExecutionV1::without_preview),
-                }
-            })
+                }),
+                label = "daemon.service.native_integration.apply"
+            )
             .await
             .map_err(|_| unavailable_native_integration())?
         }
@@ -535,10 +557,12 @@ async fn execute_with_owner(
             let application_request = NativeIntegrationStatusRequestV1 {
                 transaction_id: status.transaction_id,
             };
-            let outcome =
-                tokio::task::spawn_blocking(move || owner.service().status(application_request))
-                    .await
-                    .map_err(|_| unavailable_native_integration())?;
+            let outcome = hotpath::future!(
+                tokio::task::spawn_blocking(move || owner.service().status(application_request)),
+                label = "daemon.service.native_integration.status"
+            )
+            .await
+            .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(Some(status)) => {
                     publish_transaction_status(status_broadcast.as_ref(), &status);
@@ -563,15 +587,18 @@ async fn execute_with_owner(
                 transaction_id: cancel.transaction_id,
                 requested_at: observed_at,
             };
-            let outcome = tokio::task::spawn_blocking(move || {
-                let disposition = owner.service().cancel(application_request);
-                publish_current_transaction_status(
-                    status_broadcast.as_ref(),
-                    &owner,
-                    &cancelled_transaction_id,
-                );
-                disposition
-            })
+            let outcome = hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    let disposition = owner.service().cancel(application_request);
+                    publish_current_transaction_status(
+                        status_broadcast.as_ref(),
+                        &owner,
+                        &cancelled_transaction_id,
+                    );
+                    disposition
+                }),
+                label = "daemon.service.native_integration.cancel"
+            )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {

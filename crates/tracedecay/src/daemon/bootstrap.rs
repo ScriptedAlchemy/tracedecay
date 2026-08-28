@@ -788,7 +788,9 @@ async fn run_foreground_unix(
                 client_tasks,
                 owner_phases,
                 move |project_server_deadline| async move {
-                    server_engine.shutdown_servers(project_server_deadline).await
+                    server_engine
+                        .shutdown_servers(project_server_deadline)
+                        .await
                 },
             )
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])

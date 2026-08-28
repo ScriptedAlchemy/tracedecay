@@ -15,7 +15,12 @@ where
     ProjectOpen: Future<Output = Result<Project>>,
     ProfileOpen: Future<Output = Result<Profile>>,
 {
-    tokio::try_join!(project_open, profile_open)
+    // The two opens overlap under try_join, so the join span alone cannot say
+    // which store owned a slow admission; each side keeps its own lifetime.
+    tokio::try_join!(
+        hotpath::future!(project_open, label = "daemon.project.open.project_sessions"),
+        hotpath::future!(profile_open, label = "daemon.project.open.profile_sessions"),
+    )
 }
 
 pub(super) fn log_session_database_admission(

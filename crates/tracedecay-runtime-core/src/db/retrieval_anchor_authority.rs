@@ -83,6 +83,7 @@ async fn current_disposition(
         .transpose()?)
 }
 
+#[hotpath::measure(label = "runtime_core.db.anchor_derivatives_resolve")]
 pub(crate) async fn resolve_anchor_derivatives<O>(
     connection: &(impl QueryExecutor + Sync),
     owner: &O,
@@ -268,6 +269,7 @@ where
 }
 
 impl super::Database {
+    #[hotpath::measure(label = "runtime_core.db.anchor_disposition_append")]
     pub(crate) async fn append_retrieval_anchor_disposition(
         &self,
         record: &RetrievalAnchorDispositionRecordV1,

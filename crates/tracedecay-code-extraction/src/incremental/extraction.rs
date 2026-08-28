@@ -56,6 +56,9 @@ impl RetainedParseDocument {
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
         if report.state_epoch != self.state_epoch {
+            crate::hotpath_observe::record_retained_parse_abstention(
+                crate::hotpath_observe::RetainedParseAbstention::StaleReport,
+            );
             return Err(ParseError::StaleReport);
         }
 
@@ -160,6 +163,7 @@ impl RetainedParseDocument {
         let extracted = self.complete_composite_reset(extractor, extracted);
         match reason {
             Some(reason) => {
+                crate::hotpath_observe::record_extraction_reset(reason);
                 ParsedExtractionArtifactV1::reset(extracted.artifact, reason, self.source.len())
             }
             None => extracted,

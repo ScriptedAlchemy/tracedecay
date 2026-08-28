@@ -18,6 +18,7 @@ pub mod external_source;
 #[path = "../test-support/fault_harness.rs"]
 pub mod fault_harness;
 pub mod git_index_transactions;
+mod hotpath_observe;
 pub mod memory;
 pub mod native_integration;
 pub mod observation;

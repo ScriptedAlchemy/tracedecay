@@ -550,8 +550,7 @@ fn record_worktree_reconciliation_outcome(
             hotpath::gauge!("daemon.native_integration.worktree_reconcile.unavailable").inc(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("daemon.native_integration.worktree_reconcile.contract_error")
-                .inc(1.0);
+            hotpath::gauge!("daemon.native_integration.worktree_reconcile.contract_error").inc(1.0);
         }
     }
 }

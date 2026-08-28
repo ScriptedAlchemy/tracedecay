@@ -2763,9 +2763,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             let advancing = text.clone();
                             match hotpath::future!(
                                 tokio::task::spawn_blocking(move || advancing
-                                    .advance_text_serving(
-                                        TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
-                                    )),
+                                    .advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)),
                                 label = "daemon.code_index.text_projection"
                             )
                             .await
@@ -2940,9 +2938,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     _ => false,
                 };
-                if activate_graph
-                    && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result
-                {
+                if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
                     graph_seat_attempted =
                         Some(latest.generation().manifest().generation_id.clone());
                     let activation = worker_graph_activation
@@ -3017,41 +3013,43 @@ impl CodeIndexSchedulerRegistryV1 {
                     let latest = latest.clone();
                     let serving_swap = hotpath::future!(
                         tokio::task::spawn_blocking(move || {
-                        let scheduler = scheduler
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        // A generation that sealed while the checkout kept
-                        // moving is stale the moment it completes, and the
-                        // durable pointer may already name its successor.
-                        // Refusing the swap outright then left the route
-                        // serving nothing at all, so an empty serving slot
-                        // takes the stale seat and the next publication
-                        // supersedes it; a slot that already serves keeps what
-                        // it has rather than moving backwards.
-                        let publication_matches = scheduler.active_publication_matches(&latest)?;
-                        let mut serving = serving_generation
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let outcome = ServingSwapOutcomeV1::decide(
-                            publication_matches,
-                            serving.is_some(),
-                            replace_serving_generation,
-                        );
-                        if outcome.installs() {
-                            *serving = Some(latest.clone());
-                            serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-                            *text_generation
+                            let scheduler = scheduler
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            // A generation that sealed while the checkout kept
+                            // moving is stale the moment it completes, and the
+                            // durable pointer may already name its successor.
+                            // Refusing the swap outright then left the route
+                            // serving nothing at all, so an empty serving slot
+                            // takes the stale seat and the next publication
+                            // supersedes it; a slot that already serves keeps what
+                            // it has rather than moving backwards.
+                            let publication_matches =
+                                scheduler.active_publication_matches(&latest)?;
+                            let mut serving = serving_generation
                                 .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(latest.text_generation_handle());
-                        }
-                        drop(serving);
-                        // Semantic admission is independently retryable. A
-                        // prior attempt may have lost bounded queue capacity,
-                        // so an unchanged reconcile must offer the already-
-                        // serving generation again without reinstalling it.
-                        let _ = scheduler.schedule_semantic_generation(latest.generation_handle());
-                        Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let outcome = ServingSwapOutcomeV1::decide(
+                                publication_matches,
+                                serving.is_some(),
+                                replace_serving_generation,
+                            );
+                            if outcome.installs() {
+                                *serving = Some(latest.clone());
+                                serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                                *text_generation
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(latest.text_generation_handle());
+                            }
+                            drop(serving);
+                            // Semantic admission is independently retryable. A
+                            // prior attempt may have lost bounded queue capacity,
+                            // so an unchanged reconcile must offer the already-
+                            // serving generation again without reinstalling it.
+                            let _ =
+                                scheduler.schedule_semantic_generation(latest.generation_handle());
+                            Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
                         label = "daemon.code_index.serving_swap"
                     )

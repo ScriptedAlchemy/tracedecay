@@ -539,58 +539,71 @@ where
         profile_id: authority.profile().profile_id.clone(),
         budget: authority.profile().retrieval_budget,
     };
-    let sanitized = RawRetrievalRequestV1::new(input.query, request)
-        .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+    // Serving-phase decomposition under the one `daemon.code_index.query.execute`
+    // lifetime: admission (sanitize + production owner resolution), one span per
+    // retrieval lane, and composition/encode below. The lanes run sequentially,
+    // so their spans are disjoint slices of the outer wall time.
+    let (sanitized, owners) = hotpath::measure_block!("daemon.code_index.query.admission", {
+        let sanitized = RawRetrievalRequestV1::new(input.query, request)
+            .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+        let owners = text.production_query_owners_with_budget(&sanitized.request().budget)?;
+        (sanitized, owners)
+    });
     let request = sanitized.request();
     let query_view = sanitized.query_view();
-    let owners = text.production_query_owners_with_budget(&request.budget)?;
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-    let exact = owners.retrieve_exact(&ExactLaneRequest {
-        base: request.clone(),
-        query_view,
-        generation: generation.clone(),
-        literals: parser.parse_literals(query_view, request),
-        budget: request.budget,
+    let exact = hotpath::measure_block!("daemon.code_index.query.lane.exact", {
+        owners.retrieve_exact(&ExactLaneRequest {
+            base: request.clone(),
+            query_view,
+            generation: generation.clone(),
+            literals: parser.parse_literals(query_view, request),
+            budget: request.budget,
+        })
     })?;
     let lexical_parts = lexical_query_parts(query_view.as_str())?;
-    let lexical = owners.retrieve_lexical(&LexicalLaneRequest {
-        base: request.clone(),
-        query_view,
-        generation: generation.clone(),
-        whole_terms: lexical_parts.whole_terms,
-        subtokens: lexical_parts.subtokens,
-        phrases: lexical_parts.phrases,
-        field_filters: Vec::new(),
-        fuzzy_budget: input.fuzzy_budget,
-        lexical_profile_revision: input.lexical_profile_revision,
-        score_domain: input.lexical_score_domain,
-        budget: request.budget,
+    let lexical = hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
+        owners.retrieve_lexical(&LexicalLaneRequest {
+            base: request.clone(),
+            query_view,
+            generation: generation.clone(),
+            whole_terms: lexical_parts.whole_terms,
+            subtokens: lexical_parts.subtokens,
+            phrases: lexical_parts.phrases,
+            field_filters: Vec::new(),
+            fuzzy_budget: input.fuzzy_budget,
+            lexical_profile_revision: input.lexical_profile_revision,
+            score_domain: input.lexical_score_domain,
+            budget: request.budget,
+        })
     })?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
-    let graph = if graph_seeds.is_empty() {
-        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-            detail: "exact and lexical lanes produced no graph seed".to_owned(),
-        })
-    } else if let Some(graph_serving) = graph_latest
-        .as_ref()
-        .and_then(|latest| latest.production_graph_serving().ok())
-    {
-        graph_serving.graph.retrieve_graph(
-            &GraphLaneRequest {
-                base: request.clone(),
-                generation: generation.clone(),
-                seed_anchors: graph_seeds,
-                edge_kinds: input.graph_edge_kinds,
-                max_depth: input.graph_max_depth,
-                budget: request.budget,
-            },
-            graph_control,
-        )?
-    } else {
-        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-            detail: "persistent code graph is unavailable for this generation".to_owned(),
-        })
-    };
+    let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
+        if graph_seeds.is_empty() {
+            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+                detail: "exact and lexical lanes produced no graph seed".to_owned(),
+            })
+        } else if let Some(graph_serving) = graph_latest
+            .as_ref()
+            .and_then(|latest| latest.production_graph_serving().ok())
+        {
+            graph_serving.graph.retrieve_graph(
+                &GraphLaneRequest {
+                    base: request.clone(),
+                    generation: generation.clone(),
+                    seed_anchors: graph_seeds,
+                    edge_kinds: input.graph_edge_kinds,
+                    max_depth: input.graph_max_depth,
+                    budget: request.budget,
+                },
+                graph_control,
+            )?
+        } else {
+            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+                detail: "persistent code graph is unavailable for this generation".to_owned(),
+            })
+        }
+    });
     let lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
             .map_err(QueryAuthorityErrorV1::from)?,
@@ -608,16 +621,20 @@ where
     let page_size = input
         .page_size
         .min(request.budget.max_fused_candidates as usize);
-    let authorized = schedulers
-        .compose_query_fallback(
+    // Encode phase: fusion, pagination, and cursor encoding under the
+    // composition authority.
+    let authorized = hotpath::future!(
+        schedulers.compose_query_fallback(
             scope,
             request,
             query_view,
             lanes,
             page_size,
             input.cursor.as_ref(),
-        )
-        .await?;
+        ),
+        label = "daemon.code_index.query.compose"
+    )
+    .await?;
     // Retrieval-pipeline observation from the composition this query actually
     // ran; an uninstalled lane records nothing.
     if let Some(observability) = schedulers.index_observability_for_scope(scope).await {

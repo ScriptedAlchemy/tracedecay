@@ -15,9 +15,12 @@ pub(super) async fn wait_for_project_open_publication<Publication, Output>(
 where
     Publication: std::future::Future<Output = Result<Output>>,
 {
-    timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication)
-        .await
-        .map_err(|_| project_warming_error(project_path))?
+    hotpath::future!(
+        timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication),
+        label = "daemon.project.open.publication_wait"
+    )
+    .await
+    .map_err(|_| project_warming_error(project_path))?
 }
 
 #[hotpath::measure(label = "daemon.project.orchestrate.start", future = true)]
@@ -34,6 +37,7 @@ where
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
+        hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
         return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
             "daemon is draining before project warm-up".to_string(),
         ));
@@ -41,6 +45,7 @@ where
     tasks
         .start_cancellable(route, move |cancellation| async move {
             let Some(activity) = lifecycle.try_enter() else {
+                hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
                 return Err(TraceDecayError::Config {
                     message: "daemon is draining before project warm-up".to_string(),
                 });
