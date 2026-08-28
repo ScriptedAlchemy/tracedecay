@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TraceDecay Delivery — PR 743 Decision to Code</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #02070b;
+      --panel: rgba(5, 14, 20, .94);
+      --panel2: rgba(7, 20, 28, .84);
+      --line: rgba(117, 184, 212, .24);
+      --cyan: #4ee4ff;
+      --cyan2: #0e9cc1;
+      --amber: #ffad32;
+      --green: #78db86;
+      --violet: #c184ff;
+      --red: #ff6d70;
+      --text: #d6e4eb;
+      --muted: #78909c;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #010407; color: var(--text); font-family: var(--mono); }
+    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; background: radial-gradient(circle at 58% 46%, rgba(14,156,193,.08), transparent 38%), linear-gradient(rgba(54,120,148,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(54,120,148,.025) 1px, transparent 1px); background-size: auto, 24px 24px, 24px 24px; }
+    button { font: inherit; color: inherit; }
+    .app { height: 100vh; display: grid; grid-template-columns: 174px 1fr; border: 1px solid rgba(128,185,209,.28); }
+    .rail { padding: 20px 12px 12px; border-right: 1px solid var(--line); background: linear-gradient(180deg, rgba(5,14,20,.98), rgba(2,8,12,.98)); display: flex; flex-direction: column; }
+    .brand { padding: 0 10px 18px; font-size: 17px; letter-spacing: .1em; color: #f0f6f8; border-bottom: 1px solid var(--line); }
+    .brand small { color: var(--cyan); font-size: 11px; }
+    .nav { margin-top: 12px; display: grid; gap: 2px; }
+    .nav div { display: grid; grid-template-columns: 34px 1fr; padding: 9px 10px; color: #9db0b9; border-left: 2px solid transparent; }
+    .nav div span:first-child { color: var(--cyan); }
+    .nav .active { color: #e9fbff; background: linear-gradient(90deg, rgba(16,149,185,.28), rgba(16,149,185,.05)); border: 1px solid rgba(78,228,255,.56); box-shadow: inset 0 0 20px rgba(27,176,216,.14); }
+    .railFoot { margin-top: auto; padding: 12px 10px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); line-height: 1.7; }
+    .main { min-width: 0; display: grid; grid-template-rows: 88px 82px 1fr 48px; }
+    .header { padding: 10px 20px; border-bottom: 1px solid var(--line); background: rgba(3,10,15,.92); }
+    .crumb { color: var(--cyan); font-size: 11px; margin-bottom: 8px; }
+    .titleRow { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: .035em; font-weight: 500; color: #eff8fb; }
+    .meta { margin-top: 7px; font-size: 10px; color: #9eb0b9; display: flex; gap: 18px; }
+    .readOnly { border: 1px solid rgba(78,228,255,.35); padding: 7px 10px; color: var(--cyan); white-space: nowrap; }
+    .steps { padding: 10px 18px; display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px; border-bottom: 1px solid var(--line); background: rgba(5,15,21,.86); }
+    .step { min-width: 0; height: 54px; overflow: hidden; align-self: start; padding: 8px 9px; border-top: 1px solid rgba(138,176,193,.22); color: #82949d; position: relative; }
+    .step::after { content: ""; position: absolute; top: 16px; left: 100%; width: 8px; height: 1px; background: rgba(134,176,194,.38); }
+    .step:last-child::after { display: none; }
+    .step b { display: block; font-size: 10px; font-weight: 600; letter-spacing: .07em; white-space: nowrap; }
+    .step small { display: block; margin-top: 5px; font-size: 8px; color: #657b86; }
+    .step.user { color: var(--amber); }
+    .step.code { color: var(--cyan); }
+    .step.check { color: var(--green); }
+    .step.review { color: var(--red); }
+    .step.active { border: 1px solid var(--cyan); background: rgba(22,158,191,.13); box-shadow: 0 0 18px rgba(48,215,255,.15), inset 0 0 18px rgba(48,215,255,.08); color: #effcff; }
+    .workspace { min-height: 0; display: grid; grid-template-columns: minmax(280px, 350px) minmax(620px, 1fr) minmax(270px, 314px); gap: 8px; padding: 8px; }
+    .pane { min-height: 0; border: 1px solid var(--line); background: linear-gradient(180deg, rgba(6,17,23,.96), rgba(3,10,14,.96)); overflow: hidden; }
+    .paneHead { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--cyan); letter-spacing: .055em; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border: 1px solid currentColor; font-size: 8px; letter-spacing: .04em; }
+    .story { display: grid; grid-template-rows: 40px auto 1fr 122px; }
+    .truth { margin: 8px; padding: 9px 10px; border: 1px dashed rgba(193,132,255,.48); background: rgba(72,38,96,.10); color: #caa6ea; font-size: 9px; line-height: 1.55; }
+    .truth strong { color: #f0dfff; display: block; margin-bottom: 3px; }
+    .timeline { min-height: 0; padding: 0 10px 6px 20px; overflow: hidden; position: relative; }
+    .timeline::before { content: ""; position: absolute; left: 15px; top: 2px; bottom: 4px; width: 1px; background: linear-gradient(var(--amber), var(--cyan), var(--green)); opacity: .55; }
+    .event { position: relative; padding: 7px 7px 7px 12px; border-bottom: 1px solid rgba(110,154,172,.12); font-size: 9px; line-height: 1.35; }
+    .event::before { content: ""; position: absolute; left: -9px; top: 12px; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 9px var(--cyan); }
+    .event.user::before { background: var(--amber); box-shadow: 0 0 9px var(--amber); }
+    .event.agent::before { background: var(--violet); box-shadow: 0 0 9px var(--violet); }
+    .event.review::before { background: var(--red); box-shadow: 0 0 9px var(--red); }
+    .event .time { color: #6f8792; margin-right: 6px; }
+    .event .source { float: right; font-size: 7px; color: #8ca0aa; border: 1px solid rgba(140,160,170,.3); padding: 1px 3px; }
+    .branchBlock { margin: 0 10px 10px; padding: 8px; border: 1px solid rgba(78,228,255,.23); background: rgba(8,40,52,.25); font-size: 8px; line-height: 1.6; }
+    .branchLine { display: flex; align-items: center; gap: 6px; color: #9bb4bf; }
+    .branchLine i { width: 28px; height: 1px; background: linear-gradient(90deg,var(--cyan),var(--violet)); box-shadow: 0 0 7px var(--cyan); }
+    .code { display: grid; grid-template-rows: 40px 42px minmax(0, 1fr) 168px 50px; }
+    .modes { display: flex; gap: 22px; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--line); font-size: 10px; }
+    .modes span { color: #7d919b; }
+    .modes .on { color: var(--cyan); border-bottom: 2px solid var(--cyan); height: 42px; display: inline-flex; align-items: center; }
+    .diff { min-height: 0; overflow: hidden; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: rgba(68,115,134,.17); }
+    .file { background: #041016; min-width: 0; }
+    .fileTitle { height: 28px; padding: 7px 10px; background: rgba(6,24,33,.95); border-bottom: 1px solid var(--line); font-size: 9px; color: #a7c1cc; display: flex; justify-content: space-between; }
+    .fileTitle em { font-style: normal; color: var(--green); }
+    pre { margin: 0; padding: 7px 0; font: 9.2px/1.4 var(--mono); white-space: pre; overflow: auto; color: #b8c7ce; scrollbar-color: rgba(78,228,255,.35) transparent; }
+    .ln { display: inline-block; width: 28px; text-align: right; margin-right: 8px; color: #4f6873; user-select: none; }
+    .add { display: block; background: rgba(34,126,68,.22); color: #b9efc6; }
+    .del { display: block; background: rgba(161,48,52,.20); color: #ffc0c0; }
+    .sel { outline: 1px solid var(--cyan); box-shadow: inset 4px 0 0 var(--cyan), 0 0 12px rgba(78,228,255,.13); }
+    .graph { border-top: 1px solid var(--line); padding: 10px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; background: rgba(3,11,15,.9); }
+    .graph h3 { margin: 0 0 8px; font-size: 9px; font-weight: 500; color: var(--cyan); }
+    .flow { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .node { border: 1px solid rgba(78,228,255,.42); padding: 5px 7px; font-size: 7.5px; color: #b9dce8; background: rgba(5,29,39,.85); }
+    .node.warn { border-color: var(--amber); color: #ffd38a; }
+    .node.bad { border-color: var(--red); color: #ffadb0; }
+    .arrow { color: var(--cyan); font-size: 10px; }
+    .actions { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--line); }
+    .actions button { border: 1px solid rgba(139,176,191,.33); background: rgba(4,13,18,.9); padding: 7px 9px; font-size: 8px; }
+    .actions button.primary { border-color: var(--cyan); color: var(--cyan); }
+    .inspector { display: grid; grid-template-rows: 40px auto auto 1fr; }
+    .summary { padding: 10px; border-bottom: 1px solid var(--line); font-size: 9px; line-height: 1.6; }
+    .summary strong { display: block; color: #eef9fc; margin-bottom: 4px; }
+    .summary .amber { color: var(--amber); }
+    .summary .cyan { color: var(--cyan); }
+    .summary .green { color: var(--green); }
+    .findings { padding: 9px; border-bottom: 1px solid var(--line); }
+    .finding { margin-bottom: 7px; padding: 7px; border-left: 2px solid var(--red); background: rgba(111,31,35,.16); font-size: 8px; line-height: 1.45; }
+    .finding b { color: var(--red); }
+    .finding.p2 { border-color: var(--amber); background: rgba(116,71,14,.12); }
+    .finding.p2 b { color: var(--amber); }
+    .evidence { padding: 10px; overflow: hidden; }
+    .evidence h3 { margin: 0 0 8px; font-size: 9px; color: #c7d9e0; }
+    .evidenceRow { padding: 6px 0; border-bottom: 1px solid rgba(113,150,166,.15); font-size: 8px; line-height: 1.4; }
+    .evidenceRow b { display: block; margin-bottom: 2px; font-weight: 500; }
+    .evidenceRow.user b { color: var(--amber); }
+    .evidenceRow.diffFact b { color: var(--cyan); }
+    .evidenceRow.check b { color: var(--green); }
+    .evidenceRow.review b { color: var(--red); }
+    .footer { display: grid; grid-template-columns: 1.1fr 1.6fr 1fr 1fr 1.2fr; border-top: 1px solid var(--line); background: rgba(4,12,17,.97); }
+    .footItem { padding: 10px 15px; border-right: 1px solid var(--line); font-size: 8px; color: #718791; }
+    .footItem b { display: block; color: #b9cbd3; font-size: 9px; margin-bottom: 2px; }
+    .footItem.warn b { color: var(--red); }
+    .app.codeFocus .workspace { grid-template-columns: 0 minmax(900px, 1fr) 0; }
+    .app.codeFocus .story, .app.codeFocus .inspector { visibility: hidden; }
+    .app.hideJourney .workspace { grid-template-columns: 0 minmax(760px, 1fr) minmax(270px, 340px); }
+    .app.hideJourney .story { visibility: hidden; }
+    .app.hideEvidence .workspace { grid-template-columns: minmax(280px, 360px) minmax(760px, 1fr) 0; }
+    .app.hideEvidence .inspector { visibility: hidden; }
+    @media (max-width: 1100px) {
+      html, body { overflow: auto; }
+      .app { min-width: 760px; height: auto; min-height: 100vh; grid-template-columns: 148px 1fr; }
+      .main { grid-template-rows: auto auto auto auto; }
+      .workspace { grid-template-columns: 1fr; }
+      .story, .code, .inspector { min-height: 620px; }
+      .steps { grid-template-columns: repeat(4, 1fr); height: auto; }
+      .step { height: 54px; }
+      .app.codeFocus .workspace, .app.hideJourney .workspace, .app.hideEvidence .workspace { grid-template-columns: 1fr; }
+      .app.codeFocus .story, .app.codeFocus .inspector, .app.hideJourney .story, .app.hideEvidence .inspector { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">TRACEDECAY <small>V2</small></div>
+    <div class="nav">
+      <div><span>01</span><span>Brain</span></div><div><span>02</span><span>Explorer</span></div><div><span>03</span><span>Loom</span></div><div><span>04</span><span>Sessions</span></div><div><span>05</span><span>Agents</span></div><div><span>06</span><span>Code</span></div><div><span>07</span><span>Knowledge</span></div><div class="active"><span>08</span><span>Delivery</span></div><div><span>09</span><span>Automations</span></div><div><span>10</span><span>Observatory</span></div><div><span>11</span><span>Costs</span></div><div><span>12</span><span>Settings</span></div><div><span>13</span><span>Work</span></div><div><span>14</span><span>Workflows</span></div>
+    </div>
+    <div class="railFoot">MODE · REVIEW<br>LINK · LIVE<br>PROVIDER · READ ONLY</div>
+  </aside>
+  <main class="main">
+    <header class="header">
+      <div class="crumb">Delivery / Hotpath CI / PR #743 / Decision to Code</div>
+      <div class="titleRow"><div><h1>FOLLOW THE PRODUCER STORY · EXACT YAML REVIEW</h1><div class="meta"><span>PR #743 · MERGED</span><span>39e4704e0f8c…e858</span><span>ci/hotpath-pr-trigger → master</span><span>2 files · +124 / −17</span></div></div><div class="readOnly">PROVIDER MODE · READ ONLY</div></div>
+    </header>
+    <section class="steps">
+      <div class="step user"><b>01 USER REQUEST</b><small>20:39:33 · transcript</small></div>
+      <div class="step user"><b>02 DIRECTIVE</b><small>20:41:18 · transcript</small></div>
+      <div class="step"><b>03 DELEGATION</b><small>20:42:25 · root</small></div>
+      <div class="step"><b>04 PREREQUISITE</b><small>21:12:36 · subagent</small></div>
+      <div class="step active"><b>05 DECISION → CODE</b><small>21:41:38–21:42:15</small></div>
+      <div class="step check"><b>06 RUN EVIDENCE</b><small>21:44:37 · checks</small></div>
+      <div class="step review"><b>07 REVIEW FINDINGS</b><small>3 unresolved</small></div>
+      <div class="step code"><b>08 MERGE + MIRROR</b><small>21:52:18 · #707</small></div>
+    </section>
+    <section class="workspace">
+      <section class="pane story">
+        <div class="paneHead"><span>RECOVERED PRODUCER JOURNEY</span><span class="badge">STEP 5 / 8</span></div>
+        <div class="truth"><strong>PERSISTED TRANSCRIPT, NOT PRIVATE REASONING</strong>Root session <b>caf0eec6-9fd3-4927-9e33-454e6b627137</b> maps to hosted link <b>session_01CPdGeG8tU25R3QSh5dE7XW</b>. Hidden chain-of-thought remains unavailable.</div>
+        <div class="timeline">
+          <div class="event user"><span class="time">20:39:33</span>Is there an experimental Hotpath GitHub Action?<span class="source">USER TRANSCRIPT</span></div>
+          <div class="event user"><span class="time">20:41:18</span>Integrate full CI into #707 or a preceding mergeable PR.<span class="source">USER TRANSCRIPT</span></div>
+          <div class="event agent"><span class="time">20:42:25</span>Spawn daemon-free indexing benchmark agent.<span class="source">ROOT TRANSCRIPT</span></div>
+          <div class="event agent"><span class="time">20:43:18</span>Nested API researcher spawned; evidence only, no #743 hunks.<span class="source">SUBAGENT REPORT</span></div>
+          <div class="event"><span class="time">21:12:36</span>Prerequisite benchmark completed in three commits.<span class="source">SUBAGENT REPORT</span></div>
+          <div class="event"><span class="time">21:41:38</span>Blocker recorded: master lacks benchmark binary; naïve PR trigger would break older lines.<span class="source">ASSISTANT SUMMARY</span></div>
+          <div class="event"><span class="time">21:42:00</span>Availability-guarded workflow edits begin.<span class="source">ROOT TRANSCRIPT</span></div>
+          <div class="event"><span class="time">21:42:32</span>Commit created; push 21:42:34; PR created 21:42:48.<span class="source">GIT + PROVIDER</span></div>
+          <div class="event review"><span class="time">21:44:37</span>Profile passes only non-applicable head-absent path.<span class="source">CHECK RESULT</span></div>
+          <div class="event"><span class="time">21:52:18</span>PR merges; same workflows already mirrored to #707 as 49fc89052e.<span class="source">PROVIDER + GIT</span></div>
+        </div>
+        <div class="branchBlock"><div class="branchLine"><i></i><b>Daemon-free benchmark agent</b> · prerequisite work</div><div class="branchLine"><i></i><b>Nested API researcher</b> · source evidence only</div><div style="margin-top:5px;color:#708893">No Codex producer attribution. Subagents did not author PR #743's two workflow hunks.</div></div>
+      </section>
+      <section class="pane code">
+        <div class="paneHead"><span>CODE &amp; IMPACT · EXACT REPOSITORY DIFF</span><span><button id="toggleJourney" title="Collapse or restore the producer journey">Journey</button> <button id="focusCode" title="Give the diff the full review workspace">Focus code</button> <button id="toggleEvidence" title="Collapse or restore run evidence">Evidence</button> <button id="previousStep">‹ Previous</button> <button id="nextStep">Next ›</button></span></div>
+        <div class="modes"><span>STORY</span><span class="on">CODE &amp; IMPACT</span><span>EVIDENCE</span><span>FEEDBACK</span><span style="margin-left:auto;color:#91a5ae">2 FILES · +124 / −17</span></div>
+        <div class="diff">
+          <div class="file"><div class="fileTitle"><span>.github/workflows/hotpath-profile.yml</span><em>+96 / −10</em></div><pre><span class="del"><span class="ln">2</span>-# Manually triggered while the workload is the bounded MCP smoke.</span><span class="add sel"><span class="ln">18</span>+  pull_request:</span><span class="add"><span class="ln">21</span>+concurrency:</span><span class="add"><span class="ln">22</span>+  group: hotpath-profile-${{ github.event.pull_request.number || github.ref }}</span><span class="add"><span class="ln">23</span>+  cancel-in-progress: true</span><span class="add"><span class="ln">41</span>+  INDEX_BENCH_SOURCE: crates/tracedecay-query/src/bin/tracedecay_index_bench.rs</span><span class="add"><span class="ln">59</span>+      - name: Detect benchmark at head</span><span class="add"><span class="ln">60</span>+        id: head_bench</span><span class="add"><span class="ln">72</span>+        if: steps.head_bench.outputs.available == 'true'</span><span class="add"><span class="ln">73</span>+        run: cp -r benchmark_data/index-bench/corpus ...</span><span class="add"><span class="ln">77</span>+      - name: Head profile (timing)</span><span class="add"><span class="ln">78</span>+        if: steps.head_bench.outputs.available == 'true'</span><span class="add"><span class="ln">91</span>+      - name: Checkout base</span><span class="add"><span class="ln">96</span>+      - name: Detect benchmark at base</span><span class="add"><span class="ln">98</span>+        if: steps.head_bench.outputs.available == 'true'</span><span class="add"><span class="ln">114</span>+        if: steps.base_bench.outputs.available == 'true'</span><span class="add"><span class="ln">127</span>+      - name: Compare workload identity</span></pre></div>
+          <div class="file"><div class="fileTitle"><span>.github/workflows/hotpath-comment.yml</span><em>+28 / −7</em></div><pre><span class="add sel"><span class="ln">23</span>+      - name: Check for a comparable profile</span><span class="add"><span class="ln">24</span>+        id: comparable</span><span class="add"><span class="ln">25</span>+        run: |</span><span class="add"><span class="ln">26</span>+          pr=$(cat /tmp/metrics/pr_number.txt || true)</span><span class="add"><span class="ln">27</span>+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then</span><span class="add"><span class="ln">28</span>+            echo "available=false" &gt;&gt; "$GITHUB_OUTPUT"</span><span class="add"><span class="ln">31</span>+          elif [ ! -s /tmp/metrics/head_timing.json ] || \</span><span class="add"><span class="ln">32</span>+               [ ! -s /tmp/metrics/base_timing.json ]; then</span><span class="add"><span class="ln">40</span>+            echo "available=true" &gt;&gt; "$GITHUB_OUTPUT"</span><span class="add"><span class="ln">44</span>+        if: steps.comparable.outputs.available == 'true'</span><span class="add"><span class="ln">48</span>+        if: steps.comparable.outputs.available == 'true'</span><span class="add"><span class="ln">52</span>+        if: steps.comparable.outputs.available == 'true'</span><span class="add"><span class="ln">56</span>+        if: steps.comparable.outputs.available == 'true'</span><span class="del"><span class="ln">66</span>-            --benchmark-id "mcp-smoke-timing"</span><span class="add"><span class="ln">66</span>+            --benchmark-id "index-bench-timing"</span></pre></div>
+        </div>
+        <div class="graph">
+          <div><h3>PROFILE WORKFLOW · DEPENDENCY + GUARDS</h3><div class="flow"><span class="node">checkout head</span><span class="arrow">→</span><span class="node">detect head</span><span class="arrow">→</span><span class="node warn">head?</span><span class="arrow">→</span><span class="node">pin corpus</span><span class="arrow">→</span><span class="node">profile head</span><span class="arrow">→</span><span class="node">checkout base</span><span class="arrow">→</span><span class="node warn">base?</span><span class="arrow">→</span><span class="node">profile base</span><span class="arrow">→</span><span class="node bad">digest compare only warns</span></div></div>
+          <div><h3>COMMENT WORKFLOW · COMPARABLE PAIR GATE</h3><div class="flow"><span class="node">workflow_run</span><span class="arrow">→</span><span class="node">download artifact</span><span class="arrow">→</span><span class="node warn">comparable?</span><span class="arrow">→</span><span class="node">install tooling</span><span class="arrow">→</span><span class="node">post comment</span><span class="node bad">old default workflow failed before guard</span></div></div>
+        </div>
+        <div class="actions"><button class="primary">Comment on selected hunk</button><button>Challenge visible decision</button><button>Attach to episode</button><button>Mark understood</button><button style="color:var(--red);border-color:var(--red)">Needs clarification</button><button>Exact transcript</button><button>Evidence table</button></div>
+      </section>
+      <aside class="pane inspector">
+        <div class="paneHead"><span>RUN EVIDENCE + REVIEW</span><span class="badge" style="color:var(--red)">3 UNRESOLVED</span></div>
+        <div class="summary"><strong>WHAT THE CHANGE WAS TRYING TO DO</strong><span class="amber">Run Hotpath on pull requests</span> without breaking heads or bases that do not yet contain the benchmark.<br><br><span class="cyan">Decision retained in transcript + PR/commit:</span> probe head and base independently; emit head-only evidence when base is absent; compare only when both exist.</div>
+        <div class="findings"><div class="finding"><b>P1 · TRUST BOUNDARY</b><br>Comment target comes from attacker-controlled artifact.</div><div class="finding"><b>P1 · INVALID COMPARISON</b><br>Unequal sealed-state digests warn but still permit comparison.</div><div class="finding p2"><b>P2 · PIPE FAILURE</b><br>Missing pipefail can hide timeout failure through tee.</div></div>
+        <div class="evidence"><h3>OBSERVED OUTCOMES</h3><div class="evidenceRow check"><b>15 ordinary CI checks passed</b>Provider check matrix.</div><div class="evidenceRow review"><b>Profile path was not exercised</b>head_bench_available=false; base blank; no timing or workload JSON.</div><div class="evidenceRow review"><b>Privileged comment workflow failed pre-merge</b>workflow_run loaded the old default-branch workflow; missing base_timing.json.</div><div class="evidenceRow check"><b>Post-merge guard skipped tooling/comment</b>No real head/base comparison exists yet.</div><div class="evidenceRow diffFact"><b>Mirrored to #707</b>Commit 49fc89052e at 21:42:58Z.</div><div class="evidenceRow user"><b>Private provider reasoning unavailable</b>Only persisted user messages, assistant summaries, subagent reports, PR/commit rationale, Git evidence, checks, and findings are shown.</div></div>
+      </aside>
+    </section>
+    <footer class="footer"><div class="footItem"><b>ROOT SESSION</b>caf0eec6-9fd3-4927-9e33-454e6b627137</div><div class="footItem"><b>EXACT CHANGE</b>2 YAML files · +124 / −17 · commit 39e4704e0…</div><div class="footItem"><b>MERGED</b>2026-08-27 21:52:18Z</div><div class="footItem"><b>#707 MIRROR</b>49fc89052e · 21:42:58Z</div><div class="footItem warn"><b>REVIEW INCOMPLETE</b>3 unresolved · no full comparison run</div></footer>
+  </main>
+</div>
+<script>
+  const app = document.querySelector('.app');
+  const steps = [...document.querySelectorAll('.step')];
+  let selectedStep = steps.findIndex((step) => step.classList.contains('active'));
+  function selectStep(next) {
+    selectedStep = Math.max(0, Math.min(steps.length - 1, next));
+    steps.forEach((step, index) => step.classList.toggle('active', index === selectedStep));
+    steps[selectedStep].focus();
+  }
+  steps.forEach((step, index) => {
+    step.tabIndex = 0;
+    step.setAttribute('role', 'button');
+    step.setAttribute('aria-label', `Review episode ${index + 1}: ${step.innerText.replace(/\n/g, ' ')}`);
+    step.addEventListener('click', () => selectStep(index));
+  });
+  document.getElementById('previousStep').addEventListener('click', () => selectStep(selectedStep - 1));
+  document.getElementById('nextStep').addEventListener('click', () => selectStep(selectedStep + 1));
+  document.getElementById('focusCode').addEventListener('click', () => app.classList.toggle('codeFocus'));
+  document.getElementById('toggleJourney').addEventListener('click', () => app.classList.toggle('hideJourney'));
+  document.getElementById('toggleEvidence').addEventListener('click', () => app.classList.toggle('hideEvidence'));
+  addEventListener('keydown', (event) => {
+    if (event.altKey && event.key === 'ArrowLeft') selectStep(selectedStep - 1);
+    if (event.altKey && event.key === 'ArrowRight') selectStep(selectedStep + 1);
+    if (event.key.toLowerCase() === 'f') app.classList.toggle('codeFocus');
+    if (event.key.toLowerCase() === 'j') app.classList.toggle('hideJourney');
+    if (event.key.toLowerCase() === 'e') app.classList.toggle('hideEvidence');
+  });
+</script>
+</body>
+</html>

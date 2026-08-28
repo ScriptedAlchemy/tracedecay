@@ -1,43 +1,88 @@
 # TraceDecay UI concept V2
 
-Jayse Hansen / Cantina Avengers FUI grammar applied to the fourteen dashboard channels. Steal the grammar (night glass, hairline frames, amber alert, cyan signal, measured fields). Do not copy Marvel marks.
+Jayse Hansen / Cantina Avengers FUI grammar applied to TraceDecay's fourteen
+dashboard workspaces. Borrow the grammar—night glass, hairline frames, amber
+attention, cyan signal, and measured fields—without copying Marvel marks.
 
-These are lookbook stills, not visual-audit goldens. Do not treat them as dashboard/audit-baselines/.
+These are implementation-facing concept plates, not runtime receipts or
+visual-audit goldens. Sample data is synthetic unless a same-stem brief names a
+reviewed real-evidence packet and binds each visible claim to its exact source.
+Do not use these images as `dashboard/audit-baselines/`.
 
-## Layout
+## Shared authorities
 
-One folder per channel, versions stacked inside:
+- [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) owns the logo, visual tokens, shell
+  dimensions, color meaning, typography, and prompt floor.
+- [NAVIGATION.md](NAVIGATION.md) owns the fourteen workspace names, numbers,
+  order, routes, and persistent shell behavior.
+- [INTERACTION-STATES.md](INTERACTION-STATES.md) owns the semantic-state and
+  interaction coverage expected for each workspace.
+- [IMPLEMENTATION.md](IMPLEMENTATION.md) owns the hybrid React/DOM and shared
+  scene architecture, deterministic layout, density strategy, exact fallbacks,
+  and renderer proof-of-capability decision.
+- [CLEANUP.md](CLEANUP.md) records the exact retained authority and removed
+  superseded/rejected concept-only assets.
+- [GALLERY.md](GALLERY.md) renders every authoritative final plate in one
+  reviewable sequence.
+- Each `<NN>-<workspace>/final/README.md` is that workspace's authoritative
+  final state manifest and shared product/interaction contract.
+- Each final PNG's exact same-stem Markdown file owns that state's user job,
+  behavior, evidence boundary, acceptance gates, and production authorities.
+- Each `<NN>-<workspace>/README.md` routes to the final manifest and names the
+  workspace's production authorities.
 
-```
+The more specific authority may add workspace detail but may not contradict a
+shared authority. When a proposed plate exposes behavior the shipping product
+does not, label that path unavailable or omit the control; a concept image
+cannot supply the missing integration.
+
+## Layout and lifecycle
+
+Keep every asset in its numbered workspace folder. Reviewed implementation
+references live only in `final/`; rejected and superseded studies are removed
+from the branch tip after replacement acceptance and remain recoverable in Git
+history:
+
+```text
 mockups/ui-concept-v2/
-  <NN>-<channel>/
-    v<N>-<short-slug>.png
+  <NN>-<workspace>/
+    README.md
+    final/
+      README.md
+      <state-stem>.png
+      <state-stem>.md
 ```
 
-- Add new iterations as `vN-short-slug.png` inside the channel folder (for example the next Brain synapse/hook-firing plate is `01-brain/v2-hook-synapses.png`).
-- Highest `vN` in a folder is the current plate.
-- 2026-08-27 correction: Brain current is `01-brain/v10-activity-becomes-synapse.png`; Loom current is `03-loom/v7-host-weave-overview.png` (prior versions kept). (prior versions kept).
-- Do not flatten plates into the root. Do not dump iterations into a `drafts/` folder.
-- Never overwrite an older version; add the next `vN`.
-- No git symlinks.
+`final/README.md` is the only authoritative state manifest. Do not flatten
+plates into the root, overwrite an accepted image without its brief and
+manifest update, or add Git symlinks.
 
-## Canonical plates
+Each workspace's `final/README.md` lists every approved state, image, same-stem
+product brief, and review status. [CLEANUP.md](CLEANUP.md) is the branch-tip
+deletion receipt for superseded and rejected studies.
 
-Current (highest `vN`) plate per channel:
+A final image is eligible for `current` only after its PNG, exact same-stem
+brief, and `final/README.md` manifest entry exist and the plate has been
+visually reviewed. One workspace may have several final plates when each
+represents a distinct semantic or interaction state.
 
-| # | File | Hero |
-|---|---|---|
-| 01 |  01-brain/v10-activity-becomes-synapse.png | Admitted-activity live field. Pulse projectId/family/streamId/at. Massless hub. 1/3 hop. Shared 192px TRACEDECAY rail. CONCEPT/SYNTHETIC. |
-| 02 | 02-explorer/v4-lane-lifecycle.png | Four lanes, independent source states. Create/poll/cancel. Semantic absent/indexing/unavailable, never all LIVE. CONCEPT/SYNTHETIC. |
-| 03 |  03-loom/v7-host-weave-overview.png | Time down, hosts across, vertical strands, width=messages. OPEN/ONGOING · RECORDED · UNKNOWN. Loaded LCM page. CONCEPT/SYNTHETIC. |
-| 04 | 04-sessions/v3-provenance-inspector.png | Provider-qualified sessions, token provenance, paged inspector, coverage/redaction. exists:false vs empty vs transport vs unavailable. CONCEPT/SYNTHETIC. |
-| 05 | 05-agents/v3-authority-tree.png | Independent authorities. Usage, tree, handoff frontier, tokens, failures. No PID/CPU theatre. CONCEPT/SYNTHETIC. |
-| 06 | 06-code/v3-lenses.png | CORTEX/TRACE/CORE with direct labels. Graph totals, symbol path, strata, freshness, diagnostic warming/stale/unavailable. CONCEPT/SYNTHETIC. |
-| 07 | 07-knowledge/v4-four-cameras.png | Facts / Geometry / Curation / Oplog. Trust as ticks. PCA only if method=pca; otherwise unserved. Independent camera states. CONCEPT/SYNTHETIC. |
-| 08 | 08-delivery/v3-independent-authorities.png | Independent local Git vs provider. Labeled recency field. Denied/rate-limited/stale/unavailable/not-published never green. CONCEPT/SYNTHETIC. |
-| 09 | 09-automations/v3-scheduler-ledger.png | Scheduler ledger. Pause/resume, due/skip, jobs, skills, receipts, run ledger, artifacts, integrity. No Approvals. CONCEPT/SYNTHETIC. |
-| 10 | 10-observatory/v4-overview-honest.png | Overview stack: Doctor, observations, budgets, hooks, store telemetry. Each source own coverage/error. No invented heartbeat. CONCEPT/SYNTHETIC. |
-| 11 | 11-costs/v3-provider-spend.png | Actual provider spend first. Unpriced/null ≠ zero. Saved tokens ≠ dollars. CONCEPT/SYNTHETIC. |
-| 12 | 12-settings/v4-effective-only.png | Effective config only. Provenance unserved unless the server supplies it. Multi-root capability, no fake query. Remote Brain operational status. CONCEPT/SYNTHETIC. |
-| 13 | 13-work/v4-six-cameras.png | Six cameras over one immutable product-graph version. Unserved cameras unavailable, not invented graphs. CONCEPT/SYNTHETIC. |
-| 14 | 14-workflows/v3-definition-ledger.png | Definition ledger. Immutable versions, pinned digests, CAS activate/retire/reject, on-demand run lookup. No ARM/PAUSE/CANCEL. CONCEPT/SYNTHETIC. |
+## Contribution rules
+
+1. Start from the shared prompt floor and the workspace coverage in
+   `INTERACTION-STATES.md`. Preserve the normalized shell and route order.
+2. Add the final PNG and `<state-stem>.md` together. The brief must record user
+   job, product behavior, interaction and evidence contract, production truth
+   boundary, acceptance gates, and named authorities.
+3. Update `final/README.md` and the parent README in the same change. A final
+   state must appear exactly once in the final manifest.
+4. When replacing a state, mark the prior asset `superseded`; when an image
+   invents behavior or fails the visual brief, mark it `rejected` and say why.
+   After the replacement is accepted, remove the rejected/superseded pair from
+   the branch tip and update `CLEANUP.md`. Never derive lifecycle from a
+   filename or version number.
+5. Visibly stamp synthetic plates `CONCEPT / SYNTHETIC DATA`. A reviewed real-
+   evidence plate must label its evidence packet and source classes; never use
+   unreviewed customer/operator data or claim counts, topology, freshness,
+   health, controls, or success that no named production authority supplies.
+6. Every final state includes keyboard, reduced-motion, 200%-zoom/reflow,
+   dense-real-data, and exact text/table/transcript fallback gates.
