@@ -1615,7 +1615,7 @@ mod manifest_digest_memo_tests {
 
         // Byte identity: a cold instance built from the same inputs computes
         // the exact digests the memoized reads served.
-        let control = manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
+        let control = self::manifest("digest-memo-flow", vec![dependency(1), dependency(2)]);
         assert_eq!(control.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
