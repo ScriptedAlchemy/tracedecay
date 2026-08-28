@@ -12,17 +12,20 @@ include = ["/src/**"]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
+    "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-store/hotpath",
 ]
 hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
 ]
 hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",

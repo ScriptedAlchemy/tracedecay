@@ -33,6 +33,7 @@ required-features = ["test-transport"]
 [features]
 default = ["production"]
 hotpath = [
+    "tracedecay-domain/hotpath",
     "dep:regex",
     "hotpath/hotpath",
     "hotpath/tokio",
@@ -53,6 +54,7 @@ hotpath = [
     "tracedecay-usecases/hotpath",
 ]
 hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay/hotpath-alloc",
@@ -70,6 +72,7 @@ hotpath-alloc = [
     "tracedecay-usecases/hotpath-alloc",
 ]
 hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay/hotpath-cpu",

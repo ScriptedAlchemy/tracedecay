@@ -19,9 +19,9 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 
 [features]
 # Opt-in profiling passthrough so workspace `--features hotpath*` resolve.
-hotpath = ["hotpath/hotpath", "tracedecay-temporal-query/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-temporal-query/hotpath-alloc"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-temporal-query/hotpath-cpu"]
+hotpath = ["hotpath/hotpath", "tracedecay-temporal-query/hotpath", "tracedecay-domain/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-temporal-query/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-temporal-query/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

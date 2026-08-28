@@ -85,6 +85,7 @@ default = ["production"]
 # `#[hotpath::measure]` expands to: a library crate compiled without them
 # reports no allocation or CPU samples even when the binary enables profiling.
 hotpath = [
+    "tracedecay-domain/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
     # The daemon serves its HTTP application surface with axum 0.8 and reaches
@@ -120,6 +121,7 @@ hotpath = [
     "tracedecay-usecases/hotpath",
 ]
 hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-agent-hosts/hotpath-alloc",
@@ -150,6 +152,7 @@ hotpath-alloc = [
     "tracedecay-usecases/hotpath-alloc",
 ]
 hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-agent-hosts/hotpath-cpu",
