@@ -190,23 +190,30 @@ async fn admitted_graph(
             detail: error.to_string(),
         }
     })?;
-    let context = admission
-        .admit(CodeGraphReadAdmissionRequest::new(
+    // Admission and projection-open are the per-request store-open cost every
+    // explorer route pays before any graph work; separate spans let a flat
+    // profile distinguish them from the traversal itself.
+    let context = hotpath::future!(
+        admission.admit(CodeGraphReadAdmissionRequest::new(
             &operation,
             control.request_id(),
             control.deadline(),
             control.cancellation(),
             control.observed_at(),
-        ))
-        .await?;
+        )),
+        label = "dashboard_api.graph.explorer_admission"
+    )
+    .await?;
     let cancellation = application_graph_cancellation(control.cancellation());
-    let verified = projection
-        .open(CodeGraphReadRequest::new(
+    let verified = hotpath::future!(
+        projection.open(CodeGraphReadRequest::new(
             &context,
             control.observed_at(),
             Arc::clone(&cancellation),
-        ))
-        .await?;
+        )),
+        label = "dashboard_api.graph.explorer_open"
+    )
+    .await?;
     let reader = verified.reader_with_cancellation(
         &context,
         control.observed_at(),

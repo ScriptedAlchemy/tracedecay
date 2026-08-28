@@ -25,9 +25,14 @@ pub async fn run_list(
     axum::extract::Query(params): axum::extract::Query<RunListParams>,
 ) -> (StatusCode, Json<Value>) {
     let limit = super::util::coerce_limit(params.limit, 50, 200) as usize;
-    match tracedecay_agent_hosts::automation::run_ledger::load_run_records_page(
-        &state.dashboard_root,
-        limit,
+    // The locked ledger tail read is this route's only I/O; row projection
+    // after it is linear in the (bounded) page.
+    match hotpath::future!(
+        tracedecay_agent_hosts::automation::run_ledger::load_run_records_page(
+            &state.dashboard_root,
+            limit,
+        ),
+        label = "dashboard_api.runs.ledger_read"
     )
     .await
     {
@@ -89,8 +94,13 @@ pub async fn artifact_list(
     match find_run_record(&state.dashboard_root, &run_id).await {
         Ok(Some(record)) => {
             let count = record.artifacts.len();
-            let integrity =
-                read_published_artifact_chain(&state.dashboard_root, &run_id, None).await;
+            // Integrity verification re-reads the publication chain from disk
+            // on every list call; measure it apart from the record lookup.
+            let integrity = hotpath::future!(
+                read_published_artifact_chain(&state.dashboard_root, &run_id, None),
+                label = "dashboard_api.runs.chain_verify"
+            )
+            .await;
             let (integrity_status, integrity_verified) = match integrity {
                 Ok(Some(published)) if published == record.artifacts => ("verified", true),
                 Ok(Some(_)) => ("ledger_publication_mismatch", false),
@@ -136,7 +146,15 @@ pub async fn artifact_payload(
             "automation run artifact '{kind}' not found for run '{run_id}'"
         ));
     };
-    match read_run_artifact_payload(&state.dashboard_root, &run_id, artifact).await {
+    // Heavy per-run payloads (proposed/applied ops, validation reports) are
+    // read and parsed here; this span scales with artifact size while the
+    // surrounding handler phases stay fixed-price.
+    match hotpath::future!(
+        read_run_artifact_payload(&state.dashboard_root, &run_id, artifact),
+        label = "dashboard_api.runs.artifact_read"
+    )
+    .await
+    {
         Ok(payload) => (
             StatusCode::OK,
             Json(json!({
