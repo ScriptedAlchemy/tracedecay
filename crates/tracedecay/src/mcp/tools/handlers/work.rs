@@ -55,14 +55,17 @@ pub(super) async fn handle_work(
             "The Work daemon invocation owner is unavailable",
         ));
     };
-    let response = crate::application_surface::invoke_work_operation(
-        executor,
-        WorkHttpRequest {
-            operation,
-            request_id,
-            controls,
-            body,
-        },
+    let response = hotpath::future!(
+        crate::application_surface::invoke_work_operation(
+            executor,
+            WorkHttpRequest {
+                operation,
+                request_id,
+                controls,
+                body,
+            },
+        ),
+        label = "mcp.work.invoke"
     )
     .await;
     let body = to_bytes(response.into_body(), usize::MAX)

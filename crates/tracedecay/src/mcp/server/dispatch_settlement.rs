@@ -199,9 +199,13 @@ impl RetainedDispatchRegistry {
         drop(admission_wait);
         Self::reap_finished(&mut state);
         if !self.accepting.load(Ordering::Acquire) {
+            // Admission refusals are the signal a saturation diagnosis needs;
+            // count them alongside the admitted/settled lifecycle gauges.
+            hotpath::gauge!("mcp.server.dispatch.refused_shutdown_total").inc(1_u64);
             return Err(dispatch_shutdown_error());
         }
         if state.active.len() >= self.capacity {
+            hotpath::gauge!("mcp.server.dispatch.refused_saturated_total").inc(1_u64);
             return Err(TraceDecayError::project_route(
                 "tool_dispatch_saturated",
                 true,
@@ -627,6 +631,7 @@ fn effect_unknown_error(
     settlement: DispatchSettlement,
     cause: &str,
 ) -> TraceDecayError {
+    hotpath::gauge!("mcp.server.dispatch.effect_unknown_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_effect_unknown",
         false,
@@ -650,6 +655,7 @@ fn dispatch_cancelled_error(tool_name: &str, settlement: DispatchSettlement) -> 
     if settlement.effect_may_have_committed() && tool_carries_effect(tool_name) {
         return effect_unknown_error(tool_name, settlement, "cancellation");
     }
+    hotpath::gauge!("mcp.server.dispatch.cancelled_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_cancelled",
         true,
@@ -663,6 +669,7 @@ fn dispatch_deadline_error(tool_name: &str, settlement: DispatchSettlement) -> T
     if settlement.effect_may_have_committed() && tool_carries_effect(tool_name) {
         return effect_unknown_error(tool_name, settlement, "its absolute deadline");
     }
+    hotpath::gauge!("mcp.server.dispatch.deadline_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,
