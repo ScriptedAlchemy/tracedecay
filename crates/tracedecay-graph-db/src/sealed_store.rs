@@ -75,14 +75,18 @@ const SEALED_STORE_FORM_REPLAY: &str = "replay";
 /// `Column::value()` restores every dictionary entry as `Value::String`
 /// (`compact/column.rs`). TraceDecay serializes a Bytes payload onto nearly
 /// every code-graph entity, so compacting such a generation would fail its
-/// post-reopen recovered-digest proof. Until the fork fix (Bytes-preserving
-/// dictionary entries, branch stacked on `tracedecay/0.5.42-close-and-overlay`)
-/// is picked up by the workspace pin, a generation whose rows carry any Bytes
-/// property is sealed in **replay form**: still its own isolated
+/// post-reopen recovered-digest proof. The fork fix exists: branch
+/// `tracedecay/0.5.42-compact-bytes-roundtrip` (rev `0bc27542`, stacked on
+/// the pinned `tracedecay/0.5.42-close-and-overlay`) encodes Bytes entries
+/// losslessly inside the string dictionary, and the full sealed-store
+/// contract passes against it with this constant flipped. Until that branch
+/// is picked up by the workspace pin, a generation whose rows carry any
+/// Bytes property is sealed in **replay form**: still its own isolated
 /// single-generation store — generation-scoped open, retirement by directory
 /// delete, read routing — just without the columnar base. Flip this with the
-/// pin move; the post-reopen digest proof will refuse any store the flip
-/// mis-declares.
+/// pin move (and the `bytes_rows_seal_in_replay_form_and_read_exactly`
+/// expectation with it); the post-reopen digest proof will refuse any store
+/// the flip mis-declares.
 const COMPACT_ROUND_TRIPS_BYTES: bool = false;
 
 /// Receipt binding a sealed store directory to the exact generation and
