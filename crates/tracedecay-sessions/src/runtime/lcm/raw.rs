@@ -148,7 +148,7 @@ pub async fn load_raw_message_by_identity(
             let duplicate = rows.next().await?.is_some();
             Ok(Some((row, duplicate)))
         },
-        label = "lcm.hydrate.fetch"
+        label = "sessions.lcm.hydrate.fetch"
     )
     .await?;
     let Some((row, duplicate)) = fetched else {
@@ -159,7 +159,7 @@ pub async fn load_raw_message_by_identity(
             "duplicate raw messages for exact provider/session/message identity".to_string(),
         ));
     }
-    hotpath::measure_block!("lcm.hydrate.redact", {
+    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
         verified_raw_message_from_row(&row).map(Some)
     })
 }
@@ -180,10 +180,10 @@ pub async fn load_raw_message_by_store_id(
                 .await?
                 .ok_or(LcmError::SummarySourceNotOwnedBySession)
         },
-        label = "lcm.hydrate.fetch"
+        label = "sessions.lcm.hydrate.fetch"
     )
     .await?;
-    hotpath::measure_block!("lcm.hydrate.redact", {
+    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
         verified_raw_message_from_row(&row)
     })
 }

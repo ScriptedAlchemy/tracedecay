@@ -728,22 +728,19 @@ async fn persist_and_replay_backlog_compression(
             "persisted summarizer required after noop/auxiliary short-circuits".to_string(),
         ));
     };
-    let write_result = hotpath::future!(
-        persist_compression_transaction_writes(
-            conn,
-            publisher,
-            CompressionTransactionWriteRequest {
-                request: &request,
-                conversation_id: &context.conversation_id,
-                existing_frontier: &context.existing_frontier,
-                summary_text: &summary_invocation.summary_text,
-                route: summary_invocation.route.clone(),
-                extraction_result: summary_invocation.extraction_result.clone(),
-                backlog: &context.window.backlog,
-                forced_overflow_recovery: context.plan.forced_overflow_recovery,
-            },
-        ),
-        label = "lcm.compress.persist"
+    let write_result = persist_compression_transaction_writes(
+        conn,
+        publisher,
+        CompressionTransactionWriteRequest {
+            request: &request,
+            conversation_id: &context.conversation_id,
+            existing_frontier: &context.existing_frontier,
+            summary_text: &summary_invocation.summary_text,
+            route: summary_invocation.route.clone(),
+            extraction_result: summary_invocation.extraction_result.clone(),
+            backlog: &context.window.backlog,
+            forced_overflow_recovery: context.plan.forced_overflow_recovery,
+        },
     )
     .await?;
     // The summaries created above are already persisted in this transaction,
@@ -754,33 +751,27 @@ async fn persist_and_replay_backlog_compression(
         deferred_backlog: &write_result.remaining_backlog,
         fresh_tail: &context.window.fresh_tail,
     };
-    let replay_messages = hotpath::future!(
-        async {
-            if context.plan.forced_overflow_recovery {
-                assemble_overflow_recovery_replay(
-                    conn,
-                    &request.provider,
-                    &request.session_id,
-                    &context.raw_messages,
-                    replay_parts,
-                    context.overflow_assembly_cap,
-                )
-                .await
-            } else {
-                assemble_replay_context(
-                    conn,
-                    &request.provider,
-                    &request.session_id,
-                    &context.raw_messages,
-                    replay_parts,
-                    request.max_assembly_tokens,
-                )
-                .await
-            }
-        },
-        label = "lcm.compress.replay"
-    )
-    .await?;
+    let replay_messages = if context.plan.forced_overflow_recovery {
+        assemble_overflow_recovery_replay(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            replay_parts,
+            context.overflow_assembly_cap,
+        )
+        .await?
+    } else {
+        assemble_replay_context(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            replay_parts,
+            request.max_assembly_tokens,
+        )
+        .await?
+    };
     let mut status = "ok";
     let mut reason = if context.plan.forced_overflow_recovery {
         "forced_overflow_recovery"
@@ -1126,11 +1117,11 @@ async fn assemble_replay_context(
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = hotpath::future!(
         dag::load_uncondensed_summary_nodes(conn, provider, session_id),
-        label = "lcm.replay.fetch"
+        label = "sessions.lcm.replay.fetch"
     )
     .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    Ok(hotpath::measure_block!("lcm.replay.compile", {
+    Ok(hotpath::measure_block!("sessions.lcm.replay.compile", {
         assemble_replay_messages(
             &anchors,
             &summaries,
@@ -1144,6 +1135,7 @@ async fn assemble_replay_context(
 /// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
+#[hotpath::measure(label = "sessions.lcm.compress.assemble_overflow_replay", future = true)]
 async fn assemble_overflow_recovery_replay(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1154,11 +1146,11 @@ async fn assemble_overflow_recovery_replay(
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = hotpath::future!(
         dag::load_uncondensed_summary_nodes(conn, provider, session_id),
-        label = "lcm.replay.fetch"
+        label = "sessions.lcm.replay.fetch"
     )
     .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    let candidate = hotpath::measure_block!("lcm.replay.compile", {
+    let candidate = hotpath::measure_block!("sessions.lcm.replay.compile", {
         assemble_replay_messages(
             &anchors,
             &summaries,
@@ -1828,7 +1820,7 @@ async fn ingest_active_messages(
                 existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
             Ok::<_, LcmError>((next_available_ordinal, prepared, prefetched_states))
         },
-        label = "lcm.compress.ingest.fetch"
+        label = "sessions.lcm.compress.ingest.fetch"
     )
     .await?;
     // Message ids written by an earlier iteration are re-read from the
@@ -1946,7 +1938,7 @@ async fn ingest_active_messages(
             }
             Ok::<_, LcmError>(replay_messages)
         },
-        label = "lcm.compress.ingest.persist"
+        label = "sessions.lcm.compress.ingest.persist"
     )
     .await?;
 
@@ -2296,10 +2288,10 @@ async fn load_raw_messages_for_session(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "lcm.hydrate.fetch"
+        label = "sessions.lcm.hydrate.fetch"
     )
     .await?;
-    hotpath::measure_block!("lcm.hydrate.redact", {
+    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
         fetched
             .iter()
             .map(raw::verified_raw_message_from_row)

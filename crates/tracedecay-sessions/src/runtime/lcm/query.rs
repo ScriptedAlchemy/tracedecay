@@ -107,7 +107,7 @@ pub async fn expand_query(
                         &query_plan,
                         max_results,
                     ),
-                    label = "lcm.expand_query.search"
+                    label = "sessions.lcm.expand_query.search"
                 )
                 .await?;
                 for hit in summary_hits {
@@ -119,7 +119,7 @@ pub async fn expand_query(
                                 &request.session_id,
                                 node_id,
                             ),
-                            label = "lcm.expand_query.hydrate"
+                            label = "sessions.lcm.expand_query.hydrate"
                         )
                         .await?;
                         matches.push(expand_query_match_from_hit(&hit));
@@ -139,7 +139,7 @@ pub async fn expand_query(
                             &query_plan,
                             remaining,
                         ),
-                        label = "lcm.expand_query.search"
+                        label = "sessions.lcm.expand_query.search"
                     )
                     .await?;
                     for hit in raw_hits {
@@ -168,7 +168,7 @@ pub async fn expand_query(
                 &request.session_id,
                 &requested_node_ids,
             ),
-            label = "lcm.expand_query.hydrate"
+            label = "sessions.lcm.expand_query.hydrate"
         )
         .await?;
         for expansion in expansions {
@@ -207,7 +207,7 @@ pub async fn expand_query(
     for store_id in selected_raw_store_ids {
         let raw = hotpath::future!(
             raw::load_raw_message_by_store_id(conn, store_id),
-            label = "lcm.expand_query.hydrate"
+            label = "sessions.lcm.expand_query.hydrate"
         )
         .await?;
         if raw.provider == request.provider && raw.session_id == request.session_id {
@@ -222,7 +222,7 @@ pub async fn expand_query(
         context_pagination,
         context_truncated,
         synthesis_prompt,
-    ) = hotpath::measure_block!("lcm.expand_query.assemble", {
+    ) = hotpath::measure_block!("sessions.lcm.expand_query.assemble", {
         let mut assembler = ExpandQueryAssembler::new(context_max_chars);
         let mut node_ids = Vec::new();
         for expansion in selected_summaries {

@@ -177,7 +177,7 @@ async fn expand_summary_nodes_with_content(
     }
     let requested = hotpath::future!(
         load_summary_nodes_by_ids(conn, node_ids, include_content),
-        label = "lcm.expand.summary.fetch"
+        label = "sessions.lcm.expand.summary.fetch"
     )
     .await?;
 
@@ -205,16 +205,16 @@ async fn expand_summary_nodes_with_content(
 
     let raw_sources = hotpath::future!(
         load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content),
-        label = "lcm.expand.summary.hydrate"
+        label = "sessions.lcm.expand.summary.hydrate"
     )
     .await?;
     let child_sources = hotpath::future!(
         load_summary_nodes_by_ids(conn, &child_node_ids, include_content),
-        label = "lcm.expand.summary.fetch"
+        label = "sessions.lcm.expand.summary.fetch"
     )
     .await?;
 
-    hotpath::measure_block!("lcm.expand.summary.assemble", {
+    hotpath::measure_block!("sessions.lcm.expand.summary.assemble", {
         let mut expansions = Vec::with_capacity(summaries.len());
         for summary in summaries {
             expansions.push(assemble_summary_expansion(
@@ -503,12 +503,12 @@ async fn load_raw_messages_by_store_ids(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "lcm.hydrate.fetch"
+        label = "sessions.lcm.hydrate.fetch"
     )
     .await?;
 
     if include_content {
-        hotpath::measure_block!("lcm.hydrate.redact", {
+        hotpath::measure_block!("sessions.lcm.hydrate.redact", {
             let mut out = BTreeMap::new();
             for row in fetched {
                 let raw = raw::verified_raw_message_from_row(&row)?;

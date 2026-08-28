@@ -262,7 +262,7 @@ pub async fn expand_payload(
             };
             validate_expand_payload_owner(conn, provider, session_id, payload).await
         },
-        label = "lcm.expand.payload.fetch"
+        label = "sessions.lcm.expand.payload.fetch"
     )
     .await?;
     if payload.kind == "quarantined_assistant_output" {
@@ -272,7 +272,7 @@ pub async fn expand_payload(
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let (content, _authority) = hotpath::measure_block!("lcm.expand.payload.read", {
+    let (content, _authority) = hotpath::measure_block!("sessions.lcm.expand.payload.read", {
         read_verified_payload_text(
             &path,
             &payload.content_hash,

@@ -52,10 +52,10 @@ pub async fn load_session(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "lcm.hydrate.fetch"
+        label = "sessions.lcm.hydrate.fetch"
     )
     .await?;
-    let raws = hotpath::measure_block!("lcm.hydrate.redact", {
+    let raws = hotpath::measure_block!("sessions.lcm.hydrate.redact", {
         fetched
             .iter()
             .map(raw::verified_raw_message_from_row)
