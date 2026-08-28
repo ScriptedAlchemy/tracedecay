@@ -107,8 +107,6 @@ use super::{
 #[cfg(test)]
 use tracedecay_semantic::SemanticExecutionInterruptionV1;
 
-const EVALUATION_MAX_CONCURRENT_SESSIONS: u32 = 1;
-
 struct SemanticEvaluationGraphCancellationV1 {
     evaluation: Arc<dyn SemanticEvaluationCancellationV1>,
 }
@@ -616,10 +614,7 @@ impl ProductionSemanticRuntimeV1 {
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
         let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)?;
-        let execution = SemanticResourceCeilings {
-            max_concurrent_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS,
-            ..self.resources
-        };
+        let execution = self.resources;
         let artifact = LoadedSemanticArtifactV1::from_lifecycle(
             &self.lifecycle,
             generation.manifest(),
@@ -638,10 +633,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             generation.chunks().chunks(),
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: execution.max_concurrent_sessions as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(execution),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&cancellation),
@@ -706,10 +698,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(self.resources),
             current.projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&current.cancellation),
@@ -1068,7 +1057,7 @@ impl ProductionSemanticRuntimeV1 {
             cancellation_artifact,
             cancellation_request.clone(),
             &cancellation_chunks,
-            EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
+            evaluation_projection_resources(self.resources).max_sessions,
             self.resources.max_resident_bytes,
             clean.projection_batch_cache.as_ref(),
             Arc::clone(&clean.cancellation),
@@ -1222,10 +1211,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            SemanticEvaluationProjectionResourcesV1 {
-                max_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
-                memory_ceiling_bytes: self.resources.max_resident_bytes,
-            },
+            evaluation_projection_resources(self.resources),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(cancellation),
@@ -2517,6 +2503,15 @@ fn evaluation_target_resource_requirement(
     requirement.model_bytes = artifact.model;
     requirement.tokenizer_bytes = artifact.tokenizer;
     requirement
+}
+
+fn evaluation_projection_resources(
+    configured: SemanticResourceCeilings,
+) -> SemanticEvaluationProjectionResourcesV1 {
+    SemanticEvaluationProjectionResourcesV1 {
+        max_sessions: configured.max_concurrent_sessions as usize,
+        memory_ceiling_bytes: configured.max_resident_bytes,
+    }
 }
 
 fn canonical_exact_flat_search_index_key()
@@ -3826,6 +3821,25 @@ mod tests {
         assert_eq!(requirement.resident_bytes, configured.max_resident_bytes);
         assert_eq!(requirement.threads, configured.max_threads);
         assert!(configured_resource_ceiling_covers(&configured, requirement));
+    }
+
+    #[test]
+    fn evaluator_projection_inherits_configured_session_width() {
+        let configured = SemanticResourceCeilings {
+            max_model_bytes: 700,
+            max_tokenizer_bytes: 64,
+            max_resident_bytes: 2_048,
+            max_threads: 8,
+            max_concurrent_sessions: 4,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        };
+
+        let resources = evaluation_projection_resources(configured);
+
+        assert_eq!(resources.max_sessions, 4);
+        assert_eq!(resources.memory_ceiling_bytes, 2_048);
     }
 
     #[test]
