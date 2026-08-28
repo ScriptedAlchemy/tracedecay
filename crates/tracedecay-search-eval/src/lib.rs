@@ -17,6 +17,7 @@ mod controlled_workloads;
 mod native_qualification;
 mod packaged_assets;
 mod report;
+pub mod semantic_cut;
 pub mod semantic_native;
 
 #[cfg(test)]
