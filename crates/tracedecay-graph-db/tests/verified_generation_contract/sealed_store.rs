@@ -712,10 +712,14 @@ fn sealed_artifact_open_probe() {
     let seal_started = std::time::Instant::now();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    // The shared fixture registration carries a 30s deadline; a 500k-row seal
+    // legitimately outlives it, so the probe extends its own.
+    let mut probe_registration = registration(registered.binding.clone(), temp.path());
+    probe_registration.deadline = std::time::Instant::now() + Duration::from_secs(3_600);
     let commit = registered
         .registry
         .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
+            probe_registration,
             &mut authority,
             &context,
             &record.publication.key,
