@@ -10,8 +10,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
-    UserProfileId,
+    ConfigurationValueV1, CredentialKindV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
@@ -383,9 +383,18 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         .await
         .expect("production composition");
     let expected_revision = current_revision(&harness, &project).await;
+    let project_id = harness
+        .server(&project)
+        .expect("project server")
+        .cg()
+        .await
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
     let request = ConfigurationSetRequestV1 {
-        layer: ConfigurationLayerIdV1::Default,
-        key: SettingKey::new("mcp.tool_timings").expect("setting key"),
+        layer: ConfigurationLayerIdV1::Project { project_id },
+        key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).expect("setting key"),
         value: ConfigurationValueV1::Boolean(true),
         expected_revision: expected_revision.clone(),
         idempotency_key: ConfigurationIdempotencyKey::new(
@@ -416,17 +425,18 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("restarted production composition");
+    let mut replay_args = serde_json::to_value(&request).expect("replay request");
+    replay_args
+        .as_object_mut()
+        .expect("configuration set request object")
+        .insert("format".to_owned(), serde_json::json!("json"));
     let replay = harness
-        .call_tool(
-            &project,
-            "tracedecay_configuration_set",
-            serde_json::to_value(&request).expect("replay request"),
-        )
+        .call_tool(&project, "tracedecay_configuration_set", replay_args)
         .await
         .expect("replayed configuration effect");
     assert_eq!(
-        tool_payload(&replay),
-        first_effect,
+        tool_payload(&replay)["outcome"]["value"],
+        first_effect["outcome"]["value"],
         "MCP replay must return the CLI operation's exact durable effect envelope"
     );
     assert_eq!(

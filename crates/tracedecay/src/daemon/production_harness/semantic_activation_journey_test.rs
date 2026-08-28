@@ -360,32 +360,27 @@ pub(super) async fn evaluate_native_profile(
     }
 }
 
-async fn current_configuration_revision(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-) -> tracedecay_domain::configuration::ConfigurationRevisionId {
-    harness
-        .server(project)
-        .expect("project server")
-        .cg()
-        .await
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .expect("current production configuration")
-        .revision_id
-}
-
 pub(super) async fn set_semantic_profile(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     active: crate::config::SemanticProfileSelection,
     rollback: Option<crate::config::SemanticProfileSelection>,
 ) {
-    let expected_revision = current_configuration_revision(harness, project).await;
+    let graph = harness.server(project).expect("project server").cg().await;
+    let project_id = graph
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
+    let expected_revision = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("current production configuration")
+        .revision_id;
     let request = ConfigurationSetRequestV1 {
-        layer: ConfigurationLayerIdV1::Default,
+        layer: ConfigurationLayerIdV1::Project { project_id },
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
             .expect("semantic runtime setting key"),
         value: ConfigurationValueV1::Text(
@@ -519,6 +514,11 @@ async fn graph_bytes(
             )
             .expect("verified semantic graph head")
             .expect("published semantic graph head");
+        // Graph reconstruction hydrates ExternalV1 collections by value and
+        // never assigns persist-document content addresses. Serializing
+        // `PublishedVectorGenerationV1` through its state-document adapters
+        // therefore fails closed ("serialized before it was sealed"). Snapshot
+        // catalog identity, verified head, and collection values instead.
         snapshots.push((
             code.manifest().generation_id.clone(),
             vector_id.clone(),
@@ -526,7 +526,18 @@ async fn graph_bytes(
                 .verified_revision(Arc::clone(retained.cancellation()))
                 .expect("verified semantic graph revision"),
             head,
-            generation,
+            generation.generation_id().clone(),
+            generation.projection_key().clone(),
+            generation.source_generation().clone(),
+            generation.source_manifest_digest().clone(),
+            generation.base_generation().cloned(),
+            generation.embedding_key().clone(),
+            generation.checkpoint().clone(),
+            generation.manifest_digest().clone(),
+            generation.vectors().clone(),
+            generation.tombstones().to_vec(),
+            generation.tombstone_digests().clone(),
+            generation.receipts().to_vec(),
         ));
     }
     serde_json::to_vec(&snapshots).expect("canonical graph authority snapshot")

@@ -504,6 +504,11 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
 #[cfg(feature = "semantic-fastembed")]
 async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
     let graph = harness.server(project).expect("project server").cg().await;
+    let project_id = graph
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
     let expected_revision = graph
         .configuration_runtime()
         .client()
@@ -512,7 +517,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         .expect("current production configuration")
         .revision_id;
     let request = tracedecay_application::ConfigurationSetRequestV1 {
-        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
+        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project { project_id },
         key: tracedecay_domain::configuration::SettingKey::new(
             crate::config::SEMANTIC_RUNTIME_SETTING_KEY,
         )
