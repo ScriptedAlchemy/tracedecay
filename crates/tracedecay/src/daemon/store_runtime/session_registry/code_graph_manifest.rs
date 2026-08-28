@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{ProjectId, RepositoryId};
+use tracedecay_runtime_core::resident_memory::{
+    ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureV1,
+};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
@@ -367,16 +370,172 @@ struct DecodedSealedCodeGenerationV1 {
     generation: tracedecay_domain::CodeGenerationId,
     sealed_state_digest: SealedGraphStateDigest,
     decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+    /// Sealed source-byte census of the decode this offer retains. A checked
+    /// fact from the generation itself, used only to report retained offer
+    /// bytes; a census that cannot be computed reports zero rather than
+    /// refusing the offer, because the offer is an accelerator and the census
+    /// is telemetry.
+    source_total_bytes: u64,
 }
 
+/// The pending decoded offers, owned separately from the provider so a
+/// resident-memory pressure reclaimer can hold a `Weak` to exactly this state
+/// and nothing else.
+///
+/// Each offer retains a whole decoded generation. Until take-on-read landed,
+/// nothing ever removed one: an offer stayed live for the lifetime of the
+/// daemon's session registry, invisible to the resident-memory admission
+/// authority, which is one of the unaccounted holders behind a 16GiB limit
+/// sitting inside a 42GiB process.
 #[derive(Default)]
+pub(super) struct DecodedCodeGenerationOffersV1 {
+    offers: RwLock<BTreeMap<StoreShardIdV1, DecodedSealedCodeGenerationV1>>,
+}
+
+impl DecodedCodeGenerationOffersV1 {
+    fn insert(
+        &self,
+        project_shard: StoreShardIdV1,
+        offer: DecodedSealedCodeGenerationV1,
+    ) -> Result<(), GraphDbError> {
+        let mut offers = self.write()?;
+        offers.insert(project_shard, offer);
+        Self::publish_retained_gauge(&offers);
+        Ok(())
+    }
+
+    /// Hand the matching offer to its one consumer and forget it.
+    ///
+    /// Take-on-read, not read: the offer exists to spare exactly one decode of
+    /// bytes that are already durable on disk. Once that decode is handed over,
+    /// retaining a second reference buys nothing and holds a whole generation
+    /// resident forever. Every later reader — including a consumer that fails
+    /// its identity guards or is cancelled after taking the offer — falls
+    /// through to the canonical-then-pool read that was always the authority.
+    fn take_matching(
+        &self,
+        project_shard: &StoreShardIdV1,
+        generation: &tracedecay_domain::CodeGenerationId,
+        sealed_state_digest: &SealedGraphStateDigest,
+    ) -> Result<
+        Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+        GraphDbError,
+    > {
+        let mut offers = self.write()?;
+        let Some(offer) = offers.get(project_shard) else {
+            return Ok(None);
+        };
+        if offer.generation != *generation || offer.sealed_state_digest != *sealed_state_digest {
+            return Ok(None);
+        }
+        let taken = offers
+            .remove(project_shard)
+            .expect("offer was just matched under the same write guard");
+        Self::publish_retained_gauge(&offers);
+        Ok(Some(taken.decoded))
+    }
+
+    /// Drop every retained offer and report the census bytes released.
+    ///
+    /// The pressure backstop. Dropping an offer never loses truth: the sealed
+    /// payload stays on disk and the canonical read reconstructs it, so this
+    /// costs one re-decode and never revokes work that is already admitted.
+    fn release_all(&self) -> u64 {
+        let Ok(mut offers) = self.write() else {
+            return 0;
+        };
+        let released_bytes = offers
+            .values()
+            .fold(0_u64, |total, offer| {
+                total.saturating_add(offer.source_total_bytes)
+            });
+        offers.clear();
+        Self::publish_retained_gauge(&offers);
+        released_bytes
+    }
+
+    #[cfg(test)]
+    fn retained_offer_count(&self) -> usize {
+        self.write().map_or(0, |offers| offers.len())
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> u64 {
+        self.write().map_or(0, |offers| {
+            offers.values().fold(0_u64, |total, offer| {
+                total.saturating_add(offer.source_total_bytes)
+            })
+        })
+    }
+
+    fn write(
+        &self,
+    ) -> Result<
+        std::sync::RwLockWriteGuard<'_, BTreeMap<StoreShardIdV1, DecodedSealedCodeGenerationV1>>,
+        GraphDbError,
+    > {
+        self.offers.write().map_err(|_| {
+            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
+        })
+    }
+
+    fn publish_retained_gauge(
+        offers: &BTreeMap<StoreShardIdV1, DecodedSealedCodeGenerationV1>,
+    ) {
+        let retained_bytes = offers.values().fold(0_u64, |total, offer| {
+            total.saturating_add(offer.source_total_bytes)
+        });
+        hotpath::gauge!("daemon.memory.decoded_offers_bytes").set(retained_bytes as f64);
+        hotpath::gauge!("daemon.memory.decoded_offers").set(offers.len() as f64);
+    }
+}
+
 pub(super) struct DaemonCodeGraphManifestProviderV1 {
     sources: RwLock<BTreeMap<StoreShardIdV1, BoundCodeGenerationSourceV1>>,
     /// Per-shard decoded seal offered by the activating code index, so graph
     /// publication and the recovery branches reuse that decode instead of
     /// re-reading and re-parsing the same sealed payload (plan 40, stage 1).
-    decoded: RwLock<BTreeMap<StoreShardIdV1, DecodedSealedCodeGenerationV1>>,
+    decoded: Arc<DecodedCodeGenerationOffersV1>,
+    /// Keeps the pressure reclaimer registered for this provider's lifetime.
+    _pressure_registration: Option<ResidentMemoryPressureRegistrationV1>,
 }
+
+impl Default for DaemonCodeGraphManifestProviderV1 {
+    fn default() -> Self {
+        Self::with_pressure(tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1())
+    }
+}
+
+impl DaemonCodeGraphManifestProviderV1 {
+    /// Bind the offer store to a measured-RSS pressure cell.
+    ///
+    /// Production passes the process cell fed by the daemon's `VmRSS` sampler.
+    /// Tests pass an isolated cell so a fake RSS series drives the backstop
+    /// without touching `/proc` or other cases.
+    pub(super) fn with_pressure(pressure: &Arc<ResidentMemoryPressureV1>) -> Self {
+        let decoded = Arc::new(DecodedCodeGenerationOffersV1::default());
+        let reclaim_target = Arc::downgrade(&decoded);
+        let registration = pressure
+            .register_pressure_reclaimer(
+                DECODED_OFFER_PRESSURE_PRIORITY_V1,
+                Arc::new(move |_request| {
+                    reclaim_target
+                        .upgrade()
+                        .map_or(0, |offers| offers.release_all())
+                }),
+            )
+            .ok();
+        Self {
+            sources: RwLock::new(BTreeMap::new()),
+            decoded,
+            _pressure_registration: registration,
+        }
+    }
+}
+
+/// Decoded offers release before anything a query is actively serving from:
+/// they are pure accelerators over bytes that remain on disk.
+const DECODED_OFFER_PRESSURE_PRIORITY_V1: u32 = 10;
 
 impl DaemonCodeGraphManifestProviderV1 {
     pub(super) fn bind(
@@ -422,6 +581,10 @@ impl DaemonCodeGraphManifestProviderV1 {
     /// The offer is a pure accelerator: it is consulted only on an exact
     /// generation-and-digest match, and every miss falls through to the
     /// canonical-then-pool read that remains the authority.
+    ///
+    /// The offer is consumed by its first exact match and dropped under memory
+    /// pressure, so a shard that is offered a decode nobody ever claims does
+    /// not retain a whole generation for the daemon's lifetime.
     pub(super) fn offer_decoded_code_generation(
         &self,
         project_shard: StoreShardIdV1,
@@ -429,25 +592,26 @@ impl DaemonCodeGraphManifestProviderV1 {
         sealed_state_digest: SealedGraphStateDigest,
         decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     ) -> Result<(), GraphDbError> {
-        let mut offers = self.decoded.write().map_err(|_| {
-            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
-        })?;
-        offers.insert(
+        let source_total_bytes = decoded
+            .generation_statistics()
+            .map_or(0, |statistics| statistics.source_total_bytes);
+        self.decoded.insert(
             project_shard,
             DecodedSealedCodeGenerationV1 {
                 generation,
                 sealed_state_digest,
                 decoded,
+                source_total_bytes,
             },
-        );
-        Ok(())
+        )
     }
 
     /// The offered decode for this exact replay, or `None` to read from disk.
     ///
     /// `None` is an abstention, never a verdict: it means "not already decoded
     /// here", and the caller must still resolve the seal from the canonical
-    /// root or the replay pool.
+    /// root or the replay pool. A match is *taken*: the caller becomes the only
+    /// owner of that decode and the provider stops retaining it.
     fn offered_decode(
         &self,
         owner: &GraphProjectionIdentityV1,
@@ -456,18 +620,26 @@ impl DaemonCodeGraphManifestProviderV1 {
         Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
         GraphDbError,
     > {
-        let offers = self.decoded.read().map_err(|_| {
-            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
-        })?;
-        let Some(offer) = offers.get(&owner.shard_id) else {
-            return Ok(None);
-        };
-        if offer.generation != source.generation
-            || offer.sealed_state_digest != source.sealed_state_digest
-        {
-            return Ok(None);
-        }
-        Ok(Some(Arc::clone(&offer.decoded)))
+        self.decoded
+            .take_matching(&owner.shard_id, &source.generation, &source.sealed_state_digest)
+    }
+
+    /// Drop every retained decoded offer, reporting the census bytes released.
+    /// Exposed for the pressure backstop's test coverage and for callers that
+    /// retire a registry outright.
+    #[cfg(test)]
+    pub(super) fn release_decoded_offers(&self) -> u64 {
+        self.decoded.release_all()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_decoded_offer_count(&self) -> usize {
+        self.decoded.retained_offer_count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_decoded_offer_bytes(&self) -> u64 {
+        self.decoded.retained_bytes()
     }
 }
 
