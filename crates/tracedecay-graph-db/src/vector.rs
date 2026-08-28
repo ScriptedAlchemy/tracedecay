@@ -99,10 +99,90 @@ impl fmt::Debug for GraphVectorIndexRequest {
     }
 }
 
+/// What the store can currently answer for one exact-projection index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphVectorIndexStatus {
+    /// The index exists and covers vectors. Searches can be served.
     Available,
+    /// No index exists for this label and property. A build is needed and
+    /// nothing is being answered wrongly in the meantime: `vector_search`
+    /// reports the index as absent rather than returning an empty result.
     Missing,
+    /// The index exists and covers nothing.
+    ///
+    /// This is the failure worth having its own name. Grafeo's
+    /// `create_vector_index` scans `nodes_by_label` and succeeds over an
+    /// empty match, leaving an index registered with zero vectors -
+    /// after which `has_vector_index` answers `true` and every search
+    /// returns no matches while reporting an index exists. A caller that
+    /// only distinguished present from absent would read that as a
+    /// working index and never rebuild.
+    ///
+    /// Reachable whenever an index is built before the rows it covers
+    /// land, or over a store whose rows moved out from under the label
+    /// the index was declared on.
+    Stale,
+}
+
+impl GraphVectorIndexStatus {
+    /// Whether a caller should build or rebuild before trusting searches.
+    #[must_use]
+    pub const fn needs_build(self) -> bool {
+        matches!(self, Self::Missing | Self::Stale)
+    }
+}
+
+/// The store's own census of one vector index.
+///
+/// Read through `GrafeoDB::memory_usage`, which is the only public view
+/// into an index's coverage: `has_vector_index` answers a bare bool and
+/// cannot tell a populated index from an empty one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct VectorIndexCensus {
+    pub(crate) vectors: usize,
+    pub(crate) bytes: usize,
+}
+
+/// Censuses the index registered for `label`/`property`, if any.
+pub(crate) fn vector_index_census(
+    database: &GrafeoDB,
+    label: &str,
+    property: &str,
+) -> Option<VectorIndexCensus> {
+    // Grafeo keys its per-index memory entries by "label:property", the
+    // same key `add_vector_index` files them under.
+    let key = format!("{label}:{property}");
+    database
+        .memory_usage()
+        .indexes
+        .vector_indexes
+        .into_iter()
+        .find(|entry| entry.name == key)
+        .map(|entry| VectorIndexCensus {
+            vectors: entry.item_count,
+            bytes: entry.bytes,
+        })
+}
+
+/// Classifies one index from the store's census, and reports its size.
+pub(crate) fn classify_vector_index(
+    database: &GrafeoDB,
+    label: &str,
+    property: &str,
+) -> GraphVectorIndexStatus {
+    if !database.graph_store().has_vector_index(label, property) {
+        return GraphVectorIndexStatus::Missing;
+    }
+    match vector_index_census(database, label, property) {
+        Some(census) if census.vectors > 0 => {
+            crate::hotpath_observe::record_vector_index_size(census.vectors, census.bytes);
+            GraphVectorIndexStatus::Available
+        }
+        // Registered but covering nothing, or registered somewhere the
+        // census cannot see it. Either way a search would answer empty
+        // while claiming an index exists, so say so.
+        _ => GraphVectorIndexStatus::Stale,
+    }
 }
 
 impl fmt::Debug for VectorSearchRequest {

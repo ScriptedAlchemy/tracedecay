@@ -1538,3 +1538,143 @@ fn closed_handle_fails_typed() {
         GraphDbError::Closed
     );
 }
+
+/// An index that exists over zero vectors gets its own status.
+///
+/// Grafeo's `create_vector_index` scans the label and succeeds over an
+/// empty match, so a projection whose entities carry no vector of the
+/// requested shape ends up with an index registered and covering
+/// nothing. `has_vector_index` then answers `true` while every search
+/// returns no matches - a working-looking index that indexes no rows.
+/// Reporting that as `Available` is what let it stay hidden.
+#[test]
+fn an_index_covering_no_vectors_reports_stale_not_available() {
+    let db = memory_db();
+    db.apply_unverified(batch(
+        "vectors",
+        "g1",
+        "w1",
+        vec![GraphMutation::UpsertEntity(entity("no-embedding"))],
+    ))
+    .unwrap();
+
+    let index = GraphVectorIndexRequest {
+        namespace: namespace(),
+        projection: projection("vectors"),
+        property: GraphPropertyName::new("embedding").unwrap(),
+        dimension: 2,
+        metric: VectorMetric::Cosine,
+        cancellation: live(),
+    };
+    assert_eq!(
+        db.vector_index_status(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Missing,
+        "nothing has built an index yet"
+    );
+
+    // Building over a projection with no matching vectors registers an
+    // index that covers nothing. The typed answer must say so rather
+    // than claim the index is usable.
+    assert_eq!(
+        db.ensure_vector_index(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Stale,
+        "an index built over zero vectors must not report Available"
+    );
+    assert_eq!(
+        db.vector_index_status(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Stale,
+        "the status call must agree with the build that produced it"
+    );
+    assert!(
+        db.vector_index_status(index).unwrap().needs_build(),
+        "Stale is a state a caller must act on, like Missing"
+    );
+}
+
+/// Once the rows the index covers exist, the same request goes green.
+///
+/// The interesting half is that it recovers *without* the caller
+/// tracking that it had previously seen a stale index: `ensure` drops
+/// the empty one and builds again.
+#[test]
+fn a_stale_index_rebuilds_once_its_vectors_arrive() {
+    let db = memory_db();
+    db.apply_unverified(batch(
+        "vectors",
+        "g1",
+        "w1",
+        vec![GraphMutation::UpsertEntity(entity("no-embedding"))],
+    ))
+    .unwrap();
+    let index = GraphVectorIndexRequest {
+        namespace: namespace(),
+        projection: projection("vectors"),
+        property: GraphPropertyName::new("embedding").unwrap(),
+        dimension: 2,
+        metric: VectorMetric::Cosine,
+        cancellation: live(),
+    };
+    assert_eq!(
+        db.ensure_vector_index(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Stale
+    );
+
+    db.apply_unverified(batch(
+        "vectors",
+        "g2",
+        "w2",
+        vec![GraphMutation::UpsertEntity(vector_entity(
+            "with-embedding",
+            vec![1.0, 0.0],
+            VectorMetric::Cosine,
+        ))],
+    ))
+    .unwrap();
+
+    assert_eq!(
+        db.ensure_vector_index(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Available,
+        "the rebuild must pick up the vectors that have since landed"
+    );
+    assert_eq!(
+        db.vector_index_status(index).unwrap(),
+        GraphVectorIndexStatus::Available
+    );
+    assert_eq!(
+        db.vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
+            .unwrap()
+            .matches[0]
+            .entity
+            .as_str(),
+        "with-embedding"
+    );
+}
+
+/// A populated index reports `Available` and does not need a build.
+#[test]
+fn a_populated_index_reports_available_and_needs_no_build() {
+    let db = memory_db();
+    db.apply_unverified(batch(
+        "vectors",
+        "g1",
+        "w1",
+        vec![GraphMutation::UpsertEntity(vector_entity(
+            "a",
+            vec![1.0, 0.0],
+            VectorMetric::Cosine,
+        ))],
+    ))
+    .unwrap();
+    let status = db
+        .vector_index_status(GraphVectorIndexRequest {
+            namespace: namespace(),
+            projection: projection("vectors"),
+            property: GraphPropertyName::new("embedding").unwrap(),
+            dimension: 2,
+            metric: VectorMetric::Cosine,
+            cancellation: live(),
+        })
+        .unwrap();
+    assert_eq!(status, GraphVectorIndexStatus::Available);
+    assert!(!status.needs_build());
+}
