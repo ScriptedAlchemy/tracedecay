@@ -34,6 +34,7 @@ fn decode_canonical_envelope(
     CanonicalObservationEnvelopeV1::deserialize(payload)
 }
 
+#[hotpath::measure(label = "global_db.observation_apply.derive")]
 pub(in super::super) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -182,6 +183,7 @@ pub(super) async fn derive_projection_for_rebuild(
     derive_projection_with_alias_from_generation(conn, observation, Some(generation)).await
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.alias")]
 async fn derive_projection_with_alias_from_generation(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -351,6 +353,7 @@ async fn read_latest_goal_dedupe_key(
 
 /// Drop Codex Goal rows that only advance tokens/time while retaining the raw
 /// observation. Meaningful objective or status transitions still project.
+#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.collapse")]
 async fn collapse_consecutive_goal_ticks(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -440,6 +443,7 @@ async fn collapse_consecutive_goal_ticks(
     })
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.session")]
 pub(super) async fn apply_session(
     conn: &impl Executor,
     session: &SessionRecord,
@@ -537,6 +541,7 @@ async fn upsert_projected_raw_message(
         })
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
 async fn apply_rows(
     conn: &impl Executor,
     sequence: u64,
@@ -678,6 +683,7 @@ struct StoredWorkflowFact {
     output_digest: String,
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.workflow")]
 async fn verify_workflow_fact(
     conn: &impl QueryExecutor,
     projection: &WorkflowFactProjection,
@@ -795,6 +801,7 @@ async fn verify_workflow_fact(
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.workflow")]
 async fn apply_workflow_fact(
     conn: &impl Executor,
     sequence: u64,
@@ -820,6 +827,7 @@ async fn apply_workflow_fact(
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.provenance")]
 pub(super) async fn verify_provenance(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
@@ -919,6 +927,10 @@ async fn read_provenance_output_binding(
     )))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_apply.persist.provenance"
+)]
 async fn apply_provenance(
     conn: &impl Executor,
     sequence: u64,
@@ -1026,6 +1038,7 @@ async fn apply_provenance(
 /// Durable deterministic dispositions are projection input on every replay and
 /// rebuild. Consulting them before derivation prevents an unchanged invalid
 /// observation from repeating expensive hashing or parsing work.
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.disposition")]
 pub async fn durable_projection_disposition(
     conn: &impl QueryExecutor,
     observation_id: &str,
@@ -1094,6 +1107,7 @@ async fn verify_skip_disposition(
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.skip")]
 pub(super) async fn apply_skip_disposition(
     conn: &impl Executor,
     observation: &DurableObservationV1,
@@ -1226,6 +1240,7 @@ fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&st
     }
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.usage")]
 pub(crate) async fn apply_provider_usage_effects(
     conn: &impl Executor,
     sequence: u64,
@@ -1299,6 +1314,10 @@ pub(crate) async fn apply_provider_usage_effects(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_apply.persist.stage_usage"
+)]
 pub(super) async fn stage_provider_usage_effects(
     conn: &impl Executor,
     generation: &str,
@@ -1501,6 +1520,7 @@ async fn provider_usage_observation_sequence(
         .map_err(|error| storage("read provider usage observation sequence", error))
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query")]
 pub async fn verify_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -1540,6 +1560,7 @@ pub async fn verify_workflow_effects(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist")]
 pub(super) async fn apply_effect(
     conn: &impl Executor,
     sequence: u64,

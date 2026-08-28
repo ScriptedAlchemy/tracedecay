@@ -69,8 +69,10 @@ impl HostAdmissionRuntime {
         if max_replay_records_per_pass == 0 {
             return Err(SpoolError::MetadataCorrupted.to_open_error());
         }
-        let (spool, report) =
-            HostAdmissionSpool::open(dir, bounds).map_err(|error| error.to_open_error())?;
+        let (spool, report) = hotpath::measure_block!("usecases.admission.open", {
+            HostAdmissionSpool::open(dir, bounds)
+        })
+        .map_err(|error| error.to_open_error())?;
         if !matches!(report.integrity, SpoolIntegrity::Healthy) {
             return Err(SpoolError::MetadataCorrupted.to_open_error());
         }
@@ -93,11 +95,13 @@ impl HostAdmissionRuntime {
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let record = self
-            .spool
-            .append(source, payload)
-            .map_err(|error| error.to_outcome())?;
-        self.schedule_record(&record)?;
+        let record = hotpath::measure_block!("usecases.admission.admit", {
+            self.spool.append(source, payload)
+        })
+        .map_err(|error| error.to_outcome())?;
+        hotpath::measure_block!("usecases.admission.schedule", {
+            self.schedule_record(&record)
+        })?;
         Ok(DurableHostAdmission {
             seq: record.seq,
             outcome: HostAdmissionOutcome::accepted_for_replay(),

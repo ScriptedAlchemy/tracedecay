@@ -390,7 +390,7 @@ const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advan
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
-#[hotpath::measure]
+#[hotpath::measure(future = true, label = "global_db.observation.retention")]
 pub async fn run_observation_retention(
     database: &Database,
     generation: Option<&str>,
@@ -458,6 +458,7 @@ pub async fn run_observation_retention(
     Ok(report)
 }
 
+#[hotpath::measure(future = true, label = "global_db.observation.retention.persist")]
 async fn commit_transaction(transaction: DatabaseWriteTransaction<'_>) -> Result<()> {
     transaction.commit().await.map_err(db_error)
 }

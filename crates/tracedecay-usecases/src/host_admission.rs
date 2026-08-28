@@ -87,6 +87,7 @@ impl HostAdmissionBroker {
         })
     }
 
+    #[hotpath::measure(label = "usecases.admission.admit", future = true)]
     pub async fn admit(
         &self,
         source: &str,
@@ -123,6 +124,7 @@ impl HostAdmissionBroker {
             .is_ok_and(|count| count > 0)
     }
 
+    #[hotpath::measure(label = "usecases.admission.begin_replay", future = true)]
     pub async fn begin_replay(&self) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
         let guard = self.replay.lock().await;
         self.with_runtime(HostAdmissionRuntime::recover_leases)
@@ -147,24 +149,28 @@ impl HostAdmissionBroker {
 }
 
 impl HostAdmissionReplay<'_> {
+    #[hotpath::measure(label = "usecases.admission.replay.lease", future = true)]
     pub async fn lease_next(&self) -> Result<Option<SpoolRecord>, HostAdmissionOutcome> {
         self.broker
             .with_runtime(HostAdmissionRuntime::try_lease_next)
             .await
     }
 
+    #[hotpath::measure(label = "usecases.admission.replay.defer", future = true)]
     pub async fn defer(&self, seq: u64) -> Result<(), HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.defer(seq))
             .await
     }
 
+    #[hotpath::measure(label = "usecases.admission.replay.commit", future = true)]
     pub async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.commit(seq))
             .await
     }
 
+    #[hotpath::measure(label = "usecases.admission.replay.quarantine", future = true)]
     pub async fn quarantine(
         &self,
         seq: u64,
@@ -572,6 +578,7 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
+    #[hotpath::measure(label = "usecases.admission.get_source_cursor", future = true)]
     pub async fn get_source_cursor(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -584,6 +591,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
+    #[hotpath::measure(label = "usecases.admission.capture_observation", future = true)]
     pub async fn capture_observation(
         &self,
         request: CaptureObservationRequest,
@@ -610,7 +618,7 @@ impl<'a> HostAdmissionFacade<'a> {
     /// This overrides the trait default, which still walks
     /// [`Self::capture_observation`] one frame at a time. An empty window
     /// returns empty without minting a skipped-authority success.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.admission.capture_observations", future = true)]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -649,6 +657,7 @@ impl<'a> HostAdmissionFacade<'a> {
     }
 
     /// Persist one sanitized write through the store the façade already holds.
+    #[hotpath::measure(label = "usecases.admission.persist_observation", future = true)]
     pub async fn persist_observation(
         &self,
         provider: &str,
@@ -676,7 +685,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ///
     /// An empty window returns empty without opening the store or minting a
     /// skipped-authority success. Mixed provider or scope writes fail closed.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "usecases.admission.persist_observations", future = true)]
     pub async fn persist_observations(
         &self,
         provider: &str,
@@ -719,6 +728,7 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
+    #[hotpath::measure(label = "usecases.admission.advance_cursor", future = true)]
     pub async fn advance_non_durable_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -777,6 +787,7 @@ impl<'a> HostAdmissionFacade<'a> {
 }
 
 impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
+    #[hotpath::measure(label = "usecases.admission.resolve_evidence_anchor", future = true)]
     async fn resolve_evidence_anchor(
         &self,
         owner: FactOwnerV1,
@@ -844,6 +855,10 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
 const EVIDENCE_ANCHOR_RESOLUTION_NAMESPACE: &str = "observation-resolution.v1";
 
 impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
+    #[hotpath::measure(
+        label = "usecases.admission.resolve_evidence_anchor_report",
+        future = true
+    )]
     async fn resolve_evidence_anchor_report(
         &self,
         owner: FactOwnerV1,
