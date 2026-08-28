@@ -306,18 +306,33 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
     if vector.source_generation() != &snapshot.source_generation
         || vector.source_manifest_digest() != &snapshot.source_manifest_digest
     {
+        tracing::warn!(
+            source_generation_matches = vector.source_generation() == &snapshot.source_generation,
+            source_manifest_matches =
+                vector.source_manifest_digest() == &snapshot.source_manifest_digest,
+            "semantic evaluation candidate vector identity conflicts with the code snapshot"
+        );
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     }
     let runtime = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.production_runtime",
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-    )
-    .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    );
+    let Some(runtime) = runtime else {
+        tracing::warn!("semantic evaluation candidate production runtime is unavailable");
+        return Err(SemanticActivationCoordinationErrorV1::Unavailable);
+    };
     let resources = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.resource_requirement",
         runtime.evaluation_target_resource_requirement()
     )
-    .map_err(coordination_error_from_runtime)?;
+    .map_err(|error| {
+        tracing::warn!(
+            ?error,
+            "semantic evaluation candidate resource requirement is unavailable"
+        );
+        coordination_error_from_runtime(error)
+    })?;
     hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.materialize",
         daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
