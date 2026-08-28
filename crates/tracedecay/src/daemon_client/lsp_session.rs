@@ -22,6 +22,7 @@ pub struct DaemonLspSessionClient {
 }
 
 impl DaemonLspSessionClient {
+    #[hotpath::measure(label = "daemon_client.lsp.open", future = true)]
     pub async fn open(
         invocation: DaemonInvocationClient,
         client_revision: impl Into<String>,
@@ -73,6 +74,7 @@ impl DaemonLspSessionClient {
         self.scope_set_digest.as_ref()
     }
 
+    #[hotpath::measure(label = "daemon_client.lsp.send", future = true)]
     pub async fn try_send_client_frame(
         &mut self,
         frame: &str,
@@ -109,6 +111,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.lsp.poll", future = true)]
     pub async fn poll_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -140,6 +143,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.lsp.ack", future = true)]
     pub async fn acknowledge_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -165,6 +169,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.lsp.reconnect", future = true)]
     pub async fn reconnect(
         &mut self,
         deadline: Deadline,
@@ -193,6 +198,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::measure(label = "daemon_client.lsp.detach", future = true)]
     pub async fn detach(
         &mut self,
         deadline: Deadline,

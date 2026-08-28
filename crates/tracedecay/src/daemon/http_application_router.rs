@@ -5,6 +5,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "daemon.http.application.router_build")]
 fn build_http_application_router(project_id: &str, project_path: &Path) -> Result<axum::Router> {
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
         TraceDecayError::Config {
@@ -39,54 +40,58 @@ pub(super) fn install_http_application_cold_resolver(
     )?;
     registry.install_resolver(move |project_id| {
         let store_administration = store_administration.clone();
-        async move {
-            let database = store_administration.registered_profile_database().await?;
-            let profile_id = store_administration
-                .profile_identity()?
-                .profile_id()
-                .as_str();
-            if database
-                .remote_deletion_tombstone_for_project(profile_id, project_id.as_str())
-                .await?
-                .is_some()
-            {
-                return Ok(None);
-            }
-            let Some(context) = database
-                .project_registry_context_by_id(project_id.as_str())
-                .await?
-            else {
-                return Ok(None);
-            };
-            if context.project.project_id != project_id.as_str() {
-                return Err(TraceDecayError::Config {
-                    message: "daemon HTTP project registry identity changed".to_owned(),
-                });
-            }
-            let registered_root = PathBuf::from(&context.project.canonical_root);
-            if !registered_root.is_absolute() {
-                return Err(TraceDecayError::Config {
-                    message: "daemon HTTP registered project root is not absolute".to_owned(),
-                });
-            }
-            let canonical_root =
-                registered_root
-                    .canonicalize()
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!(
-                            "daemon HTTP registered project root is unavailable: {error}"
-                        ),
-                    })?;
-            if canonical_root != registered_root {
-                return Err(TraceDecayError::Config {
-                    message: "daemon HTTP registered project root is not canonical".to_owned(),
-                });
-            }
-            build_http_application_router(project_id.as_str(), &canonical_root).map(Some)
-        }
+        hotpath::future!(
+            async move {
+                let database = store_administration.registered_profile_database().await?;
+                let profile_id = store_administration
+                    .profile_identity()?
+                    .profile_id()
+                    .as_str();
+                if database
+                    .remote_deletion_tombstone_for_project(profile_id, project_id.as_str())
+                    .await?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let Some(context) = database
+                    .project_registry_context_by_id(project_id.as_str())
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                if context.project.project_id != project_id.as_str() {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon HTTP project registry identity changed".to_owned(),
+                    });
+                }
+                let registered_root = PathBuf::from(&context.project.canonical_root);
+                if !registered_root.is_absolute() {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon HTTP registered project root is not absolute".to_owned(),
+                    });
+                }
+                let canonical_root =
+                    registered_root
+                        .canonicalize()
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "daemon HTTP registered project root is unavailable: {error}"
+                            ),
+                        })?;
+                if canonical_root != registered_root {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon HTTP registered project root is not canonical".to_owned(),
+                    });
+                }
+                build_http_application_router(project_id.as_str(), &canonical_root).map(Some)
+            },
+            label = "daemon.http.application.router_cold_resolve"
+        )
     })
 }
 
+#[hotpath::measure(future = true, label = "daemon.http.application.remote_router_install")]
 pub(super) async fn install_remote_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: &StoreAdministration,
@@ -102,6 +107,7 @@ pub(super) async fn install_remote_http_application_router(
     registry.install_remote(router, credentials, Some(runtime))
 }
 
+#[hotpath::measure(future = true, label = "daemon.http.application.router_mount")]
 pub(super) async fn mount_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
     project_id: &str,

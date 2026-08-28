@@ -8,6 +8,7 @@ use super::{
 };
 
 impl DaemonInvocationClient {
+    #[hotpath::measure(label = "daemon_client.invoke_controlled", future = true)]
     pub(crate) async fn invoke_controlled(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
@@ -25,7 +26,8 @@ impl DaemonInvocationClient {
         })?;
         let target_request_id = request.request_id.clone();
         let client = self.clone();
-        tokio::spawn(async move {
+        tokio::spawn(hotpath::future!(
+            async move {
             let stage = match policy {
                 InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
                 InvocationCancellationPolicy::AuthoritativeEffect => {
@@ -102,7 +104,9 @@ impl DaemonInvocationClient {
                 *client.state.lock().await = None;
             }
             outcome
-        })
+            },
+            label = "daemon_client.invoke_controlled.task"
+        ))
         .await
         .map_err(|_| DaemonInvocationError::Unavailable)?
     }

@@ -145,6 +145,7 @@ pub fn requested_output_format(args: &Value) -> RequestedOutputFormat {
 
 /// Normalizes compatibility tool arguments before every CLI/MCP transport
 /// parses the canonical application request.
+#[hotpath::measure(label = "application_surface.normalize")]
 pub fn normalize_application_tool_args(
     tool_name: &str,
     mut args: Value,
@@ -785,6 +786,7 @@ impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
     }
 }
 
+#[hotpath::measure(label = "application_surface.invoker_assemble")]
 fn application_invoker_for_surface(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     surface: BindingSurface,
@@ -836,6 +838,7 @@ fn application_invoker_for_surface(
     Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
 }
 
+#[hotpath::measure(label = "application_surface.multi_root.invoke", future = true)]
 pub(crate) async fn invoke_multi_root_surface_request(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     operation: ApplicationSurfaceOperation,
@@ -1085,6 +1088,7 @@ where
     CanonicalInvocationResult::<T>::new(binding_id.clone(), Err(problem)).into_http_response()
 }
 
+#[hotpath::measure(label = "application_surface.registered.invoke")]
 async fn invoke_registered_http<T, O>(
     executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     operation: O,
@@ -1160,10 +1164,15 @@ where
     } else {
         InvocationCancellationPolicy::AuthoritativeEffect
     };
-    let response = executor
-        .invoke_controlled(invocation, controls.deadline, controls.cancellation, policy)
-        .await;
-    let outcome = validated_daemon_outcome(operation, &request_id, response);
+    let response = hotpath::future!(
+        executor.invoke_controlled(invocation, controls.deadline, controls.cancellation, policy),
+        label = "application_surface.registered.dispatch"
+    )
+    .await;
+    let outcome = hotpath::measure_block!(
+        "application_surface.registered.assemble",
+        validated_daemon_outcome(operation, &request_id, response)
+    );
     let owning_layer = match &outcome {
         Ok(
             crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { .. }
@@ -1258,7 +1267,24 @@ pub fn http_application_router(
     http_application_router_with_executor(Arc::new(client), operation_events, active_project_id)
 }
 
+#[hotpath::measure(label = "application_surface.http.router")]
 pub fn http_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    operation_events: OperationEventAuthority,
+    active_project_id: ProjectId,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    Ok(with_hotpath_server_layer(assemble_http_application_router(
+        executor,
+        operation_events,
+        active_project_id,
+    )?))
+}
+
+/// Complete HTTP application routes without the process HTTP-server layer.
+///
+/// Dashboard nests this under `/api/application` and applies one Axum layer
+/// after the full dashboard router is assembled.
+pub(crate) fn assemble_http_application_router(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
@@ -1270,27 +1296,28 @@ pub fn http_application_router_with_executor(
     let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
     let retained_router = retained::router_with_executor(Arc::clone(&executor))?;
-    let router = tracedecay_api::application_router(application_invoker_for_surface(
-        executor,
-        BindingSurface::Http,
-        &HttpApplicationOperation::ALL,
-    )?)
-    .merge(work_router)
-    .merge(workflow_router)
-    .merge(handoff_router)
-    .merge(multi_root_router)
-    .merge(retained_router)
-    .layer(axum::middleware::from_fn_with_state(
-        Arc::clone(&cancellations),
-        application_http_context,
-    ))
-    .merge(http_operation_event_router(
-        operation_events,
-        active_project_id,
-        cancellations,
-        Some(event_executor),
-    ));
-    Ok(with_hotpath_server_layer(router))
+    Ok(
+        tracedecay_api::application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Http,
+            &HttpApplicationOperation::ALL,
+        )?)
+        .merge(work_router)
+        .merge(workflow_router)
+        .merge(handoff_router)
+        .merge(multi_root_router)
+        .merge(retained_router)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&cancellations),
+            application_http_context,
+        ))
+        .merge(http_operation_event_router(
+            operation_events,
+            active_project_id,
+            cancellations,
+            Some(event_executor),
+        )),
+    )
 }
 
 /// Build the dashboard's public Work mount.
@@ -1299,32 +1326,37 @@ pub fn http_application_router_with_executor(
 /// descriptor, the same owner, the same dispatch and problem taxonomy. The
 /// attempt-runtime routes are simply not registered here, so the lease protocol
 /// is unreachable from the dashboard rather than merely undocumented.
+#[hotpath::measure(label = "application_surface.http.dashboard_work_router")]
 pub fn dashboard_work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    let router = work::dashboard_router_with_executor(executor)?.layer(
-        axum::middleware::from_fn_with_state(cancellations, application_http_context),
-    );
-    Ok(with_hotpath_server_layer(router))
+    Ok(
+        work::dashboard_router_with_executor(executor)?.layer(
+            axum::middleware::from_fn_with_state(cancellations, application_http_context),
+        ),
+    )
 }
 
+#[hotpath::measure(label = "application_surface.http.dashboard_configuration_router")]
 pub fn dashboard_configuration_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    let router = tracedecay_api::configuration_application_router(application_invoker_for_surface(
-        executor,
-        BindingSurface::Dashboard,
-        &CONFIGURATION_WIRE_OPERATIONS,
-    )?)
-    .layer(axum::middleware::from_fn_with_state(
-        cancellations,
-        application_http_context,
-    ));
-    Ok(with_hotpath_server_layer(router))
+    Ok(
+        tracedecay_api::configuration_application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Dashboard,
+            &CONFIGURATION_WIRE_OPERATIONS,
+        )?)
+        .layer(axum::middleware::from_fn_with_state(
+            cancellations,
+            application_http_context,
+        )),
+    )
 }
 
+#[hotpath::measure(label = "application_surface.http.dashboard_feedback_router")]
 pub fn dashboard_feedback_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1334,10 +1366,9 @@ pub fn dashboard_feedback_application_router_with_executor(
         BindingSurface::Dashboard,
         &DASHBOARD_FEEDBACK_OPERATIONS,
     )?;
-    let router = tracedecay_api::feedback_application_router(invoker).layer(
+    Ok(tracedecay_api::feedback_application_router(invoker).layer(
         axum::middleware::from_fn_with_state(cancellations, application_http_context),
-    );
-    Ok(with_hotpath_server_layer(router))
+    ))
 }
 
 /// Attach Hotpath only after a production HTTP router has its complete route
@@ -1356,7 +1387,7 @@ pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Rou
     router
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "application_surface.http_context")]
 async fn application_http_context(
     State(cancellations): State<HttpCancellationRegistry>,
     mut request: Request<Body>,
@@ -1424,7 +1455,11 @@ async fn application_http_context(
         deadline,
         cancellation: cancellation.clone(),
     });
-    let response = hotpath::future!(next.run(request), label = "http.application_dispatch").await;
+    let response = hotpath::future!(
+        next.run(request),
+        label = "application_surface.http.dispatch"
+    )
+    .await;
     active.finish();
     response
 }
@@ -1564,9 +1599,8 @@ async fn resolve_authenticated_http_request_context(
     observed_at: UtcMicros,
     resume_token: Option<&ResumeToken>,
 ) -> Result<RequestContext, OperationEventError> {
-    state
-        .authority
-        .resolve_request_context(
+    hotpath::future!(
+        state.authority.resolve_request_context(
             operation_id,
             &state.active_project_id,
             OperationRequestControls::new(
@@ -1576,8 +1610,10 @@ async fn resolve_authenticated_http_request_context(
                 observed_at,
                 resume_token,
             ),
-        )
-        .await
+        ),
+        label = "application_surface.http.events.resolve_context"
+    )
+    .await
 }
 
 fn sse_observation_subject(request_id: &RequestId, operation_id: &str) -> Option<ManifestDigest> {
@@ -1669,8 +1705,11 @@ async fn http_operation_events_through_executor(
             );
         }
     };
-    let response =
-        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation).await;
+    let response = hotpath::future!(
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        label = "application_surface.http.events.invoke"
+    )
+    .await;
     let tracedecay_application::ApplicationResponse::Stream(response) = (match response {
         Ok(response) => response,
         Err(error) => return operation_event_invocation_failure(request_id, error),
@@ -1751,6 +1790,7 @@ fn operation_event_invocation_failure(
     }
 }
 
+#[hotpath::measure(label = "application_surface.http.events")]
 async fn http_operation_events(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -1846,16 +1886,17 @@ async fn http_operation_events(
         },
     )
     .await;
-    let subscription = match state
-        .authority
-        .subscribe(
+    let subscription = match hotpath::future!(
+        state.authority.subscribe(
             &operation_id,
             &context,
             observed_at,
             next_sequence,
             query.resume_token.as_ref(),
-        )
-        .await
+        ),
+        label = "application_surface.http.events.subscribe"
+    )
+    .await
     {
         Ok(subscription) => subscription,
         Err(error) => {
@@ -1989,8 +2030,11 @@ async fn http_operation_cancel_through_executor(
             );
         }
     };
-    let response =
-        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation).await;
+    let response = hotpath::future!(
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        label = "application_surface.http.cancel.invoke"
+    )
+    .await;
     let tracedecay_application::ApplicationResponse::Cancellation(response) = (match response {
         Ok(response) => response,
         Err(error) => return operation_event_invocation_failure(request_id, error),
@@ -2024,6 +2068,7 @@ async fn http_operation_cancel_through_executor(
     }
 }
 
+#[hotpath::measure(label = "application_surface.http.cancel")]
 async fn http_operation_cancel(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -2101,10 +2146,11 @@ async fn http_operation_cancel(
         .lock()
         .ok()
         .and_then(|active| active.get(operation_id.request_id()).cloned());
-    match state
-        .authority
-        .cancel(&operation_id, &context, observed_at)
-        .await
+    match hotpath::future!(
+        state.authority.cancel(&operation_id, &context, observed_at),
+        label = "application_surface.http.cancel.authority"
+    )
+    .await
     {
         Ok(OperationCancelOutcome::Requested) => {
             if let Some(cancellation) = target_cancellation {
@@ -2719,6 +2765,7 @@ fn parse_native_integration_surface_request(
     }
 }
 
+#[hotpath::measure(label = "application_surface.parse")]
 pub fn parse_application_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
@@ -3053,7 +3100,7 @@ pub fn parse_application_surface_request(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "application_surface.execute")]
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
@@ -3074,7 +3121,7 @@ pub async fn execute_application_surface(
         receipt_contract,
         reconciliation_contract,
         catalog_effect,
-    ) = {
+    ) = hotpath::measure_block!("application_surface.execute.catalog", {
         let catalog = application_surface_catalog_ref()?;
         let capability = catalog
             .capabilities()
@@ -3090,7 +3137,7 @@ pub async fn execute_application_surface(
             capability.reconciliation(),
             capability.effect().is_effect(),
         )
-    };
+    });
     let maximum_deadline_at = UtcMicros(observed_at.0.saturating_add(deadline_ceiling_micros));
     let effective_deadline_at = invocation
         .deadline
@@ -3154,8 +3201,9 @@ pub async fn execute_application_surface(
         )?;
         let request = tracedecay_application::ApplicationRequest::surface(binding, payload)?;
         let invocation = tracedecay_application::ApplicationInvocation::new(context, request)?;
-        let result = match tracedecay_application::ApplicationInvocationExecutor::invoke(
-            executor, invocation,
+        let result = match hotpath::future!(
+            tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+            label = "application_surface.execute.invoke"
         )
         .await
         {
@@ -3196,178 +3244,180 @@ pub async fn execute_application_surface(
             requested_format,
         });
     }
-    let request = match invocation.request {
-        ApplicationSurfaceRequest::GitRead(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::git_read(
-                request_id.as_str(),
-                operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::GitPreview(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::git_preview(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::GitApply(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::git_apply(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::github_stack_signal_expand(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::NativeIntegration(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::native_integration(
-                request_id.as_str(),
-                operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::Feedback(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::feedback(
-                request_id.as_str(),
-                operation,
-                request.request_handle,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::feedback_advisory_cycle(
-                request_id.as_str(),
-                request.document_uri,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::FeedbackImpact(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::feedback(
-                request_id.as_str(),
-                ApplicationSurfaceOperation::FeedbackImpact,
-                request.request_handle,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::AffectedTests(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::feedback(
-                request_id.as_str(),
-                ApplicationSurfaceOperation::AffectedTests,
-                request.request_handle,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::TestResults(_) => {
-            crate::daemon_contract::DaemonInvocationRequest::primitive(
-                request_id.as_str(),
-                operation,
-                tracedecay_usecases::primitives::PrimitiveRequest::RecentTestResults(
+    let request = hotpath::measure_block!("application_surface.execute.request_build", {
+        match invocation.request {
+            ApplicationSurfaceRequest::GitRead(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::git_read(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitPreview(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::git_preview(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitApply(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::git_apply(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::github_stack_signal_expand(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::NativeIntegration(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::native_integration(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Feedback(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    operation,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::feedback_advisory_cycle(
+                    request_id.as_str(),
+                    request.document_uri,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::FeedbackImpact(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    ApplicationSurfaceOperation::FeedbackImpact,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::AffectedTests(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    ApplicationSurfaceOperation::AffectedTests,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::TestResults(_) => {
+                crate::daemon_contract::DaemonInvocationRequest::primitive(
+                    request_id.as_str(),
+                    operation,
+                    tracedecay_usecases::primitives::PrimitiveRequest::RecentTestResults(
+                        invocation.page,
+                    ),
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::CallableCode(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::callable_code(
+                    request_id.as_str(),
+                    operation,
+                    request,
                     invocation.page,
-                ),
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::PrimitiveCode(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::primitive_code(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    invocation.page,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Primitive(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::primitive(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::ObservatoryRead(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::observatory_read(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+                .with_resolved_scope(resolved_scope)
+            }
+            ApplicationSurfaceRequest::Configuration(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::configuration(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::ContextScout(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::context_scout(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Retained(request) => {
+                crate::daemon_contract::DaemonInvocationRequest::retained_application(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
         }
-        ApplicationSurfaceRequest::CallableCode(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::callable_code(
-                request_id.as_str(),
-                operation,
-                request,
-                invocation.page,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::PrimitiveCode(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::primitive_code(
-                request_id.as_str(),
-                operation,
-                request,
-                invocation.page,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::Primitive(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::primitive(
-                request_id.as_str(),
-                operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::ObservatoryRead(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::observatory_read(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-            .with_resolved_scope(resolved_scope)
-        }
-        ApplicationSurfaceRequest::Configuration(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::configuration(
-                request_id.as_str(),
-                operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::ContextScout(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::context_scout(
-                request_id.as_str(),
-                operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-        ApplicationSurfaceRequest::Retained(request) => {
-            crate::daemon_contract::DaemonInvocationRequest::retained_application(
-                request_id.as_str(),
-                request,
-                observed_at,
-                deadline,
-                cancellation_context,
-            )
-        }
-    }
-    .with_delivery_route(delivery_route);
+        .with_delivery_route(delivery_route)
+    });
     let Some(executor) = executor else {
         return Ok(ApplicationSurfaceInvocationResult {
             operation,
@@ -3401,9 +3451,11 @@ pub async fn execute_application_surface(
     } else {
         InvocationCancellationPolicy::ReadOnly
     };
-    let response = executor
-        .invoke_controlled(request, request_deadline, cancellation, policy)
-        .await;
+    let response = hotpath::future!(
+        executor.invoke_controlled(request, request_deadline, cancellation, policy),
+        label = "application_surface.execute.invoke"
+    )
+    .await;
     let response = match response {
         Ok(response) => response,
         Err(error) => {
@@ -3451,115 +3503,125 @@ pub async fn execute_application_surface(
             });
         }
     };
-    let result = match response.outcome {
-        crate::daemon_contract::DaemonInvocationOutcome::GitRead { scope, result } => {
-            Ok(ApplicationEnvelope::evidence(
-                result_contract.clone(),
-                request_id.clone(),
+    let result = hotpath::measure_block!("application_surface.execute.assemble", {
+        match response.outcome {
+            crate::daemon_contract::DaemonInvocationOutcome::GitRead { scope, result } => {
+                Ok(ApplicationEnvelope::evidence(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    result.into_application(),
+                ))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::GitPreview { scope, preview } => {
+                Ok(ApplicationEnvelope::preview(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    preview.into_application_result()?,
+                ))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::GitApply { scope, effect } => {
+                Ok(ApplicationEnvelope::effect(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    effect.into_application_result()?,
+                ))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result }
+            | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result }
+            | crate::daemon_contract::DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
+                Ok(ApplicationEnvelope::evidence(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    result.into_application(),
+                ))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::CallableCode { scope, result } => {
+                Ok(ApplicationEnvelope::evidence(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    result.into_application(),
+                ))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+                if validate_configuration_outcome(
+                    operation,
+                    &outcome,
+                    &cancellation_contract,
+                    &terminal_states,
+                    receipt_contract,
+                    reconciliation_contract,
+                ) {
+                    Ok(ApplicationEnvelope {
+                        contract: result_contract.clone(),
+                        request_id: request_id.clone(),
+                        scope,
+                        outcome,
+                    })
+                } else {
+                    Err(ApplicationProblemEnvelope::new(
+                        result_contract.clone(),
+                        request_id.clone(),
+                        ApplicationProblem::unavailable(SafeDiagnostic::new(
+                            "application.surface.invalid_configuration_response",
+                            "The daemon returned a configuration result that did not match its wire contract",
+                        )?),
+                    )?)
+                }
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::GitHubStackSignalExpand {
                 scope,
-                result.into_application(),
-            ))
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::GitPreview { scope, preview } => {
-            Ok(ApplicationEnvelope::preview(
-                result_contract.clone(),
-                request_id.clone(),
+                outcome,
+            }
+            | crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration {
                 scope,
-                preview.into_application_result()?,
-            ))
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::GitApply { scope, effect } => {
-            Ok(ApplicationEnvelope::effect(
-                result_contract.clone(),
-                request_id.clone(),
-                scope,
-                effect.into_application_result()?,
-            ))
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result }
-        | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result }
-        | crate::daemon_contract::DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
-            Ok(ApplicationEnvelope::evidence(
-                result_contract.clone(),
-                request_id.clone(),
-                scope,
-                result.into_application(),
-            ))
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::CallableCode { scope, result } => {
-            Ok(ApplicationEnvelope::evidence(
-                result_contract.clone(),
-                request_id.clone(),
-                scope,
-                result.into_application(),
-            ))
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            if validate_configuration_outcome(
-                operation,
-                &outcome,
-                &cancellation_contract,
-                &terminal_states,
-                receipt_contract,
-                reconciliation_contract,
-            ) {
+                outcome,
+            }
+            | crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
                 Ok(ApplicationEnvelope {
                     contract: result_contract.clone(),
                     request_id: request_id.clone(),
                     scope,
                     outcome,
                 })
-            } else {
-                Err(ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    ApplicationProblem::unavailable(SafeDiagnostic::new(
-                        "application.surface.invalid_configuration_response",
-                        "The daemon returned a configuration result that did not match its wire contract",
-                    )?),
-                )?)
             }
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::GitHubStackSignalExpand {
-            scope,
-            outcome,
-        }
-        | crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration { scope, outcome }
-        | crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
-            Ok(ApplicationEnvelope {
-                contract: result_contract.clone(),
-                request_id: request_id.clone(),
+            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
                 scope,
                 outcome,
-            })
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication { scope, outcome } => {
-            Ok(ApplicationEnvelope {
+            } => Ok(ApplicationEnvelope {
                 contract: result_contract.clone(),
                 request_id: request_id.clone(),
                 scope,
                 outcome: retained::outcome_value(outcome)?,
-            })
-        }
-        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
-            ApplicationProblemEnvelope::new(result_contract.clone(), request_id.clone(), problem)?,
-        ),
-        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
-            Err(ApplicationProblemEnvelope::new(
+            }),
+            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    problem,
+                )?)
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    invocation_problem(problem)?,
+                )?)
+            }
+            _ => Err(ApplicationProblemEnvelope::new(
                 result_contract.clone(),
                 request_id.clone(),
-                invocation_problem(problem)?,
-            )?)
-        }
-        _ => Err(ApplicationProblemEnvelope::new(
-            result_contract.clone(),
-            request_id.clone(),
-            ApplicationProblem::unavailable(SafeDiagnostic::new(
-                "application.surface.invalid_response",
-                "The daemon returned an invalid application response",
+                ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.surface.invalid_response",
+                    "The daemon returned an invalid application response",
+                )?),
             )?),
-        )?),
-    };
+        }
+    });
 
     Ok(ApplicationSurfaceInvocationResult {
         operation,
@@ -3763,6 +3825,7 @@ fn surface_rejection_metadata(
     }
 }
 
+#[hotpath::measure(label = "application_surface.resolve.http", future = true)]
 pub async fn resolve_http_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -3796,6 +3859,7 @@ pub async fn resolve_http_application_surface(
 /// application handler as CLI, MCP, and HTTP. Dashboard adapters may shape
 /// presentation responses around this result, but they do not own mutation
 /// validation, authorization, CAS, receipts, or rollback semantics.
+#[hotpath::measure(label = "application_surface.resolve.dashboard", future = true)]
 pub async fn resolve_dashboard_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -3849,6 +3913,7 @@ pub fn resolve_application_surface_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "application_surface.dispatch")]
 pub fn resolve_application_surface_dispatch_with_controls(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
@@ -3900,6 +3965,7 @@ fn invoke_catalog_bound_application_request(
     })
 }
 
+#[hotpath::measure(label = "application_surface.adapter.invoke", future = true)]
 async fn invoke_application_adapter_request(
     request: HttpApplicationRequest,
     surface: BindingSurface,
@@ -4094,6 +4160,7 @@ fn resolve_named_binding(
 /// Typed application surfaces continue through [`ApplicationSurfaceOperation`];
 /// compatibility-owned tools use this boundary before entering their retained
 /// execution adapter, so catalog metadata remains the single binding authority.
+#[hotpath::measure(label = "application_surface.catalog_binding")]
 pub fn resolve_catalog_tool_binding(
     surface: BindingSurface,
     tool_name: &str,

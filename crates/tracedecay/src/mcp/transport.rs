@@ -143,6 +143,7 @@ impl StdioTransport {
 }
 
 impl McpTransport for StdioTransport {
+    #[hotpath::measure(label = "mcp.server.read", future = true)]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         self.reader.read_mcp_line().await
     }
@@ -302,6 +303,7 @@ impl McpDuplexTransport for ChannelTransport {
 /// full payload bytes. When a bounded leading prefix safely yields a JSON-RPC
 /// request `id`, the error correlates to that ID as `InvalidRequest`; otherwise
 /// it uses `ParseError` with a null ID (JSON-RPC 2.0 parse-error semantics).
+#[hotpath::measure(label = "mcp.server.write_oversized", future = true)]
 pub(crate) async fn write_wire_oversized_rejection(
     transport: &mut impl McpTransport,
     error: &std::io::Error,

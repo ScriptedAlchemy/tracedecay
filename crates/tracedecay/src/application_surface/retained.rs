@@ -176,6 +176,7 @@ impl tracedecay_api::RetainedApplicationOwner for RetainedExecutorOwner {
     }
 }
 
+#[hotpath::measure(label = "application_surface.retained.invoke", future = true)]
 async fn invoke_operation(
     executor: Arc<dyn DaemonInvocationExecutor>,
     request: tracedecay_api::RetainedHttpRequest,
@@ -219,6 +220,7 @@ async fn invoke_operation(
     .await
 }
 
+#[hotpath::measure(label = "application_surface.retained.decode")]
 pub(crate) fn decode_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,

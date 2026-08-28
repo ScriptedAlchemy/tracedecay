@@ -292,9 +292,12 @@ impl DaemonHttpApplicationRegistry {
             .map_err(|_| ProjectRouterResolutionError::Saturated)?;
         // A cold project route resolution can park on daemon project-open
         // work; bound it so an HTTP caller never waits unboundedly.
-        let resolved = tokio::time::timeout(
-            HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
-            resolver(project_id.clone()),
+        let resolved = hotpath::future!(
+            tokio::time::timeout(
+                HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
+                resolver(project_id.clone()),
+            ),
+            label = "daemon.http.application.router_resolve"
         )
         .await
         .map_err(|_| ProjectRouterResolutionError::TimedOut)?
@@ -345,13 +348,16 @@ impl DaemonHttpApplicationRegistry {
             })?
             .clone();
         match remote {
-            Some(remote) => {
-                let remote_router = crate::application_surface::with_hotpath_server_layer(
-                    Router::new().nest("/remote", remote.router),
-                );
-                Ok((local.merge(remote_router), Some(remote.credentials)))
-            }
-            None => Ok((local, None)),
+            Some(remote) => Ok((
+                crate::application_surface::with_hotpath_server_layer(
+                    local.merge(Router::new().nest("/remote", remote.router)),
+                ),
+                Some(remote.credentials),
+            )),
+            None => Ok((
+                crate::application_surface::with_hotpath_server_layer(local),
+                None,
+            )),
         }
     }
 
@@ -390,9 +396,11 @@ async fn provision_remote_node(
     let Some(runtime) = runtime else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match runtime
-        .provision_remote_node(request.grant, request.admission)
-        .await
+    match hotpath::future!(
+        runtime.provision_remote_node(request.grant, request.admission),
+        label = "daemon.http.application.remote_node_provision"
+    )
+    .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::CONFLICT.into_response(),
@@ -439,7 +447,7 @@ pub(crate) fn live_remote_operational_status() -> Result<RemoteOperationalStatus
         .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT));
     #[cfg(feature = "hotpath")]
     let agent = agent.middleware(hotpath::UreqHttpMiddleware::with_label(
-        "daemon.remote_status",
+        "daemon.http.application.remote_status",
     ));
     let agent: ureq::Agent = agent.build().into();
     let mut response = agent
@@ -456,14 +464,16 @@ pub(crate) fn live_remote_operational_status() -> Result<RemoteOperationalStatus
             ),
         });
     }
-    response
-        .body_mut()
-        .read_json()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "TraceDecay daemon remote status was not a typed operational read: {error}"
-            ),
-        })
+    hotpath::measure_block!("daemon.http.application.remote_status_decode", {
+        response
+            .body_mut()
+            .read_json()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "TraceDecay daemon remote status was not a typed operational read: {error}"
+                ),
+            })
+    })
 }
 
 fn missing_daemon_authority() -> TraceDecayError {
@@ -517,7 +527,12 @@ async fn dispatch_project_application(
     };
     *request.uri_mut() = uri;
     request.extensions_mut().clear();
-    match router.oneshot(request).await {
+    match hotpath::future!(
+        router.oneshot(request),
+        label = "daemon.http.application.router_oneshot"
+    )
+    .await
+    {
         Ok(response) => response,
         Err(never) => match never {},
     }
@@ -826,7 +841,7 @@ impl DaemonHttpApplicationService {
                 task_active.store(false, Ordering::Release);
                 result
             },
-            label = "daemon.http.application_listener"
+            label = "daemon.http.application.listener"
         ));
         let mut remote_tls_endpoint = None;
         let mut remote_tls_shutdown = None;
@@ -855,7 +870,7 @@ impl DaemonHttpApplicationService {
                     }
                     result
                 },
-                label = "daemon.http.remote_tls_listener"
+                label = "daemon.http.application.remote_tls_listener"
             )));
         }
         #[cfg(not(test))]
@@ -1140,7 +1155,7 @@ async fn serve_remote_brain_tls(
                         async move {
                             serve_remote_brain_tls_connection(io, router, graceful, address).await;
                         },
-                        label = "daemon.http.remote_tls_connection"
+                        label = "daemon.http.application.remote_tls_connection"
                     ));
                 }
             }

@@ -16,6 +16,7 @@ pub struct GitReadSurfaceRequest {
     pub max_bytes: u64,
 }
 
+#[hotpath::measure(label = "application_surface.git.parse")]
 pub(super) fn parse_git_read_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,

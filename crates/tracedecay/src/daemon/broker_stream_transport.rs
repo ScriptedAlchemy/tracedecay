@@ -336,76 +336,80 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let response_lifecycle = self.response_lifecycle.clone();
         let selected_project_responses = self.selected_project_responses.clone();
         let work_delivery_settlement = self.work_delivery_settlement.clone();
-        async move {
-            let response_id = Self::outbound_response_id(&item);
-            let request_key = Self::typed_response_request_key(&item, response_id.as_ref());
-            let mut bytes = serde_json::to_vec(&item)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            bytes.push(b'\n');
-            let selected_response_lease = match selected_project_responses {
-                Some(authority) => authority
-                    .take(response_id.as_ref())
-                    .map_err(|error| std::io::Error::other(error.to_string()))?,
-                None => None,
-            };
-            let RmcpResponseWrite::Write(delivery_attempt) =
-                Self::take_response_write(active_requests, request_key)?
-            else {
-                return Ok(());
-            };
-            let response_revoked = selected_response_lease
-                .as_ref()
-                .map(crate::mcp::server::SelectedProjectResponseLease::revoked)
-                .or_else(|| {
-                    response_lifecycle
-                        .as_ref()
-                        .map(crate::mcp::server::ProjectServerResponseLifecycle::response_revoked)
-                });
-            let write_result = match response_revoked {
-                None => Self::write_all_and_flush(writer, bytes)
-                    .await
-                    .map_err(RmcpResponseWriteFailure::Transport),
-                Some(response_revoked) if response_revoked.is_cancelled() => {
-                    Err(RmcpResponseWriteFailure::Cancelled)
-                }
-                Some(response_revoked) => {
-                    tokio::select! {
-                        biased;
-                        () = response_revoked.cancelled() => {
-                            Err(RmcpResponseWriteFailure::Cancelled)
-                        }
-                        result = Self::write_all_and_flush(writer, bytes) => {
-                            result.map_err(RmcpResponseWriteFailure::Transport)
+        hotpath::future!(
+            async move {
+                let response_id = Self::outbound_response_id(&item);
+                let request_key = Self::typed_response_request_key(&item, response_id.as_ref());
+                let mut bytes = serde_json::to_vec(&item)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                bytes.push(b'\n');
+                let selected_response_lease = match selected_project_responses {
+                    Some(authority) => authority
+                        .take(response_id.as_ref())
+                        .map_err(|error| std::io::Error::other(error.to_string()))?,
+                    None => None,
+                };
+                let RmcpResponseWrite::Write(delivery_attempt) =
+                    Self::take_response_write(active_requests, request_key)?
+                else {
+                    return Ok(());
+                };
+                let response_revoked = selected_response_lease
+                    .as_ref()
+                    .map(crate::mcp::server::SelectedProjectResponseLease::revoked)
+                    .or_else(|| {
+                        response_lifecycle.as_ref().map(
+                            crate::mcp::server::ProjectServerResponseLifecycle::response_revoked,
+                        )
+                    });
+                let write_result = match response_revoked {
+                    None => Self::write_all_and_flush(writer, bytes)
+                        .await
+                        .map_err(RmcpResponseWriteFailure::Transport),
+                    Some(response_revoked) if response_revoked.is_cancelled() => {
+                        Err(RmcpResponseWriteFailure::Cancelled)
+                    }
+                    Some(response_revoked) => {
+                        tokio::select! {
+                            biased;
+                            () = response_revoked.cancelled() => {
+                                Err(RmcpResponseWriteFailure::Cancelled)
+                            }
+                            result = Self::write_all_and_flush(writer, bytes) => {
+                                result.map_err(RmcpResponseWriteFailure::Transport)
+                            }
                         }
                     }
+                };
+                if let Some(attempt) = delivery_attempt {
+                    match &write_result {
+                        Ok(()) => Self::settle_work_delivery(
+                            work_delivery_settlement.as_ref(),
+                            Some(attempt),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                            None,
+                        ),
+                        Err(RmcpResponseWriteFailure::Cancelled) => Self::settle_work_delivery(
+                            work_delivery_settlement.as_ref(),
+                            Some(attempt),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                            Some(tracedecay_domain::DeliveryDropReasonV1::Cancelled),
+                        ),
+                        Err(RmcpResponseWriteFailure::Transport(_)) => Self::settle_work_delivery(
+                            work_delivery_settlement.as_ref(),
+                            Some(attempt),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                            Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                        ),
+                    }
                 }
-            };
-            if let Some(attempt) = delivery_attempt {
-                match &write_result {
-                    Ok(()) => Self::settle_work_delivery(
-                        work_delivery_settlement.as_ref(),
-                        Some(attempt),
-                        tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
-                        None,
-                    ),
-                    Err(RmcpResponseWriteFailure::Cancelled) => Self::settle_work_delivery(
-                        work_delivery_settlement.as_ref(),
-                        Some(attempt),
-                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                        Some(tracedecay_domain::DeliveryDropReasonV1::Cancelled),
-                    ),
-                    Err(RmcpResponseWriteFailure::Transport(_)) => Self::settle_work_delivery(
-                        work_delivery_settlement.as_ref(),
-                        Some(attempt),
-                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                    ),
-                }
-            }
-            write_result.map_err(RmcpResponseWriteFailure::into_io_error)
-        }
+                write_result.map_err(RmcpResponseWriteFailure::into_io_error)
+            },
+            label = "daemon.broker.send"
+        )
     }
 
+    #[hotpath::measure(label = "daemon.broker.receive", future = true)]
     async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>> {
         loop {
             let line = match self.read_line().await {

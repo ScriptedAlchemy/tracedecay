@@ -30,6 +30,7 @@ use crate::errors::Result;
 /// Call this as early as possible in a process: the slots below are read by
 /// transcript ingest, agent-host installers, hooks, and branch locking, all of
 /// which fail quietly (or fail closed) when the root never registered.
+#[hotpath::measure(label = "runtime_ports.register")]
 pub fn register_runtime_ports() -> Result<()> {
     register_session_ports();
     register_agent_host_ports();
@@ -56,8 +57,9 @@ fn schedule_user_session_review<'a>(
     provider: &'a str,
     session_id: Option<&'a str>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(tracedecay_agent_hosts::hooks::schedule_user_session_review(
-        provider, session_id,
+    Box::pin(hotpath::future!(
+        tracedecay_agent_hosts::hooks::schedule_user_session_review(provider, session_id),
+        label = "runtime_ports.session_review"
     ))
 }
 
@@ -109,6 +111,7 @@ fn register_agent_host_ports() {
     );
 }
 
+#[hotpath::measure(label = "runtime_ports.codex_app_server")]
 fn run_codex_app_server_prompt(
     prompt: &str,
     config: &tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig,
@@ -143,24 +146,31 @@ fn daemon_tool_json<'a>(
     arguments: Value,
     require_project_identity: bool,
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
-    Box::pin(async move {
-        let handshake = crate::daemon::DaemonHandshake::for_current_client(
-            project_root.map(Path::to_path_buf),
-            None,
-            false,
-            require_project_identity,
-        )?;
-        let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-        crate::daemon::tool_json_payload(&result, tool_name)
-    })
+    Box::pin(hotpath::future!(
+        async move {
+            let handshake = crate::daemon::DaemonHandshake::for_current_client(
+                project_root.map(Path::to_path_buf),
+                None,
+                false,
+                require_project_identity,
+            )?;
+            let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+            crate::daemon::tool_json_payload(&result, tool_name)
+        },
+        label = "runtime_ports.daemon_tool"
+    ))
 }
 
 fn resolve_project_root_with_identity(
     start: &Path,
 ) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + '_>> {
-    Box::pin(crate::config::discover_project_root_with_identity(start))
+    Box::pin(hotpath::future!(
+        crate::config::discover_project_root_with_identity(start),
+        label = "runtime_ports.resolve_project_root"
+    ))
 }
 
+#[hotpath::measure(label = "runtime_ports.resolve_hook_scope")]
 fn resolve_hook_scope(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
@@ -173,9 +183,12 @@ fn notify_hook_event(
     project_root: &Path,
     event: tracedecay_hooks::DaemonHookEvent,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-    Box::pin(async move {
-        let _ = crate::daemon::notify_hook_event(project_root, event).await;
-    })
+    Box::pin(hotpath::future!(
+        async move {
+            let _ = crate::daemon::notify_hook_event(project_root, event).await;
+        },
+        label = "runtime_ports.notify_hook"
+    ))
 }
 
 fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
@@ -187,7 +200,10 @@ fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
 fn resolve_hook_store_layout(
     project_root: &Path,
 ) -> Pin<Box<dyn Future<Output = Result<crate::storage::StoreLayout>> + Send + '_>> {
-    Box::pin(crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root))
+    Box::pin(hotpath::future!(
+        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root),
+        label = "runtime_ports.resolve_store_layout"
+    ))
 }
 
 fn cursor_catch_up_ingest_max_bytes() -> u64 {

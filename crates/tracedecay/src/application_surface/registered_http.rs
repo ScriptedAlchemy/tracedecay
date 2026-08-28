@@ -23,6 +23,7 @@ pub(crate) trait RegisteredHttpOperation: Copy {
     >;
 }
 
+#[hotpath::measure(label = "application_surface.registered.validate_outcome")]
 pub(super) fn validated_daemon_outcome<O>(
     operation: O,
     request_id: &RequestId,

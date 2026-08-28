@@ -68,6 +68,7 @@ pub enum RemoteCommand {
     },
 }
 
+#[hotpath::measure(label = "serve.remote.run")]
 pub fn run(command: RemoteCommand) -> Result<()> {
     match command {
         RemoteCommand::Status { json } => run_status(json),
@@ -79,14 +80,20 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client.capture(&request).map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.capture",
+                    client.capture(&request).map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
         RemoteCommand::Query { args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
-            let response = client.query(&request).map_err(map_remote_client_error)?;
+            let response = hotpath::measure_block!(
+                "serve.remote.query",
+                client.query(&request).map_err(map_remote_client_error)?
+            );
             // `--json` emits exactly the canonical wire response.
             let local_spool = if args.json {
                 None
@@ -99,9 +106,12 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client
-                    .transfer_frame(&request)
-                    .map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.transfer_frame",
+                    client
+                        .transfer_frame(&request)
+                        .map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
@@ -109,7 +119,10 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client.replay(&request).map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.replay",
+                    client.replay(&request).map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
@@ -117,7 +130,10 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client.backup(&request).map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.backup",
+                    client.backup(&request).map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
@@ -125,7 +141,10 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client.restore(&request).map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.restore",
+                    client.restore(&request).map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
@@ -133,15 +152,22 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &client.failover(&request).map_err(map_remote_client_error)?,
+                &hotpath::measure_block!(
+                    "serve.remote.failover",
+                    client.failover(&request).map_err(map_remote_client_error)?
+                ),
                 args.json,
             )
         }
     }
 }
 
+#[hotpath::measure(label = "serve.remote.status")]
 fn run_status(json: bool) -> Result<()> {
-    let status = crate::daemon::live_remote_operational_status()?;
+    let status = hotpath::measure_block!(
+        "serve.remote.status.read",
+        crate::daemon::live_remote_operational_status()?
+    );
     if json {
         print!("{}", status_json_line(&status)?);
     } else {
@@ -150,6 +176,7 @@ fn run_status(json: bool) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure(label = "serve.remote.enroll")]
 fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> Result<()> {
     let request: RemoteProtocolRequestV1<EnrollmentRequestV1> =
         read_protocol_request(&args.request_file)?;
@@ -160,13 +187,17 @@ fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> 
         })?;
     let client = build_client(&args)?;
     emit_protocol_response(
-        &client
-            .enroll(&request, enrollment_credential)
-            .map_err(map_remote_client_error)?,
+        &hotpath::measure_block!(
+            "serve.remote.enroll_rpc",
+            client
+                .enroll(&request, enrollment_credential)
+                .map_err(map_remote_client_error)?
+        ),
         args.json,
     )
 }
 
+#[hotpath::measure(label = "serve.remote.client")]
 fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
@@ -209,6 +240,7 @@ fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
     .map_err(map_remote_client_error)
 }
 
+#[hotpath::measure(label = "serve.remote.request")]
 fn read_protocol_request<T: DeserializeOwned>(path: &Path) -> Result<RemoteProtocolRequestV1<T>> {
     let payload = if path == Path::new("-") {
         let mut payload = String::new();
