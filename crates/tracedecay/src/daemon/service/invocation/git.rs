@@ -180,6 +180,7 @@ pub(super) fn git_read_evidence_packet(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.git.read", future = true)]
 pub(super) async fn execute_git_read(
     wire_request_id: String,
     project_root: Option<&Path>,
@@ -487,6 +488,7 @@ pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure(label = "daemon.service.git.preview", future = true)]
 pub(super) async fn execute_git_preview(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
@@ -520,6 +522,7 @@ pub(super) async fn execute_git_preview(
     Box::pin(settle_prepared_git_preview(operation_events, prepared)).await
 }
 
+#[hotpath::measure(label = "daemon.service.git.apply", future = true)]
 pub(super) async fn execute_git_apply(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
@@ -716,6 +719,7 @@ fn prepare_git_apply(
     }))
 }
 
+#[hotpath::measure(label = "daemon.service.git.settle_preview", future = true)]
 async fn settle_prepared_git_preview(
     operation_events: &OperationEventAuthority,
     prepared: Box<PreparedGitPreview>,
@@ -766,6 +770,7 @@ async fn settle_prepared_git_preview(
     response
 }
 
+#[hotpath::measure(label = "daemon.service.git.settle_apply", future = true)]
 async fn settle_prepared_git_apply(
     operation_events: &OperationEventAuthority,
     prepared: Box<PreparedGitApply>,

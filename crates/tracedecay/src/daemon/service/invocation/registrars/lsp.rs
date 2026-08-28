@@ -57,6 +57,7 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.service.lsp.build_and_register", future = true)]
     pub(crate) async fn build_and_register(
         &self,
         project_root: PathBuf,

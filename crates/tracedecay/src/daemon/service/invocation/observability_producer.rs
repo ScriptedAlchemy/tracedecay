@@ -54,6 +54,7 @@ fn registered_observability_producer_matches_mount(
 }
 
 impl DaemonInvocationService {
+    #[hotpath::measure(label = "daemon.service.observability.mount", future = true)]
     pub(crate) async fn mount_observability_producer(
         &self,
         project_root: PathBuf,

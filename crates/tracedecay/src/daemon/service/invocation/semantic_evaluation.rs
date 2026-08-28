@@ -137,6 +137,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "daemon.service.semantic.execute", future = true)]
     async fn execute_semantic_operation(
         &self,
         project_root: Option<&Path>,

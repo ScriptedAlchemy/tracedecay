@@ -189,6 +189,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
     }
 }
 
+#[hotpath::measure(label = "daemon.service.work.adjudicate_leak", future = true)]
 pub(super) async fn adjudicate_leak(
     registered: &super::super::RegisteredWorkRuntime,
     services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
@@ -222,6 +223,7 @@ pub(super) async fn adjudicate_leak(
     service.adjudicate(context, command, observed_at, scan_deadline)
 }
 
+#[hotpath::measure(label = "daemon.service.work.read_leak_evidence", future = true)]
 async fn read_leak_evidence(
     registered: &super::super::RegisteredWorkRuntime,
     services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,

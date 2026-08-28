@@ -366,6 +366,7 @@ impl DaemonInvocationService {
         Arc::clone(&self.github_stack_coordinator)
     }
 
+    #[hotpath::measure(label = "daemon.service.invocation.retained_context", future = true)]
     pub(crate) async fn registered_retained_request_context(
         &self,
         project_root: &Path,
@@ -416,6 +417,10 @@ impl DaemonInvocationService {
 
     /// Installs every durable worktree-cleanup recovery fence before project
     /// open publishes holder-capable Work and LSP runtimes.
+    #[hotpath::measure(
+        label = "daemon.service.invocation.install_cleanup_fences",
+        future = true
+    )]
     pub(crate) async fn install_worktree_cleanup_recovery_fences(
         &self,
         owner: &DaemonNativeIntegrationOwner,

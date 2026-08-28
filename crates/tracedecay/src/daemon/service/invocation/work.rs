@@ -57,6 +57,7 @@ pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationRe
 /// Dispatches one Work invocation through the product authority and publishes
 /// a Task-family activity pulse only after a mutation committed.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.execute", future = true)]
 pub(super) async fn execute_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,

@@ -63,6 +63,7 @@ const NATIVE_INTEGRATION_PREVIEW_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 
 /// Executes one native-integration surface request.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.native_integration.execute", future = true)]
 pub(super) async fn execute_native_integration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -272,6 +273,7 @@ fn publish_current_transaction_status(
 /// coordinator's own cancellation map keeps a running apply cancellable
 /// through the separate cancel operation.
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.native_integration.apply", future = true)]
 async fn execute_with_owner(
     wire_request_id: &str,
     owner: DaemonNativeIntegrationOwner,
@@ -601,6 +603,7 @@ enum WorktreeUnavailableReasonV1 {
     Unavailable,
 }
 
+#[hotpath::measure(label = "daemon.service.native_integration.worktree", future = true)]
 async fn execute_worktree_with_owner(
     owner: DaemonNativeIntegrationOwner,
     request: NativeWorktreeSurfaceRequest,

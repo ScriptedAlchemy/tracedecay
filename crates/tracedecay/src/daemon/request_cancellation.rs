@@ -52,6 +52,7 @@ pub(super) fn register(request_id: &str) -> Option<Lease> {
     })
 }
 
+#[hotpath::measure(label = "daemon.invocation.cancel")]
 pub(super) fn cancel(request_id: &str) -> bool {
     let mut state = state()
         .lock()

@@ -28,6 +28,10 @@ impl DaemonContextScoutRuntimeRegistrar {
         }
     }
 
+    #[hotpath::measure(
+        label = "daemon.service.context_scout.open_and_register",
+        future = true
+    )]
     pub(crate) async fn open_and_register(
         &self,
         database: Database,

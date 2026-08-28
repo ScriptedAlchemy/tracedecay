@@ -230,6 +230,7 @@ impl BoundedHookOrchestratorV1 {
         }
     }
 
+    #[hotpath::measure(label = "daemon.service.hooks.admit")]
     pub(crate) fn admit(
         &self,
         mut request: HookOrchestrationRequestV1,

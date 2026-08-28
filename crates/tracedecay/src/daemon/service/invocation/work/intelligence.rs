@@ -28,6 +28,7 @@ use super::{
     work_topology_unavailable_problem,
 };
 
+#[hotpath::measure(label = "daemon.service.work.generate_proposal")]
 pub(super) fn generate_proposal(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -59,6 +60,7 @@ pub(super) fn generate_proposal(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.execution_history")]
 pub(super) fn execution_history(
     registered: &RegisteredWorkRuntime,
     services: &crate::global_db::RegisteredWorkApplicationServicesV1,
@@ -114,6 +116,7 @@ pub(super) fn execution_history(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.experience", future = true)]
 pub(super) async fn experience(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -167,6 +170,7 @@ pub(super) async fn experience(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.work.compare_proposal")]
 pub(super) fn compare_proposal(
     registered: &RegisteredWorkRuntime,
     request_id: String,

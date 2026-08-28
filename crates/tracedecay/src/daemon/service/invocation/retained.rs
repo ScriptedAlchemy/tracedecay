@@ -1,5 +1,6 @@
 use super::*;
 
+#[hotpath::measure(label = "daemon.service.retained.execute", future = true)]
 pub(super) async fn execute_retained_application(
     request_id: String,
     registered: Option<RegisteredRetainedRuntime>,

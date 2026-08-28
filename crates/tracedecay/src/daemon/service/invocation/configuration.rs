@@ -8,7 +8,7 @@ mod settlement;
 
 use settlement::{configuration_effect, reconcile_configuration_runtime};
 
-#[hotpath::measure]
+#[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
 pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -461,6 +461,7 @@ pub(super) async fn execute_configuration(
     }
 }
 
+#[hotpath::measure(label = "daemon.service.configuration.apply", future = true)]
 async fn apply_configuration_or_semantic_transition(
     registered: &RegisteredConfigurationRuntime,
     authority: ConfigurationMutationAuthority,

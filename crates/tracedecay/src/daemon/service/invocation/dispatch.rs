@@ -117,7 +117,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.service.invocation.dispatch", future = true)]
     async fn invoke_with_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
