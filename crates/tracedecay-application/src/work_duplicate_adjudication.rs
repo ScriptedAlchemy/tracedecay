@@ -202,7 +202,8 @@ where
         command.validate().map_err(|_| invalid_problem())?;
         let canonical_input_digest =
             work_duplicate_adjudication_input_digest(&command).map_err(|_| invalid_problem())?;
-        self.storage
+        let outcome = self
+            .storage
             .compare_and_record_duplicate_adjudication(
                 &authority,
                 &WorkDuplicateAdjudicationWriteV1 {
@@ -211,7 +212,18 @@ where
                     canonical_input_digest,
                 },
             )
-            .map_err(storage_problem)
+            .map_err(storage_problem)?;
+        // Idempotent replays are the interesting half of this decision: a
+        // rising replay share means callers are re-adjudicating settled pairs.
+        match &outcome {
+            WorkDuplicateAdjudicationAppendOutcomeV1::Appended(_) => {
+                hotpath::gauge!("application.work.duplicate.adjudicate.appended").inc(1u64);
+            }
+            WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(_) => {
+                hotpath::gauge!("application.work.duplicate.adjudicate.replayed").inc(1u64);
+            }
+        }
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -276,13 +288,35 @@ where
                 &attempts,
             )
             .map_err(storage_problem)?;
-        Ok(classify_complete_attempt_relations(
+        let read = classify_complete_attempt_relations(
             &authority,
             request.work_generation,
             request.topology_generation,
             attempts,
             receipts,
-        ))
+        );
+        // Bounded per-reason counters: classification refusals are typed
+        // product states, and each reason implicates a different authority
+        // (missing pair matrix, conflicting receipts, unresolved verdicts).
+        match &read {
+            WorkDuplicateAttemptClassificationReadV1::Complete { .. } => {
+                hotpath::gauge!("application.work.duplicate.classify.complete").inc(1u64);
+            }
+            WorkDuplicateAttemptClassificationReadV1::Unavailable { reason } => match reason {
+                WorkDuplicateClassificationUnavailableReasonV1::MissingPair => {
+                    hotpath::gauge!("application.work.duplicate.classify.missing_pair").inc(1u64);
+                }
+                WorkDuplicateClassificationUnavailableReasonV1::ConflictingPair => {
+                    hotpath::gauge!("application.work.duplicate.classify.conflicting_pair")
+                        .inc(1u64);
+                }
+                WorkDuplicateClassificationUnavailableReasonV1::UnresolvedVerdict => {
+                    hotpath::gauge!("application.work.duplicate.classify.unresolved_verdict")
+                        .inc(1u64);
+                }
+            },
+        }
+        Ok(read)
     }
 }
 

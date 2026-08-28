@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+#[cfg(feature = "hotpath")]
+use tracedecay_domain::WorkflowRunStatus;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
@@ -204,13 +206,19 @@ where
         fan_out_plans: Vec<tracedecay_domain::WorkflowFanOutPlanV1>,
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
+        // One bounded refusal counter across the three pinned digests: any
+        // stale digest means runs are being started against a drifted
+        // policy/configuration/catalog environment.
         if definition.pinned_policy_digest() != &admission.policy_digest {
+            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
         if definition.pinned_configuration_digest() != &admission.configuration_digest {
+            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
             return Err(WorkflowRunServiceError::ConfigurationDigestMismatch);
         }
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
+            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
         let event = WorkflowRunEvent::admitted_with_fan_out(
@@ -221,13 +229,15 @@ where
             fan_out_plans,
             context,
         )?;
-        Ok(self
+        let projection = self
             .storage
             .append(&WorkflowRunAppendRequest {
                 expected_sequence: None,
                 event,
             })?
-            .into_projection())
+            .into_projection();
+        observe_run_status_entered(&projection);
+        Ok(projection)
     }
 
     #[hotpath::measure(label = "application.workflow.run.apply")]
@@ -243,14 +253,38 @@ where
             return Err(WorkflowRunStorageError::VersionConflict.into());
         }
         let event = projection.next_event(command, context)?;
-        Ok(self
+        let next = self
             .storage
             .append(&WorkflowRunAppendRequest {
                 expected_sequence: Some(expected_sequence),
                 event,
             })?
-            .into_projection())
+            .into_projection();
+        observe_run_status_entered(&next);
+        Ok(next)
     }
+}
+
+/// Counts every durably appended run transition on a bounded static gauge
+/// key for the status it entered, so failed and cancelled runs are recorded
+/// with the same weight as completed ones. The run's wall lifetime spans
+/// daemon restarts through the journal, so a per-transition counter — not an
+/// in-process RAII lifetime — is the truthful application-layer record.
+fn observe_run_status_entered(projection: &WorkflowRunProjection) {
+    #[cfg(feature = "hotpath")]
+    {
+        let entered = match projection.status() {
+            WorkflowRunStatus::Running => "application.workflow.run.status.running",
+            WorkflowRunStatus::Paused => "application.workflow.run.status.paused",
+            WorkflowRunStatus::Cancelling => "application.workflow.run.status.cancelling",
+            WorkflowRunStatus::Completed => "application.workflow.run.status.completed",
+            WorkflowRunStatus::Failed => "application.workflow.run.status.failed",
+            WorkflowRunStatus::Cancelled => "application.workflow.run.status.cancelled",
+        };
+        hotpath::gauge!(entered).inc(1u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
+    let _ = projection;
 }
 
 /// Upper bound on one durable workflow artifact payload.
@@ -309,15 +343,22 @@ impl WorkflowArtifactPayload {
         artifact: WorkArtifactRefV1,
         bytes: Vec<u8>,
     ) -> Result<Self, WorkflowArtifactStoreError> {
-        if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
-            return Err(WorkflowArtifactStoreError::Oversized);
-        }
-        if bytes.len() as u64 != artifact.byte_length()
-            || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
-        {
-            return Err(WorkflowArtifactStoreError::DigestMismatch);
-        }
-        Ok(Self { artifact, bytes })
+        // The decode/verify phase of artifact hydration and persistence: a
+        // canonical framed SHA-256 over up to 4 MiB, distinct from the store
+        // I/O around it. The bytes gauge sizes what the digest walked.
+        hotpath::measure_block!("application.workflow.artifact.verify", {
+            if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
+                return Err(WorkflowArtifactStoreError::Oversized);
+            }
+            hotpath::gauge!("application.workflow.artifact.verify.bytes")
+                .set(bytes.len() as u64);
+            if bytes.len() as u64 != artifact.byte_length()
+                || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
+            {
+                return Err(WorkflowArtifactStoreError::DigestMismatch);
+            }
+            Ok(Self { artifact, bytes })
+        })
     }
 
     pub fn artifact(&self) -> &WorkArtifactRefV1 {
