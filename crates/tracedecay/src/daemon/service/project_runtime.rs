@@ -109,6 +109,30 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
     }
 }
 
+/// A registered background-recovery cancellation standing in for the owners
+/// `RegisteredWorkRuntime` mounts.
+///
+/// It carries a real [`CancellationToken`] — the same handle the production
+/// recovery owners cancel through — so a test can observe the synchronous
+/// shutdown sweep without assembling a whole Work runtime (a registered
+/// database lease, grant, topology policy, and routing authority) around it.
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct RecoveryCancelProbe {
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+}
+
+#[cfg(test)]
+impl RecoveryCancelProbe {
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+}
+
 /// Everything one canonical project's daemon runtime owns.
 ///
 /// A slot is `None` until that component is registered.
@@ -144,9 +168,26 @@ pub(crate) struct ProjectRuntime {
     recording_first: Option<RecordingComponent<1>>,
     #[cfg(test)]
     recording_second: Option<RecordingComponent<2>>,
+    #[cfg(test)]
+    recovery_cancel_probe: Option<RecoveryCancelProbe>,
 }
 
 impl ProjectRuntime {
+    /// Stop this project's retained background recovery owners from starting
+    /// another cycle, without awaiting anything.
+    ///
+    /// Only the cancel half: the owners are still joined by the drain in
+    /// `shutdown::shut_down_observability`. Every call is idempotent.
+    fn cancel_background_recovery(&self) {
+        if let Some(work) = self.work.as_ref() {
+            work.cancel_background_recovery();
+        }
+        #[cfg(test)]
+        if let Some(probe) = self.recovery_cancel_probe.as_ref() {
+            probe.cancel();
+        }
+    }
+
     fn has_components(&self) -> bool {
         self.callable_code.is_some()
             || self.feedback.is_some()
@@ -172,6 +213,7 @@ impl ProjectRuntime {
                         || self.test_omitted.is_some()
                         || self.recording_first.is_some()
                         || self.recording_second.is_some()
+                        || self.recovery_cancel_probe.is_some()
                 }
                 #[cfg(not(test))]
                 {
@@ -233,6 +275,7 @@ project_runtime_components!(
     TestOmitted => test_omitted,
     RecordingComponent<1> => recording_first,
     RecordingComponent<2> => recording_second,
+    RecoveryCancelProbe => recovery_cancel_probe,
 );
 
 #[derive(Clone, Copy)]

@@ -102,9 +102,56 @@ impl ProjectRuntimeRegistryV1 {
         self.signal_reservation_changed();
     }
 
+    /// Close registry admission and stop every project's retained background
+    /// recovery owner, synchronously.
+    ///
+    /// Called from `DaemonInvocationService::cancel_admissions`, so both halves
+    /// run at shutdown *prepare* time — before any owner join is polled.
+    /// Previously this only set `closed`, and the recovery owners were left to
+    /// be cancelled deep inside the async `shut_down_all` drain; blocked-interval
+    /// and workflow-census cycles kept scanning for the whole of the phases in
+    /// front of that drain.
+    ///
+    /// # Cancelling here is safe on a retried shutdown
+    ///
+    /// `shut_down_all` is retryable: a failed drain stores `shutdown_started =
+    /// false` so a later attempt re-runs it. Cancelling owners at prepare time
+    /// would be wrong if such a retry could be expected to keep them running —
+    /// but it cannot. `closed` is one-way: it is set true here and nothing in
+    /// the workspace ever stores false, and every admission path (`reserve`,
+    /// `publish`, `register_or_reconcile`, request admission) refuses with
+    /// `ProjectRuntimeRegistryError::Closed` once it is set. So the runtimes a
+    /// retry can observe are always a subset of the ones live at the first
+    /// call, never a superset: no owner cancelled here can be one a retry is
+    /// still supposed to run. Both this sweep and the per-owner cancels are
+    /// idempotent, so the retry itself is a no-op against them.
+    ///
+    /// Targeted single-project retirement deliberately does not come through
+    /// here — `retire_roots`/`quiesce_roots` fence one root and join that
+    /// project's owners in `shut_down_observability`, leaving every other
+    /// project's recovery running.
     pub(crate) fn begin_shutdown(&self) {
         self.closed.store(true, Ordering::Release);
+        self.cancel_retained_background_recovery();
         self.signal_reservation_changed();
+    }
+
+    /// Sweep every retained project's background recovery cancellation.
+    ///
+    /// Runs under the runtime map's `std` mutex and touches no async lock, so
+    /// it stays callable from the synchronous `cancel_admissions` half of
+    /// shutdown. Cancelling a token only flags it and wakes its waiters — the
+    /// woken tasks are scheduled, never polled inline — so no cancelled owner
+    /// can re-enter this lock while the guard is held.
+    ///
+    /// No owner can slip past the sweep. `register_or_reconcile` tests
+    /// `closed` and mounts the component under one continuously-held guard on
+    /// this same map, so a concurrent registrar either takes the lock first
+    /// and is swept here, or takes it after and is refused.
+    fn cancel_retained_background_recovery(&self) {
+        for runtime in self.lock_runtimes().values() {
+            runtime.cancel_background_recovery();
+        }
     }
 
     /// Shut every project runtime down and leave the registry empty.

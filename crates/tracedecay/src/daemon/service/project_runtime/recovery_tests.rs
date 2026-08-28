@@ -2,8 +2,10 @@ use std::any::Any;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use super::{ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1};
+use super::{ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1, RecoveryCancelProbe};
 
 type Component = Arc<dyn Any + Send + Sync>;
 
@@ -244,6 +246,156 @@ async fn captured_admission_continues_after_quiescence_installs_its_fence() {
         .expect("quiescence task")
         .expect("quiescence completes after outer settlement");
     drop(guard);
+}
+
+/// Recovery owners used to be cancelled deep inside the async `shut_down_all`
+/// drain, so they kept running through every shutdown phase in front of it —
+/// blocked-interval and workflow-census scans were still logging seconds after
+/// the daemon began shutting down. `begin_shutdown` runs in the synchronous
+/// `cancel_admissions` half of shutdown, so the cancellation must already have
+/// happened by the time it returns.
+#[tokio::test]
+async fn begin_shutdown_cancels_project_recovery_owners_before_it_returns() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("recovery-owner-at-prepare-time");
+    let probe = RecoveryCancelProbe::default();
+    registry
+        .publish(project.clone(), probe.clone())
+        .await
+        .expect("recovery cancellation registers at owner mount");
+    assert!(
+        !probe.is_cancelled(),
+        "a mounted recovery owner runs until shutdown begins"
+    );
+
+    registry.begin_shutdown();
+
+    // No await between the call and this assertion: the sweep is synchronous.
+    assert!(
+        probe.is_cancelled(),
+        "begin_shutdown must cancel retained recovery owners before returning"
+    );
+}
+
+/// The log-shaped invariant: once `begin_shutdown` has returned, no recovery
+/// owner starts another cycle.
+///
+/// Time is paused on a current-thread runtime, so the worker cannot be polled
+/// while the synchronous `begin_shutdown` runs — the cycle count read after it
+/// returns is exactly the count at the moment it returned.
+#[tokio::test(start_paused = true)]
+async fn no_recovery_cycle_starts_after_begin_shutdown_returns() {
+    const CYCLE: Duration = Duration::from_secs(5);
+
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("recovery-cycles-during-shutdown");
+    let probe = RecoveryCancelProbe::default();
+    registry
+        .publish(project.clone(), probe.clone())
+        .await
+        .expect("recovery cancellation registers at owner mount");
+
+    let cycles = Arc::new(AtomicUsize::new(0));
+    let worker_cycles = Arc::clone(&cycles);
+    let cancellation = probe.cancellation.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            // The shape every recovery owner's loop uses: a biased
+            // cancellation arm in front of the interval, so a cancelled owner
+            // starts no further cycle.
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                () = tokio::time::sleep(CYCLE) => {}
+            }
+            worker_cycles.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    for _ in 0..3 {
+        tokio::time::advance(CYCLE).await;
+    }
+    let before_shutdown = cycles.load(Ordering::SeqCst);
+    assert!(
+        before_shutdown > 0,
+        "the recovery owner must be cycling before shutdown begins"
+    );
+
+    registry.begin_shutdown();
+    let at_return = cycles.load(Ordering::SeqCst);
+
+    tokio::time::advance(CYCLE * 4).await;
+    worker.await.expect("recovery worker");
+    assert_eq!(
+        cycles.load(Ordering::SeqCst),
+        at_return,
+        "no recovery cycle may start after begin_shutdown returns"
+    );
+}
+
+/// Cancelling at prepare time is only safe because registry admission is
+/// one-way. `shut_down_all` is retryable — a failed drain clears
+/// `shutdown_started` — so a retry re-enters `begin_shutdown`; this pins the
+/// property that makes that harmless: nothing can re-admit an owner for the
+/// retry to run, and the sweep is idempotent.
+#[tokio::test]
+async fn a_retried_shutdown_cannot_readmit_a_cancelled_recovery_owner() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("retry-after-a-failed-shutdown");
+    let probe = RecoveryCancelProbe::default();
+    registry
+        .publish(project.clone(), probe.clone())
+        .await
+        .expect("recovery cancellation registers at owner mount");
+
+    registry.begin_shutdown();
+    assert!(probe.is_cancelled());
+
+    assert_eq!(
+        registry
+            .publish(project.clone(), RecoveryCancelProbe::default())
+            .await,
+        Err(ProjectRuntimeRegistryError::Closed),
+        "a shutting-down registry can never admit another recovery owner"
+    );
+
+    // A retried attempt re-enters the sweep; it must stay a no-op.
+    registry.begin_shutdown();
+    assert!(probe.is_cancelled());
+    assert!(registry.shut_down_all().await);
+    assert_eq!(
+        registry.publish(project, RecoveryCancelProbe::default()).await,
+        Err(ProjectRuntimeRegistryError::Closed),
+        "shutdown admission never reopens"
+    );
+}
+
+/// Targeted single-project retirement must not reach through the whole
+/// registry the way daemon shutdown does: a project being retired or
+/// database-replaced leaves every other project's recovery owner running.
+#[tokio::test]
+async fn retiring_one_root_leaves_other_projects_recovery_owners_running() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let retired = root("retired-project");
+    let retained = root("retained-project");
+    let retired_probe = RecoveryCancelProbe::default();
+    let retained_probe = RecoveryCancelProbe::default();
+    registry
+        .publish(retired.clone(), retired_probe.clone())
+        .await
+        .expect("retired project publication");
+    registry
+        .publish(retained.clone(), retained_probe.clone())
+        .await
+        .expect("retained project publication");
+
+    assert!(registry.retire_roots(&BTreeSet::from([retired])).await);
+
+    assert!(
+        !retained_probe.is_cancelled(),
+        "retiring one root must not cancel another project's recovery owner"
+    );
+    assert!(registry.holds::<RecoveryCancelProbe>(&retained).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
