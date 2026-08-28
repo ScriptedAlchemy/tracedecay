@@ -195,6 +195,30 @@ pub(super) async fn join_shutdown_owner_phases(
     prepare_shutdown_owner_phases(phases).join(deadline).await
 }
 
+/// RAII drain marker: increments its gauge while a shutdown owner or phase is
+/// draining and decrements on drop, so cancellation, panic, and abort cannot
+/// leak a phantom straggler. A non-zero gauge during a hung shutdown names the
+/// lane that is still draining live, before any receipt exists to consult.
+pub(super) struct DrainingGauge {
+    key: &'static str,
+}
+
+impl DrainingGauge {
+    pub(super) fn arm(key: &'static str) -> Self {
+        hotpath::gauge!(key).inc(1_u64);
+        Self { key }
+    }
+}
+
+impl Drop for DrainingGauge {
+    fn drop(&mut self) {
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!(self.key).dec(1_u64);
+        #[cfg(not(feature = "hotpath"))]
+        let _ = self.key;
+    }
+}
+
 /// One prepared owner: its original ordinal, name, cancellation-time panic
 /// message (if cancelling it panicked), and its join factory.
 type PreparedShutdownOwner = (usize, &'static str, Option<String>, ShutdownJoinFactory);
@@ -260,6 +284,7 @@ async fn join_shutdown_phase(
     let mut pending = std::collections::HashMap::new();
     for (ordinal, name, cancellation_error, join) in owners {
         let handle = joins.spawn(async move {
+            let _draining = DrainingGauge::arm("daemon.shutdown.owners_draining");
             let join_status = match tokio::time::timeout_at(deadline, join(deadline)).await {
                 Ok(status) => status,
                 Err(_) => ShutdownStatus::TimedOut,
@@ -274,6 +299,24 @@ async fn join_shutdown_phase(
                     ShutdownStatus::Failed(format!("{error}; join timed out"))
                 }
             };
+            // Failed and timed-out drains are counted too: success-only
+            // counters would hide exactly the stuck owners being diagnosed.
+            // The timed-out owner name is a bounded static vocabulary fixed by
+            // the shutdown plan, recorded so a post-deadline report names the
+            // straggler without replaying the receipt.
+            match &status {
+                ShutdownStatus::Clean => {
+                    hotpath::gauge!("daemon.shutdown.owner.clean_total").inc(1_u64);
+                }
+                ShutdownStatus::Failed(_) => {
+                    hotpath::gauge!("daemon.shutdown.owner.failed_total").inc(1_u64);
+                }
+                ShutdownStatus::TimedOut => {
+                    hotpath::gauge!("daemon.shutdown.owner.timed_out_total").inc(1_u64);
+                    #[cfg(feature = "hotpath")]
+                    hotpath::val!("daemon.shutdown.straggler.owner").set(&name);
+                }
+            }
             (ordinal, ShutdownOwnerReceipt { name, status })
         });
         pending.insert(handle.id(), (ordinal, name));
