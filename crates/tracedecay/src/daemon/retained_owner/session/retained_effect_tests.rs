@@ -253,13 +253,35 @@ fn assert_partial_effect(
         .clone();
     receipt.validate().expect("valid committed receipt");
     assert_eq!(receipt.outcome, EffectTermination::Partial);
+    // `PreparedRetainedEffect::material_committed_state_digest` binds four
+    // elements: the domain tag, the retained operation, the prepared effect's
+    // durable operation id, and the committed-state material — the serialized
+    // state the effect actually committed. `session_refresh_effect_outcome`
+    // hands the durable operation id itself as that material, because the
+    // durable refresh row keyed by that id *is* what committed before the
+    // scheduler delivery failed, so the id appears in both positions here.
+    let committed_state_material = durable_operation_id;
     let expected = canonical_sha256(&(
         "tracedecay.retained.effect.committed-state.v1",
         operation.as_str(),
         durable_operation_id,
+        committed_state_material,
     ))
     .expect("canonical committed-state digest");
     assert_eq!(receipt.committed_state, Some(expected));
+    let unrelated_material = canonical_sha256(&(
+        "tracedecay.retained.effect.committed-state.v1",
+        operation.as_str(),
+        durable_operation_id,
+        "state that this effect never committed",
+    ))
+    .expect("canonical committed-state digest for unrelated material");
+    assert_ne!(
+        receipt.committed_state,
+        Some(unrelated_material),
+        "the committed-state digest must bind the committed material, not \
+         only the operation and its durable id"
+    );
     receipt
 }
 
