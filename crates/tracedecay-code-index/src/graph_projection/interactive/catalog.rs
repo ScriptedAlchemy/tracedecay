@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use tracedecay_domain::SanitizedCodeFileV1;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity,
-    GraphProjectionReadRequest, GraphRelation, MAX_VERIFIED_GENERATION_RELATIONS,
-    VerifiedGraphSnapshot,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphGenerationManifest,
+    GraphProjectionIdentity, GraphProjectionReadRequest, GraphRelation,
+    MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
 };
 
 use super::super::schema::{
@@ -88,6 +88,38 @@ pub(super) fn build_interactive_catalog(
     })
 }
 
+/// Builds the same interactive catalog as [`build_interactive_catalog`], but
+/// from the in-hand manifest rows of a generation that is being sealed right
+/// now, instead of paging the published projection back out of the store.
+/// One linear pass over rows the seal already holds — this is the seal-time
+/// derivation of the catalog bundle artifact.
+pub(in crate::graph_projection) fn build_interactive_catalog_from_manifest(
+    manifest: &GraphGenerationManifest,
+    cancellation: &dyn GraphCancellation,
+) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
+    let mut scan = CatalogScan::new();
+    let projection_node_count = manifest.entities.len();
+    scan.record_entity_page(&manifest.entities, projection_node_count, cancellation)?;
+    for relation in &manifest.relations {
+        check_cancelled(cancellation)?;
+        scan.count_relation()?;
+        if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
+            continue;
+        }
+        let relation = GraphRelation::new(
+            relation.identity.clone(),
+            relation.from.identity.clone(),
+            relation.to.identity.clone(),
+            relation.kind.clone(),
+            relation.properties.clone(),
+        )
+        .map_err(CodeGraphProjectionError::from)?;
+        scan.record_import_link(relation)?;
+    }
+    check_cancelled(cancellation)?;
+    scan.finish(projection_node_count)
+}
+
 struct CatalogScan {
     catalog: InteractiveCatalog,
     imports_by_entity: BTreeMap<GraphEntityId, CodeIndexImportEvidenceV1>,
@@ -99,15 +131,7 @@ struct CatalogScan {
 impl CatalogScan {
     fn new() -> Self {
         Self {
-            catalog: InteractiveCatalog {
-                symbols: BTreeMap::new(),
-                by_qualified_name: BTreeMap::new(),
-                by_simple_name: BTreeMap::new(),
-                by_file: BTreeMap::new(),
-                by_logical_path: BTreeMap::new(),
-                files: BTreeMap::new(),
-                imports: Vec::new(),
-            },
+            catalog: InteractiveCatalog::empty(),
             imports_by_entity: BTreeMap::new(),
             import_links: BTreeMap::new(),
             scanned_entities: 0,
@@ -243,33 +267,43 @@ impl CatalogScan {
         relations: &[GraphRelation],
         cancellation: &dyn GraphCancellation,
     ) -> Result<(), CodeGraphProjectionError> {
-        self.scanned_relations = self
-            .scanned_relations
-            .checked_add(relations.len())
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph interactive relation scan overflowed".to_owned(),
-                )
-            })?;
+        for relation in relations {
+            check_cancelled(cancellation)?;
+            self.count_relation()?;
+            if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
+                continue;
+            }
+            self.record_import_link(relation.clone())?;
+        }
+        Ok(())
+    }
+
+    fn count_relation(&mut self) -> Result<(), CodeGraphProjectionError> {
+        self.scanned_relations = self.scanned_relations.checked_add(1).ok_or_else(|| {
+            CodeGraphProjectionError::Corrupt(
+                "code graph interactive relation scan overflowed".to_owned(),
+            )
+        })?;
         if self.scanned_relations > MAX_VERIFIED_GENERATION_RELATIONS {
             return Err(CodeGraphProjectionError::Corrupt(
                 "code graph interactive scan exceeded the verified relation ceiling".to_owned(),
             ));
         }
-        for relation in relations {
-            check_cancelled(cancellation)?;
-            if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
-                continue;
-            }
-            if self
-                .import_links
-                .insert(relation.to.clone(), relation.clone())
-                .is_some()
-            {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph import entity has duplicate file links".to_owned(),
-                ));
-            }
+        Ok(())
+    }
+
+    fn record_import_link(
+        &mut self,
+        relation: GraphRelation,
+    ) -> Result<(), CodeGraphProjectionError> {
+        if self
+            .import_links
+            .insert(relation.to.clone(), relation)
+            .is_some()
+        {
+            return Err(CodeGraphProjectionError::Corrupt(
+                "code graph import entity has duplicate file links".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -340,7 +374,7 @@ impl CatalogScan {
     }
 }
 
-fn canonical_import_order(
+pub(super) fn canonical_import_order(
     left: &CodeIndexImportEvidenceV1,
     right: &CodeIndexImportEvidenceV1,
 ) -> Ordering {

@@ -1,4 +1,5 @@
 mod backup;
+mod bundle;
 mod error;
 mod generation;
 mod generation_runtime;
@@ -25,6 +26,11 @@ mod traversal;
 mod vector;
 
 pub use backup::GraphBackupReceipt;
+pub use bundle::{
+    MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1, SEALED_READ_BUNDLE_FORMAT_V1,
+    SealedReadBundleArtifactStateV1, SealedReadBundleArtifactV1, SealedReadBundleManifestV1,
+    SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
+};
 pub use error::{GraphBudgetKind, GraphDbError};
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,

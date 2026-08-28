@@ -1114,6 +1114,11 @@ impl RetainedCodeGraphRuntimeV1 {
                     );
                 }
                 let _replay_pool_lock = verify_durable_source()?;
+                // Seal-time bundle: stage from the in-hand rows before the
+                // publish consumes them, commit only after it succeeds.
+                let bundle_identity = prepared.manifest.identity();
+                let staged_bundle =
+                    self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
                 let publication = observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::ActiveReplayPublish,
                     publish(
@@ -1122,6 +1127,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         Some(Arc::clone(&prepared.manifest)),
                     ),
                 )?;
+                self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => {
@@ -1223,6 +1229,11 @@ impl RetainedCodeGraphRuntimeV1 {
             }
         }
         drop(replay_pool_lock);
+        // Seal-time bundle: stage from the in-hand rows before the publish
+        // consumes them, commit only after it succeeds.
+        let bundle_identity = prepared.manifest.identity();
+        let staged_bundle =
+            self.stage_sealed_read_bundle(&prepared.manifest, &prepared.request_cancelled);
         let publication = observe_code_graph_publication(
             CodeGraphPublicationConflictStageV1::FinalPublish,
             publish(
@@ -1231,7 +1242,125 @@ impl RetainedCodeGraphRuntimeV1 {
                 Some(Arc::clone(&prepared.manifest)),
             ),
         )?;
+        self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
         Ok(publication.snapshot)
+    }
+
+    /// Loads this generation's interactive-catalog bundle artifact, verified
+    /// against the generation identity through the sealed read bundle
+    /// envelope. `Absent` and `Stale` are typed states the caller must log
+    /// before falling back to open-time re-derivation.
+    pub(crate) fn load_sealed_read_bundle_catalog(
+        &self,
+        request_cancelled: &Arc<AtomicBool>,
+    ) -> std::result::Result<tracedecay_graph_db::SealedReadBundleArtifactStateV1, GraphDbError>
+    {
+        let identity = tracedecay_code_index::graph_projection::code_graph_manifest_identity(
+            self.authority.namespace().clone(),
+            &self.generation_id,
+            &GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )?,
+        )
+        .map_err(map_code_graph_error)?;
+        let cancellation = CombinedAtomicGraphCancellationV1 {
+            local: Arc::clone(request_cancelled),
+            registry: Some(Arc::clone(&self.lifecycle_cancelled)),
+        };
+        tracedecay_graph_db::load_sealed_read_bundle_artifact(
+            &self.generations_root,
+            &self.sealed_state_digest,
+            &identity,
+            tracedecay_code_index::graph_projection::INTERACTIVE_CATALOG_ARTIFACT_NAME,
+            &|| {
+                if cancellation.is_cancelled() {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    }
+
+    /// Stages the sealed read bundle's artifacts from the manifest rows the
+    /// seal already holds, before publication consumes them. Streaming to a
+    /// staged temporary file keeps the derivation out of the publish RAM
+    /// peak; nothing becomes visible until [`Self::commit_sealed_read_bundle`]
+    /// runs after the publication succeeds. A staging failure is logged and
+    /// degrades to the open-time re-derivation fallback — it never fails the
+    /// seal itself.
+    fn stage_sealed_read_bundle(
+        &self,
+        manifest: &GraphGenerationManifest,
+        request_cancelled: &Arc<AtomicBool>,
+    ) -> Option<tracedecay_graph_db::SealedReadBundleWriterV1> {
+        let cancellation = CombinedAtomicGraphCancellationV1 {
+            local: Arc::clone(request_cancelled),
+            registry: Some(Arc::clone(&self.lifecycle_cancelled)),
+        };
+        let stage = || {
+            let mut writer = tracedecay_graph_db::SealedReadBundleWriterV1::create(
+                &self.generations_root,
+                &self.sealed_state_digest,
+            )?;
+            writer.stage_artifact(
+                tracedecay_code_index::graph_projection::INTERACTIVE_CATALOG_ARTIFACT_NAME,
+                &mut |out| {
+                    tracedecay_code_index::graph_projection::write_interactive_catalog_artifact(
+                        manifest,
+                        out,
+                        &cancellation,
+                    )
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))
+                },
+            )?;
+            Ok::<_, GraphDbError>(writer)
+        };
+        match stage() {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    generation = %self.generation_id,
+                    "sealed read bundle staging failed; open will re-derive the interactive catalog"
+                );
+                None
+            }
+        }
+    }
+
+    /// Commits a staged sealed read bundle after its generation's publication
+    /// succeeded. Commit failure degrades to the logged open-time fallback.
+    fn commit_sealed_read_bundle(
+        &self,
+        writer: Option<tracedecay_graph_db::SealedReadBundleWriterV1>,
+        identity: &tracedecay_graph_db::GraphGenerationManifestIdentity,
+    ) {
+        let Some(writer) = writer else {
+            return;
+        };
+        match writer.commit(identity, &|| {
+            if self.lifecycle_cancelled.load(Ordering::Acquire) {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(manifest) => {
+                tracing::info!(
+                    generation = %self.generation_id,
+                    artifacts = manifest.artifacts.len(),
+                    "sealed read bundle written at seal"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    generation = %self.generation_id,
+                    "sealed read bundle commit failed; open will re-derive the interactive catalog"
+                );
+            }
+        }
     }
 
     fn sealed_generation_bytes(&self) -> std::result::Result<u64, GraphDbError> {

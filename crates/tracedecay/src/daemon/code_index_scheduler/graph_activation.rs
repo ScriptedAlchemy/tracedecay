@@ -248,14 +248,16 @@ impl CodeGraphActivationAuthorityV1 {
                         "code graph activation task failed: {error}"
                     ))
                 })??;
-                drop(tokio::task::spawn_blocking(move || {
-                    if let Err(error) = pending_catalog_warm.run() {
-                        tracing::warn!(
-                            error = %error,
-                            "background code graph interactive catalog warm failed"
-                        );
-                    }
-                }));
+                if let Some(pending_catalog_warm) = pending_catalog_warm {
+                    drop(tokio::task::spawn_blocking(move || {
+                        if let Err(error) = pending_catalog_warm.run() {
+                            tracing::warn!(
+                                error = %error,
+                                "background code graph interactive catalog warm failed"
+                            );
+                        }
+                    }));
+                }
                 Ok(())
             }
             #[cfg(test)]
@@ -367,7 +369,7 @@ impl LatestCompleteCodeIndexV1 {
         &self,
         retained: crate::daemon::store_runtime::session_registry::RetainedCodeGraphRuntimeV1,
         cancellation: Arc<AtomicBool>,
-    ) -> Result<PendingInteractiveCatalogWarmV1, CodeIndexSchedulerErrorV1> {
+    ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let authority = retained.authority();
         let snapshot = hotpath::measure_block!(
@@ -382,10 +384,67 @@ impl LatestCompleteCodeIndexV1 {
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
-        // Install occurrence-seeded graph serving before the derived catalog
-        // scan. Marking first prevents a request from racing the background
-        // worker and performing the whole scan on its own thread.
-        store.mark_interactive_catalog_warming()?;
+        // A bundled generation loads its interactive catalog from the sealed
+        // read bundle and never runs the projection warm scan. Absent and
+        // stale bundles are typed states: the fallback to the background
+        // re-derivation is explicit and logged, so generations sealed before
+        // bundles existed keep serving exactly as before.
+        let catalog_loaded = match retained.load_sealed_read_bundle_catalog(&cancellation) {
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Loaded {
+                artifact,
+                bytes,
+            }) => match store
+                .install_interactive_catalog_artifact(&bytes, Arc::clone(&graph_cancellation))
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        generation = %generation_id,
+                        bytes = artifact.bytes,
+                        "code graph interactive catalog loaded from sealed read bundle"
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation = %generation_id,
+                        "sealed read bundle catalog failed to install; re-deriving the catalog from the projection"
+                    );
+                    false
+                }
+            },
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Absent { reason }) => {
+                tracing::info!(
+                    generation = %generation_id,
+                    reason = %reason,
+                    "no sealed read bundle catalog; re-deriving the catalog from the projection"
+                );
+                false
+            }
+            Ok(tracedecay_graph_db::SealedReadBundleArtifactStateV1::Stale { detail }) => {
+                tracing::warn!(
+                    generation = %generation_id,
+                    detail = %detail,
+                    "sealed read bundle catalog is stale; re-deriving the catalog from the projection"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    generation = %generation_id,
+                    "sealed read bundle load failed; re-deriving the catalog from the projection"
+                );
+                false
+            }
+        };
+        if !catalog_loaded {
+            // Install occurrence-seeded graph serving before the derived
+            // catalog scan. Marking first prevents a request from racing the
+            // background worker and performing the whole scan on its own
+            // thread.
+            store.mark_interactive_catalog_warming()?;
+        }
         let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
             store.evidence_reader_with_cancellation(
                 &generation_id,
@@ -404,9 +463,14 @@ impl LatestCompleteCodeIndexV1 {
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
-        Ok(PendingInteractiveCatalogWarmV1 {
+        if catalog_loaded {
+            // A bundled generation skips the warm entirely: the catalog is
+            // already ready, so there is no background scan to run.
+            return Ok(None);
+        }
+        Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,
             cancellation: graph_cancellation,
-        })
+        }))
     }
 }

@@ -145,6 +145,26 @@ pub struct GraphGenerationManifestIdentity {
 }
 
 impl GraphGenerationManifestIdentity {
+    /// An identity reconstructed from its metadata parts, with a cold
+    /// dependency-closure memo: the digest is recomputed on first use exactly
+    /// as a cloned identity would.
+    pub fn new(
+        projection: GraphProjectionIdentity,
+        generation: GraphGenerationId,
+        source_generation: SourceGeneration,
+        watermark: GraphWatermark,
+        dependencies: Vec<GraphGenerationDependency>,
+    ) -> Self {
+        Self {
+            projection,
+            generation,
+            source_generation,
+            watermark,
+            dependencies,
+            digest_memo: DependencyClosureDigestMemo::default(),
+        }
+    }
+
     pub fn dependency_closure_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -1012,6 +1032,32 @@ pub(crate) fn reset_dependency_closure_canonicalizations() {
 #[cfg(test)]
 pub(crate) fn dependency_closure_canonicalizations() -> usize {
     DEPENDENCY_CLOSURE_CANONICALIZATIONS.with(std::cell::Cell::get)
+}
+
+/// Digest of the generation identity frames alone, in the exact byte layout
+/// the recovered-generation proof hashes before its entity and relation
+/// frames. This is the binding digest for derived read artifacts (the sealed
+/// read bundle): it reuses [`write_generation_identity_frames`] so there is
+/// exactly one canonical encoding of a generation's identity, never a
+/// parallel authority.
+pub(crate) fn generation_identity_frames_digest(
+    identity: &GraphGenerationManifestIdentity,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<String, GraphDbError> {
+    let mut digest = Sha256::new();
+    let mut writer = CheckedDigestWriter::new(&mut digest, check);
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    write_generation_identity_frames(
+        &mut writer,
+        &mut canonical,
+        &identity.projection,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
+        &identity.dependencies,
+    )?;
+    writer.finish()?;
+    Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
 pub(crate) fn physical_namespace_projection_map(

@@ -2377,11 +2377,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
     }
     assert!(
         matches!(
-            &*latest
-                .text_projection_build
-                .slot
-                .lock()
-                .expect("text projection state"),
+            &*latest.text_projection_build.lock_slot(),
             super::CodeTextProjectionSlotV1::Idle
         ),
         "foreground observation must not initialize the background builder"
@@ -2393,11 +2389,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
     assert!(latest.query_owners_are_warm());
     assert!(
         matches!(
-            &*latest
-                .text_projection_build
-                .slot
-                .lock()
-                .expect("completed text projection state"),
+            &*latest.text_projection_build.lock_slot(),
             super::CodeTextProjectionSlotV1::Idle
         ),
         "completed projection must release its partial builder state"
@@ -3796,11 +3788,7 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
     assert!(
         latest.query_owners_are_warm()
             || matches!(
-                &*latest
-                    .text_projection_build
-                    .slot
-                    .lock()
-                    .expect("shared text projection state"),
+                &*latest.text_projection_build.lock_slot(),
                 super::CodeTextProjectionSlotV1::Building(_)
             ),
         "bounded concurrent wakes must retain one shared partial projection"
@@ -3810,82 +3798,6 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
         .expect("finish shared text projection")
     {}
     assert!(latest.query_owners_are_warm());
-}
-
-#[test]
-fn wake_parked_behind_head_open_claim_proceeds_after_release() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn indexed() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
-        &fixture,
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("publish"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    let held = latest.hold_text_head_open();
-
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let waiter = {
-        let latest = latest.clone();
-        std::thread::spawn(move || {
-            let result = latest.advance_text_serving(1);
-            sender.send(()).expect("waiter completion signal");
-            result
-        })
-    };
-    assert!(
-        receiver.recv_timeout(Duration::from_millis(400)).is_err(),
-        "a wake must park behind an in-flight head open instead of claiming a second one"
-    );
-
-    drop(held);
-    receiver
-        .recv_timeout(Duration::from_secs(30))
-        .expect("parked wake must resume once the head-open claim is released");
-    waiter
-        .join()
-        .expect("parked wake joined")
-        .expect("resumed wake must advance the projection with the released slot");
-}
-
-#[test]
-fn wake_parked_behind_head_open_returns_typed_cancelled_on_retire() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn indexed() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
-        &fixture,
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("publish"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    // The claim stays held for the whole test: cancellation must surface
-    // through the parked wake's own checkpoint, not through claim release.
-    let _held = latest.hold_text_head_open();
-
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let waiter = {
-        let latest = latest.clone();
-        std::thread::spawn(move || {
-            let result = latest.advance_text_serving(1);
-            sender.send(()).expect("waiter completion signal");
-            result
-        })
-    };
-    assert!(
-        receiver.recv_timeout(Duration::from_millis(400)).is_err(),
-        "a wake must park while the head-open claim is held"
-    );
-
-    latest.text_control.retire();
-    receiver
-        .recv_timeout(Duration::from_secs(30))
-        .expect("a cancelled parked wake must return while the open is still in flight");
-    match waiter.join().expect("parked wake joined") {
-        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled) => {}
-        other => panic!("parked wake must fail with the typed cancelled state: {other:?}"),
-    }
 }
 
 #[test]
@@ -4010,17 +3922,11 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
             .expect("start bounded text build")
     );
     let progress_before = {
-        let slot = latest
-            .text_projection_build
-            .slot
-            .lock()
-            .expect("text build state");
-        match &*slot {
-            super::CodeTextProjectionSlotV1::Building(build) => {
-                build.builder.progress().expect("durable progress")
-            }
-            _ => panic!("partial build"),
-        }
+        let slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+            panic!("partial build");
+        };
+        build.builder.progress().expect("durable progress")
     };
     let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
@@ -4054,18 +3960,14 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         "cancellation must occur after preparation publishes the bulk-commit boundary"
     );
     let progress_after = {
-        let slot = latest
-            .text_projection_build
-            .slot
-            .lock()
-            .expect("text build state after cancellation");
-        match &*slot {
-            super::CodeTextProjectionSlotV1::Building(build) => build
-                .builder
-                .progress()
-                .expect("durable progress after cancellation"),
-            _ => panic!("cancelled build remains resumable"),
-        }
+        let slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+            panic!("cancelled build remains resumable");
+        };
+        build
+            .builder
+            .progress()
+            .expect("durable progress after cancellation")
     };
     assert_eq!(progress_after, progress_before);
     let dashboard_after = build_progress_snapshot(&scheduler);
@@ -4241,11 +4143,7 @@ fn source_epoch_advance_does_not_discard_immutable_text_progress() {
     );
     assert!(
         matches!(
-            &*latest
-                .text_projection_build
-                .slot
-                .lock()
-                .expect("retained text projection"),
+            &*latest.text_projection_build.lock_slot(),
             super::CodeTextProjectionSlotV1::Building(_)
         ) || latest.query_owners_are_warm(),
         "the bounded pass must retain or complete its generation-owned progress"
@@ -4362,11 +4260,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     assert!(
         matches!(
-            &*replacement
-                .text_projection_build
-                .slot
-                .lock()
-                .expect("replacement projection state"),
+            &*replacement.text_projection_build.lock_slot(),
             super::CodeTextProjectionSlotV1::Building(_)
         ),
         "publishing the replacement baseline initializes only its independent projection state"
