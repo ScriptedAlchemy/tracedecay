@@ -248,6 +248,7 @@ impl McpDispatchCatalogV1 {
         }
         let canonical = serde_json::to_vec(&by_name)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
+        crate::hotpath_observe::mcp_catalog_entries(by_name.len());
         Ok(Self {
             contracts: by_name,
             fingerprint: CatalogDigest::sha256(canonical),
@@ -263,7 +264,9 @@ impl McpDispatchCatalogV1 {
     }
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
-        self.contracts.get(tool_name)
+        let contract = self.contracts.get(tool_name);
+        crate::hotpath_observe::mcp_contract_lookup(contract.is_some());
+        contract
     }
 
     pub fn contracts(&self) -> impl ExactSizeIterator<Item = &McpDispatchContractV1> {
