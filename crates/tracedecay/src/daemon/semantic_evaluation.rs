@@ -221,11 +221,17 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
     control.checkpoint()?;
     let snapshot = control
-        .interruptible(scheduler.semantic_evaluation_snapshot_for_scope(scope))
+        .interruptible(hotpath::future!(
+            scheduler.semantic_evaluation_snapshot_for_scope(scope),
+            label = "daemon.semantic.evaluation.candidate.code_snapshot"
+        ))
         .await?
         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
     let serving = control
-        .interruptible(scheduler.serving_code_scope(project_root))
+        .interruptible(hotpath::future!(
+            scheduler.serving_code_scope(project_root),
+            label = "daemon.semantic.evaluation.candidate.serving_code"
+        ))
         .await?
         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
     let code = serving
@@ -239,26 +245,40 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     }
 
-    let status = tracedecay_usecases::semantic_runtime::project_semantic_application_status(
-        project_root,
-        None,
+    let status = hotpath::measure_block!(
+        "daemon.semantic.evaluation.candidate.runtime_status",
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+            project_root,
+            None,
+        )
     )
     .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
     let vector_generation_id = semantic_publication_generation(&status.state)?;
     let provider = control
-        .interruptible(scheduler.semantic_vector_graph_provider(project_root))
+        .interruptible(hotpath::future!(
+            scheduler.semantic_vector_graph_provider(project_root),
+            label = "daemon.semantic.evaluation.candidate.vector_provider"
+        ))
         .await?
         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
     let retained = control
-        .interruptible(provider.graph_for_generation(&code))
+        .interruptible(hotpath::future!(
+            provider.graph_for_generation(&code),
+            label = "daemon.semantic.evaluation.candidate.vector_graph"
+        ))
         .await?
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let store =
+    let store = hotpath::measure_block!(
+        "daemon.semantic.evaluation.candidate.vector_store",
         GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
-            .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+    )
+    .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
+    .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
     let vector = control
-        .interruptible(store.generation(&vector_generation_id, Arc::clone(retained.cancellation())))
+        .interruptible(hotpath::future!(
+            store.generation(&vector_generation_id, Arc::clone(retained.cancellation())),
+            label = "daemon.semantic.evaluation.candidate.vector_generation"
+        ))
         .await?
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
         .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
@@ -267,13 +287,20 @@ pub(super) async fn build_daemon_semantic_evaluation_candidate(
     {
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     }
-    let runtime =
+    let runtime = hotpath::measure_block!(
+        "daemon.semantic.evaluation.candidate.production_runtime",
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-            .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let resources = runtime
-        .evaluation_target_resource_requirement()
-        .map_err(coordination_error_from_runtime)?;
-    daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
+    )
+    .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+    let resources = hotpath::measure_block!(
+        "daemon.semantic.evaluation.candidate.resource_requirement",
+        runtime.evaluation_target_resource_requirement()
+    )
+    .map_err(coordination_error_from_runtime)?;
+    hotpath::measure_block!(
+        "daemon.semantic.evaluation.candidate.materialize",
+        daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
+    )
 }
 
 pub(super) fn semantic_publication_generation(
