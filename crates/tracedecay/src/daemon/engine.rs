@@ -719,9 +719,11 @@ impl DaemonEngine {
             let canonical_project_path = project_path
                 .canonicalize()
                 .unwrap_or_else(|_| project_path.clone());
-            self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init)
-                .await?;
-            let composition = production_project_server(
+            Box::pin(
+                self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init),
+            )
+            .await?;
+            let composition = Box::pin(production_project_server(
                 &self.store_administration,
                 self.project_open_gates.as_ref(),
                 &self.invocation,
@@ -732,7 +734,7 @@ impl DaemonEngine {
                 cancellation,
                 #[cfg(test)]
                 Some(&self.project_open_attempts),
-            )
+            ))
             .await?;
             if composition.inserted {
                 self.spawn_project_maintenance_activation(

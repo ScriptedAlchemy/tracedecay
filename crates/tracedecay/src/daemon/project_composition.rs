@@ -522,7 +522,7 @@ pub(super) async fn production_project_server(
     }
     project_open_cancellation_checkpoint(cancellation)?;
     let mcp_construction_started = Instant::now();
-    let core_candidate = crate::mcp::McpServer::new_with_context(core_context).await;
+    let core_candidate = Box::pin(crate::mcp::McpServer::new_with_context(core_context)).await;
     core_candidate
         .install_generation_census_reader(Arc::clone(&generation_census_reader))
         .map_err(|_| TraceDecayError::Config {
@@ -663,7 +663,7 @@ pub(super) async fn production_project_server(
         });
         let session_capabilities_published = AtomicBool::new(false);
         let mut published_full_candidate = None;
-        let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
+        let full_upgrade: Result<Arc<crate::mcp::McpServer>> = Box::pin(async {
             // The core is reachable from here on, so every step below leaves
             // this block with an error instead of returning behind a published
             // route: the funnel around it owns retiring the owner. Retired
@@ -675,29 +675,36 @@ pub(super) async fn production_project_server(
                 });
             }
             project_open_cancellation_checkpoint(cancellation)?;
-            let project_session_open = async {
-                let started = Instant::now();
-                let database = store_administration
-                    .registered_project_session_database(cg.project_root(), cg.store_layout())
+                let project_session_open = async {
+                    let started = Instant::now();
+                    let database = Box::pin(
+                        store_administration.registered_project_session_database(
+                            cg.project_root(),
+                            cg.store_layout(),
+                        ),
+                    )
                     .await?;
-                Ok((database, started.elapsed()))
-            };
-            let profile_session_open = async {
-                let started = Instant::now();
-                let database = store_administration
-                    .registered_profile_session_database()
-                    .await?;
-                Ok((database, started.elapsed()))
-            };
+                    Ok((database, started.elapsed()))
+                };
+                let profile_session_open = async {
+                    let started = Instant::now();
+                    let database =
+                        Box::pin(store_administration.registered_profile_session_database()).await?;
+                    Ok((database, started.elapsed()))
+                };
             let (
                 (registered_project_session_db, project_sessions_elapsed),
                 (registered_user_session_db, profile_sessions_elapsed),
-            ) = join_independent_session_opens(project_session_open, profile_session_open).await?;
+            ) = Box::pin(join_independent_session_opens(
+                project_session_open,
+                profile_session_open,
+            ))
+            .await?;
             if !project_database_is_read_only {
-                bind_verified_project_graph_runtime(
+                Box::pin(bind_verified_project_graph_runtime(
                     Arc::new(cg.db().clone()),
                     registered_project_session_db.as_ref(),
-                )
+                ))
                 .await?;
             }
             log_session_database_admission(
@@ -707,13 +714,11 @@ pub(super) async fn production_project_server(
             );
             let session_db = registered_project_session_db.clone();
             let user_session_db = registered_user_session_db.clone();
-            invocation
-                .service
-                .mount_session_holder_databases([
+            Box::pin(invocation.service.mount_session_holder_databases([
                     registered_profile_db.clone(),
                     user_session_db.clone(),
-                ])
-                .await;
+                ]))
+            .await;
             let delivery_access = project_open_owners::daemon_owned_project_source_access_at(
                 &code_search_scope,
                 canonical_project_path,
@@ -723,22 +728,21 @@ pub(super) async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project delivery source access denied: {error}"),
             })?;
-            project_delivery_mount::ensure_project_delivery_settlement(
+            Box::pin(project_delivery_mount::ensure_project_delivery_settlement(
                 invocation,
                 canonical_project_path,
                 session_db.clone(),
                 &code_search_scope,
                 &delivery_access,
-            )
+            ))
             .await?;
             let host_admission_broker = Some(
-                store_administration
-                    .host_admission_broker(&session_db)
-                    .await?,
+                Box::pin(store_administration.host_admission_broker(&session_db)).await?,
             );
-            let project_session_refresh_wake = store_administration
-                .session_temporal_refresh_schedulers()
-                .ensure_project_with_history(
+            let project_session_refresh_wake = Box::pin(
+                store_administration
+                    .session_temporal_refresh_schedulers()
+                    .ensure_project_with_history(
                     key.owner.clone(),
                     session_db.clone(),
                     Arc::new(
@@ -753,11 +757,13 @@ pub(super) async fn production_project_server(
                                 .codex_discovery(),
                         ),
                     ),
-                )
-                .await;
-            let user_session_refresh_wake = store_administration
-                .session_temporal_refresh_schedulers()
-                .ensure_profile_with_history(
+                ),
+            )
+            .await;
+            let user_session_refresh_wake = Box::pin(
+                store_administration
+                    .session_temporal_refresh_schedulers()
+                    .ensure_profile_with_history(
                     user_session_db.db_path().to_path_buf(),
                     user_session_db.clone(),
                     Arc::new(
@@ -771,11 +777,12 @@ pub(super) async fn production_project_server(
                                 .codex_discovery(),
                         ),
                     ),
-                )
-                .await;
+                ),
+            )
+            .await;
             let session_sync_owner = store_administration.session_sync_service();
-            session_sync_owner
-                .register_project(crate::daemon::session_sync::DaemonSessionSyncConfig {
+            Box::pin(session_sync_owner.register_project(
+                crate::daemon::session_sync::DaemonSessionSyncConfig {
                     brain_id: profile_identity.brain_id().clone(),
                     profile_id: profile_identity.profile_id().clone(),
                     project_id: code_search_project_id.clone(),
@@ -788,8 +795,9 @@ pub(super) async fn production_project_server(
                     startup_import: cg.get_config().sync.session_start_sync,
                     project_refresh: project_session_refresh_wake.clone(),
                     user_refresh: user_session_refresh_wake.clone(),
-                })
-                .await?;
+                },
+            ))
+            .await?;
             let session_sync_port: Arc<
                 dyn tracedecay_application::session_sync::SessionSyncServicePort,
             > = session_sync_owner;
@@ -837,8 +845,10 @@ pub(super) async fn production_project_server(
                 store_telemetry_sampling,
                 Arc::clone(cg.configuration_runtime()),
             );
-            let (delivery_settlement_authority, delivery_settlement_recorder) =
-                project_delivery_settlement_ports(invocation, canonical_project_path).await?;
+            let (delivery_settlement_authority, delivery_settlement_recorder) = Box::pin(
+                project_delivery_settlement_ports(invocation, canonical_project_path),
+            )
+            .await?;
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
                 handshake.scope_prefix.clone(),
@@ -894,7 +904,8 @@ pub(super) async fn production_project_server(
             }
             project_open_cancellation_checkpoint(cancellation)?;
             let full_construction_started = Instant::now();
-            let full_candidate = crate::mcp::McpServer::new_with_context(full_context).await;
+            let full_candidate =
+                Box::pin(crate::mcp::McpServer::new_with_context(full_context)).await;
             full_candidate
                 .install_generation_census_reader(Arc::clone(&generation_census_reader))
                 .map_err(|_| TraceDecayError::Config {
@@ -944,7 +955,7 @@ pub(super) async fn production_project_server(
                     ),
                 ],
             );
-            let full_setup: Result<()> = async {
+            let full_setup: Result<()> = Box::pin(async {
                 let full_setup_started = Instant::now();
                 let log_full_setup_phase = |phase: &'static str| {
                     log_daemon_event(
@@ -964,23 +975,25 @@ pub(super) async fn production_project_server(
                     None
                 } else {
                     Some(
-                        project_open_owners::install_project_open_source_edit_preview_owner(
+                        Box::pin(
+                            project_open_owners::install_project_open_source_edit_preview_owner(
                             full_candidate.as_ref(),
                             Arc::clone(&cg),
                             Arc::clone(&code_graph_projection_read_port),
                             canonical_project_path,
                             &project_id,
+                            ),
                         )
                         .await?,
                     )
                 };
                 log_full_setup_phase("source_edit_preview_ready");
-                ensure_git_index_transactions_for_mutation_owners(
+                Box::pin(ensure_git_index_transactions_for_mutation_owners(
                     store_administration,
                     registered_project_session_db.clone(),
                     canonical_project_path,
                     key.owner.project_id.as_deref(),
-                )
+                ))
                 .await?;
                 log_full_setup_phase("git_transactions_ready");
                 let dependent_owners = if project_database_is_read_only {
@@ -992,7 +1005,8 @@ pub(super) async fn production_project_server(
                                 "writable project did not install source edit preview authority"
                                     .to_owned(),
                         })?;
-                    let state = project_open_owners::register_project_open_production_owners(
+                    let state = Box::pin(
+                        project_open_owners::register_project_open_production_owners(
                         invocation,
                         store_administration.git_index_transaction_services(),
                         store_administration.native_integration_services(),
@@ -1000,16 +1014,18 @@ pub(super) async fn production_project_server(
                         &project_id,
                         full_candidate.as_ref(),
                         source_edit_mutation_ready,
+                        ),
                     )
                     .await?;
                     log_full_setup_phase("independent_owners_registered");
                     Some(state)
                 };
                 project_open_cancellation_checkpoint(cancellation)?;
-                match invocation
-                    .semantic_runtime_registrar()
-                    .register(canonical_project_path.to_path_buf(), semantic_runtime)
-                    .await
+                match Box::pin(invocation.semantic_runtime_registrar().register(
+                    canonical_project_path.to_path_buf(),
+                    semantic_runtime,
+                ))
+                .await
                 {
                     Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
                     Err(DaemonSemanticRuntimeRegistrationError::RegistryClosed) => {
@@ -1020,24 +1036,24 @@ pub(super) async fn production_project_server(
                 }
                 log_full_setup_phase("semantic_runtime_registered");
                 if let Some(dependent_owners) = dependent_owners {
-                    project_open_owners::register_project_open_dependent_owners(
+                    Box::pin(project_open_owners::register_project_open_dependent_owners(
                         invocation,
                         canonical_project_path,
                         full_candidate.as_ref(),
                         dependent_owners,
-                    )
+                    ))
                     .await?;
                     log_full_setup_phase("production_owners_registered");
-                    mount_http_application_router(
+                    Box::pin(mount_http_application_router(
                         http_application_registry,
                         &project_id,
                         canonical_project_path,
-                    )
+                    ))
                     .await?;
                     log_full_setup_phase("http_application_mounted");
                 }
                 Ok(())
-            }
+            })
             .await;
             full_setup?;
             if *current_key.lock().await != key {
@@ -1048,15 +1064,13 @@ pub(super) async fn production_project_server(
             // The registry cutover prevents new core leases. Existing core
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.
-            resolved
-                .revoke_project_server_responses_after_drain()
-                .await;
-            schedule_project_server_retirement(
+            Box::pin(resolved.revoke_project_server_responses_after_drain()).await;
+            Box::pin(schedule_project_server_retirement(
                 store_administration,
                 key.owner.clone(),
                 vec![Arc::clone(&resolved)],
                 None,
-            )
+            ))
             .await;
             full_candidate.publish_doctor_report();
             let indexing_requested = code_index_activation.activate();
@@ -1081,7 +1095,7 @@ pub(super) async fn production_project_server(
                 ],
             );
             Ok(full_candidate)
-        }
+        })
         .await;
         match full_upgrade {
             Ok(full_server) => resolved = full_server,
