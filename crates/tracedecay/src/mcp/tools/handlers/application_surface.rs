@@ -129,6 +129,7 @@ fn complete_protocol_controls_with_ceiling(
     Ok(Some((deadline, cancellation)))
 }
 
+#[hotpath::measure(label = "mcp.application.surface.total")]
 pub(super) async fn handle_application_surface(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
@@ -170,26 +171,32 @@ pub(super) async fn handle_application_surface(
     )?;
     let result = match controls {
         Some((deadline, cancellation)) => {
-            resolve_mcp_application_surface_with_controls_for_target(
-                operation,
-                request_id,
-                request,
-                requested_format,
-                deadline,
-                cancellation,
-                target,
-                executor,
+            hotpath::future!(
+                resolve_mcp_application_surface_with_controls_for_target(
+                    operation,
+                    request_id,
+                    request,
+                    requested_format,
+                    deadline,
+                    cancellation,
+                    target,
+                    executor,
+                ),
+                label = "mcp.application.surface.resolve"
             )
             .await
         }
         None => {
-            resolve_mcp_application_surface_for_target(
-                operation,
-                request_id,
-                request,
-                requested_format,
-                target,
-                executor,
+            hotpath::future!(
+                resolve_mcp_application_surface_for_target(
+                    operation,
+                    request_id,
+                    request,
+                    requested_format,
+                    target,
+                    executor,
+                ),
+                label = "mcp.application.surface.resolve"
             )
             .await
         }

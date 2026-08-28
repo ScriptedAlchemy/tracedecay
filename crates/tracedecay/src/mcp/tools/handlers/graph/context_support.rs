@@ -249,6 +249,7 @@ pub(super) struct ContextMemoryOutcome {
     pub(super) error: Option<String>,
 }
 
+#[hotpath::measure(future = true, label = "mcp.graph.context.memory")]
 pub(super) async fn context_memory_outcome(
     cg: &TraceDecay,
     task: &str,

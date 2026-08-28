@@ -116,6 +116,7 @@ pub(crate) trait ProjectRegistryReadPort: Send + Sync {
 
 /// Reads the registry through `port`, reporting the typed missing-registry
 /// state when no port is mounted.
+#[hotpath::measure(future = true, label = "mcp.project.registry.list")]
 pub(crate) async fn list_registered_projects(
     port: Option<&dyn ProjectRegistryReadPort>,
     command: ProjectRegistryListingCommand,
@@ -128,6 +129,7 @@ pub(crate) async fn list_registered_projects(
 
 /// Resolves one registered project through `port`, reporting the typed
 /// missing-registry state when no port is mounted.
+#[hotpath::measure(future = true, label = "mcp.project.registry.context")]
 pub(crate) async fn read_registered_project_context(
     port: Option<&dyn ProjectRegistryReadPort>,
     command: ProjectRegistryContextCommand,

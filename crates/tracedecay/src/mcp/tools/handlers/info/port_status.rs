@@ -76,6 +76,7 @@ fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
     Some(parent_no_generics.trim().to_string())
 }
 
+#[hotpath::measure(label = "mcp.info.port_status.total")]
 pub(crate) async fn handle_port_status(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -105,83 +106,107 @@ pub(crate) async fn handle_port_status(
         });
     }
 
-    let source_nodes = symbols_in_dir(graph, &request.source_dir, &kinds)?;
-    let target_nodes = symbols_in_dir(graph, &request.target_dir, &kinds)?;
+    let (source_nodes, target_nodes) = hotpath::measure_block!("mcp.info.port_status.symbols", {
+        (
+            symbols_in_dir(graph, &request.source_dir, &kinds)?,
+            symbols_in_dir(graph, &request.target_dir, &kinds)?,
+        )
+    });
 
     // Match key includes the parent qualifier (e.g. enclosing struct/class) for
     // kinds that have one, so `Biquad::new` does NOT collide with `Adaa::new`.
     // Top-level kinds (struct, function, …) keep using name-only matching.
-    let mut target_map = HashMap::<PortKey, Vec<_>>::new();
-    for node in &target_nodes {
-        let metadata = required_metadata(node)?;
-        let key: PortKey = (
-            metadata.simple_name.to_lowercase(),
-            port_parent_qualifier(&metadata.kind, &metadata.qualified_name)
-                .map(|value| value.to_lowercase()),
-            kind_compat_group(&metadata.kind),
-        );
-        target_map.entry(key).or_default().push(node);
-    }
+    let (
+        matched_symbols,
+        unmatched_by_file,
+        target_only,
+        source_count,
+        matched_count,
+        unmatched_count,
+        coverage,
+    ) = hotpath::measure_block!("mcp.info.port_status.match", {
+        let mut target_map = HashMap::<PortKey, Vec<_>>::new();
+        for node in &target_nodes {
+            let metadata = required_metadata(node)?;
+            let key: PortKey = (
+                metadata.simple_name.to_lowercase(),
+                port_parent_qualifier(&metadata.kind, &metadata.qualified_name)
+                    .map(|value| value.to_lowercase()),
+                kind_compat_group(&metadata.kind),
+            );
+            target_map.entry(key).or_default().push(node);
+        }
 
-    let mut matched_symbols = Vec::<PortMatchedSymbolV1>::new();
-    let mut matched_target_ids = HashSet::new();
-    let mut unmatched_by_file = BTreeMap::<String, Vec<PortUnmatchedSymbolV1>>::new();
+        let mut matched_symbols = Vec::<PortMatchedSymbolV1>::new();
+        let mut matched_target_ids = HashSet::new();
+        let mut unmatched_by_file = BTreeMap::<String, Vec<PortUnmatchedSymbolV1>>::new();
 
-    for src_node in &source_nodes {
-        let (source_metadata, source_file) = required_symbol_parts(src_node)?;
-        let key: PortKey = (
-            source_metadata.simple_name.to_lowercase(),
-            port_parent_qualifier(&source_metadata.kind, &source_metadata.qualified_name)
-                .map(|value| value.to_lowercase()),
-            kind_compat_group(&source_metadata.kind),
-        );
-        if let Some(targets) = target_map.get(&key) {
-            // Take the first match
-            let tgt = targets[0];
-            let (target_metadata, target_file) = required_symbol_parts(tgt)?;
-            matched_symbols.push(PortMatchedSymbolV1 {
-                name: source_metadata.simple_name.clone(),
-                source_kind: source_metadata.kind.clone(),
-                target_kind: target_metadata.kind.clone(),
-                source_file: source_file.to_owned(),
-                target_file: target_file.to_owned(),
-            });
-            matched_target_ids.insert(tgt.occurrence.clone());
-        } else {
-            unmatched_by_file
-                .entry(source_file.to_owned())
-                .or_default()
-                .push(PortUnmatchedSymbolV1 {
+        for src_node in &source_nodes {
+            let (source_metadata, source_file) = required_symbol_parts(src_node)?;
+            let key: PortKey = (
+                source_metadata.simple_name.to_lowercase(),
+                port_parent_qualifier(&source_metadata.kind, &source_metadata.qualified_name)
+                    .map(|value| value.to_lowercase()),
+                kind_compat_group(&source_metadata.kind),
+            );
+            if let Some(targets) = target_map.get(&key) {
+                // Take the first match
+                let tgt = targets[0];
+                let (target_metadata, target_file) = required_symbol_parts(tgt)?;
+                matched_symbols.push(PortMatchedSymbolV1 {
                     name: source_metadata.simple_name.clone(),
-                    kind: source_metadata.kind.clone(),
-                    line: source_metadata.start_line.saturating_add(1),
+                    source_kind: source_metadata.kind.clone(),
+                    target_kind: target_metadata.kind.clone(),
+                    source_file: source_file.to_owned(),
+                    target_file: target_file.to_owned(),
                 });
+                matched_target_ids.insert(tgt.occurrence.clone());
+            } else {
+                unmatched_by_file
+                    .entry(source_file.to_owned())
+                    .or_default()
+                    .push(PortUnmatchedSymbolV1 {
+                        name: source_metadata.simple_name.clone(),
+                        kind: source_metadata.kind.clone(),
+                        line: source_metadata.start_line.saturating_add(1),
+                    });
+            }
         }
-    }
 
-    // Target-only symbols (in target but no source match)
-    let mut target_only = Vec::new();
-    for node in &target_nodes {
-        if matched_target_ids.contains(&node.occurrence) {
-            continue;
+        // Target-only symbols (in target but no source match)
+        let mut target_only = Vec::new();
+        for node in &target_nodes {
+            if matched_target_ids.contains(&node.occurrence) {
+                continue;
+            }
+            let (metadata, file) = required_symbol_parts(node)?;
+            target_only.push(PortTargetOnlySymbolV1 {
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                file: file.to_owned(),
+                line: metadata.start_line.saturating_add(1),
+            });
         }
-        let (metadata, file) = required_symbol_parts(node)?;
-        target_only.push(PortTargetOnlySymbolV1 {
-            name: metadata.simple_name.clone(),
-            kind: metadata.kind.clone(),
-            file: file.to_owned(),
-            line: metadata.start_line.saturating_add(1),
-        });
-    }
 
-    let source_count = source_nodes.len();
-    let matched_count = matched_symbols.len();
-    let unmatched_count = source_count - matched_count;
-    let coverage = if source_count > 0 {
-        (matched_count as f64 / source_count as f64) * 100.0
-    } else {
-        0.0
-    };
+        let source_count = source_nodes.len();
+        let matched_count = matched_symbols.len();
+        let unmatched_count = source_count - matched_count;
+        let coverage = if source_count > 0 {
+            (matched_count as f64 / source_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        (
+            matched_symbols,
+            unmatched_by_file,
+            target_only,
+            source_count,
+            matched_count,
+            unmatched_count,
+            coverage,
+        )
+    });
 
     let touched_paths = source_nodes
         .iter()

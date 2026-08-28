@@ -102,6 +102,7 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
 }
 
 /// Lists exact local branch refs. A branch name never selects a branch DB.
+#[hotpath::measure(label = "mcp.git.branch_list.total")]
 pub(crate) async fn handle_branch_list(
     cg: &TraceDecay,
     args: Value,
@@ -124,13 +125,16 @@ pub(crate) async fn handle_branch_list(
         .and_then(Value::as_str)
         .filter(|after| !after.is_empty())
         .map(str::to_owned);
-    match run_branch_ref_read(
-        cg.project_root().to_path_buf(),
-        limit,
-        after,
-        deadline,
-        cancellation,
-        crate::branch::local_branch_snapshots_controlled,
+    match hotpath::future!(
+        run_branch_ref_read(
+            cg.project_root().to_path_buf(),
+            limit,
+            after,
+            deadline,
+            cancellation,
+            crate::branch::local_branch_snapshots_controlled,
+        ),
+        label = "mcp.git.branch_list.ref_read"
     )
     .await
     {
@@ -146,15 +150,18 @@ pub(crate) async fn handle_branch_list(
                     })
                 })
                 .collect::<Vec<_>>();
-            let result = json!({
-                "status": if page.truncated { "partial" } else { "complete" },
-                "reason": page.truncated.then_some("reference_limit"),
-                "snapshot_count": snapshots.len(),
-                "examined": page.examined,
-                "limit": limit,
-                "next_after": page.next_after,
-                "snapshots": snapshots,
-            });
+            let result = hotpath::measure_block!(
+                "mcp.git.branch_list.assemble",
+                json!({
+                    "status": if page.truncated { "partial" } else { "complete" },
+                    "reason": page.truncated.then_some("reference_limit"),
+                    "snapshot_count": snapshots.len(),
+                    "examined": page.examined,
+                    "limit": limit,
+                    "next_after": page.next_after,
+                    "snapshots": snapshots,
+                })
+            );
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
@@ -255,6 +262,7 @@ fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static s
 }
 
 /// Searches the generation sealed for the selected local ref's exact commit.
+#[hotpath::measure(label = "mcp.git.branch_search.total")]
 pub(crate) async fn handle_branch_search(
     cg: &TraceDecay,
     args: Value,
@@ -285,15 +293,18 @@ pub(crate) async fn handle_branch_search(
         .map_or(10, |value| value.min(500) as usize);
     let cursor = super::super::support::retrieval_cursor(&args)?;
     let revision_branch = branch.clone();
-    let revision = match run_branch_ref_read(
-        cg.project_root().to_path_buf(),
-        1,
-        None,
-        deadline.clone(),
-        cancellation.clone(),
-        move |root, control| {
-            crate::branch::local_branch_revision_controlled(root, &revision_branch, control)
-        },
+    let revision = match hotpath::future!(
+        run_branch_ref_read(
+            cg.project_root().to_path_buf(),
+            1,
+            None,
+            deadline.clone(),
+            cancellation.clone(),
+            move |root, control| {
+                crate::branch::local_branch_revision_controlled(root, &revision_branch, control)
+            },
+        ),
+        label = "mcp.git.branch_search.ref_read"
     )
     .await
     {
@@ -329,19 +340,22 @@ pub(crate) async fn handle_branch_search(
                 message: format!("invalid branch reference: {error}"),
             }
         })?;
-    match executor(crate::mcp::server::CodeIndexSearchRequestV1 {
-        project_root: cg.project_root().to_path_buf(),
-        query,
-        source_revision: Some(revision.commit.clone()),
-        source_tree: Some(revision.tree.clone()),
-        source_reference: Some(source_reference),
-        limit,
-        cursor,
-        mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
-        authority: authority.cloned(),
-        deadline,
-        cancellation,
-    })
+    match hotpath::future!(
+        executor(crate::mcp::server::CodeIndexSearchRequestV1 {
+            project_root: cg.project_root().to_path_buf(),
+            query,
+            source_revision: Some(revision.commit.clone()),
+            source_tree: Some(revision.tree.clone()),
+            source_reference: Some(source_reference),
+            limit,
+            cursor,
+            mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
+            authority: authority.cloned(),
+            deadline,
+            cancellation,
+        }),
+        label = "mcp.git.branch_search.search"
+    )
     .await
     {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
@@ -373,17 +387,20 @@ pub(crate) async fn handle_branch_search(
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
-                &json!({
-                    "status": status,
-                    "reason": reason,
-                    "branch": branch,
-                    "source_reference": format!("refs/heads/{branch}"),
-                    "source_revision": revision.commit.as_str(),
-                    "source_tree": revision.tree.as_str(),
-                    "code_generation": complete.code_generation,
-                    "next_cursor": next_cursor,
-                    "results": results,
-                }),
+                &hotpath::measure_block!(
+                    "mcp.git.branch_search.assemble",
+                    json!({
+                        "status": status,
+                        "reason": reason,
+                        "branch": branch,
+                        "source_reference": format!("refs/heads/{branch}"),
+                        "source_revision": revision.commit.as_str(),
+                        "source_tree": revision.tree.as_str(),
+                        "code_generation": complete.code_generation,
+                        "next_cursor": next_cursor,
+                        "results": results,
+                    })
+                ),
                 vec![],
             ))
         }
@@ -487,6 +504,7 @@ fn branch_change_counts(
 }
 
 /// Compares generations sealed for the two selected local refs' exact commits.
+#[hotpath::measure(label = "mcp.git.branch_diff.total")]
 pub(crate) async fn handle_branch_diff(
     cg: &TraceDecay,
     args: Value,
@@ -534,19 +552,28 @@ pub(crate) async fn handle_branch_diff(
     }
     let resolution_base = base_name.clone();
     let resolution_head = head_name.clone();
-    let (base_revision, head_revision) = match run_branch_ref_read(
-        cg.project_root().to_path_buf(),
-        1,
-        None,
-        deadline.clone(),
-        cancellation.clone(),
-        move |root, control| {
-            let base =
-                crate::branch::local_branch_revision_controlled(root, &resolution_base, control)?;
-            let head =
-                crate::branch::local_branch_revision_controlled(root, &resolution_head, control)?;
-            Ok((base, head))
-        },
+    let (base_revision, head_revision) = match hotpath::future!(
+        run_branch_ref_read(
+            cg.project_root().to_path_buf(),
+            1,
+            None,
+            deadline.clone(),
+            cancellation.clone(),
+            move |root, control| {
+                let base = crate::branch::local_branch_revision_controlled(
+                    root,
+                    &resolution_base,
+                    control,
+                )?;
+                let head = crate::branch::local_branch_revision_controlled(
+                    root,
+                    &resolution_head,
+                    control,
+                )?;
+                Ok((base, head))
+            },
+        ),
+        label = "mcp.git.branch_diff.ref_read"
     )
     .await
     {
@@ -575,30 +602,31 @@ pub(crate) async fn handle_branch_diff(
             },
         ));
     };
-    match executor(crate::mcp::server::CodeIndexBranchDiffRequestV1 {
-        project_root: cg.project_root().to_path_buf(),
-        base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}")).map_err(
-            |error| TraceDecayError::Config {
-                message: format!("invalid base branch reference: {error}"),
-            },
-        )?,
-        base_revision: base_revision.commit.clone(),
-        base_tree: base_revision.tree.clone(),
-        head_reference: tracedecay_domain::RefId::new(format!("refs/heads/{head_name}")).map_err(
-            |error| TraceDecayError::Config {
-                message: format!("invalid head branch reference: {error}"),
-            },
-        )?,
-        head_revision: head_revision.commit.clone(),
-        head_tree: head_revision.tree.clone(),
-        file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
-        kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
-        limit,
-        cursor,
-        authority: authority.cloned(),
-        deadline,
-        cancellation,
-    })
+    match hotpath::future!(
+        executor(crate::mcp::server::CodeIndexBranchDiffRequestV1 {
+            project_root: cg.project_root().to_path_buf(),
+            base_reference: tracedecay_domain::RefId::new(format!("refs/heads/{base_name}"))
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid base branch reference: {error}"),
+                })?,
+            base_revision: base_revision.commit.clone(),
+            base_tree: base_revision.tree.clone(),
+            head_reference: tracedecay_domain::RefId::new(format!("refs/heads/{head_name}"))
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid head branch reference: {error}"),
+                })?,
+            head_revision: head_revision.commit.clone(),
+            head_tree: head_revision.tree.clone(),
+            file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
+            kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
+            limit,
+            cursor,
+            authority: authority.cloned(),
+            deadline,
+            cancellation,
+        }),
+        label = "mcp.git.branch_diff.diff"
+    )
     .await
     {
         crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Complete(completed) => {
@@ -612,24 +640,27 @@ pub(crate) async fn handle_branch_diff(
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
-                &json!({
-                    "status": "complete",
-                    "base": base_name,
-                    "head": head_name,
-                    "base_revision": base_revision.commit.as_str(),
-                    "base_tree": base_revision.tree.as_str(),
-                    "head_revision": head_revision.commit.as_str(),
-                    "head_tree": head_revision.tree.as_str(),
-                    "base_generation": completed.base_generation,
-                    "head_generation": completed.head_generation,
-                    "total_changes": completed.total_changes,
-                    "summary": {
-                        "added": added,
-                        "removed": removed,
-                        "changed": changed,
-                    },
-                    "changes": changes,
-                }),
+                &hotpath::measure_block!(
+                    "mcp.git.branch_diff.assemble",
+                    json!({
+                        "status": "complete",
+                        "base": base_name,
+                        "head": head_name,
+                        "base_revision": base_revision.commit.as_str(),
+                        "base_tree": base_revision.tree.as_str(),
+                        "head_revision": head_revision.commit.as_str(),
+                        "head_tree": head_revision.tree.as_str(),
+                        "base_generation": completed.base_generation,
+                        "head_generation": completed.head_generation,
+                        "total_changes": completed.total_changes,
+                        "summary": {
+                            "added": added,
+                            "removed": removed,
+                            "changed": changed,
+                        },
+                        "changes": changes,
+                    })
+                ),
                 touched,
             ))
         }
@@ -644,26 +675,29 @@ pub(crate) async fn handle_branch_diff(
             Ok(generic_tool_result(
                 Some(cg.project_root()),
                 &args,
-                &json!({
-                    "status": "partial",
-                    "reason": partial.reason.as_str(),
-                    "base": base_name,
-                    "head": head_name,
-                    "base_revision": base_revision.commit.as_str(),
-                    "base_tree": base_revision.tree.as_str(),
-                    "head_revision": head_revision.commit.as_str(),
-                    "head_tree": head_revision.tree.as_str(),
-                    "base_generation": partial.base_generation,
-                    "head_generation": partial.head_generation,
-                    "total_changes": partial.total_changes,
-                    "next_cursor": partial.next_cursor,
-                    "summary": {
-                        "added": added,
-                        "removed": removed,
-                        "changed": changed,
-                    },
-                    "changes": changes,
-                }),
+                &hotpath::measure_block!(
+                    "mcp.git.branch_diff.assemble",
+                    json!({
+                        "status": "partial",
+                        "reason": partial.reason.as_str(),
+                        "base": base_name,
+                        "head": head_name,
+                        "base_revision": base_revision.commit.as_str(),
+                        "base_tree": base_revision.tree.as_str(),
+                        "head_revision": head_revision.commit.as_str(),
+                        "head_tree": head_revision.tree.as_str(),
+                        "base_generation": partial.base_generation,
+                        "head_generation": partial.head_generation,
+                        "total_changes": partial.total_changes,
+                        "next_cursor": partial.next_cursor,
+                        "summary": {
+                            "added": added,
+                            "removed": removed,
+                            "changed": changed,
+                        },
+                        "changes": changes,
+                    })
+                ),
                 touched,
             ))
         }

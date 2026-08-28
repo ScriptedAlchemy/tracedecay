@@ -137,6 +137,7 @@ fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) ->
     Value::Object(value)
 }
 
+#[hotpath::measure(future = true, label = "mcp.admin.project.total")]
 pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,

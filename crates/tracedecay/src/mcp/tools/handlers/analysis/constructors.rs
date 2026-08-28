@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "mcp.analysis.constructors.total")]
 pub(crate) async fn handle_constructors(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -19,33 +20,39 @@ pub(crate) async fn handle_constructors(
         .and_then(serde_json::Value::as_u64)
         .map_or(100, |v| v.clamp(1, 1000) as usize);
 
-    let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
-    let struct_nodes = candidates
-        .into_iter()
-        .map(|symbol| {
-            let metadata = symbol.metadata.as_ref().ok_or_else(|| {
-                TraceDecayError::project_route(
-                    "code-graph-corrupt",
-                    false,
-                    "constructor candidate is missing extraction-attested metadata",
-                )
-            })?;
-            let is_container = matches!(metadata.kind.as_str(), "struct" | "class" | "case_class");
-            Ok(is_container.then_some(symbol))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let struct_nodes = hotpath::measure_block!("mcp.analysis.constructors.resolve", {
+        let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
+        candidates
+            .into_iter()
+            .map(|symbol| {
+                let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "code-graph-corrupt",
+                        false,
+                        "constructor candidate is missing extraction-attested metadata",
+                    )
+                })?;
+                let is_container =
+                    matches!(metadata.kind.as_str(), "struct" | "class" | "case_class");
+                Ok(is_container.then_some(symbol))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    });
 
     if struct_nodes.is_empty() {
-        let payload = json!({
-            "found": false,
-            "struct": struct_name,
-            "message": format!("No struct, class, or case-class named '{struct_name}' found."),
-            "match_count": 0,
-            "sites": [],
-        });
+        let payload = hotpath::measure_block!(
+            "mcp.analysis.constructors.assemble",
+            json!({
+                "found": false,
+                "struct": struct_name,
+                "message": format!("No struct, class, or case-class named '{struct_name}' found."),
+                "match_count": 0,
+                "sites": [],
+            })
+        );
         return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
@@ -54,31 +61,33 @@ pub(crate) async fn handle_constructors(
         ));
     }
 
-    let mut expected_fields: HashSet<String> = HashSet::new();
-    let seeds = struct_nodes
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    for children in graph.callees(&seeds, &[RelationEdgeKindV1::Contains], 10_000)? {
-        for child in children {
-            let metadata = child.neighbor.metadata.ok_or_else(|| {
-                TraceDecayError::project_route(
-                    "code-graph-corrupt",
-                    false,
-                    "constructor field relation is missing extraction-attested metadata",
-                )
-            })?;
-            if matches!(metadata.kind.as_str(), "field" | "val_field" | "var_field") {
-                expected_fields.insert(metadata.simple_name);
+    let (expected_fields, files) = hotpath::measure_block!("mcp.analysis.constructors.graph", {
+        let mut expected_fields: HashSet<String> = HashSet::new();
+        let seeds = struct_nodes
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>();
+        for children in graph.callees(&seeds, &[RelationEdgeKindV1::Contains], 10_000)? {
+            for child in children {
+                let metadata = child.neighbor.metadata.ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "code-graph-corrupt",
+                        false,
+                        "constructor field relation is missing extraction-attested metadata",
+                    )
+                })?;
+                if matches!(metadata.kind.as_str(), "field" | "val_field" | "var_field") {
+                    expected_fields.insert(metadata.simple_name);
+                }
             }
         }
-    }
-
+        let files = verified_analysis_symbols(graph, scope_prefix)?
+            .into_iter()
+            .map(|symbol| symbol.path)
+            .collect::<HashSet<_>>();
+        (expected_fields, files)
+    });
     let project_root = cg.project_root();
-    let files = verified_analysis_symbols(graph, scope_prefix)?
-        .into_iter()
-        .map(|symbol| symbol.path)
-        .collect::<HashSet<_>>();
 
     // Reading and parsing every source file in the project is a long CPU and
     // I/O slice with no await points. Running it inline pinned a request
@@ -91,55 +100,61 @@ pub(crate) async fn handle_constructors(
     let scan_struct = struct_name.to_string();
     let scan_fields = expected_fields.clone();
 
-    let (sites, touched) = tokio::task::spawn_blocking(move || {
-        let mut sites: Vec<Value> = Vec::new();
-        let mut touched: Vec<String> = Vec::new();
+    let (sites, touched) = hotpath::future!(
+        tokio::task::spawn_blocking(move || {
+            let mut sites: Vec<Value> = Vec::new();
+            let mut touched: Vec<String> = Vec::new();
 
-        'outer: for path in &scan_paths {
-            let abs = scan_root.join(path);
-            let Ok(source) = crate::sync::read_source_file(&abs) else {
-                continue;
-            };
-
-            for site in find_struct_literals(&source, &scan_struct) {
-                let field_list = parse_literal_fields(&source, site.brace_open_byte);
-                let missing: Vec<String> = if scan_fields.is_empty() {
-                    Vec::new()
-                } else {
-                    scan_fields
-                        .iter()
-                        .filter(|f| !field_list.contains(f))
-                        .cloned()
-                        .collect()
+            'outer: for path in &scan_paths {
+                let abs = scan_root.join(path);
+                let Ok(source) = crate::sync::read_source_file(&abs) else {
+                    continue;
                 };
-                if !touched.contains(path) {
-                    touched.push(path.clone());
-                }
-                sites.push(json!({
-                    "file": path,
-                    "line": site.line,
-                    "fields": field_list,
-                    "missing_fields": missing,
-                }));
-                if sites.len() >= limit {
-                    break 'outer;
+
+                for site in find_struct_literals(&source, &scan_struct) {
+                    let field_list = parse_literal_fields(&source, site.brace_open_byte);
+                    let missing: Vec<String> = if scan_fields.is_empty() {
+                        Vec::new()
+                    } else {
+                        scan_fields
+                            .iter()
+                            .filter(|f| !field_list.contains(f))
+                            .cloned()
+                            .collect()
+                    };
+                    if !touched.contains(path) {
+                        touched.push(path.clone());
+                    }
+                    sites.push(json!({
+                        "file": path,
+                        "line": site.line,
+                        "fields": field_list,
+                        "missing_fields": missing,
+                    }));
+                    if sites.len() >= limit {
+                        break 'outer;
+                    }
                 }
             }
-        }
 
-        (sites, touched)
-    })
+            (sites, touched)
+        }),
+        label = "mcp.analysis.constructors.scan"
+    )
     .await
     .map_err(|e| TraceDecayError::Config {
         message: format!("tracedecay_constructors scan failed to join: {e}"),
     })?;
 
-    let payload = json!({
-        "struct": struct_name,
-        "expected_fields": expected_fields.iter().cloned().collect::<Vec<_>>(),
-        "match_count": sites.len(),
-        "sites": sites,
-    });
+    let payload = hotpath::measure_block!(
+        "mcp.analysis.constructors.assemble",
+        json!({
+            "struct": struct_name,
+            "expected_fields": expected_fields.iter().cloned().collect::<Vec<_>>(),
+            "match_count": sites.len(),
+            "sites": sites,
+        })
+    );
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,

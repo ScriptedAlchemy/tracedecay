@@ -255,6 +255,7 @@ fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
     })
 }
 
+#[hotpath::measure(label = "mcp.admin.cli.total")]
 async fn dispatch_admin_cli(
     context: AdminCliContext<'_>,
     action: AdminCliAction,
@@ -263,14 +264,17 @@ async fn dispatch_admin_cli(
     let value = match action {
         AdminCliAction::CostSummary { range } => {
             let provider_scope = context.provider_usage_scope()?;
-            cost_summary(
-                context.require_accounting_db()?,
-                context
-                    .registered_project_session_db
-                    .map(std::convert::AsRef::as_ref),
-                provider_scope.as_ref(),
-                context.project_root(),
-                &range,
+            hotpath::future!(
+                cost_summary(
+                    context.require_accounting_db()?,
+                    context
+                        .registered_project_session_db
+                        .map(std::convert::AsRef::as_ref),
+                    provider_scope.as_ref(),
+                    context.project_root(),
+                    &range,
+                ),
+                label = "mcp.admin.cli.cost"
             )
             .await?
         }
@@ -648,6 +652,7 @@ fn unavailable_provider_usage_cost_summary()
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.admin.cli.session_sync")]
 async fn execute_session_sync(
     context: &AdminCliContext<'_>,
     command: SessionSyncCommandV1,
@@ -748,6 +753,7 @@ fn session_sync_scope(context: &AdminCliContext<'_>) -> Result<SessionSyncScopeV
     ))
 }
 
+#[hotpath::measure(future = true, label = "mcp.admin.cli.session_control")]
 async fn control_session_sync(
     context: &AdminCliContext<'_>,
     idempotency_key: String,

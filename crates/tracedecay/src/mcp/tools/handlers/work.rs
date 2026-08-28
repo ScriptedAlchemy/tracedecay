@@ -19,7 +19,7 @@ use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_re
 
 use super::tool_call_support::json_result;
 
-#[hotpath::measure(label = "mcp.dispatch.work")]
+#[hotpath::measure(future = true, label = "mcp.work.total")]
 pub(super) async fn handle_work(
     tool_name: &str,
     mut body: Value,
@@ -28,22 +28,26 @@ pub(super) async fn handle_work(
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
-    let operation = work_operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
-        message: format!("unknown tool: {tool_name}"),
-    })?;
-    let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
-    let controls = work_controls(
-        operation,
-        &request_id,
-        protocol_deadline,
-        protocol_cancellation,
-    )?;
-    if let Some(object) = body.as_object_mut() {
-        // MCP presentation and request-correlation fields never belong to a
-        // typed Work request body.
-        object.remove("format");
-        object.remove("__mcp_request_id");
-    }
+    let (operation, request_id, controls) = hotpath::measure_block!("mcp.work.request_build", {
+        let operation =
+            work_operation_for_tool(tool_name).ok_or_else(|| TraceDecayError::Config {
+                message: format!("unknown tool: {tool_name}"),
+            })?;
+        let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
+        let controls = work_controls(
+            operation,
+            &request_id,
+            protocol_deadline,
+            protocol_cancellation,
+        )?;
+        if let Some(object) = body.as_object_mut() {
+            // MCP presentation and request-correlation fields never belong to a
+            // typed Work request body.
+            object.remove("format");
+            object.remove("__mcp_request_id");
+        }
+        (operation, request_id, controls)
+    });
     let Some(executor) = executor else {
         return Err(TraceDecayError::project_route(
             "work.daemon_unavailable",
@@ -70,21 +74,23 @@ pub(super) async fn handle_work(
                 format!("The Work application response could not be read: {error}"),
             )
         })?;
-    let payload = serde_json::from_slice::<Value>(&body).map_err(|error| {
-        TraceDecayError::project_route(
-            "work.response_invalid",
-            true,
-            format!("The Work application response was not valid JSON: {error}"),
+    hotpath::measure_block!("mcp.work.result_assemble", {
+        let payload = serde_json::from_slice::<Value>(&body).map_err(|error| {
+            TraceDecayError::project_route(
+                "work.response_invalid",
+                true,
+                format!("The Work application response was not valid JSON: {error}"),
+            )
+        })?;
+        let result = json_result(&payload);
+        Ok(
+            if payload.get("kind").and_then(Value::as_str) == Some("problem") {
+                result.with_semantic_error(true)
+            } else {
+                result.with_semantic_error(false)
+            },
         )
-    })?;
-    let result = json_result(&payload);
-    Ok(
-        if payload.get("kind").and_then(Value::as_str) == Some("problem") {
-            result.with_semantic_error(true)
-        } else {
-            result.with_semantic_error(false)
-        },
-    )
+    })
 }
 
 pub(super) fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> {

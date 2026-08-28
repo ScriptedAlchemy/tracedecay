@@ -87,6 +87,7 @@ fn json_by_skill<T: Serialize>(
         .collect()
 }
 
+#[hotpath::measure(label = "mcp.automation.skill_list.total")]
 pub(super) async fn handle_skill_list(
     cg: &TraceDecay,
     args: Value,
@@ -96,7 +97,11 @@ pub(super) async fn handle_skill_list(
     sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let state = parse_state(&args)?;
     let include_body = optional_bool(&args, "include_body", false);
-    let mut skills = list_managed_skills(&profile_root).await?;
+    let mut skills = hotpath::future!(
+        list_managed_skills(&profile_root),
+        label = "mcp.automation.skill_list.load"
+    )
+    .await?;
     if let Some(state) = state {
         skills.retain(|skill| skill.metadata.state == state);
     }
@@ -148,6 +153,7 @@ pub(super) async fn handle_skill_list(
     ))
 }
 
+#[hotpath::measure(label = "mcp.automation.skill_view.total")]
 pub(super) async fn handle_skill_view(
     cg: &TraceDecay,
     args: Value,
@@ -156,7 +162,11 @@ pub(super) async fn handle_skill_view(
     let profile_root = crate::storage::default_profile_root()?;
     sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
     let include_support_files = optional_bool(&args, "include_support_files", true);
-    let mut skill = load_managed_skill(&profile_root, required_str(&args, "id")?).await?;
+    let mut skill = hotpath::future!(
+        load_managed_skill(&profile_root, required_str(&args, "id")?),
+        label = "mcp.automation.skill_view.load"
+    )
+    .await?;
     let targets = skill
         .metadata
         .targets
@@ -220,6 +230,7 @@ pub(super) async fn handle_skill_view(
     ))
 }
 
+#[hotpath::measure(label = "mcp.automation.artifact_view.total")]
 pub(super) async fn handle_automation_run_artifact_view(
     cg: &TraceDecay,
     args: Value,
@@ -227,9 +238,12 @@ pub(super) async fn handle_automation_run_artifact_view(
     let run_id = required_str(&args, "run_id")?;
     let kind = required_str(&args, "kind")?;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let record = find_run_record(&dashboard_root, run_id)
-        .await?
-        .ok_or_else(|| config_error(format!("automation run not found: {run_id}")))?;
+    let record = hotpath::future!(
+        find_run_record(&dashboard_root, run_id),
+        label = "mcp.automation.artifact_view.load"
+    )
+    .await?
+    .ok_or_else(|| config_error(format!("automation run not found: {run_id}")))?;
     let artifact = record
         .artifacts
         .iter()
@@ -239,7 +253,11 @@ pub(super) async fn handle_automation_run_artifact_view(
                 "automation run artifact not found: {run_id}/{kind}"
             ))
         })?;
-    let payload = read_run_artifact_payload(&dashboard_root, &record.run_id, artifact).await?;
+    let payload = hotpath::future!(
+        read_run_artifact_payload(&dashboard_root, &record.run_id, artifact),
+        label = "mcp.automation.artifact_view.read"
+    )
+    .await?;
     let payload = json!({
         "status": "ok",
         "run_id": record.run_id,
@@ -269,6 +287,7 @@ async fn sync_project_skill_analytics(
     .map(|_| ())
 }
 
+#[hotpath::measure(label = "mcp.automation.hermes_bridge.total")]
 pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let snapshot = load_standard_hermes_skill_bridge(HermesSkillBridgeOptions {
         include_skill_bodies: optional_bool(args, "include_skill_bodies", false),

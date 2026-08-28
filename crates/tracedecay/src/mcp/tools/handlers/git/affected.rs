@@ -107,6 +107,7 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
     Ok(AffectedTestTraversal { test_distances })
 }
 
+#[hotpath::measure(label = "mcp.git.affected.total")]
 pub(crate) async fn handle_affected(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -118,14 +119,20 @@ pub(crate) async fn handle_affected(
     let custom_filter = args.get("filter").and_then(|v| v.as_str());
     let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
 
-    let files_with_inline_tests = graph.test_annotated_logical_files(None, 500_000, 2_000_000)?;
+    let files_with_inline_tests = hotpath::measure_block!(
+        "mcp.git.affected.test_annotations",
+        graph.test_annotated_logical_files(None, 500_000, 2_000_000)?
+    );
     let dependents = VerifiedAffectedTestDependents { query: graph };
-    let traversal = collect_affected_test_files(
-        &dependents,
-        &files,
-        max_depth,
-        custom_glob.as_ref(),
-        &files_with_inline_tests,
+    let traversal = hotpath::future!(
+        collect_affected_test_files(
+            &dependents,
+            &files,
+            max_depth,
+            custom_glob.as_ref(),
+            &files_with_inline_tests,
+        ),
+        label = "mcp.git.affected.traverse"
     )
     .await?;
 
@@ -151,19 +158,22 @@ pub(crate) async fn handle_affected(
         .collect::<Vec<_>>();
 
     let touched_files = unique_file_paths(result.iter().map(std::string::String::as_str));
-    let output = json!({
-        "changed_files": files,
-        "affected_tests": result,
-        "count": result.len(),
-        "ranked_tests": ranked_tests,
-        "recommended_tests": recommended_tests,
-        "ranking_metadata": {
-            "strategy": "dependency_distance_then_path",
-            "distance": "minimum file-dependency hops from the changed files",
-            "recommended_proximity": ["changed", "direct", "near"],
-            "compatibility_field": "affected_tests",
-        },
-    });
+    let output = hotpath::measure_block!(
+        "mcp.git.affected.assemble",
+        json!({
+            "changed_files": files,
+            "affected_tests": result,
+            "count": result.len(),
+            "ranked_tests": ranked_tests,
+            "recommended_tests": recommended_tests,
+            "ranking_metadata": {
+                "strategy": "dependency_distance_then_path",
+                "distance": "minimum file-dependency hops from the changed files",
+                "recommended_proximity": ["changed", "direct", "near"],
+                "compatibility_field": "affected_tests",
+            },
+        })
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),

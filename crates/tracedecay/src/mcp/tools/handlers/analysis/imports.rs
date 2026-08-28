@@ -180,6 +180,7 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 /// covers the whole scope. `limit` cuts the walk between files rather than
 /// between one file's findings, so a page can exceed it by the last file's
 /// remainder and no finding is stranded behind the cursor.
+#[hotpath::measure(label = "mcp.analysis.unused_imports.total")]
 pub(crate) async fn handle_unused_imports(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -197,19 +198,22 @@ pub(crate) async fn handle_unused_imports(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    let mut use_symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
-    for symbol in verified_analysis_symbols(graph, scope_prefix)? {
-        if symbol.metadata.kind == "use" {
-            use_symbols_by_file
-                .entry(symbol.path.clone())
-                .or_default()
-                .push(symbol);
+    let use_symbols_by_file = hotpath::measure_block!("mcp.analysis.unused_imports.graph", {
+        let mut use_symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+        for symbol in verified_analysis_symbols(graph, scope_prefix)? {
+            if symbol.metadata.kind == "use" {
+                use_symbols_by_file
+                    .entry(symbol.path.clone())
+                    .or_default()
+                    .push(symbol);
+            }
         }
-    }
+        use_symbols_by_file
+    });
     // Graph phase is done. Each candidate file is read and masked, so the
     // walk belongs on a blocking worker like the sibling analysis scans.
     let project_root = cg.project_root().to_path_buf();
-    let (unused, touched, scanned_files, last_scanned, mut partial_reason) =
+    let (unused, touched, scanned_files, last_scanned, mut partial_reason) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut unused: Vec<Value> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
@@ -249,11 +253,13 @@ pub(crate) async fn handle_unused_imports(
                 }
             }
             Ok((unused, touched, scanned_files, last_scanned, partial_reason))
-        })
-        .await
-        .map_err(|join_error| TraceDecayError::Config {
-            message: format!("tracedecay_unused_imports scan failed to join: {join_error}"),
-        })??;
+        }),
+        label = "mcp.analysis.unused_imports.scan"
+    )
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("tracedecay_unused_imports scan failed to join: {join_error}"),
+    })??;
     // A partial answer without a resumable cursor would be a dead end, so a
     // stop that produced no inspected file is reported as complete coverage of
     // what the scope contains rather than a fabricated continuation.
@@ -264,15 +270,18 @@ pub(crate) async fn handle_unused_imports(
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
-    let output = json!({
-        "unused_import_count": unused.len(),
-        "imports": unused,
-        "limit": limit,
-        "scanned_files": scanned_files,
-        "complete": partial_reason.is_none(),
-        "partial_reason": partial_reason,
-        "next_cursor": next_cursor,
-    });
+    let output = hotpath::measure_block!(
+        "mcp.analysis.unused_imports.assemble",
+        json!({
+            "unused_import_count": unused.len(),
+            "imports": unused,
+            "limit": limit,
+            "scanned_files": scanned_files,
+            "complete": partial_reason.is_none(),
+            "partial_reason": partial_reason,
+            "next_cursor": next_cursor,
+        })
+    );
 
     Ok(rendered_tool_result(
         Some(cg.project_root()),

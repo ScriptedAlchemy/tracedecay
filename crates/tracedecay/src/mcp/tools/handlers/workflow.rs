@@ -135,6 +135,7 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 }
 
 /// Handles `tracedecay_diagnose`.
+#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
 pub(super) async fn handle_diagnose(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -161,14 +162,16 @@ pub(super) async fn handle_diagnose(
         .and_then(serde_json::Value::as_u64)
         .map_or(50_usize, |v| v.min(500) as usize);
 
-    let mut diagnostics: Vec<_> = parse_cargo_output(cargo_output)
-        .into_iter()
-        .filter(|d| match severity_filter {
-            "error" => d.severity == Severity::Error,
-            "warning" => d.severity == Severity::Warning,
-            _ => true,
-        })
-        .collect();
+    let mut diagnostics: Vec<_> = hotpath::measure_block!("mcp.workflow.diagnose.parse", {
+        parse_cargo_output(cargo_output)
+            .into_iter()
+            .filter(|d| match severity_filter {
+                "error" => d.severity == Severity::Error,
+                "warning" => d.severity == Severity::Warning,
+                _ => true,
+            })
+            .collect()
+    });
     let total = diagnostics.len();
     diagnostics.truncate(max_diagnostics);
 
@@ -250,15 +253,18 @@ pub(super) async fn handle_diagnose(
         publish_parsed_compiler_diagnostics(cg, code_index_identity, &diagnostics).await;
 
     let mapped = items.iter().filter(|i| !i["node"].is_null()).count();
-    let body = json!({
-        "diagnostics_parsed": total,
-        "diagnostics_returned": items.len(),
-        "mapped_to_node": mapped,
-        "unmapped": items.len() - mapped,
-        "truncated": total > items.len(),
-        "published": publication,
-        "diagnostics": items,
-    });
+    let body = hotpath::measure_block!(
+        "mcp.workflow.diagnose.assemble",
+        json!({
+            "diagnostics_parsed": total,
+            "diagnostics_returned": items.len(),
+            "mapped_to_node": mapped,
+            "unmapped": items.len() - mapped,
+            "truncated": total > items.len(),
+            "published": publication,
+            "diagnostics": items,
+        })
+    );
     Ok(rendered_tool_result(
         Some(cg.project_root()),
         &args,
@@ -369,6 +375,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// resolver — a direct, non-daemon server — the honest outcome is to publish
 /// nothing under a named reason rather than to guess a repository-relative
 /// path, which the projection could only refuse.
+#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.publish")]
 async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
@@ -448,6 +455,7 @@ fn compiler_publication_report(
 
 /// Runs the maintained redundancy journey once and indexes its already-ranked
 /// structural pairs by both endpoint identities for diagnostic enrichment.
+#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.redundancy")]
 async fn diagnose_redundancy_index(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -525,6 +533,7 @@ pub(super) async fn handle_run_affected_tests(
     .await
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
 async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -552,7 +561,10 @@ where
         return Ok(empty_result(&args, "no changed files detected"));
     }
 
-    let test_targets = collect_affected_test_targets(graph, &changed_paths)?;
+    let test_targets = hotpath::measure_block!(
+        "mcp.workflow.affected_tests.graph",
+        collect_affected_test_targets(graph, &changed_paths)
+    )?;
 
     if test_targets.is_empty() {
         return Ok(empty_result(
@@ -632,7 +644,10 @@ where
         }
     };
 
-    let results = parse_libtest_output(&output.stdout);
+    let results = hotpath::measure_block!(
+        "mcp.workflow.affected_tests.parse",
+        parse_libtest_output(&output.stdout)
+    );
     if let Some(test_name) = missing_requested_test(&test_names, &results) {
         let any_requested_result = results
             .iter()
@@ -674,15 +689,18 @@ where
     .await?;
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
-    let body = run_affected_tests_body(
-        output.exit_code,
-        &results,
-        &test_names,
-        truncated,
-        &selected_targets,
-        &output.stderr,
-        &output.stdout,
-        managed_test_terminal(&emitter, &receipt),
+    let body = hotpath::measure_block!(
+        "mcp.workflow.affected_tests.assemble",
+        run_affected_tests_body(
+            output.exit_code,
+            &results,
+            &test_names,
+            truncated,
+            &selected_targets,
+            &output.stderr,
+            &output.stdout,
+            managed_test_terminal(&emitter, &receipt)
+        )
     );
 
     Ok(generic_tool_result(
@@ -717,6 +735,7 @@ async fn wait_for_test_run_cancellation(
     }
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.begin")]
 async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
@@ -769,6 +788,7 @@ async fn begin_test_run(
         .map_err(test_run_event_error)
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.digests")]
 async fn managed_test_document_content_digests(
     root: &Path,
     changed_paths: &[String],
@@ -830,6 +850,7 @@ fn current_head_commit_id(root: &Path) -> Option<CommitId> {
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.emit")]
 async fn emit_observed_test_results(
     emitter: &OperationEmitter,
     results: &[(String, bool)],
@@ -848,6 +869,7 @@ async fn emit_observed_test_results(
         .map_err(test_run_event_error)
 }
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
 async fn finish_test_run(
     emitter: &OperationEmitter,
     started_at: UtcMicros,

@@ -76,6 +76,7 @@ fn verify_arg(args: &Value) -> bool {
     args.get("verify").and_then(Value::as_bool).unwrap_or(false)
 }
 
+#[hotpath::measure(label = "mcp.edit.apply.total")]
 async fn source_edit_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -104,14 +105,17 @@ async fn source_edit_tool_result(
             message: "daemon-owned source edit authority is unavailable".to_owned(),
         });
     };
-    let result = executor(SourceEditInvocationV1 {
-        edit: request,
-        idempotency_key,
-        expected_state,
-        request_id,
-        deadline,
-        cancellation,
-    })
+    let result = hotpath::future!(
+        executor(SourceEditInvocationV1 {
+            edit: request,
+            idempotency_key,
+            expected_state,
+            request_id,
+            deadline,
+            cancellation,
+        }),
+        label = "mcp.edit.apply.execute"
+    )
     .await?;
     let value = source_edit_surface_value(&result)?;
     let touched_files = result.outcome.touched_files();
@@ -141,6 +145,7 @@ pub(super) struct SourceEditInvocationContext {
     pub(super) cancellation: Option<CancellationSignal>,
 }
 
+#[hotpath::measure(label = "mcp.edit.rollback.total")]
 pub(super) async fn handle_source_edit_rollback(
     cg: &TraceDecay,
     args: Value,
@@ -181,16 +186,19 @@ pub(super) async fn handle_source_edit_rollback(
             message: "daemon-owned source edit rollback authority is unavailable".to_owned(),
         });
     };
-    let result = executor(SourceEditRollbackInvocationV1 {
-        effect_id,
-        original_idempotency_key,
-        idempotency_key,
-        original_input_digest,
-        expected_state,
-        request_id,
-        deadline,
-        cancellation,
-    })
+    let result = hotpath::future!(
+        executor(SourceEditRollbackInvocationV1 {
+            effect_id,
+            original_idempotency_key,
+            idempotency_key,
+            original_input_digest,
+            expected_state,
+            request_id,
+            deadline,
+            cancellation,
+        }),
+        label = "mcp.edit.rollback.execute"
+    )
     .await?;
     let value = source_edit_surface_value(&result)?;
     let success = result.outcome.success();
@@ -203,6 +211,7 @@ pub(super) async fn handle_source_edit_rollback(
     }
 }
 
+#[hotpath::measure(label = "mcp.edit.reconcile.total")]
 pub(super) async fn handle_source_edit_reconcile(
     cg: &TraceDecay,
     args: Value,
@@ -268,17 +277,20 @@ pub(super) async fn handle_source_edit_reconcile(
             message: "daemon-owned source edit reconciliation authority is unavailable".to_owned(),
         });
     };
-    let result = executor(SourceEditReconciliationInvocationV1 {
-        kind,
-        effect_id,
-        idempotency_key,
-        attempt_idempotency_key,
-        input_digest,
-        disposition,
-        request_id,
-        deadline,
-        cancellation,
-    })
+    let result = hotpath::future!(
+        executor(SourceEditReconciliationInvocationV1 {
+            kind,
+            effect_id,
+            idempotency_key,
+            attempt_idempotency_key,
+            input_digest,
+            disposition,
+            request_id,
+            deadline,
+            cancellation,
+        }),
+        label = "mcp.edit.reconcile.execute"
+    )
     .await?;
     let value = source_edit_surface_value(&result)?;
     let success = result.outcome.success();

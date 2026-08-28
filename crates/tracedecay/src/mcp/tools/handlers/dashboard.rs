@@ -219,7 +219,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        let http = crate::application_surface::http_application_router_with_executor(
+        let http = crate::application_surface::assemble_http_application_router(
             Arc::clone(&self.executor),
             tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
             active_project_id,
@@ -373,6 +373,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 /// Resolves one native-integration status read over the catalog-bound
 /// dashboard surface, answering the same application result CLI and MCP
 /// project.
+#[hotpath::measure(future = true, label = "mcp.dashboard.native_integration.status")]
 pub(crate) async fn dashboard_native_integration_status(
     executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     control: &crate::dashboard::DashboardHttpRequestControlV1,
@@ -643,6 +644,7 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
     generic_tool_result(Some(cg.project_root()), args, payload, vec![])
 }
 
+#[hotpath::measure(label = "mcp.dashboard.open.total")]
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
@@ -703,7 +705,11 @@ pub(super) async fn handle_dashboard(
                     .map(|dashboard| dashboard.url.clone())
             };
             let payload = if let Some(previous_url) = previous_url {
-                shutdown_dashboard_for(&project_root).await?;
+                hotpath::future!(
+                    shutdown_dashboard_for(&project_root),
+                    label = "mcp.dashboard.open.stop"
+                )
+                .await?;
                 json!({ "status": "stopped", "previous_url": previous_url })
             } else {
                 json!({ "status": "not_running" })

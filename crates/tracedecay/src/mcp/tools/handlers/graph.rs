@@ -203,6 +203,7 @@ fn rendered_context_tool_result(
     }
 }
 
+#[hotpath::measure(label = "mcp.graph.search.total")]
 pub(super) async fn handle_search<F>(
     cg: &TraceDecay,
     graph: F,
@@ -263,13 +264,16 @@ where
             let graph = bind_verified_graph_to_search(graph, &complete.code_generation);
             let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
                 let graph = graph?;
-                dependency_hints::admit_verified_ignored_dependency(
-                    ignored_dependency_admission,
-                    &graph,
-                    query,
-                    scope_prefix,
-                    deadline.as_ref(),
-                    cancellation.as_ref(),
+                hotpath::future!(
+                    dependency_hints::admit_verified_ignored_dependency(
+                        ignored_dependency_admission,
+                        &graph,
+                        query,
+                        scope_prefix,
+                        deadline.as_ref(),
+                        cancellation.as_ref()
+                    ),
+                    label = "mcp.graph.search.admit"
                 )
                 .await?;
                 Ok(graph)
@@ -290,23 +294,29 @@ where
                     })
                     .map(|display| display.path.as_str()),
             );
-            for ranked in &complete.ordered_candidates {
-                let mut result = json!(ranked);
-                if let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) {
-                    result["display"] = json!({
-                        "name": display.name,
-                        "qualified_name": display.qualified_name,
-                        "kind": display.kind,
-                        "path": display.path,
-                    });
-                    if include_graph_node_ids {
-                        graph_evidence.enrich_node_id(&mut result, display);
+            hotpath::measure_block!("mcp.graph.search.graph", {
+                for ranked in &complete.ordered_candidates {
+                    let mut result = json!(ranked);
+                    if let Some(display) =
+                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
+                    {
+                        result["display"] = json!({
+                            "name": display.name,
+                            "qualified_name": display.qualified_name,
+                            "kind": display.kind,
+                            "path": display.path,
+                        });
+                        if include_graph_node_ids {
+                            graph_evidence.enrich_node_id(&mut result, display);
+                        }
                     }
+                    results.push(result);
                 }
-                results.push(result);
-            }
+            });
             let result_count = results.len();
-            let mut output = json!({
+            let mut output = hotpath::measure_block!(
+                "mcp.graph.search.serialize",
+                json!({
                 "results": results,
                 "code_generation": complete.code_generation,
                 "query_fallback_digest": &complete.query_fallback.digest,
@@ -316,7 +326,8 @@ where
                     .map(serde_json::to_string)
                     .transpose()?,
                 "coverage": coverage_value(&complete.coverage),
-            });
+                })
+            );
             if let Some(scope) = scope_prefix {
                 output["scope_prefix"] = json!(scope);
                 output["scope_prefix_applied"] = json!(false);
@@ -348,15 +359,18 @@ where
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
-            let output = json!({
-                "results": [],
-                "code_generation": unavailable.code_generation,
-                "query_fallback_digest": Value::Null,
-                "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
-                "status": "unavailable",
-                "reason": reason,
-                "coverage": coverage_value(&unavailable.coverage),
-            });
+            let output = hotpath::measure_block!(
+                "mcp.graph.search.serialize",
+                json!({
+                    "results": [],
+                    "code_generation": unavailable.code_generation,
+                    "query_fallback_digest": Value::Null,
+                    "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
+                    "status": "unavailable",
+                    "reason": reason,
+                    "coverage": coverage_value(&unavailable.coverage),
+                })
+            );
             let failure = format!("code-index search unavailable: {reason}");
             let mut result =
                 rendered_tool_result(cg, &args, &output, Vec::new(), || render_search_md(&output))
@@ -654,6 +668,7 @@ fn append_context_semantic_pending(output: &mut String, value: &Value) {
     }
 }
 
+#[hotpath::measure(label = "mcp.graph.context.total")]
 pub(super) async fn handle_context<F>(
     cg: &TraceDecay,
     graph: F,
@@ -728,14 +743,17 @@ where
         None => graph,
     };
     let (graph, projection, verified_graph_evidence) = match (graph, complete.as_ref()) {
-        (Ok(graph), Some(complete)) => match context_graph_projection(
-            cg,
-            &graph,
-            complete,
-            scope_prefix,
-            max_nodes,
-            include_code,
-            max_code_blocks,
+        (Ok(graph), Some(complete)) => match hotpath::measure_block!(
+            "mcp.graph.context.graph",
+            context_graph_projection(
+                cg,
+                &graph,
+                complete,
+                scope_prefix,
+                max_nodes,
+                include_code,
+                max_code_blocks,
+            )
         ) {
             Ok(projection) => (Some(graph), projection, None),
             Err(error) => (
@@ -827,7 +845,8 @@ where
         memory_matches_error: memory_matches_error.clone(),
         verified_graph_evidence,
     };
-    let mut value = serde_json::to_value(result)?;
+    let mut value =
+        hotpath::measure_block!("mcp.graph.context.serialize", serde_json::to_value(result)?);
     if let Some(object) = value.as_object_mut() {
         object.insert(
             CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
@@ -866,6 +885,7 @@ where
     }
 }
 
+#[hotpath::measure(label = "mcp.graph.callers.total")]
 pub(super) async fn handle_callers(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -879,13 +899,16 @@ pub(super) async fn handle_callers(
         .map_or(3, |v| v.min(10) as usize);
 
     let occurrence = graph_occurrence_id(node_id)?;
-    let results = traverse_verified_neighbors(
-        graph,
-        occurrence,
-        &[RelationEdgeKindV1::Calls],
-        true,
-        max_depth,
-    )?;
+    let results = hotpath::measure_block!(
+        "mcp.graph.callers.graph",
+        traverse_verified_neighbors(
+            graph,
+            occurrence,
+            &[RelationEdgeKindV1::Calls],
+            true,
+            max_depth,
+        )?
+    );
     let summaries = results
         .iter()
         .map(|result| result.symbol.clone())
@@ -896,7 +919,7 @@ pub(super) async fn handle_callers(
         .map(verified_neighbor_value)
         .collect::<Result<Vec<_>>>()?;
 
-    let value = json!(items);
+    let value = hotpath::measure_block!("mcp.graph.callers.serialize", json!(items));
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -908,6 +931,7 @@ pub(super) async fn handle_callers(
 /// they statically called.
 ///
 /// Dispatch resolution skipped when `resolve_dispatch=false` is passed.
+#[hotpath::measure(label = "mcp.graph.callees.total")]
 pub(super) async fn handle_callees(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -918,13 +942,16 @@ pub(super) async fn handle_callees(
     let resolve_dispatch = request.resolve_dispatch.unwrap_or(true);
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let results = traverse_verified_neighbors(
-        graph,
-        occurrence,
-        &[RelationEdgeKindV1::Calls],
-        false,
-        max_depth,
-    )?;
+    let results = hotpath::measure_block!(
+        "mcp.graph.callees.graph",
+        traverse_verified_neighbors(
+            graph,
+            occurrence,
+            &[RelationEdgeKindV1::Calls],
+            false,
+            max_depth,
+        )?
+    );
     let mut seen = results
         .iter()
         .map(|result| result.symbol.occurrence.clone())
@@ -951,30 +978,33 @@ pub(super) async fn handle_callees(
         .collect::<Result<Vec<_>>>()?;
 
     if resolve_dispatch {
-        for callee in &results {
-            for impl_method in verified_trait_dispatch_targets(graph, &callee.symbol)? {
-                if !seen.insert(impl_method.occurrence.clone()) {
-                    continue;
+        hotpath::measure_block!("mcp.graph.callees.dispatch", {
+            for callee in &results {
+                for impl_method in verified_trait_dispatch_targets(graph, &callee.symbol)? {
+                    if !seen.insert(impl_method.occurrence.clone()) {
+                        continue;
+                    }
+                    let metadata = required_graph_metadata(&impl_method)?;
+                    items.push(CalleeV1 {
+                        node_id: impl_method.occurrence.as_str().to_owned(),
+                        name: metadata.simple_name.clone(),
+                        kind: metadata.kind.clone(),
+                        file: required_graph_file_path(&impl_method)?.to_owned(),
+                        line: user_line(metadata.start_line),
+                        edge_kind: "calls".to_owned(),
+                        dispatch_via_trait: true,
+                        depth: None,
+                        dispatch_from: Some(callee.symbol.occurrence.as_str().to_owned()),
+                    });
                 }
-                let metadata = required_graph_metadata(&impl_method)?;
-                items.push(CalleeV1 {
-                    node_id: impl_method.occurrence.as_str().to_owned(),
-                    name: metadata.simple_name.clone(),
-                    kind: metadata.kind.clone(),
-                    file: required_graph_file_path(&impl_method)?.to_owned(),
-                    line: user_line(metadata.start_line),
-                    edge_kind: "calls".to_owned(),
-                    dispatch_via_trait: true,
-                    depth: None,
-                    dispatch_from: Some(callee.symbol.occurrence.as_str().to_owned()),
-                });
             }
-        }
+        });
     }
 
     let touched_files = unique_file_paths(items.iter().map(|item| item.file.as_str()));
 
-    let value = serde_json::to_value(items)?;
+    let value =
+        hotpath::measure_block!("mcp.graph.callees.serialize", serde_json::to_value(items)?);
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -983,6 +1013,7 @@ pub(super) async fn handle_callees(
 /// column equals the query exactly. Useful when you already know the symbol
 /// and want the apples-to-apples cost of an index hit instead of
 /// `tracedecay_search`'s ranked query.
+#[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1005,16 +1036,21 @@ pub(super) async fn handle_find_exact_symbol(
         .and_then(serde_json::Value::as_u64)
         .map_or(20, |v| v.min(200) as usize);
 
-    let mut nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-    nodes = graph_symbols_in_scope(nodes, scope_prefix)?;
+    let mut nodes = hotpath::measure_block!("mcp.graph.find_exact_symbol.graph", {
+        let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
+        graph_symbols_in_scope(nodes, scope_prefix)?
+    });
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
-        dependency_hints::admit_verified_ignored_dependency(
-            ignored_dependency_admission,
-            graph,
-            name,
-            scope_prefix,
-            deadline,
-            cancellation,
+        hotpath::future!(
+            dependency_hints::admit_verified_ignored_dependency(
+                ignored_dependency_admission,
+                graph,
+                name,
+                scope_prefix,
+                deadline,
+                cancellation,
+            ),
+            label = "mcp.graph.find_exact_symbol.admit"
         )
         .await?;
     }
@@ -1040,14 +1076,18 @@ pub(super) async fn handle_find_exact_symbol(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let body = json!({
-        "name": name,
-        "count": items.len(),
-        "matches": items,
-    });
+    let body = hotpath::measure_block!(
+        "mcp.graph.find_exact_symbol.serialize",
+        json!({
+            "name": name,
+            "count": items.len(),
+            "matches": items,
+        })
+    );
     Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
 
+#[hotpath::measure(label = "mcp.graph.impact.total")]
 pub(super) async fn handle_impact(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1057,13 +1097,16 @@ pub(super) async fn handle_impact(
     let max_depth = request.max_depth.map_or(3, |value| value.min(10));
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let impact = graph.impact(
-        std::slice::from_ref(&occurrence),
-        &[],
-        max_depth,
-        50_000,
-        GRAPH_RELATION_READ_LIMIT,
-    )?;
+    let impact = hotpath::measure_block!(
+        "mcp.graph.impact.graph",
+        graph.impact(
+            std::slice::from_ref(&occurrence),
+            &[],
+            max_depth,
+            50_000,
+            GRAPH_RELATION_READ_LIMIT,
+        )?
+    );
     let summaries = impact
         .impacted
         .iter()
@@ -1086,16 +1129,20 @@ pub(super) async fn handle_impact(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let output = serde_json::to_value(ImpactResultV1 {
-        node_count: nodes.len(),
-        complete: impact.complete,
-        unavailable_fields: vec!["edge_count".to_owned()],
-        nodes,
-    })?;
+    let output = hotpath::measure_block!(
+        "mcp.graph.impact.serialize",
+        serde_json::to_value(ImpactResultV1 {
+            node_count: nodes.len(),
+            complete: impact.complete,
+            unavailable_fields: vec!["edge_count".to_owned()],
+            nodes,
+        })?
+    );
 
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
+#[hotpath::measure(label = "mcp.graph.node.total")]
 pub(super) async fn handle_node(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1103,7 +1150,7 @@ pub(super) async fn handle_node(
 ) -> Result<ToolResult> {
     let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let node = graph.symbol_summary(&occurrence)?;
+    let node = hotpath::measure_block!("mcp.graph.node.graph", graph.symbol_summary(&occurrence)?);
 
     match node {
         Some(n) => {
@@ -1119,44 +1166,48 @@ pub(super) async fn handle_node(
                 ))
             })?;
             let line_count = end_line - metadata.start_line + 1;
-            let output = serde_json::to_value(NodeDetailsV1 {
-                id: n.occurrence.as_str().to_owned(),
-                name: metadata.simple_name.clone(),
-                kind: metadata.kind.clone(),
-                qualified_name: metadata.qualified_name.clone(),
-                file: file_path.to_owned(),
-                start_line: user_line(metadata.start_line),
-                end_line: user_line(end_line),
-                signature: metadata.signature.clone(),
-                visibility: metadata.visibility.clone(),
-                branches: metadata.branches,
-                loops: metadata.loops,
-                max_nesting: metadata.max_nesting,
-                cyclomatic_complexity,
-                cost_to_expand: NodeExpansionCostV1 {
-                    body: u64::from(line_count) * 20,
-                    full_file: file_size_bytes / 4,
-                },
-                unavailable_fields: [
-                    "assertions",
-                    "attrs_start_line",
-                    "derives",
-                    "docstring",
-                    "is_async",
-                    "returns",
-                    "unchecked_calls",
-                    "unsafe_blocks",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            })?;
+            let output = hotpath::measure_block!(
+                "mcp.graph.node.serialize",
+                serde_json::to_value(NodeDetailsV1 {
+                    id: n.occurrence.as_str().to_owned(),
+                    name: metadata.simple_name.clone(),
+                    kind: metadata.kind.clone(),
+                    qualified_name: metadata.qualified_name.clone(),
+                    file: file_path.to_owned(),
+                    start_line: user_line(metadata.start_line),
+                    end_line: user_line(end_line),
+                    signature: metadata.signature.clone(),
+                    visibility: metadata.visibility.clone(),
+                    branches: metadata.branches,
+                    loops: metadata.loops,
+                    max_nesting: metadata.max_nesting,
+                    cyclomatic_complexity,
+                    cost_to_expand: NodeExpansionCostV1 {
+                        body: u64::from(line_count) * 20,
+                        full_file: file_size_bytes / 4,
+                    },
+                    unavailable_fields: [
+                        "assertions",
+                        "attrs_start_line",
+                        "derives",
+                        "docstring",
+                        "is_async",
+                        "returns",
+                        "unchecked_calls",
+                        "unsafe_blocks",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                })?
+            );
             Ok(generic_tool_result(cg, &args, &output, touched_files))
         }
         None => node_not_found_result(&request.node_id),
     }
 }
 
+#[hotpath::measure(label = "mcp.graph.similar.total")]
 pub(super) async fn handle_similar(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1170,21 +1221,24 @@ pub(super) async fn handle_similar(
     let limit = request.limit.map_or(10, |value| value.min(100) as usize);
     let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
 
-    let outcome = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: request.symbol,
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit,
-            cursor: None,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
+    let outcome = hotpath::future!(
+        execute_code_index_search(
+            search_executor,
+            crate::mcp::server::CodeIndexSearchRequestV1 {
+                project_root: cg.project_root().to_path_buf(),
+                query: request.symbol,
+                source_revision: None,
+                source_tree: None,
+                source_reference: None,
+                limit,
+                cursor: None,
+                mode: semantic_mode,
+                authority: search_authority.cloned(),
+                deadline,
+                cancellation,
+            }
+        ),
+        label = "mcp.graph.similar.query"
     )
     .await;
     let complete = match outcome {
@@ -1198,23 +1252,25 @@ pub(super) async fn handle_similar(
         }
     };
     let mut results = Vec::new();
-    for ranked in &complete.ordered_candidates {
-        let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
-            continue;
-        };
-        let candidates =
-            graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-        let mut matched = None;
-        for node in candidates {
-            if required_graph_file_path(&node)? == display.path.as_str() {
-                matched = Some(node);
-                break;
+    hotpath::measure_block!("mcp.graph.similar.graph", {
+        for ranked in &complete.ordered_candidates {
+            let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
+                continue;
+            };
+            let candidates =
+                graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
+            let mut matched = None;
+            for node in candidates {
+                if required_graph_file_path(&node)? == display.path.as_str() {
+                    matched = Some(node);
+                    break;
+                }
+            }
+            if let Some(node) = matched {
+                results.push((node, ranked.candidate.utility_micros));
             }
         }
-        if let Some(node) = matched {
-            results.push((node, ranked.candidate.utility_micros));
-        }
-    }
+    });
     let result_nodes = results
         .iter()
         .map(|(node, _)| node.clone())
@@ -1236,7 +1292,8 @@ pub(super) async fn handle_similar(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let value = serde_json::to_value(items)?;
+    let value =
+        hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(items)?);
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -1330,6 +1387,7 @@ struct RenameReferenceSiteInput {
 /// current-text snippet, plus a per-file count of literal name occurrences
 /// that are NOT backed by a graph edge ("text-only matches — review
 /// manually"). Nothing is rewritten.
+#[hotpath::measure(label = "mcp.graph.rename_preview.total")]
 pub(super) async fn handle_rename_preview(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1345,57 +1403,59 @@ pub(super) async fn handle_rename_preview(
     let mut touched: Vec<String> = Vec::new();
     // Graph phase: extract owned declaration fields and per-reference-site
     // inputs so the blocking file walk below needs no graph value at all.
-    let (mut declaration, declaration_line, symbol_name, reference_inputs) = {
-        let Some(node) = graph.symbol_summary(&occurrence)? else {
-            return node_not_found_result(&request.node_id);
-        };
-        let node_metadata = required_graph_metadata(&node)?;
-        let node_file = required_graph_file_path(&node)?;
-        let symbol_name = node_metadata.simple_name.clone();
+    let (mut declaration, declaration_line, symbol_name, reference_inputs) =
+        hotpath::measure_block!("mcp.graph.rename_preview.graph", {
+            let Some(node) = graph.symbol_summary(&occurrence)? else {
+                return node_not_found_result(&request.node_id);
+            };
+            let node_metadata = required_graph_metadata(&node)?;
+            let node_file = required_graph_file_path(&node)?;
+            let symbol_name = node_metadata.simple_name.clone();
 
-        touched.push(node_file.to_owned());
-        *graph_counts.entry(node_file.to_owned()).or_default() += 1;
-        let declaration = RenamePreviewNodeV1 {
-            id: node.occurrence.as_str().to_owned(),
-            name: node_metadata.simple_name.clone(),
-            qualified_name: node_metadata.qualified_name.clone(),
-            kind: node_metadata.kind.clone(),
-            file: node_file.to_owned(),
-            line: user_line(node_metadata.start_line),
-            snippet: None,
-        };
+            touched.push(node_file.to_owned());
+            *graph_counts.entry(node_file.to_owned()).or_default() += 1;
+            let declaration = RenamePreviewNodeV1 {
+                id: node.occurrence.as_str().to_owned(),
+                name: node_metadata.simple_name.clone(),
+                qualified_name: node_metadata.qualified_name.clone(),
+                kind: node_metadata.kind.clone(),
+                file: node_file.to_owned(),
+                line: user_line(node_metadata.start_line),
+                snippet: None,
+            };
 
-        // Reference sites: incoming edges are the callers/users that name this
-        // symbol. NOTE: call-edge coverage improves as the resolver improves;
-        // the text-only counts below catch what the graph currently misses.
-        let incoming = single_graph_adjacency_batch(graph.callers(
-            std::slice::from_ref(&node.occurrence),
-            &[],
-            2_000_000,
-        )?)?;
-        let mut reference_inputs = Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
-        for edge in incoming {
-            let source_node = edge.neighbor;
-            let source_metadata = required_graph_metadata(&source_node)?;
-            let source_file = required_graph_file_path(&source_node)?;
-            touched.push(source_file.to_owned());
-            *graph_counts.entry(source_file.to_owned()).or_default() += 1;
-            reference_inputs.push(RenameReferenceSiteInput {
-                from_node_id: source_node.occurrence.as_str().to_owned(),
-                from_name: source_metadata.simple_name.clone(),
-                from_kind: source_metadata.kind.clone(),
-                edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
-                file: source_file.to_owned(),
-                evidence_start_byte: edge.edge.evidence_span.start_byte,
-            });
-        }
-        (
-            declaration,
-            node_metadata.start_line,
-            symbol_name,
-            reference_inputs,
-        )
-    };
+            // Reference sites: incoming edges are the callers/users that name this
+            // symbol. NOTE: call-edge coverage improves as the resolver improves;
+            // the text-only counts below catch what the graph currently misses.
+            let incoming = single_graph_adjacency_batch(graph.callers(
+                std::slice::from_ref(&node.occurrence),
+                &[],
+                2_000_000,
+            )?)?;
+            let mut reference_inputs =
+                Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
+            for edge in incoming {
+                let source_node = edge.neighbor;
+                let source_metadata = required_graph_metadata(&source_node)?;
+                let source_file = required_graph_file_path(&source_node)?;
+                touched.push(source_file.to_owned());
+                *graph_counts.entry(source_file.to_owned()).or_default() += 1;
+                reference_inputs.push(RenameReferenceSiteInput {
+                    from_node_id: source_node.occurrence.as_str().to_owned(),
+                    from_name: source_metadata.simple_name.clone(),
+                    from_kind: source_metadata.kind.clone(),
+                    edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
+                    file: source_file.to_owned(),
+                    evidence_start_byte: edge.edge.evidence_span.start_byte,
+                });
+            }
+            (
+                declaration,
+                node_metadata.start_line,
+                symbol_name,
+                reference_inputs,
+            )
+        });
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
@@ -1407,7 +1467,8 @@ pub(super) async fn handle_rename_preview(
     let walk_symbol_name = symbol_name.clone();
     let walk_graph_counts = graph_counts;
     let walk_touched_files = touched_files.clone();
-    let (decl_snippet, references, text_only_matches) = tokio::task::spawn_blocking(
+    let (decl_snippet, references, text_only_matches) = hotpath::future!(
+        tokio::task::spawn_blocking(
         move || -> Result<(
             Option<String>,
             Vec<RenamePreviewReferenceV1>,
@@ -1467,7 +1528,9 @@ pub(super) async fn handle_rename_preview(
                 }
             }
             Ok((decl_snippet, references, text_only_matches))
-        },
+        }
+        ),
+        label = "mcp.graph.rename_preview.walk"
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {
@@ -1475,26 +1538,30 @@ pub(super) async fn handle_rename_preview(
     })??;
     declaration.snippet = decl_snippet;
 
-    let output = serde_json::to_value(RenamePreviewPrimitiveResultV1 {
-        read_only: true,
-        note: "Preview only — nothing is edited. 'references' are graph reference sites \
+    let output = hotpath::measure_block!(
+        "mcp.graph.rename_preview.serialize",
+        serde_json::to_value(RenamePreviewPrimitiveResultV1 {
+            read_only: true,
+            note: "Preview only — nothing is edited. 'references' are graph reference sites \
                (the declaration is reported separately in 'node'); 'text_only_matches' are \
                literal name occurrences NOT backed by a graph edge (comments, strings, \
                dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
                call-edge coverage improves as the resolver does."
-            .to_owned(),
-        symbol: symbol_name,
-        new_name: request.new_name,
-        node: declaration,
-        reference_count: references.len(),
-        references,
-        text_only_matches,
-    })?;
+                .to_owned(),
+            symbol: symbol_name,
+            new_name: request.new_name,
+            node: declaration,
+            reference_count: references.len(),
+            references,
+            text_only_matches,
+        })?
+    );
 
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Bulk caller lookup over many IDs.
+#[hotpath::measure(label = "mcp.graph.callers_for.total")]
 pub(super) async fn handle_callers_for(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1540,7 +1607,10 @@ pub(super) async fn handle_callers_for(
         .iter()
         .map(|node_id| graph_occurrence_id(node_id))
         .collect::<Result<Vec<_>>>()?;
-    let batches = graph.callers(&occurrences, &kinds, 2_000_000)?;
+    let batches = hotpath::measure_block!(
+        "mcp.graph.callers_for.graph",
+        graph.callers(&occurrences, &kinds, 2_000_000)?
+    );
     if batches.len() != node_ids.len() {
         return Err(graph_symbol_corrupt(format!(
             "verified graph returned {} caller batches for {} symbols",
@@ -1571,15 +1641,19 @@ pub(super) async fn handle_callers_for(
         .map(|id| (id, by_target.remove(id).unwrap_or_default()))
         .collect();
 
-    let output = json!({
-        "callers": result_map,
-        "truncated": truncated,
-        "max_per_item": max_per_item,
-    });
+    let output = hotpath::measure_block!(
+        "mcp.graph.callers_for.serialize",
+        json!({
+            "callers": result_map,
+            "truncated": truncated,
+            "max_per_item": max_per_item,
+        })
+    );
     Ok(generic_tool_result(cg, &args, &output, vec![]))
 }
 
 /// Cross-run node lookup by name.
+#[hotpath::measure(label = "mcp.graph.by_qualified_name.total")]
 pub(super) async fn handle_by_qualified_name(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1592,26 +1666,33 @@ pub(super) async fn handle_by_qualified_name(
             message: "missing required parameter: qualified_name".to_string(),
         })?;
 
-    let nodes = graph.resolve_qualified_name(qname, None, 1_000)?;
+    let nodes = hotpath::measure_block!(
+        "mcp.graph.by_qualified_name.graph",
+        graph.resolve_qualified_name(qname, None, 1_000)?
+    );
     let touched_files = graph_symbol_paths(&nodes)?;
     let items = nodes
         .iter()
         .map(graph_symbol_location_value)
         .collect::<Result<Vec<_>>>()?;
 
-    let value = json!(items);
+    let value = hotpath::measure_block!("mcp.graph.by_qualified_name.serialize", json!(items));
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Signature-only lookup (no body) by qualified name or node ID. Returns
 /// the public-API surface of a symbol so callers can avoid reading the
 /// source file just to inspect the signature.
+#[hotpath::measure(label = "mcp.graph.signature.total")]
 pub(super) async fn handle_signature(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let nodes = nodes_addressed_by_args(graph, &args)?;
+    let nodes = hotpath::measure_block!(
+        "mcp.graph.signature.graph",
+        nodes_addressed_by_args(graph, &args)?
+    );
     let touched_files = graph_symbol_paths(&nodes)?;
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
@@ -1635,7 +1716,7 @@ pub(super) async fn handle_signature(
         }));
     }
 
-    let value = json!(items);
+    let value = hotpath::measure_block!("mcp.graph.signature.serialize", json!(items));
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -1644,6 +1725,7 @@ pub(super) async fn handle_signature(
 /// Both `trait` and `type` arguments are optional. With neither, every impl
 /// in the graph is returned (capped by `limit`). Surfaces trait-dispatch
 /// information that is otherwise hidden behind raw `Implements` edges.
+#[hotpath::measure(label = "mcp.graph.impls.total")]
 pub(super) async fn handle_impls(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1660,48 +1742,50 @@ pub(super) async fn handle_impls(
     let mut results = Vec::new();
     let mut examined = 0usize;
     let mut generation_complete = false;
-    while results.len() <= limit {
-        if examined >= 500_000 {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-graph-budget-exhausted".to_owned(),
-                retryable: false,
-                detail: "impl census exceeded 500000 verified symbols".to_owned(),
-            });
-        }
-        let page = graph.symbols_page(after.as_ref(), 1_024)?;
-        examined = examined.saturating_add(page.symbols.len());
-        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-        for impl_node in page.symbols {
-            let metadata = required_graph_metadata(&impl_node)?;
-            if metadata.kind != NodeKind::Impl.as_str()
-                || type_filter.is_some_and(|query| !graph_name_matches(metadata, query))
-            {
-                continue;
+    hotpath::measure_block!("mcp.graph.impls.graph", {
+        while results.len() <= limit {
+            if examined >= 500_000 {
+                return Err(TraceDecayError::ProjectRoute {
+                    reason_code: "verified-code-graph-budget-exhausted".to_owned(),
+                    retryable: false,
+                    detail: "impl census exceeded 500000 verified symbols".to_owned(),
+                });
             }
-            let traits = single_graph_adjacency_batch(graph.callees(
-                std::slice::from_ref(&impl_node.occurrence),
-                &[RelationEdgeKindV1::Implements],
-                GRAPH_RELATION_READ_LIMIT,
-            )?)?;
-            let trait_node = traits.into_iter().next().map(|edge| edge.neighbor);
-            if trait_filter.is_some_and(|query| {
-                trait_node
-                    .as_ref()
-                    .and_then(|node| node.metadata.as_ref())
-                    .is_none_or(|metadata| !graph_name_matches(metadata, query))
-            }) {
-                continue;
+            let page = graph.symbols_page(after.as_ref(), 1_024)?;
+            examined = examined.saturating_add(page.symbols.len());
+            after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+            for impl_node in page.symbols {
+                let metadata = required_graph_metadata(&impl_node)?;
+                if metadata.kind != NodeKind::Impl.as_str()
+                    || type_filter.is_some_and(|query| !graph_name_matches(metadata, query))
+                {
+                    continue;
+                }
+                let traits = single_graph_adjacency_batch(graph.callees(
+                    std::slice::from_ref(&impl_node.occurrence),
+                    &[RelationEdgeKindV1::Implements],
+                    GRAPH_RELATION_READ_LIMIT,
+                )?)?;
+                let trait_node = traits.into_iter().next().map(|edge| edge.neighbor);
+                if trait_filter.is_some_and(|query| {
+                    trait_node
+                        .as_ref()
+                        .and_then(|node| node.metadata.as_ref())
+                        .is_none_or(|metadata| !graph_name_matches(metadata, query))
+                }) {
+                    continue;
+                }
+                results.push((impl_node, trait_node));
+                if results.len() > limit {
+                    break;
+                }
             }
-            results.push((impl_node, trait_node));
-            if results.len() > limit {
+            if !page.has_more {
+                generation_complete = true;
                 break;
             }
         }
-        if !page.has_more {
-            generation_complete = true;
-            break;
-        }
-    }
+    });
     let truncated = !generation_complete || results.len() > limit;
     results.truncate(limit);
 
@@ -1735,23 +1819,30 @@ pub(super) async fn handle_impls(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let output = json!({
-        "count": items.len(),
-        "truncated": truncated,
-        "impls": items,
-    });
+    let output = hotpath::measure_block!(
+        "mcp.graph.impls.serialize",
+        json!({
+            "count": items.len(),
+            "truncated": truncated,
+            "impls": items,
+        })
+    );
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Derive annotations are not published in the
 /// verified code graph generation, so a matched symbol reports a typed
 /// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
+#[hotpath::measure(label = "mcp.graph.derives.total")]
 pub(super) async fn handle_derives(
     _cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let nodes = nodes_addressed_by_args(graph, &args)?;
+    let nodes = hotpath::measure_block!(
+        "mcp.graph.derives.graph",
+        nodes_addressed_by_args(graph, &args)?
+    );
     if nodes.is_empty() {
         return Ok(text_tool_result("No matching symbol found.", Vec::new()));
     }
@@ -1764,6 +1855,7 @@ pub(super) async fn handle_derives(
 }
 
 /// Trait / method implementor lookup.
+#[hotpath::measure(label = "mcp.graph.implementations.total")]
 pub(super) async fn handle_implementations(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -1794,113 +1886,118 @@ pub(super) async fn handle_implementations(
     let mut entries: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
 
-    if let Some(name) = trait_name {
-        let candidates = graph.resolve_simple_name(name, None, 50)?;
-        let trait_nodes: Vec<_> = candidates
-            .into_iter()
-            .filter(|node| {
-                node.metadata.as_ref().is_some_and(|metadata| {
-                    matches!(
-                        NodeKind::from_str(&metadata.kind),
-                        Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-                    )
+    hotpath::measure_block!("mcp.graph.implementations.graph", {
+        if let Some(name) = trait_name {
+            let candidates = graph.resolve_simple_name(name, None, 50)?;
+            let trait_nodes: Vec<_> = candidates
+                .into_iter()
+                .filter(|node| {
+                    node.metadata.as_ref().is_some_and(|metadata| {
+                        matches!(
+                            NodeKind::from_str(&metadata.kind),
+                            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+                        )
+                    })
                 })
-            })
-            .collect();
-        if trait_nodes.is_empty() {
-            return Ok(text_tool_result(
-                &format!("No trait or interface named '{name}' found."),
-                vec![],
-            ));
-        }
+                .collect();
+            if trait_nodes.is_empty() {
+                return Ok(text_tool_result(
+                    &format!("No trait or interface named '{name}' found."),
+                    vec![],
+                ));
+            }
 
-        for trait_node in trait_nodes {
-            let trait_metadata = required_graph_metadata(&trait_node)?;
-            let implementors = single_graph_adjacency_batch(graph.callers(
-                std::slice::from_ref(&trait_node.occurrence),
-                &[RelationEdgeKindV1::Implements],
-                GRAPH_RELATION_READ_LIMIT,
-            )?)?;
-            for implementor in implementors {
-                let impl_node = implementor.neighbor;
-                let impl_metadata = required_graph_metadata(&impl_node)?;
-                let impl_file = required_graph_file_path(&impl_node)?;
-                if scope_prefix.is_some_and(|prefix| !impl_file.starts_with(prefix)) {
-                    continue;
+            for trait_node in trait_nodes {
+                let trait_metadata = required_graph_metadata(&trait_node)?;
+                let implementors = single_graph_adjacency_batch(graph.callers(
+                    std::slice::from_ref(&trait_node.occurrence),
+                    &[RelationEdgeKindV1::Implements],
+                    GRAPH_RELATION_READ_LIMIT,
+                )?)?;
+                for implementor in implementors {
+                    let impl_node = implementor.neighbor;
+                    let impl_metadata = required_graph_metadata(&impl_node)?;
+                    let impl_file = required_graph_file_path(&impl_node)?;
+                    if scope_prefix.is_some_and(|prefix| !impl_file.starts_with(prefix)) {
+                        continue;
+                    }
+                    let methods = collect_method_bodies(graph, &impl_node, &project_root)?;
+                    if !touched.iter().any(|path| path == impl_file) {
+                        touched.push(impl_file.to_owned());
+                    }
+                    entries.push(json!({
+                        "type": impl_metadata.simple_name,
+                        "qualified_name": impl_metadata.qualified_name,
+                        "kind": impl_metadata.kind,
+                        "file": impl_file,
+                        "line": user_line(impl_metadata.start_line),
+                        "trait": trait_metadata.qualified_name,
+                        "methods": methods,
+                    }));
+                    if entries.len() >= limit {
+                        break;
+                    }
                 }
-                let methods = collect_method_bodies(graph, &impl_node, &project_root)?;
-                if !touched.iter().any(|path| path == impl_file) {
-                    touched.push(impl_file.to_owned());
-                }
-                entries.push(json!({
-                    "type": impl_metadata.simple_name,
-                    "qualified_name": impl_metadata.qualified_name,
-                    "kind": impl_metadata.kind,
-                    "file": impl_file,
-                    "line": user_line(impl_metadata.start_line),
-                    "trait": trait_metadata.qualified_name,
-                    "methods": methods,
-                }));
                 if entries.len() >= limit {
                     break;
                 }
             }
-            if entries.len() >= limit {
-                break;
-            }
-        }
-    } else if let Some(name) = method_name {
-        let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-        let mut method_nodes = Vec::new();
-        for node in nodes {
-            let metadata = required_graph_metadata(&node)?;
-            if !matches!(
-                NodeKind::from_str(&metadata.kind),
-                Some(NodeKind::Function | NodeKind::Method)
-            ) {
-                continue;
-            }
-            let file_path = required_graph_file_path(&node)?;
-            if scope_prefix.is_none_or(|prefix| file_path.starts_with(prefix)) {
-                method_nodes.push(node);
-                if method_nodes.len() == limit {
-                    break;
+        } else if let Some(name) = method_name {
+            let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
+            let mut method_nodes = Vec::new();
+            for node in nodes {
+                let metadata = required_graph_metadata(&node)?;
+                if !matches!(
+                    NodeKind::from_str(&metadata.kind),
+                    Some(NodeKind::Function | NodeKind::Method)
+                ) {
+                    continue;
+                }
+                let file_path = required_graph_file_path(&node)?;
+                if scope_prefix.is_none_or(|prefix| file_path.starts_with(prefix)) {
+                    method_nodes.push(node);
+                    if method_nodes.len() == limit {
+                        break;
+                    }
                 }
             }
-        }
-        if method_nodes.is_empty() {
-            return Ok(text_tool_result(
-                &format!("No function or method named '{name}' found."),
-                vec![],
-            ));
-        }
-        for n in method_nodes {
-            let metadata = required_graph_metadata(&n)?;
-            let file_path = required_graph_file_path(&n)?;
-            let abs_path = project_root.join(file_path);
-            let source = crate::sync::read_source_file(&abs_path)?;
-            let end_line = graph_symbol_end_line(metadata)?;
-            let body = super::info::extract_lines(&source, metadata.start_line, end_line);
-            if !touched.iter().any(|path| path == file_path) {
-                touched.push(file_path.to_owned());
+            if method_nodes.is_empty() {
+                return Ok(text_tool_result(
+                    &format!("No function or method named '{name}' found."),
+                    vec![],
+                ));
             }
-            entries.push(json!({
-                "name": metadata.simple_name,
-                "qualified_name": metadata.qualified_name,
-                "kind": metadata.kind,
-                "file": file_path,
-                "line": user_line(metadata.start_line),
-                "end_line": user_line(end_line),
-                "signature": metadata.signature,
-                "body": body,
-            }));
+            for n in method_nodes {
+                let metadata = required_graph_metadata(&n)?;
+                let file_path = required_graph_file_path(&n)?;
+                let abs_path = project_root.join(file_path);
+                let source = crate::sync::read_source_file(&abs_path)?;
+                let end_line = graph_symbol_end_line(metadata)?;
+                let body = super::info::extract_lines(&source, metadata.start_line, end_line);
+                if !touched.iter().any(|path| path == file_path) {
+                    touched.push(file_path.to_owned());
+                }
+                entries.push(json!({
+                    "name": metadata.simple_name,
+                    "qualified_name": metadata.qualified_name,
+                    "kind": metadata.kind,
+                    "file": file_path,
+                    "line": user_line(metadata.start_line),
+                    "end_line": user_line(end_line),
+                    "signature": metadata.signature,
+                    "body": body,
+                }));
+            }
         }
-    }
-
-    let payload = json!({
-        "match_count": entries.len(),
-        "implementations": entries,
     });
+
+    let payload = hotpath::measure_block!(
+        "mcp.graph.implementations.serialize",
+        json!({
+            "match_count": entries.len(),
+            "implementations": entries,
+        })
+    );
     Ok(generic_tool_result(cg, &args, &payload, touched))
 }
 

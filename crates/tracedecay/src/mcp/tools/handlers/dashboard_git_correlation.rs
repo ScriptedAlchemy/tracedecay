@@ -26,6 +26,7 @@ impl DashboardGitCorrelationReadAdapter {
         }
     }
 
+    #[hotpath::measure(label = "mcp.dashboard.git_correlation.read")]
     fn read_inner(
         &self,
     ) -> Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1> {

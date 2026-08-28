@@ -266,6 +266,7 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
     out
 }
 
+#[hotpath::measure(label = "mcp.analysis.unmounted_files.total")]
 pub(crate) async fn handle_unmounted_files(
     cg: &TraceDecay,
     args: Value,
@@ -288,63 +289,73 @@ pub(crate) async fn handle_unmounted_files(
     // The walk reads every candidate source file, so it runs on a blocking
     // worker rather than holding the async dispatch thread through thousands
     // of synchronous reads.
-    let audit = tokio::task::spawn_blocking(move || audit_project(&project_root))
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("unmounted-file audit did not complete: {error}"),
-        })??;
+    let audit = hotpath::future!(
+        tokio::task::spawn_blocking(move || audit_project(&project_root)),
+        label = "mcp.analysis.unmounted_files.scan"
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("unmounted-file audit did not complete: {error}"),
+    })??;
 
-    let matching = audit
-        .ecosystems
-        .iter()
-        .filter(|ecosystem| {
-            ecosystem_filter
-                .as_deref()
-                .is_none_or(|wanted| wanted == ecosystem.ecosystem)
-        })
-        .flat_map(|ecosystem| {
-            ecosystem
-                .unmounted
+    let (output, touched_files) =
+        hotpath::measure_block!("mcp.analysis.unmounted_files.assemble", {
+            let matching = audit
+                .ecosystems
                 .iter()
-                .map(move |entry| (ecosystem.ecosystem, entry))
-        })
-        .filter(|(_, entry)| {
-            crate::path_scope::path_matches_scope(&entry.file, path_filter.as_deref())
-        })
-        .collect::<Vec<_>>();
-    let unmounted_file_count = matching.len();
-    let returned = matching.iter().take(limit).collect::<Vec<_>>();
-    let touched_files = unique_file_paths(returned.iter().map(|(_, entry)| entry.file.as_str()));
+                .filter(|ecosystem| {
+                    ecosystem_filter
+                        .as_deref()
+                        .is_none_or(|wanted| wanted == ecosystem.ecosystem)
+                })
+                .flat_map(|ecosystem| {
+                    ecosystem
+                        .unmounted
+                        .iter()
+                        .map(move |entry| (ecosystem.ecosystem, entry))
+                })
+                .filter(|(_, entry)| {
+                    crate::path_scope::path_matches_scope(&entry.file, path_filter.as_deref())
+                })
+                .collect::<Vec<_>>();
+            let unmounted_file_count = matching.len();
+            let returned = matching.iter().take(limit).collect::<Vec<_>>();
+            let touched_files =
+                unique_file_paths(returned.iter().map(|(_, entry)| entry.file.as_str()));
 
-    let rows = returned
-        .iter()
-        .map(|(ecosystem, entry)| {
-            json!({
-                "file": entry.file,
-                "ecosystem": ecosystem,
-                "package": entry.package,
-                "manifest": entry.manifest,
-                "nearest_mounted_parent": entry.nearest_mounted_parent,
-                "suggested_declaration": entry.suggested_declaration,
-            })
-        })
-        .collect::<Vec<_>>();
+            let rows = returned
+                .iter()
+                .map(|(ecosystem, entry)| {
+                    json!({
+                        "file": entry.file,
+                        "ecosystem": ecosystem,
+                        "package": entry.package,
+                        "manifest": entry.manifest,
+                        "nearest_mounted_parent": entry.nearest_mounted_parent,
+                        "suggested_declaration": entry.suggested_declaration,
+                    })
+                })
+                .collect::<Vec<_>>();
 
-    let output = json!({
-        "unmounted_file_count": unmounted_file_count,
-        "returned_count": rows.len(),
-        "omitted_count": unmounted_file_count.saturating_sub(rows.len()),
-        "complete": rows.len() == unmounted_file_count,
-        "ecosystems": audit
-            .ecosystems
-            .iter()
-            .map(EcosystemAudit::to_json)
-            .collect::<Vec<_>>(),
-        "limit": limit,
-        "path": path_filter,
-        "ecosystem": ecosystem_filter,
-        "unmounted": rows,
-    });
+            (
+                json!({
+                    "unmounted_file_count": unmounted_file_count,
+                    "returned_count": rows.len(),
+                    "omitted_count": unmounted_file_count.saturating_sub(rows.len()),
+                    "complete": rows.len() == unmounted_file_count,
+                    "ecosystems": audit
+                        .ecosystems
+                        .iter()
+                        .map(EcosystemAudit::to_json)
+                        .collect::<Vec<_>>(),
+                    "limit": limit,
+                    "path": path_filter,
+                    "ecosystem": ecosystem_filter,
+                    "unmounted": rows,
+                }),
+                touched_files,
+            )
+        });
 
     Ok(rendered_tool_result(
         Some(cg.project_root()),
@@ -357,8 +368,16 @@ pub(crate) async fn handle_unmounted_files(
 
 /// Walks the working tree once and asks each ecosystem its own question.
 fn audit_project(project_root: &Path) -> Result<ProjectAudit> {
-    let files = ProjectFiles::collect(project_root)?;
-    let mut ecosystems = vec![rust::audit(&files)?, typescript::audit(&files)];
+    let files = hotpath::measure_block!(
+        "mcp.analysis.unmounted_files.walk",
+        ProjectFiles::collect(project_root)?
+    );
+    let rust = hotpath::measure_block!("mcp.analysis.unmounted_files.rust", rust::audit(&files)?);
+    let typescript = hotpath::measure_block!(
+        "mcp.analysis.unmounted_files.typescript",
+        typescript::audit(&files)
+    );
+    let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));
     Ok(ProjectAudit { ecosystems })
 }

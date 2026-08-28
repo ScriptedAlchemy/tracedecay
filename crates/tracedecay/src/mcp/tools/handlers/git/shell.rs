@@ -5,6 +5,7 @@ use super::*;
 const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
 const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 
+#[hotpath::measure(label = "mcp.git.shell.resolve")]
 fn resolve_pr_comparison_commit(
     repo: &gix::Repository,
     requested: &str,
@@ -93,6 +94,7 @@ pub(super) fn git_pr_comparison(
     git_pr_comparison_controlled(project_root, base_ref, head_ref, &|| false)
 }
 
+#[hotpath::measure(label = "mcp.git.shell.pr_comparison")]
 pub(super) fn git_pr_comparison_controlled(
     project_root: &std::path::Path,
     base_ref: &str,
@@ -113,9 +115,13 @@ pub(super) fn git_pr_comparison_controlled(
     let head_oid = head_commit.id.to_string();
     check_git_pr_cancelled(cancelled)?;
     ensure_pr_ancestry_bounded(&repo, base_commit.id, head_commit.id, cancelled)?;
-    let merge_base = repo
-        .merge_base(base_commit.id, head_commit.id)
-        .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?;
+    let merge_base = hotpath::measure_block!(
+        "mcp.git.shell.merge_base",
+        repo.merge_base(base_commit.id, head_commit.id)
+            .map_err(|e| format!(
+                "cannot find merge base for '{base_ref}' and '{head_ref}': {e}"
+            ))?
+    );
     let merge_base = merge_base.to_string();
     check_git_pr_cancelled(cancelled)?;
 
@@ -128,6 +134,7 @@ pub(super) fn git_pr_comparison_controlled(
     })
 }
 
+#[hotpath::measure(label = "mcp.git.shell.ancestry")]
 fn ensure_pr_ancestry_bounded(
     repo: &gix::Repository,
     base: gix::ObjectId,
@@ -162,6 +169,7 @@ fn check_git_pr_cancelled(
     }
 }
 
+#[hotpath::measure(label = "mcp.git.shell.diff")]
 fn git_diff_file_changes_controlled(
     project_root: &std::path::Path,
     from_ref: &str,
@@ -275,6 +283,7 @@ pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
 }
 
 /// Returns file paths changed in the working tree (unstaged + staged, or staged-only).
+#[hotpath::measure(label = "mcp.git.shell.changed_files")]
 pub(super) fn git_changed_files(
     project_root: &std::path::Path,
     staged_only: bool,
@@ -354,6 +363,7 @@ pub(super) fn git_changed_files(
 }
 
 /// Returns the last N commit subjects from HEAD.
+#[hotpath::measure(label = "mcp.git.shell.recent_commits")]
 pub(super) fn git_recent_commits(
     project_root: &std::path::Path,
     count: usize,
@@ -397,6 +407,7 @@ pub(super) fn git_recent_commits(
 }
 
 /// Returns commit subjects between two refs.
+#[hotpath::measure(label = "mcp.git.shell.commit_log")]
 fn git_commit_log_controlled(
     project_root: &std::path::Path,
     base_ref: &str,

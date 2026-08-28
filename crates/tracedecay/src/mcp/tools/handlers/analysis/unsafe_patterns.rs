@@ -107,6 +107,7 @@ fn path_looks_like_test(path: &str) -> bool {
         || path.ends_with("Test.java")
 }
 
+#[hotpath::measure(label = "mcp.analysis.unsafe_patterns.total")]
 pub(crate) async fn handle_unsafe_patterns(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -134,101 +135,111 @@ pub(crate) async fn handle_unsafe_patterns(
         .and_then(serde_json::Value::as_u64)
         .map_or(200, |v| v.min(2000) as usize);
 
-    let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
-    for symbol in verified_analysis_symbols(graph, path)? {
+    let symbols_by_file = hotpath::measure_block!("mcp.analysis.unsafe_patterns.graph", {
+        let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+        for symbol in verified_analysis_symbols(graph, path)? {
+            symbols_by_file
+                .entry(symbol.path.clone())
+                .or_default()
+                .push(symbol);
+        }
         symbols_by_file
-            .entry(symbol.path.clone())
-            .or_default()
-            .push(symbol);
-    }
+    });
     // Graph phase is done. The source walk reads and masks candidate files, so
     // it belongs on a blocking worker like the sibling analysis scans.
     let project_root = cg.project_root().to_path_buf();
-    let (matches, by_kind, touched) = tokio::task::spawn_blocking(move || {
-        let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
-        files.sort();
-        let mut matches: Vec<Value> = Vec::new();
-        let mut by_kind: HashMap<String, u64> = HashMap::new();
-        let mut touched: Vec<String> = Vec::new();
+    let (matches, by_kind, touched) = hotpath::future!(
+        tokio::task::spawn_blocking(move || {
+            let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
+            files.sort();
+            let mut matches: Vec<Value> = Vec::new();
+            let mut by_kind: HashMap<String, u64> = HashMap::new();
+            let mut touched: Vec<String> = Vec::new();
 
-        'outer: for file in &files {
-            let in_test = path_looks_like_test(file);
-            if exclude_tests && in_test {
-                continue;
-            }
-            let abs_path = project_root.join(file);
-            let Ok(source) = crate::sync::read_source_file(&abs_path) else {
-                continue;
-            };
-            // Cheap raw pre-filter before the tree-sitter mask and the per-file
-            // store read. Masking only blanks content, so a keyword absent from
-            // the raw source cannot appear in the masked copy — skipping here
-            // is equivalent, and spares most files in a repository two
-            // expensive steps that could never produce a match.
-            if !kinds
-                .iter()
-                .any(|kind| source_may_contain_unsafe_kind(&source, kind))
-            {
-                continue;
-            }
-            // Blank comments and string/char literals for Rust files so an
-            // `unsafe`/`unwrap`/`panic!` mentioned inside a comment or string
-            // is not reported as a real risk site. Detection runs on the
-            // masked copy; the original line is kept for the emitted snippet.
-            // Non-Rust files are scanned raw (the Rust grammar would
-            // mis-tokenise them).
-            let masked = if path_is_rust(file) {
-                tracedecay_code_extraction::source_mask::masked_rust_source_with(
-                    &source,
-                    tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
-                )
-            } else {
-                source.clone()
-            };
-            // Masking can erase every raw hit (all of them in comments or
-            // string literals), so the file's nodes are fetched only once a
-            // real match survives.
-            for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
-                let line_no = (idx as u32) + 1;
-                for kind in &kinds {
-                    if line_matches_unsafe_kind(masked_line, kind) {
-                        let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
-                        let enclosing = nodes
-                            .iter()
-                            .filter(|n| n.metadata.start_line <= line_no && line_no <= n.end_line())
-                            .min_by_key(|n| n.metadata.line_span)
-                            .map(|n| n.metadata.qualified_name.clone());
-                        *by_kind.entry(kind.clone()).or_insert(0) += 1;
-                        matches.push(json!({
-                            "kind": kind,
-                            "file": file,
-                            "line": line_no,
-                            "snippet": line.trim(),
-                            "enclosing": enclosing,
-                            "in_test": in_test,
-                        }));
-                        if !touched.contains(file) {
-                            touched.push(file.clone());
-                        }
-                        if matches.len() >= limit {
-                            break 'outer;
+            'outer: for file in &files {
+                let in_test = path_looks_like_test(file);
+                if exclude_tests && in_test {
+                    continue;
+                }
+                let abs_path = project_root.join(file);
+                let Ok(source) = crate::sync::read_source_file(&abs_path) else {
+                    continue;
+                };
+                // Cheap raw pre-filter before the tree-sitter mask and the per-file
+                // store read. Masking only blanks content, so a keyword absent from
+                // the raw source cannot appear in the masked copy — skipping here
+                // is equivalent, and spares most files in a repository two
+                // expensive steps that could never produce a match.
+                if !kinds
+                    .iter()
+                    .any(|kind| source_may_contain_unsafe_kind(&source, kind))
+                {
+                    continue;
+                }
+                // Blank comments and string/char literals for Rust files so an
+                // `unsafe`/`unwrap`/`panic!` mentioned inside a comment or string
+                // is not reported as a real risk site. Detection runs on the
+                // masked copy; the original line is kept for the emitted snippet.
+                // Non-Rust files are scanned raw (the Rust grammar would
+                // mis-tokenise them).
+                let masked = if path_is_rust(file) {
+                    tracedecay_code_extraction::source_mask::masked_rust_source_with(
+                        &source,
+                        tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
+                    )
+                } else {
+                    source.clone()
+                };
+                // Masking can erase every raw hit (all of them in comments or
+                // string literals), so the file's nodes are fetched only once a
+                // real match survives.
+                for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
+                    let line_no = (idx as u32) + 1;
+                    for kind in &kinds {
+                        if line_matches_unsafe_kind(masked_line, kind) {
+                            let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
+                            let enclosing = nodes
+                                .iter()
+                                .filter(|n| {
+                                    n.metadata.start_line <= line_no && line_no <= n.end_line()
+                                })
+                                .min_by_key(|n| n.metadata.line_span)
+                                .map(|n| n.metadata.qualified_name.clone());
+                            *by_kind.entry(kind.clone()).or_insert(0) += 1;
+                            matches.push(json!({
+                                "kind": kind,
+                                "file": file,
+                                "line": line_no,
+                                "snippet": line.trim(),
+                                "enclosing": enclosing,
+                                "in_test": in_test,
+                            }));
+                            if !touched.contains(file) {
+                                touched.push(file.clone());
+                            }
+                            if matches.len() >= limit {
+                                break 'outer;
+                            }
                         }
                     }
                 }
             }
-        }
-        (matches, by_kind, touched)
-    })
+            (matches, by_kind, touched)
+        }),
+        label = "mcp.analysis.unsafe_patterns.scan"
+    )
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_unsafe_patterns scan failed to join: {join_error}"),
     })?;
 
-    let counts = serde_json::to_value(&by_kind).unwrap_or(json!({}));
-    let payload = json!({
-        "match_count": matches.len(),
-        "by_kind": counts,
-        "matches": matches,
+    let payload = hotpath::measure_block!("mcp.analysis.unsafe_patterns.assemble", {
+        let counts = serde_json::to_value(&by_kind).unwrap_or(json!({}));
+        json!({
+            "match_count": matches.len(),
+            "by_kind": counts,
+            "matches": matches,
+        })
     });
     Ok(rendered_tool_result(
         Some(cg.project_root()),

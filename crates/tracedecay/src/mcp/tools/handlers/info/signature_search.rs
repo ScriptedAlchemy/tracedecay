@@ -4,6 +4,7 @@ use super::*;
 
 /// Substring search across the cached `signature` column on every
 /// Function/Method node.
+#[hotpath::measure(label = "mcp.info.signature_search.total")]
 pub(crate) async fn handle_signature_search(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -40,60 +41,65 @@ pub(crate) async fn handle_signature_search(
         ));
     }
 
-    let mut entries: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-    for node in all_symbols(graph)? {
-        let (metadata, file_path) = required_symbol_parts(&node)?;
-        if !matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Function | NodeKind::Method)
-        ) {
-            continue;
-        }
-        if let Some(prefix) = path_filter
-            && !crate::path_scope::path_matches_scope(file_path, Some(prefix))
-        {
-            continue;
-        }
-
-        let Some(sig) = metadata.signature.as_deref() else {
-            continue;
-        };
-
-        if let Some(ret_pat) = returns
-            && !returns_substring(sig).contains(ret_pat)
-        {
-            continue;
-        }
-
-        if !params.is_empty() {
-            let param_region = params_substring(sig);
-            if !params.iter().all(|p| param_region.contains(p.as_str())) {
+    let (payload, touched) = hotpath::measure_block!("mcp.info.signature_search.scan", {
+        let mut entries: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
+        for node in all_symbols(graph)? {
+            let (metadata, file_path) = required_symbol_parts(&node)?;
+            if !matches!(
+                NodeKind::from_str(&metadata.kind),
+                Some(NodeKind::Function | NodeKind::Method)
+            ) {
                 continue;
+            }
+            if let Some(prefix) = path_filter
+                && !crate::path_scope::path_matches_scope(file_path, Some(prefix))
+            {
+                continue;
+            }
+
+            let Some(sig) = metadata.signature.as_deref() else {
+                continue;
+            };
+
+            if let Some(ret_pat) = returns
+                && !returns_substring(sig).contains(ret_pat)
+            {
+                continue;
+            }
+
+            if !params.is_empty() {
+                let param_region = params_substring(sig);
+                if !params.iter().all(|p| param_region.contains(p.as_str())) {
+                    continue;
+                }
+            }
+
+            if !touched.iter().any(|path| path == file_path) {
+                touched.push(file_path.to_owned());
+            }
+            entries.push(json!({
+                "id": node.occurrence.as_str(),
+                "name": metadata.simple_name,
+                "qualified_name": metadata.qualified_name,
+                "kind": metadata.kind,
+                "file": file_path,
+                "line": metadata.start_line.saturating_add(1),
+                "signature": sig,
+                "unavailable_fields": ["is_async"],
+            }));
+            if entries.len() >= limit {
+                break;
             }
         }
 
-        if !touched.iter().any(|path| path == file_path) {
-            touched.push(file_path.to_owned());
-        }
-        entries.push(json!({
-            "id": node.occurrence.as_str(),
-            "name": metadata.simple_name,
-            "qualified_name": metadata.qualified_name,
-            "kind": metadata.kind,
-            "file": file_path,
-            "line": metadata.start_line.saturating_add(1),
-            "signature": sig,
-            "unavailable_fields": ["is_async"],
-        }));
-        if entries.len() >= limit {
-            break;
-        }
-    }
-
-    let payload = json!({
-        "match_count": entries.len(),
-        "matches": entries,
+        (
+            json!({
+                "match_count": entries.len(),
+                "matches": entries,
+            }),
+            touched,
+        )
     });
     Ok(generic_tool_result(
         Some(cg.project_root()),

@@ -68,11 +68,15 @@ fn run_summary(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
+#[hotpath::measure(label = "mcp.automation.run_list.total")]
 pub(super) async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let limit = parse_limit(&args);
-    let page = load_run_records_page(&cg.store_layout().dashboard_root, limit)
-        .await
-        .map_err(|error| ledger_unavailable("list", error))?;
+    let page = hotpath::future!(
+        load_run_records_page(&cg.store_layout().dashboard_root, limit),
+        label = "mcp.automation.run_list.load"
+    )
+    .await
+    .map_err(|error| ledger_unavailable("list", error))?;
     let completeness = if page.is_complete() {
         "known"
     } else {
@@ -97,12 +101,16 @@ pub(super) async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResu
     ))
 }
 
+#[hotpath::measure(label = "mcp.automation.run_view.total")]
 pub(super) async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let run_id = required_run_id(&args)?;
-    let record = find_run_record(&cg.store_layout().dashboard_root, run_id)
-        .await
-        .map_err(|error| ledger_unavailable("view", error))?
-        .ok_or_else(|| run_not_found(run_id))?;
+    let record = hotpath::future!(
+        find_run_record(&cg.store_layout().dashboard_root, run_id),
+        label = "mcp.automation.run_view.load"
+    )
+    .await
+    .map_err(|error| ledger_unavailable("view", error))?
+    .ok_or_else(|| run_not_found(run_id))?;
     let payload = json!({
         "status": "ok",
         "scope": "active_project",

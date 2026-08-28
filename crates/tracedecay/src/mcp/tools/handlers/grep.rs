@@ -51,6 +51,7 @@ impl From<GrepSearchHit> for GrepHit {
     }
 }
 
+#[hotpath::measure(label = "mcp.search.grep.total")]
 pub(super) async fn handle_grep(
     cg: &TraceDecay,
     args: Value,
@@ -101,19 +102,22 @@ pub(super) async fn handle_grep(
         context_lines,
         max_results,
     };
-    let scan = run_bounded_search(
-        "tracedecay_grep",
-        pattern.to_owned(),
-        deadline,
-        cancellation,
-        move |cancelled, transport_cancellation| {
-            search_tree_with_cancel(&project_root, &query, || {
-                cancelled.load(std::sync::atomic::Ordering::Acquire)
-                    || transport_cancellation
-                        .as_ref()
-                        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-            })
-        },
+    let scan = hotpath::future!(
+        run_bounded_search(
+            "tracedecay_grep",
+            pattern.to_owned(),
+            deadline,
+            cancellation,
+            move |cancelled, transport_cancellation| {
+                search_tree_with_cancel(&project_root, &query, || {
+                    cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        || transport_cancellation
+                            .as_ref()
+                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                })
+            },
+        ),
+        label = "mcp.search.grep.scan"
     )
     .await?;
 

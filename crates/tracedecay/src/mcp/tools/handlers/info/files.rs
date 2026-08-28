@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "mcp.info.files.total")]
 pub(crate) async fn handle_files(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -9,7 +10,8 @@ pub(crate) async fn handle_files(
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_files")?;
-    let mut files = indexed_files(cg, graph).await?;
+    let mut files =
+        hotpath::future!(indexed_files(cg, graph), label = "mcp.info.files.census").await?;
 
     if let Some(dir) = effective_path(&args, scope_prefix) {
         let prefix = if dir.ends_with('/') {
@@ -35,14 +37,16 @@ pub(crate) async fn handle_files(
         .and_then(|v| v.as_str())
         .unwrap_or("grouped");
 
-    let file_values: Vec<Value> = files
-        .iter()
-        .map(|f| json!({ "path": f.path, "symbols": f.node_count, "bytes": f.size }))
-        .collect();
-    let payload = json!({
-        "count": files.len(),
-        "layout": layout,
-        "files": file_values,
+    let payload = hotpath::measure_block!("mcp.info.files.assemble", {
+        let file_values: Vec<Value> = files
+            .iter()
+            .map(|f| json!({ "path": f.path, "symbols": f.node_count, "bytes": f.size }))
+            .collect();
+        json!({
+            "count": files.len(),
+            "layout": layout,
+            "files": file_values,
+        })
     });
     Ok(rendered_tool_result(
         Some(cg.project_root()),

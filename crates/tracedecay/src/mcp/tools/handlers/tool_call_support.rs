@@ -47,6 +47,7 @@ pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Va
     args.get("project_selector").is_some()
 }
 
+#[hotpath::measure(future = true, label = "mcp.project.route.resolve")]
 pub(crate) async fn resolve_registered_project_route_for_tool(
     tool_name: String,
     args: Value,
@@ -89,6 +90,7 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     .map(Some)
 }
 
+#[hotpath::measure(label = "mcp.retrieve.handle.total")]
 pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
         message: "tracedecay_retrieve arguments must be an object".to_string(),
@@ -115,9 +117,12 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
     let lookup = {
         let project_root = cg.project_root().to_path_buf();
         let handle = handle.to_string();
-        tokio::task::spawn_blocking(move || {
-            retrieve_response_handle(&project_root, &handle, current_timestamp())
-        })
+        hotpath::future!(
+            tokio::task::spawn_blocking(move || {
+                retrieve_response_handle(&project_root, &handle, current_timestamp())
+            }),
+            label = "mcp.retrieve.handle.load"
+        )
         .await
         .map_err(|join_error| TraceDecayError::Config {
             message: format!("response handle retrieval task failed: {join_error}"),

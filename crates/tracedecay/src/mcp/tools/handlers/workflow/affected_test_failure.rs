@@ -14,6 +14,7 @@ use super::{
     parse_libtest_output, run_affected_tests_body,
 };
 
+#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
     args: &Value,
@@ -103,9 +104,12 @@ pub(super) async fn terminal_failure(
             format!("test identity `{test_identity}` is not executable"),
         ),
     };
-    let results = partial
-        .as_ref()
-        .map_or_else(Vec::new, |output| parse_libtest_output(&output.stdout));
+    let results = partial.as_ref().map_or_else(Vec::new, |output| {
+        hotpath::measure_block!(
+            "mcp.workflow.affected_tests.parse",
+            parse_libtest_output(&output.stdout)
+        )
+    });
     emit_observed_test_results(emitter, &results, test_names.len()).await?;
     let receipt = finish_test_run(
         emitter,
@@ -121,20 +125,23 @@ pub(super) async fn terminal_failure(
         stderr: String::new(),
         output_bytes,
     });
-    let mut body = run_affected_tests_body(
-        partial.exit_code.or(failure_exit_code),
-        &results,
-        test_names,
-        truncated,
-        selected_targets,
-        &partial.stderr,
-        &partial.stdout,
-        managed_test_terminal(emitter, &receipt),
-    );
-    body["error"] = json!({
-        "kind": kind,
-        "operation": operation,
-        "message": message,
+    let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
+        let mut body = run_affected_tests_body(
+            partial.exit_code.or(failure_exit_code),
+            &results,
+            test_names,
+            truncated,
+            selected_targets,
+            &partial.stderr,
+            &partial.stdout,
+            managed_test_terminal(emitter, &receipt),
+        );
+        body["error"] = json!({
+            "kind": kind,
+            "operation": operation,
+            "message": message,
+        });
+        body
     });
     Ok(super::super::support::generic_tool_result(
         None,

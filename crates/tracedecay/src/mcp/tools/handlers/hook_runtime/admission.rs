@@ -37,6 +37,7 @@ fn classify_hook_v2_binding(
     HookV2BindingAdmission::Bound(snapshot)
 }
 
+#[hotpath::measure(label = "mcp.hook_runtime.binding")]
 pub(super) fn hook_v2_binding_admission(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -167,6 +168,7 @@ fn retain_hook_v2_pending_work(
     }))
 }
 
+#[hotpath::measure(label = "mcp.hook_runtime.pending_work")]
 pub(crate) fn hook_v2_pending_work_envelopes(
     data_root: &Path,
     host: tracedecay_hooks::HookHostV1,
@@ -267,6 +269,7 @@ pub(crate) async fn admit_hook_v2_envelope(
     admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, now).await
 }
 
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
 async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -525,6 +528,7 @@ pub(super) async fn hook_v2_admit(
 /// Admits a native event that has no project route into the authenticated
 /// profile's V2 ledger. The hook supplies only decoded, content-free native
 /// material; the daemon owns the profile scope binding and all durable writes.
+#[hotpath::measure(label = "mcp.hook_runtime.profile_admit")]
 pub(super) fn hook_v2_profile_admit(
     args: &Value,
     action: &str,

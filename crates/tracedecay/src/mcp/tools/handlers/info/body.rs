@@ -16,6 +16,7 @@ pub(crate) fn extract_lines(source: &str, start_line: u32, end_line: u32) -> Str
     lines[start..end].join("\n")
 }
 
+#[hotpath::measure(label = "mcp.info.body.total")]
 pub(crate) async fn handle_body(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -40,7 +41,10 @@ pub(crate) async fn handle_body(
         ));
     }
 
-    let chosen = body_candidates(graph, symbol, limit, scope_prefix)?;
+    let chosen = hotpath::measure_block!(
+        "mcp.info.body.candidates",
+        body_candidates(graph, symbol, limit, scope_prefix)?
+    );
 
     if chosen.is_empty() {
         return Ok(ToolResult::new(
@@ -52,34 +56,39 @@ pub(crate) async fn handle_body(
     }
 
     let project_root = cg.project_root();
-    let mut matches: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
+    let (output, touched) = hotpath::measure_block!("mcp.info.body.source", {
+        let mut matches: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
 
-    for result in &chosen {
-        let (metadata, file_path) = required_symbol_parts(result)?;
-        let body = source_body_for_node(
-            project_root,
-            file_path,
-            metadata.start_line,
-            end_line(metadata)?,
-            &mut touched,
-        )?;
-        matches.push(json!({
-            "id": result.occurrence.as_str(),
-            "name": metadata.simple_name,
-            "qualified_name": metadata.qualified_name,
-            "kind": metadata.kind,
-            "file": file_path,
-            "start_line": metadata.start_line.saturating_add(1),
-            "end_line": end_line(metadata)?.saturating_add(1),
-            "signature": metadata.signature,
-            "body": body,
-        }));
-    }
+        for result in &chosen {
+            let (metadata, file_path) = required_symbol_parts(result)?;
+            let body = source_body_for_node(
+                project_root,
+                file_path,
+                metadata.start_line,
+                end_line(metadata)?,
+                &mut touched,
+            )?;
+            matches.push(json!({
+                "id": result.occurrence.as_str(),
+                "name": metadata.simple_name,
+                "qualified_name": metadata.qualified_name,
+                "kind": metadata.kind,
+                "file": file_path,
+                "start_line": metadata.start_line.saturating_add(1),
+                "end_line": end_line(metadata)?.saturating_add(1),
+                "signature": metadata.signature,
+                "body": body,
+            }));
+        }
 
-    let output = json!({
-        "match_count": matches.len(),
-        "matches": matches,
+        (
+            json!({
+                "match_count": matches.len(),
+                "matches": matches,
+            }),
+            touched,
+        )
     });
     Ok(rendered_tool_result(
         Some(cg.project_root()),

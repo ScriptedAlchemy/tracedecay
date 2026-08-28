@@ -60,19 +60,23 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     )
 }
 
+#[hotpath::measure(label = "mcp.info.project_list.total")]
 pub(crate) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
-    let outcome = list_registered_projects(
-        registry,
-        ProjectRegistryListingCommand {
-            active_project_root: cg.project_root().to_path_buf(),
-            scope: ProjectRegistryListingScope::All,
-            limit,
-        },
+    let outcome = hotpath::future!(
+        list_registered_projects(
+            registry,
+            ProjectRegistryListingCommand {
+                active_project_root: cg.project_root().to_path_buf(),
+                scope: ProjectRegistryListingScope::All,
+                limit,
+            },
+        ),
+        label = "mcp.info.project_list.list"
     )
     .await?;
     Ok(registry_listing_result(
@@ -84,6 +88,7 @@ pub(crate) async fn handle_project_list(
     ))
 }
 
+#[hotpath::measure(label = "mcp.info.project_search.total")]
 pub(crate) async fn handle_project_search(
     cg: &TraceDecay,
     args: Value,
@@ -97,15 +102,18 @@ pub(crate) async fn handle_project_search(
         })?
         .to_owned();
     let limit = bounded_limit(&args, 10, 50);
-    let outcome = list_registered_projects(
-        registry,
-        ProjectRegistryListingCommand {
-            active_project_root: cg.project_root().to_path_buf(),
-            scope: ProjectRegistryListingScope::Matching {
-                query: query.clone(),
+    let outcome = hotpath::future!(
+        list_registered_projects(
+            registry,
+            ProjectRegistryListingCommand {
+                active_project_root: cg.project_root().to_path_buf(),
+                scope: ProjectRegistryListingScope::Matching {
+                    query: query.clone(),
+                },
+                limit,
             },
-            limit,
-        },
+        ),
+        label = "mcp.info.project_search.search"
     )
     .await?;
     Ok(registry_listing_result(
@@ -183,17 +191,21 @@ fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySel
     }
 }
 
+#[hotpath::measure(label = "mcp.info.project_context.total")]
 pub(crate) async fn handle_project_context(
     cg: &TraceDecay,
     args: Value,
     registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
-    let outcome = read_registered_project_context(
-        registry,
-        ProjectRegistryContextCommand {
-            active_project_root: cg.project_root().to_path_buf(),
-            selector: project_context_selector(cg, &args),
-        },
+    let outcome = hotpath::future!(
+        read_registered_project_context(
+            registry,
+            ProjectRegistryContextCommand {
+                active_project_root: cg.project_root().to_path_buf(),
+                selector: project_context_selector(cg, &args),
+            },
+        ),
+        label = "mcp.info.project_context.read"
     )
     .await?;
     let payload = match outcome {

@@ -14,6 +14,7 @@ use super::required_str;
 /// Admit a Codex terminal receipt by retaining its follow-up work in
 /// the daemon. The hook only receives this acknowledgement; transcript ingest
 /// and review are cancellable daemon-owned work for that exact session.
+#[hotpath::measure(label = "mcp.hook_runtime.terminal")]
 pub(super) fn retain_codex_stop(
     args: &Value,
     profile_root: &Path,
@@ -38,61 +39,63 @@ pub(super) fn retain_codex_stop(
     let profile_root = profile_root.to_path_buf();
     let weak_registry = Arc::downgrade(session_runtime_registry);
     let task_session_id = session_id.clone();
-    let accepted = session_runtime_registry.retain_hook_task(
-        "codex",
-        &session_id,
-        move |cancellation| async move {
-            if cancellation.is_cancelled() {
-                return;
-            }
-            let Some(session_runtime_registry) = weak_registry.upgrade() else {
-                return;
-            };
-            let Ok(global_db) = session_runtime_registry.profile_database().await else {
-                return;
-            };
-            let ingest_args = json!({
-                "action": "ingest_transcript",
-                "provider": "codex",
-                "user_scope": true,
-                "session_id": task_session_id,
-            });
-            let authorities = SessionAuthorities::new(None, Some(&user_sessions))
-                .with_profile_identity(Some(&profile_identity))
-                .with_registered_databases(None, Some(&profile_registered));
-            let ingested = ingest_transcript_with_cancellation(
-                None,
-                &ingest_args,
-                Some(&profile_root),
-                Some(global_db.as_ref()),
-                None,
-                authorities,
-                &cancellation,
+    let accepted =
+        session_runtime_registry.retain_hook_task("codex", &session_id, move |cancellation| {
+            hotpath::future!(
+                async move {
+                    if cancellation.is_cancelled() {
+                        return;
+                    }
+                    let Some(session_runtime_registry) = weak_registry.upgrade() else {
+                        return;
+                    };
+                    let Ok(global_db) = session_runtime_registry.profile_database().await else {
+                        return;
+                    };
+                    let ingest_args = json!({
+                        "action": "ingest_transcript",
+                        "provider": "codex",
+                        "user_scope": true,
+                        "session_id": task_session_id,
+                    });
+                    let authorities = SessionAuthorities::new(None, Some(&user_sessions))
+                        .with_profile_identity(Some(&profile_identity))
+                        .with_registered_databases(None, Some(&profile_registered));
+                    let ingested = ingest_transcript_with_cancellation(
+                        None,
+                        &ingest_args,
+                        Some(&profile_root),
+                        Some(global_db.as_ref()),
+                        None,
+                        authorities,
+                        &cancellation,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|result| result.get("messages_upserted").and_then(Value::as_u64))
+                    .is_some_and(|count| count > 0);
+                    if ingested
+                        && !cancellation.is_cancelled()
+                        && let Some(session_id) = ingest_args.get("session_id").cloned()
+                    {
+                        let _ = await_terminal_operation(
+                            &cancellation,
+                            user_review(
+                                &json!({
+                                    "action": "user_review",
+                                    "provider": "codex",
+                                    "session_id": session_id,
+                                }),
+                                &profile_root,
+                                &session_runtime_registry,
+                            ),
+                        )
+                        .await;
+                    }
+                },
+                label = "mcp.hook_runtime.terminal_followup"
             )
-            .await
-            .ok()
-            .and_then(|result| result.get("messages_upserted").and_then(Value::as_u64))
-            .is_some_and(|count| count > 0);
-            if ingested
-                && !cancellation.is_cancelled()
-                && let Some(session_id) = ingest_args.get("session_id").cloned()
-            {
-                let _ = await_terminal_operation(
-                    &cancellation,
-                    user_review(
-                        &json!({
-                            "action": "user_review",
-                            "provider": "codex",
-                            "session_id": session_id,
-                        }),
-                        &profile_root,
-                        &session_runtime_registry,
-                    ),
-                )
-                .await;
-            }
-        },
-    );
+        });
     if !accepted {
         return Err(config_error(
             "daemon retained terminal-hook task is unavailable",

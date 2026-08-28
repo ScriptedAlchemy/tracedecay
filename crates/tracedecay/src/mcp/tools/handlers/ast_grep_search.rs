@@ -20,6 +20,7 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
+#[hotpath::measure(future = true, label = "mcp.search.ast_grep.scan")]
 async fn search_tree_off_thread(
     project_root: std::path::PathBuf,
     pattern: String,
@@ -56,6 +57,7 @@ async fn search_tree_off_thread(
     .await
 }
 
+#[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
 pub(super) async fn handle_ast_grep_search(
     cg: &TraceDecay,
     args: Value,

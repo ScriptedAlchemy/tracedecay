@@ -6,6 +6,7 @@ use tracedecay_domain::RelationEdgeKindV1;
 const MAX_GINI_SYMBOLS: usize = 500_000;
 const MAX_GINI_RELATIONS: usize = 2_000_000;
 
+#[hotpath::measure(label = "mcp.health.gini.total")]
 pub(crate) async fn handle_gini(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -23,42 +24,52 @@ pub(crate) async fn handle_gini(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let named_values = verified_gini_values(graph, metric, scope, path_prefix)?;
+    let named_values = hotpath::measure_block!(
+        "mcp.health.gini.graph",
+        verified_gini_values(graph, metric, scope, path_prefix)?
+    );
 
-    let values: Vec<f64> = named_values.iter().map(|(_, v)| *v).collect();
-    let gini = gini_coefficient(&values);
-    let interpretation = gini_label(gini);
+    let (gini, interpretation, total_items, outliers) =
+        hotpath::measure_block!("mcp.health.gini.compute", {
+            let values: Vec<f64> = named_values.iter().map(|(_, v)| *v).collect();
+            let gini = gini_coefficient(&values);
+            let interpretation = gini_label(gini);
 
-    let total_items = named_values.len();
-    let mut sorted = named_values;
-    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    sorted.truncate(limit);
+            let total_items = named_values.len();
+            let mut sorted = named_values;
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.truncate(limit);
 
-    let max_val = sorted.first().map_or(0.0, |(_, v)| *v);
-    let outliers: Vec<Value> = sorted
-        .iter()
-        .map(|(name, val)| {
-            let pct = if max_val > 0.0 {
-                (val / max_val * 100.0).round()
-            } else {
-                0.0
-            };
-            json!({
-                "name": name,
-                "value": val,
-                "pct_of_max": pct,
-            })
+            let max_val = sorted.first().map_or(0.0, |(_, v)| *v);
+            let outliers: Vec<Value> = sorted
+                .iter()
+                .map(|(name, val)| {
+                    let pct = if max_val > 0.0 {
+                        (val / max_val * 100.0).round()
+                    } else {
+                        0.0
+                    };
+                    json!({
+                        "name": name,
+                        "value": val,
+                        "pct_of_max": pct,
+                    })
+                })
+                .collect();
+            (gini, interpretation, total_items, outliers)
+        });
+
+    let output = hotpath::measure_block!(
+        "mcp.health.gini.assemble",
+        json!({
+            "gini": (gini * 10000.0).round() / 10000.0,
+            "interpretation": interpretation,
+            "total_items": total_items,
+            "metric": metric,
+            "scope": scope,
+            "outliers": outliers,
         })
-        .collect();
-
-    let output = json!({
-        "gini": (gini * 10000.0).round() / 10000.0,
-        "interpretation": interpretation,
-        "total_items": total_items,
-        "metric": metric,
-        "scope": scope,
-        "outliers": outliers,
-    });
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
@@ -222,6 +233,7 @@ fn verified_gini_member_values(
     Ok(members.into_values().collect())
 }
 
+#[hotpath::measure(label = "mcp.health.dependency_depth.total")]
 pub(crate) async fn handle_dependency_depth(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -234,29 +246,38 @@ pub(crate) async fn handle_dependency_depth(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let adj = graph.build_file_adjacency(path_prefix).await?;
+    let adj = hotpath::future!(
+        graph.build_file_adjacency(path_prefix),
+        label = "mcp.health.dependency_depth.graph"
+    )
+    .await?;
 
-    let result = dependency_depth(&adj, limit);
-    let score = depth_score(result.max_depth, result.ideal_depth);
-
-    let chains: Vec<Value> = result
-        .chains
-        .iter()
-        .map(|ch| {
-            json!({
-                "file": ch.file,
-                "depth": ch.depth,
-                "chain": ch.chain,
+    let (result, score, chains) = hotpath::measure_block!("mcp.health.dependency_depth.compute", {
+        let result = dependency_depth(&adj, limit);
+        let score = depth_score(result.max_depth, result.ideal_depth);
+        let chains: Vec<Value> = result
+            .chains
+            .iter()
+            .map(|ch| {
+                json!({
+                    "file": ch.file,
+                    "depth": ch.depth,
+                    "chain": ch.chain,
+                })
             })
-        })
-        .collect();
-
-    let output = json!({
-        "max_depth": result.max_depth,
-        "ideal_depth": result.ideal_depth,
-        "depth_score": (score * 10000.0).round() / 10000.0,
-        "chains": chains,
+            .collect();
+        (result, score, chains)
     });
+
+    let output = hotpath::measure_block!(
+        "mcp.health.dependency_depth.assemble",
+        json!({
+            "max_depth": result.max_depth,
+            "ideal_depth": result.ideal_depth,
+            "depth_score": (score * 10000.0).round() / 10000.0,
+            "chains": chains,
+        })
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
@@ -266,6 +287,7 @@ pub(crate) async fn handle_dependency_depth(
     ))
 }
 
+#[hotpath::measure(label = "mcp.health.health.total")]
 pub(crate) async fn handle_health(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -278,64 +300,70 @@ pub(crate) async fn handle_health(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let snap = tracedecay_usecases::graph::health::compute_verified_health_snapshot(
-        &graph.manager(),
-        path_prefix,
+    let snap = hotpath::future!(
+        tracedecay_usecases::graph::health::compute_verified_health_snapshot(
+            &graph.manager(),
+            path_prefix
+        ),
+        label = "mcp.health.health.graph"
     )
     .await?;
 
-    let output = if details {
-        let r4 = |x: f64| (x * 10000.0).round() / 10000.0;
-        json!({
-            "quality_signal": snap.quality_signal,
-            "files_analyzed": snap.files_analyzed,
-            "dimensions": {
-                "acyclicity": {
-                    "score": r4(snap.acyclicity),
-                    "edges_in_cycles": snap.edges_in_cycles,
-                    "source": "1 - edges_in_nontrivial_SCCs / total_edges",
+    let output = hotpath::measure_block!(
+        "mcp.health.health.assemble",
+        if details {
+            let r4 = |x: f64| (x * 10000.0).round() / 10000.0;
+            json!({
+                "quality_signal": snap.quality_signal,
+                "files_analyzed": snap.files_analyzed,
+                "dimensions": {
+                    "acyclicity": {
+                        "score": r4(snap.acyclicity),
+                        "edges_in_cycles": snap.edges_in_cycles,
+                        "source": "1 - edges_in_nontrivial_SCCs / total_edges",
+                    },
+                    "depth": {
+                        "score": r4(snap.depth),
+                        "max_chain": snap.max_chain,
+                        "ideal_chain": snap.ideal_chain,
+                        "source": "min(1, ideal_chain / max_chain), ideal = ceil(log2(file_count))",
+                    },
+                    "equality": {
+                        "score": r4(snap.equality),
+                        "gini": r4(snap.gini),
+                        "interpretation": gini_label(snap.gini),
+                        "source": "1 - gini(per_file_complexity)",
+                    },
+                    "redundancy": {
+                        "score": r4(snap.redundancy),
+                        "dead_count": snap.dead_count,
+                        "total_fns": snap.total_fns,
+                        "source": "1 - dead_fns / total_fns",
+                    },
+                    "modularity": {
+                        "score": r4(snap.modularity),
+                        "interpretation": modularity_label(snap.modularity),
+                        "components_after_hub_removal": snap.modularity_components,
+                        "source": "1 - 1/components_after_hub_removal",
+                    },
+                    "coverage_discipline": {
+                        "score": r4(snap.coverage_discipline),
+                        "skip_test_coverage_count": snap.skip_coverage_count,
+                        "total_fns": snap.total_fns,
+                        "source": "1 - skip_test_coverage_annotations / total_fns",
+                    },
                 },
-                "depth": {
-                    "score": r4(snap.depth),
-                    "max_chain": snap.max_chain,
-                    "ideal_chain": snap.ideal_chain,
-                    "source": "min(1, ideal_chain / max_chain), ideal = ceil(log2(file_count))",
+                "weights": {
+                    "note": "quality_signal is geometric mean × 10000",
                 },
-                "equality": {
-                    "score": r4(snap.equality),
-                    "gini": r4(snap.gini),
-                    "interpretation": gini_label(snap.gini),
-                    "source": "1 - gini(per_file_complexity)",
-                },
-                "redundancy": {
-                    "score": r4(snap.redundancy),
-                    "dead_count": snap.dead_count,
-                    "total_fns": snap.total_fns,
-                    "source": "1 - dead_fns / total_fns",
-                },
-                "modularity": {
-                    "score": r4(snap.modularity),
-                    "interpretation": modularity_label(snap.modularity),
-                    "components_after_hub_removal": snap.modularity_components,
-                    "source": "1 - 1/components_after_hub_removal",
-                },
-                "coverage_discipline": {
-                    "score": r4(snap.coverage_discipline),
-                    "skip_test_coverage_count": snap.skip_coverage_count,
-                    "total_fns": snap.total_fns,
-                    "source": "1 - skip_test_coverage_annotations / total_fns",
-                },
-            },
-            "weights": {
-                "note": "quality_signal is geometric mean × 10000",
-            },
-        })
-    } else {
-        json!({
-            "quality_signal": snap.quality_signal,
-            "files_analyzed": snap.files_analyzed,
-        })
-    };
+            })
+        } else {
+            json!({
+                "quality_signal": snap.quality_signal,
+                "files_analyzed": snap.files_analyzed,
+            })
+        }
+    );
 
     Ok(generic_tool_result(
         Some(cg.project_root()),

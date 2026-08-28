@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure(label = "mcp.info.read.total")]
 pub(crate) async fn handle_read(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -41,20 +42,23 @@ pub(crate) async fn handle_read(
     };
 
     let project_id = cg.project_root().to_string_lossy();
-    let output = read_source(
-        cg.project_root(),
-        cg.db(),
-        cg.is_read_only(),
-        graph.reader(),
-        graph.cancellation(),
-        SourceReadRequest {
-            file,
-            mode,
-            line_range,
-            raw_lines: args.get("lines").and_then(Value::as_str),
-            include_symbols,
-            project_id: &project_id,
-        },
+    let output = hotpath::future!(
+        read_source(
+            cg.project_root(),
+            cg.db(),
+            cg.is_read_only(),
+            graph.reader(),
+            graph.cancellation(),
+            SourceReadRequest {
+                file,
+                mode,
+                line_range,
+                raw_lines: args.get("lines").and_then(Value::as_str),
+                include_symbols,
+                project_id: &project_id,
+            },
+        ),
+        label = "mcp.info.read.source"
     )
     .await?;
     let display_file = output.file;
