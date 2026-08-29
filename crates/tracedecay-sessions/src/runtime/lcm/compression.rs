@@ -1510,7 +1510,7 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 fn replay_token_estimate(messages: &[Value]) -> i64 {
     messages
         .iter()
-        .map(|message| crate::lcm::lcm_budget_tokens(&message_content(message)))
+        .map(crate::lcm::lcm_message_budget_tokens)
         .sum()
 }
 
@@ -1977,7 +1977,7 @@ async fn prepare_active_messages(
             .to_string();
         let original_content = message_content_value(message);
         let storage_text = message_storage_text(&original_content);
-        let search_text = message_content(message);
+        let search_text = crate::lcm::lcm_message_visible_text(message);
         let replay_as_is = message
             .get("lcm_summary_node_id")
             .and_then(Value::as_str)
@@ -2302,28 +2302,6 @@ async fn load_raw_messages_for_session(
     })
 }
 
-fn message_content(message: &Value) -> String {
-    let Some(content) = message.get("content") else {
-        return String::new();
-    };
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-    if let Some(text) = content.get("text").and_then(Value::as_str) {
-        return text.to_string();
-    }
-    if let Some(items) = content.as_array() {
-        let texts = items
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        if !texts.is_empty() {
-            return texts.join("\n\n");
-        }
-    }
-    content.to_string()
-}
-
 fn deterministic_message_id(
     provider: &str,
     session_id: &str,
@@ -2398,6 +2376,36 @@ fn debt_from_db(
 mod authority_tests {
     use super::*;
     use crate::runtime::lcm::LcmSummarizerMode;
+
+    #[test]
+    fn replay_budget_matches_policy_for_object_with_text() {
+        let message = json!({
+            "content": {
+                "extra": "ignored key words",
+                "text": "one",
+            }
+        });
+        assert_eq!(replay_token_estimate(std::slice::from_ref(&message)), 1);
+        assert_eq!(
+            replay_token_estimate(std::slice::from_ref(&message)),
+            crate::lcm::lcm_message_budget_tokens(&message)
+        );
+    }
+
+    #[test]
+    fn replay_budget_matches_policy_for_array_of_text_parts() {
+        let message = json!({
+            "content": [
+                { "extra": "ignored key words", "text": "one" },
+                { "text": "two three" },
+            ]
+        });
+        assert_eq!(replay_token_estimate(std::slice::from_ref(&message)), 3);
+        assert_eq!(
+            replay_token_estimate(std::slice::from_ref(&message)),
+            crate::lcm::lcm_message_budget_tokens(&message)
+        );
+    }
 
     #[test]
     fn authoritative_summary_text_is_never_replaced_by_an_extractive_fallback() {
