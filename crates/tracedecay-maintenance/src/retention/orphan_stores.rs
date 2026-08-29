@@ -984,7 +984,10 @@ pub(crate) async fn execute_registered_collection_controlled(
                 "SELECT store_relpath, created_at, last_write_at
                  FROM store_instances
                  WHERE project_id = ?1 AND store_id = ?2",
-                tracedecay_runtime_core::db::engine::params![finding.project_id.as_str(), finding.store_id.as_str()],
+                tracedecay_runtime_core::db::engine::params![
+                    finding.project_id.as_str(),
+                    finding.store_id.as_str()
+                ],
             ))
             .await
         {
@@ -1746,9 +1749,11 @@ pub async fn build_store_census(
     let projects = db.list_code_projects(usize::MAX).await?;
     build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "unbounded store census was unexpectedly interrupted".to_owned(),
-        })
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "unbounded store census was unexpectedly interrupted".to_owned(),
+            },
+        )
 }
 
 #[derive(Debug, Clone)]
@@ -1775,9 +1780,11 @@ pub async fn build_store_census_page(
         .flatten();
     let entries = build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "unbounded store census page was unexpectedly interrupted".to_owned(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "unbounded store census page was unexpectedly interrupted".to_owned(),
+            },
+        )?;
     Ok(StoreCensusPageV1 {
         entries,
         next_cursor,
@@ -1963,9 +1970,11 @@ async fn inspect_store_leaf_cheap(
     tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
         .await
         .map(Some)
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("store census inspect join failed: {error}"),
-        })
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("store census inspect join failed: {error}"),
+            },
+        )
 }
 
 async fn attach_lazy_content_fences(

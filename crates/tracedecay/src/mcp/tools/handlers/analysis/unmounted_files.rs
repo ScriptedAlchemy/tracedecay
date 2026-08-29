@@ -315,7 +315,10 @@ pub(crate) async fn handle_unmounted_files(
                         .map(move |entry| (ecosystem.ecosystem, entry))
                 })
                 .filter(|(_, entry)| {
-                    tracedecay_runtime_core::path_scope::path_matches_scope(&entry.file, path_filter.as_deref())
+                    tracedecay_runtime_core::path_scope::path_matches_scope(
+                        &entry.file,
+                        path_filter.as_deref(),
+                    )
                 })
                 .collect::<Vec<_>>();
             let unmounted_file_count = matching.len();

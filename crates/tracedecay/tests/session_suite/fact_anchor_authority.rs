@@ -10,15 +10,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
-#[cfg(feature = "test-transport")]
-use tracedecay_runtime_core::db::{
-    DatabaseAuthorityRole, TestDatabaseRuntimeMode, enter_maintenance_database_scope,
-};
-use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
-use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::store::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
@@ -32,6 +24,14 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
+use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::db::{
+    DatabaseAuthorityRole, TestDatabaseRuntimeMode, enter_maintenance_database_scope,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
 #[cfg(feature = "test-transport")]
 use tracedecay_store::FactStoreError;
 use tracedecay_store::{

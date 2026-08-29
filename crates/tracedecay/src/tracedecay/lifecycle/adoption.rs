@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::TraceDecay;
 

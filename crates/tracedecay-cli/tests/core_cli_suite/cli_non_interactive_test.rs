@@ -9,8 +9,6 @@ use crate::common::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tracedecay_runtime_core::branch_meta::BranchMeta;
-use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -22,6 +20,8 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay_domain::ProjectId;
+use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_runtime_core::branch_meta::BranchMeta;
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures

@@ -1791,7 +1791,9 @@ enum RetainedCompactionStore<'a> {
 }
 
 impl RetainedCompactionStore<'_> {
-    async fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
+    async fn storage_page_counts(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         match self {
             Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
@@ -1933,7 +1935,8 @@ pub(super) async fn run_branch_compaction(
     config: &CompactionThresholdConfig,
 ) -> bool {
     let layout = cg.store_layout();
-    let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root) else {
+    let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+    else {
         return true;
     };
     let active_db_path = layout.graph_db_path.clone();

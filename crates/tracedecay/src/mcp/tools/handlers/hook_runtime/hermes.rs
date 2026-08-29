@@ -1,12 +1,12 @@
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::errors::Result;
-use tracedecay_global_db::RegisteredGlobalDb;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_usecases::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
 };
@@ -233,10 +233,12 @@ async fn continue_projectless_hermes_review(
     if session_db
         .lcm_raw_message_store_id("hermes", &ready.transcript_watermark)
         .await
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "read Hermes transcript watermark".to_owned(),
-            message: error.to_string(),
-        })?
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read Hermes transcript watermark".to_owned(),
+                message: error.to_string(),
+            },
+        )?
         .is_none()
     {
         return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));

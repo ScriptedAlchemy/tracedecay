@@ -483,7 +483,8 @@ fn linked_worktree_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 async fn ready_registered_state(watcher: &GitWatcher, repo: &Path) -> Arc<WatchState> {
-    let common = tracedecay_runtime_core::worktree::git_common_dir(repo).expect("repository common directory");
+    let common = tracedecay_runtime_core::worktree::git_common_dir(repo)
+        .expect("repository common directory");
     let projects = watcher.inner.projects.lock().await;
     Arc::clone(projects.get(&common).expect("repository registered"))
 }
@@ -681,7 +682,8 @@ async fn linked_worktrees_share_one_repository_watcher() {
         1,
         "linked roots share one slot and an unrelated repository is capped"
     );
-    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("common directory");
+    let common =
+        tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("common directory");
     let state = projects.get(&common).expect("repository watcher");
     assert!(state.contains_worktree(&primary.canonicalize().unwrap()));
     assert!(state.contains_worktree(&linked.canonicalize().unwrap()));
@@ -692,7 +694,8 @@ async fn linked_worktrees_share_one_repository_watcher() {
 #[test]
 fn unmounted_linked_worktree_operation_does_not_block_mounted_sibling() {
     let (_container, primary, linked) = linked_worktree_fixture();
-    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common dir");
+    let common =
+        tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common dir");
     let primary_git_dir = worktree_git_dir(&primary).expect("primary git dir");
     let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
     let state = WatchState::new(
@@ -746,7 +749,8 @@ fn registered_worktree_operation_scan_fails_closed_at_its_cap() {
 #[tokio::test]
 async fn callback_failure_requests_conservative_reconciliation() {
     let repo = temp_repo();
-    let common = tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common dir");
+    let common =
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common dir");
     let git_dir = worktree_git_dir(repo.path()).expect("git dir");
     let state = WatchState::new(
         common,

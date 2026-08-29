@@ -157,9 +157,11 @@ pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_child| ())
-        .map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("failed to spawn cargo prewarm: {e}"),
-        })
+        .map_err(
+            |e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("failed to spawn cargo prewarm: {e}"),
+            },
+        )
 }
 
 /// Which compiler levels become diagnostics. Every driver reports "error" and

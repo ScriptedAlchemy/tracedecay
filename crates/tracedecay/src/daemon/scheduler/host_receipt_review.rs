@@ -3,8 +3,8 @@ use std::path::Path;
 
 use tracedecay_agent_hosts::automation::AutomationRunControl;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::{
     DaemonEngine, DaemonHandshake, effective_automation_config_for_project, log_daemon_event,
@@ -108,7 +108,10 @@ async fn run_one_host_receipt_review(
                  FROM lcm_raw_messages
                  WHERE provider = ?1 AND message_id = ?2
                  LIMIT 1",
-                    tracedecay_runtime_core::db::engine::params!["hermes", ready.transcript_watermark.as_str()],
+                    tracedecay_runtime_core::db::engine::params![
+                        "hermes",
+                        ready.transcript_watermark.as_str()
+                    ],
                 )
                 .await
                 .map_err(|error| TraceDecayError::Config {

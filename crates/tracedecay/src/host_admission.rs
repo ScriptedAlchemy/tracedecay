@@ -15,10 +15,10 @@ use tracedecay_usecases::host_admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
@@ -201,8 +201,9 @@ impl HostAdmissionTestRuntimeV1 {
             "host-admission-test-runtime",
         )?;
         let session_registry = {
-            let profile_key =
-                tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
+            let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                identity.profile_root(),
+            );
             // Held across construction so two concurrent opens of one profile
             // cannot race into two registries (the loser would fail the
             // exclusive profile session store open).

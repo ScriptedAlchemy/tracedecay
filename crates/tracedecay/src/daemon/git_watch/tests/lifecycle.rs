@@ -77,7 +77,8 @@ async fn linked_worktree_registration_reconciles_its_pinned_timing() {
 #[tokio::test]
 async fn metadata_paths_route_to_exact_worktree_or_shared_reconciliation() {
     let (_container, primary, linked) = linked_worktree_fixture();
-    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common directory");
+    let common =
+        tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common directory");
     let primary_root = primary.canonicalize().expect("primary root");
     let linked_root = linked.canonicalize().expect("linked root");
     let linked_git_dir = worktree_git_dir(&linked).expect("linked git directory");
@@ -426,7 +427,8 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
     let repo = temp_repo();
     let watcher = GitWatcher::new(fast_watch_config());
     let state = Arc::new(WatchState::new(
-        tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common directory"),
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
         repo.path().canonicalize().expect("canonical project root"),
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
@@ -468,7 +470,8 @@ async fn shutdown_bounds_a_stuck_repository_join() {
     let repo = temp_repo();
     let watcher = GitWatcher::new(fast_watch_config());
     let state = Arc::new(WatchState::new(
-        tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common directory"),
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
         repo.path().canonicalize().expect("canonical project root"),
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
@@ -603,7 +606,8 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
     let mut config = fast_watch_config();
     config.watch_max_projects = 1;
     let watcher = GitWatcher::new(config);
-    let common = tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common directory");
+    let common =
+        tracedecay_runtime_core::worktree::git_common_dir(&primary).expect("git common directory");
     let stale = Arc::new(WatchState::new(
         common.clone(),
         linked.canonicalize().expect("canonical linked root"),
@@ -677,8 +681,8 @@ async fn concurrent_registration_prevents_empty_owner_retirement() {
     let replacement = container.path().join("replacement");
     seed_repo(&replacement);
     let watcher = GitWatcher::new(fast_watch_config());
-    let common_dir =
-        tracedecay_runtime_core::worktree::git_common_dir(&replacement).expect("replacement common directory");
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&replacement)
+        .expect("replacement common directory");
     let state = Arc::new(WatchState::new(
         common_dir.clone(),
         missing_root,
@@ -727,7 +731,8 @@ async fn concurrent_registration_prevents_empty_owner_retirement() {
 #[tokio::test]
 async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
     let repo = temp_repo();
-    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common directory");
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+        .expect("git common directory");
     for index in 0..=MAX_METADATA_WATCH_DIRECTORIES {
         std::fs::create_dir_all(common_dir.join(format!("refs/heads/team-{index}/nested")))
             .expect("create nested ref directory");
@@ -750,7 +755,8 @@ async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
 #[tokio::test]
 async fn a_new_nested_ref_directory_requests_a_watch_plan_rebuild() {
     let repo = temp_repo();
-    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common directory");
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+        .expect("git common directory");
     let state = Arc::new(WatchState::new(
         common_dir.clone(),
         repo.path().canonicalize().expect("canonical project root"),
@@ -806,7 +812,8 @@ async fn shutdown_reports_cancelled_repository_join() {
     let repo = temp_repo();
     let watcher = GitWatcher::new(fast_watch_config());
     let state = Arc::new(WatchState::new(
-        tracedecay_runtime_core::worktree::git_common_dir(repo.path()).expect("git common directory"),
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
         repo.path().canonicalize().expect("canonical project root"),
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),

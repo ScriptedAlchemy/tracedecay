@@ -40,10 +40,10 @@ use tracedecay_usecases::request_identity::{PreviewIdentityDomain, derive_previe
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;

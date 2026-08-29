@@ -1,14 +1,14 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-#[cfg(all(unix, not(target_os = "macos")))]
-use tracedecay_global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,
 };
+#[cfg(all(unix, not(target_os = "macos")))]
+use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 use tracedecay_sessions::runtime::git_correlation::{

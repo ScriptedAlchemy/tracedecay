@@ -441,9 +441,12 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     ];
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 47, "native topology restart")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        47,
+        "native topology restart",
+    )
+    .expect("daemon database scope");
     let first_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),

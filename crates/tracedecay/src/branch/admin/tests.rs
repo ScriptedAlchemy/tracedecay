@@ -64,8 +64,13 @@ fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
         reference: format!("refs/heads/tracedecay/track/{branch}"),
         source_oid: format!("oid-{branch}"),
     };
-    let outcome =
-        tracedecay_runtime_core::branch_meta::publish_graph_source(tracedecay_dir, branch, None, source).unwrap();
+    let outcome = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        tracedecay_dir,
+        branch,
+        None,
+        source,
+    )
+    .unwrap();
     assert!(matches!(
         outcome,
         tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
@@ -151,7 +156,8 @@ fn metadata_cas_rejects_changed_store_path_without_unlink() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
     let prepared = prepare_remove(&project_root, &tracedecay_dir);
-    let mut changed = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut changed =
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     changed.branches.get_mut("feature").unwrap().db_file = "branches/recreated.db".to_owned();
     tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &changed).unwrap();
 
@@ -386,7 +392,8 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
         "legacy private store must be collected"
     );
     assert!(main_db.exists(), "the project store must survive GC");
-    let persisted = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let persisted =
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     assert!(!persisted.is_tracked("topic"));
     assert!(!persisted.is_tracked("feature"));
 }

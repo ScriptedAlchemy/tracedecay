@@ -15,8 +15,8 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use tracedecay_runtime_core::errors::Result;
 use crate::project_registry::{ProjectRegistryView, PublicCodeProject};
+use tracedecay_runtime_core::errors::Result;
 
 /// Which registered project a context read names.
 #[derive(Clone, Debug, PartialEq, Eq)]
