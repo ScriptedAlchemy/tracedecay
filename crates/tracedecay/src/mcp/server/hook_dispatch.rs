@@ -122,7 +122,7 @@ impl McpServer {
                 self.run_hook_incremental_sync(cg, agent).await
             }
             HookEventPlan::RecordTerminalReceipt { route, receipt } => {
-                match tracedecay_agent_hosts::automation::host_receipts::record(
+                match tracedecay_automation_runtime::automation::host_receipts::record(
                     &cg.store_layout().dashboard_root,
                     route,
                     receipt,
@@ -148,7 +148,7 @@ impl McpServer {
                 route,
                 transcript_watermark,
             } => {
-                match tracedecay_agent_hosts::automation::host_receipts::mark_turn_ingested(
+                match tracedecay_automation_runtime::automation::host_receipts::mark_turn_ingested(
                     &cg.store_layout().dashboard_root,
                     route,
                     &transcript_watermark,

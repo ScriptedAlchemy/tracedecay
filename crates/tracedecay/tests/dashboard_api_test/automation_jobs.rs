@@ -24,7 +24,7 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let mut global_config = tracedecay_usecases::user_config::UserConfig::default();
         global_config.automation.enabled = true;
         global_config.automation.backend =
-            tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer;
+            tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer;
         global_config
             .save()
             .expect("global user config should save");
@@ -349,7 +349,7 @@ for line in sys.stdin:
         }
         let started = backend_started.exists();
         let unsettled =
-            tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded(
+            tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
                 &dashboard_root,
                 run_id,
             )
@@ -371,7 +371,7 @@ for line in sys.stdin:
         let mut settled = None;
         for _ in 0..250 {
             settled =
-                tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded(
+                tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
                     &dashboard_root,
                     run_id,
                 )
@@ -388,19 +388,19 @@ for line in sys.stdin:
         assert_eq!(settled.run_id, run_id);
         assert_eq!(
             settled.task,
-            tracedecay_agent_hosts::automation::backend::AgentTaskKind::UserJob
+            tracedecay_automation_runtime::automation::backend::AgentTaskKind::UserJob
         );
         assert_eq!(settled.task_key.as_deref(), Some("user_job:retained-history"));
         assert_eq!(
             settled.trigger,
-            tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Dashboard
+            tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Dashboard
         );
         assert_eq!(
             settled.status,
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
+            tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Succeeded
         );
         let records =
-            tracedecay_agent_hosts::automation::run_ledger::load_run_records(&dashboard_root, 16)
+            tracedecay_automation_runtime::automation::run_ledger::load_run_records(&dashboard_root, 16)
                 .await
                 .unwrap_or_else(|error| panic!("read settled dashboard user-job ledger: {error}"));
         assert_eq!(

@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
-use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-use tracedecay_agent_hosts::automation::runner::{
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+use tracedecay_automation_runtime::automation::runner::{
     MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
 };
 use tracedecay_application::ApplicationOutcome;

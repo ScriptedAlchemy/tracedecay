@@ -1461,7 +1461,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         ));
     }
     server.ledger_writes_settled().await;
-    let ready = tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root)
+    let ready = tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
         .await
         .unwrap()
         .expect("credential receipt should join its ingested watermark");

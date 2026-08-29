@@ -50,7 +50,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
 ) -> Result<AutomationEffectRecoveryReport> {
     let repair_root = dashboard_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        tracedecay_agent_hosts::automation::run_ledger::repair_corrupt_run_ledger_append_intent_blocking(
+        tracedecay_automation_runtime::automation::run_ledger::repair_corrupt_run_ledger_append_intent_blocking(
             &repair_root,
         )
     })
@@ -327,14 +327,14 @@ async fn reconcile_indexed_automation_effect(
         .ok_or_else(|| contract_error("terminal journal lost its durable sidecar"))?;
         if let Some(publication) = record.publication() {
             let published =
-                tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+                tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
                     dashboard_root,
                     admission.request.run_id.as_str(),
                     publication,
                 )
                 .await?;
             if published
-                == tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
+                == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
             {
                 return Ok(EntryRecoveryOutcome::Deferred);
             }
@@ -342,7 +342,7 @@ async fn reconcile_indexed_automation_effect(
             let cleanup_admission = admission.clone();
             let cleanup_terminal = terminal.clone();
             let cleanup_publication = publication.clone();
-            tracedecay_agent_hosts::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+            tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
                 dashboard_root,
                 admission.request.run_id.as_str(),
                 publication,
@@ -388,14 +388,14 @@ async fn reconcile_indexed_automation_effect(
             return Ok(EntryRecoveryOutcome::Deferred);
         }
         let published =
-            tracedecay_agent_hosts::automation::run_ledger::publish_staged_run_record_exact(
+            tracedecay_automation_runtime::automation::run_ledger::publish_staged_run_record_exact(
                 dashboard_root,
                 admission.request.run_id.as_str(),
                 &publication,
             )
             .await?;
         if published
-            == tracedecay_agent_hosts::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
+            == tracedecay_automation_runtime::automation::run_ledger::ExactRunPublishOutcome::MissingPayload
         {
             return Ok(EntryRecoveryOutcome::Deferred);
         }
@@ -412,7 +412,7 @@ async fn reconcile_indexed_automation_effect(
         let terminal_path = indexed.path.clone();
         let terminal_admission = admission.clone();
         let terminal_publication = cleanup_publication.clone();
-        tracedecay_agent_hosts::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
+        tracedecay_automation_runtime::automation::run_ledger::discard_stale_staged_run_record_exact_after_terminal(
             dashboard_root,
             admission.request.run_id.as_str(),
             &cleanup_publication,
@@ -433,7 +433,7 @@ async fn reconcile_indexed_automation_effect(
     let cleanup_path = indexed.path.clone();
     let cleanup_admission = admission.clone();
     let discarded =
-        tracedecay_agent_hosts::automation::run_ledger::discard_unbound_staged_run_records_if(
+        tracedecay_automation_runtime::automation::run_ledger::discard_unbound_staged_run_records_if(
             dashboard_root,
             admission.request.run_id.as_str(),
             move || {
@@ -445,7 +445,7 @@ async fn reconcile_indexed_automation_effect(
         )
         .await?;
     if discarded
-        == tracedecay_agent_hosts::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained
+        == tracedecay_automation_runtime::automation::run_ledger::ExactRunUnboundDiscardOutcome::Retained
     {
         return Ok(EntryRecoveryOutcome::Deferred);
     }

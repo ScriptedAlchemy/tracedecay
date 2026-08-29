@@ -498,7 +498,7 @@ fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
 async fn install_project_open_context_scout_configuration(
     owner: &ProjectContextScoutOwnerV1,
     pin: ContextScoutConfigurationPinV1,
-    model_config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
         (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
@@ -709,7 +709,7 @@ async fn run_production_hook_cycle(
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let Ok(model_config) = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
+    let Ok(model_config) = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
         &pinned_configuration.snapshot,
     ) else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
@@ -1182,7 +1182,7 @@ async fn register_production_advisory_owner(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
         })?;
-    let model_config = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
+    let model_config = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
         &configuration.snapshot,
     )?;
     install_project_open_context_scout_configuration(

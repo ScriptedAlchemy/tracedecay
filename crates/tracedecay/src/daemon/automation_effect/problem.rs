@@ -1,6 +1,6 @@
 //! Canonical admitted problem mapping for automation runs.
 
-use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
 use tracedecay_application::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
@@ -210,7 +210,7 @@ fn zero_effect_terminal(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
     use tracedecay_application::{
         ApplicationExecutionFailureClassV1, ApplicationProblemKind, ApplicationUnavailableClassV1,
         CancellationContext, CancellationSignal, CancellationStage, CapabilityGrantId,

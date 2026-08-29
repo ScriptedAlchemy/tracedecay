@@ -6,7 +6,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
-use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_usecases::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
 
 use super::SessionAuthorities;

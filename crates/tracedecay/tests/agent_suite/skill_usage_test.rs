@@ -1,8 +1,8 @@
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
     default_managed_skill_targets,
 };
-use tracedecay_agent_hosts::automation::skill_usage::{
+use tracedecay_automation_runtime::automation::skill_usage::{
     AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
     record_skill_usage, record_skill_usage_event, skill_improvement_recommendations,
     stale_skill_recommendations, summarize_skill_usage,
@@ -175,7 +175,7 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
         .unwrap();
     assert!(touched.is_empty());
     assert!(
-        tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+        tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
             &profile_root,
             "repo-hygiene"
         )
@@ -243,7 +243,7 @@ async fn analytics_ingest_dedupes_tracedecay_skill_view_by_request_id() {
         .unwrap();
     assert!(second.is_empty());
 
-    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+    let record = tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
         &profile_root,
         "repo-hygiene",
     )
@@ -305,7 +305,7 @@ async fn direct_skill_view_marks_matching_analytics_request_imported() {
     .unwrap();
 
     assert!(touched.is_empty());
-    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+    let record = tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
         &profile_root,
         "repo-hygiene",
     )
@@ -350,7 +350,7 @@ async fn analytics_ingest_is_idempotent_and_accepts_bare_skill_name_rows() {
     assert_eq!(first[0].skill_id, "repo-hygiene");
     assert_eq!(first[0].use_count, 1);
 
-    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+    let record = tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record(
         &profile_root,
         "repo-hygiene",
     )
@@ -377,7 +377,7 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     )
     .await
     .unwrap();
-    let pinned = tracedecay_agent_hosts::automation::managed_skills::set_managed_skill_pinned(
+    let pinned = tracedecay_automation_runtime::automation::managed_skills::set_managed_skill_pinned(
         &profile_root,
         &pinned_skill.metadata.id,
         true,

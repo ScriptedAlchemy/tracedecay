@@ -1,6 +1,6 @@
 //! Projection from automation/store authority receipts into the application terminal.
 
-use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
+use tracedecay_automation_runtime::automation::AutomationCommittedReceipt;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunRequestV1,
     AutomationRunSummaryV1, AutomationSkipReasonV1, AutomationTaskRequestV1, AutomationTaskV1,
@@ -210,7 +210,7 @@ pub(super) fn project_recovered_committed_receipts(
         (None, false) => {
             let results = recovered.automatic_fact_results().map_err(contract_error)?;
             let receipts =
-                tracedecay_agent_hosts::automation::NonEmptyAutomaticFactReceipts::from_vec(
+                tracedecay_automation_runtime::automation::NonEmptyAutomaticFactReceipts::from_vec(
                     results,
                 )
                 .ok_or_else(|| contract_error("recovered automatic-fact receipt set is empty"))?;
@@ -228,7 +228,7 @@ pub(super) fn project_recovered_committed_receipts(
 
 fn project_external_receipt(
     request: &AutomationRunRequestV1,
-    receipt: &tracedecay_agent_hosts::automation::ExternalAutomationEffectReceipt,
+    receipt: &tracedecay_automation_runtime::automation::ExternalAutomationEffectReceipt,
 ) -> Result<AutomationExternalEffectReceiptV1> {
     let (expected_run_id, task_key) = match &request.task {
         AutomationTaskRequestV1::SkillWriter(_) => (

@@ -1397,7 +1397,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn released_automation_tombstone_allows_one_eventual_replacement() {
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
-    use tracedecay_agent_hosts::automation::scheduler::{
+    use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
 

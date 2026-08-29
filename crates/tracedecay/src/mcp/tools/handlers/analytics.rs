@@ -7,7 +7,7 @@
 //! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
 //! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
-//! [`tracedecay_agent_hosts::automation::run_ledger::load_run_records`]) rather than
+//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
 
 use std::collections::BTreeMap;
@@ -30,7 +30,7 @@ use crate::store::DatabaseFactStore;
 use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
-use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
+use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
 
 use super::super::{ToolResult, renderers};
 use super::support::tool_json_with_md;

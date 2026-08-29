@@ -1,7 +1,7 @@
 //! Read-only MCP inspection over the active project's durable automation ledger.
 
 use serde_json::{Value, json};
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, find_run_record, load_run_records_page,
 };
 

@@ -557,12 +557,12 @@ async fn agent_usage_summary(
 }
 
 fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    tracedecay_agent_hosts::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
+    tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
         let metadata: Value = serde_json::from_str(metadata_json).ok()?;
         ["agent_nickname", "agent_role"]
             .into_iter()
             .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-            .find_map(tracedecay_agent_hosts::automation::agent_targets::managed_agent_label)
+            .find_map(tracedecay_automation_runtime::automation::agent_targets::managed_agent_label)
     })
 }
 

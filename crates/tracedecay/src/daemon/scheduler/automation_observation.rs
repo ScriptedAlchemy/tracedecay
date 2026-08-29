@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_domain::ProjectId;
 
 #[cfg(test)]
@@ -27,8 +27,8 @@ pub(super) fn record_scheduler_run(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
-    use tracedecay_agent_hosts::automation::run_ledger::{
+    use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+    use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     };
     use tracedecay_domain::{AutomationTerminalV1, CoverageStateV1, ObservedTernaryV1, UtcMicros};

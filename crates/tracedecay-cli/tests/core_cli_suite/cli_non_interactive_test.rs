@@ -18,7 +18,7 @@ use tracedecay::storage::{
     profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_agent_hosts::PRODUCT_VERSION;
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay_domain::ProjectId;

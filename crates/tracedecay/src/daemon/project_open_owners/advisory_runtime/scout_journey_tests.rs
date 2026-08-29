@@ -217,7 +217,7 @@ async fn test_scout_owner(
 
 #[tokio::test]
 async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
+    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 
     let temporary = tempfile::tempdir().expect("temporary directory");
     let model_config = AutomationConfig {
@@ -430,7 +430,7 @@ async fn stock_disabled_configuration_produces_nothing() {
     install_project_open_context_scout_configuration(
         owner.as_ref(),
         pin,
-        &tracedecay_agent_hosts::automation::config::AutomationConfig::default(),
+        &tracedecay_automation_runtime::automation::config::AutomationConfig::default(),
     )
     .await
     .expect("install disabled Scout configuration");

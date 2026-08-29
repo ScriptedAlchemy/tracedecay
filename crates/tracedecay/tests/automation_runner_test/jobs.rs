@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tracedecay_agent_hosts::automation::jobs::{
+use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
     job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend,
     run_user_job_with_backend_for_retained_settlement, save_jobs, validate_job,
 };
-use tracedecay_agent_hosts::automation::scheduler::{
+use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
 use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
@@ -618,7 +618,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
             summary: "Adds job context.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Use the profile-specific job context.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
@@ -691,7 +691,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
             summary: "Must not be attached after archival.".to_string(),
             category: "workflow".to_string(),
             targets:
-                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "ARCHIVED_SKILL_BODY_MUST_NOT_RUN".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
@@ -703,7 +703,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
     )
     .await
     .unwrap();
-    tracedecay_agent_hosts::automation::managed_skills::archive_managed_skill(
+    tracedecay_automation_runtime::automation::managed_skills::archive_managed_skill(
         &profile_root,
         "archived-job-context",
     )
@@ -1006,7 +1006,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let records = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(records, vec![first.ledger_record]);
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
             &dashboard_root,
             occurrence,
         )
@@ -1082,7 +1082,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
         2
     );
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
             &dashboard_root,
             occurrence,
         )
@@ -1153,7 +1153,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     let records = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(records, vec![run.ledger_record]);
     assert!(
-        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
             &dashboard_root,
             occurrence,
         )

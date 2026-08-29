@@ -8,11 +8,11 @@ use super::context_scout_v2::{
     ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
     serialized_token_count,
 };
-use crate::automation::backend::{
+use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskError, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
-use crate::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 use crate::ports::pricing::cost_of_turn;
 
 const CONTEXT_SCOUT_PROMPT_V1: &str = "\
@@ -268,7 +268,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::automation::backend::AgentTaskResponse;
+    use tracedecay_automation_runtime::automation::backend::AgentTaskResponse;
     use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
     #[derive(Clone)]

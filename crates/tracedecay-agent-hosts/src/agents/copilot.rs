@@ -163,7 +163,7 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         if !self.has_tracedecay(home) {
             return Ok(Vec::new());
         }
@@ -176,9 +176,9 @@ impl AgentIntegration for CopilotIntegration {
             .iter()
             .filter(|path| path.exists())
             .map(|path| {
-                crate::automation::skill_targets::install_managed_skills(
+                tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                     profile_root,
-                    crate::automation::skill_targets::SkillInstallTarget::Agents,
+                    tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                     path,
                 )
             })
@@ -189,15 +189,15 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>> {
         let instructions = project_root.join(".github/copilot-instructions.md");
         if !workspace_mcp_has_tracedecay(project_root) || !instructions.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                 &instructions,
             )?,
         ])

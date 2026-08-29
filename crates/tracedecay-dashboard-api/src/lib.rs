@@ -155,8 +155,8 @@ use tower::ServiceExt;
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::backend;
-use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_automation_runtime::automation::backend;
+use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{
@@ -216,7 +216,7 @@ pub type AutomationSchedulerReconcileFuture =
 pub type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
 pub type DashboardAutomationObservationRecorderV1 = Arc<
-    dyn Fn(tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord)
+    dyn Fn(tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord)
         + Send
         + Sync
         + 'static,

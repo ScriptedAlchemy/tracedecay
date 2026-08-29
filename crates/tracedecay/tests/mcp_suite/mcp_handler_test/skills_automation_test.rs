@@ -9,16 +9,16 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_agent_hosts::automation::skill_usage::{
+use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
 
@@ -50,7 +50,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
-            task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+            task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_string()),
             backend: "codex_app_server".to_string(),
             backend_identity: None,
@@ -367,7 +367,7 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
+        targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
         ),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![

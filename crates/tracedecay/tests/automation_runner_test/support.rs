@@ -25,32 +25,32 @@ pub(crate) use tempfile::tempdir;
 
 pub(crate) use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
-pub(crate) use tracedecay_agent_hosts::automation::automatic_facts::{
+pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
     record_session_automatic_facts,
 };
-pub(crate) use tracedecay_agent_hosts::automation::backend::{
+pub(crate) use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
-pub(crate) use tracedecay_agent_hosts::automation::config::{
+pub(crate) use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
     AutomationTaskSet,
 };
-pub(crate) use tracedecay_agent_hosts::automation::managed_skills::{
+pub(crate) use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, create_managed_skill, load_managed_skill,
 };
-pub(crate) use tracedecay_agent_hosts::automation::run_ledger::{
+pub(crate) use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     load_run_records, read_run_artifact_payload,
 };
-pub(crate) use tracedecay_agent_hosts::automation::runner::{
+pub(crate) use tracedecay_automation_runtime::automation::runner::{
     AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
     AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
     CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
     SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
 };
-pub(crate) use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
+pub(crate) use tracedecay_automation_runtime::automation::{AutomationRunControl, AutomationRunError};
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -278,11 +278,11 @@ pub(crate) async fn run_session_reflector_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<
-    tracedecay_agent_hosts::automation::runner::SessionReflectorAutomationRun,
+    tracedecay_automation_runtime::automation::runner::SessionReflectorAutomationRun,
     AutomationRunError,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
-    tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
         cg,
         config,
         run_control,
@@ -299,10 +299,10 @@ pub(crate) async fn run_skill_writer_with_backend(
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
-) -> Result<tracedecay_agent_hosts::automation::runner::SkillWriterAutomationRun, AutomationRunError>
+) -> Result<tracedecay_automation_runtime::automation::runner::SkillWriterAutomationRun, AutomationRunError>
 {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
-    tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+    tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
         cg,
         config,
         &test_configuration_revision(),
@@ -321,7 +321,7 @@ pub(crate) async fn run_combined_review_with_backend(
     options: CombinedReviewAutomationOptions,
 ) -> tracedecay_runtime_core::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
-    tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+    tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
         cg,
         config,
         &test_configuration_revision(),
@@ -340,10 +340,10 @@ pub(crate) async fn run_memory_curator_with_backend(
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<
-    tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
+    tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationRun,
     AutomationRunError,
 > {
-    tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         cg,
         config,
         &test_configuration_revision(),

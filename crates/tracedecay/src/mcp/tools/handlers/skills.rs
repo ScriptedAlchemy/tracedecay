@@ -5,20 +5,20 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
+use tracedecay_automation_runtime::ports::session_store::AutomationSessionStore;
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::hermes_skill_bridge::{
+use tracedecay_automation_runtime::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
 };
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{find_run_record, read_run_artifact_payload};
-use tracedecay_agent_hosts::automation::skill_usage::{
+use tracedecay_automation_runtime::automation::run_ledger::{find_run_record, read_run_artifact_payload};
+use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, analytics_import_key_for_request, ingest_project_analytics_events,
     record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
     summarize_skill_usage, summarize_skill_usage_for,
