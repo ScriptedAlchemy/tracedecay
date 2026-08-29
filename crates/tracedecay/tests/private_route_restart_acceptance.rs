@@ -54,7 +54,7 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
 }
 
 fn project_handshake(project: &Path) -> DaemonHandshake {
-    DaemonHandshake::for_current_client(Some(project.to_path_buf()), None, false, false)
+    tracedecay::daemon::handshake_for_current_client(Some(project.to_path_buf()), None, false, false)
         .expect("project daemon handshake")
 }
 

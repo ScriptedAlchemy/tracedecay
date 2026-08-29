@@ -9,7 +9,7 @@ use tracedecay_application::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
 
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 use super::RegisteredWorkRuntime;

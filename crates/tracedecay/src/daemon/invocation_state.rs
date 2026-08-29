@@ -339,7 +339,7 @@ impl DaemonInvocationState {
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
@@ -356,7 +356,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
         expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
-        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::
@@ -382,7 +382,7 @@ impl DaemonInvocationState {
         profile_id: tracedecay_domain::configuration::UserProfileId,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     ) -> std::result::Result<
         query_authority_provider::QueryAuthorityProviderStatusV1,
         query_authority_provider::QueryAuthorityUpdateErrorV1,
@@ -934,7 +934,7 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = crate::daemon_client::DaemonInvocationExecutor::invoke_controlled(
+                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
@@ -945,7 +945,7 @@ impl DaemonInvocationState {
                     ),
                     deadline,
                     control_cancellation,
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
                 )
                 .await
                 .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;

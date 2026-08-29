@@ -71,8 +71,6 @@ pub use tracedecay_query as query;
 pub mod config;
 pub mod context;
 pub mod daemon;
-pub mod daemon_client;
-pub mod daemon_contract;
 pub mod dashboard;
 pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
@@ -95,7 +93,6 @@ pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;
-pub mod remote_command;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;
@@ -110,8 +107,6 @@ pub(crate) mod support;
 pub mod tracedecay;
 pub mod types;
 pub mod version;
-pub mod work_cli;
-pub mod workflow_cli;
 #[cfg(test)]
 #[path = "sessions/workflow_ingest_tests.rs"]
 mod workflow_ingest_tests;

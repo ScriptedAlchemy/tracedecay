@@ -483,7 +483,7 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
 }
 
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
-    if crate::daemon_contract::parse_daemon_invocation_cancellation_request(request_line).is_some()
+    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line).is_some()
     {
         return true;
     }

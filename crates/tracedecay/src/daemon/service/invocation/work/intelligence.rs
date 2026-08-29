@@ -16,7 +16,7 @@ use tracedecay_application::{
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationProblem, DaemonInvocationResponse, WorkApplicationOutcomeV1,
 };
 use tracedecay_global_db::configuration::{

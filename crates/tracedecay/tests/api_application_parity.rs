@@ -11,7 +11,7 @@ use tracedecay::application_surface::{
     parse_application_surface_request, resolve_application_surface_dispatch,
     resolve_http_application_surface_dispatch,
 };
-use tracedecay::daemon_client::{
+use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
 };
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;

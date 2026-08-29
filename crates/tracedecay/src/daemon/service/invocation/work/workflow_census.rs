@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracedecay_application::{ApplicationProblem, RequestContext};
 use tracedecay_domain::UtcMicros;
 
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::RegisteredWorkRuntime;
 

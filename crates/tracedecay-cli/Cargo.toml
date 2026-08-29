@@ -44,7 +44,9 @@ hotpath = [
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-global-db/hotpath",
+    "tracedecay-sdk/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
     "tracedecay-lsp/hotpath",
@@ -65,7 +67,9 @@ hotpath-alloc = [
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-sdk/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
@@ -86,7 +90,9 @@ hotpath-cpu = [
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-sdk/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
@@ -174,6 +180,7 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
@@ -183,6 +190,7 @@ tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0"
 tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }

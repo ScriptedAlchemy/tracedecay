@@ -57,8 +57,6 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use tracedecay::application_surface::http_application_router;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay_application::{
     EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
@@ -1624,9 +1622,9 @@ fn post_probe(
 /// evidence so an inner/outer disagreement can be named precisely.
 async fn inner_router(project: &Path) -> axum::Router {
     let handshake =
-        DaemonHandshake::for_current_client(Some(project.to_path_buf()), None, false, false)
+        tracedecay::daemon::handshake_for_current_client(Some(project.to_path_buf()), None, false, false)
             .expect("production daemon handshake");
-    let client = DaemonInvocationClient::for_current(handshake).expect("production daemon client");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake).expect("production daemon client");
     http_application_router(
         client,
         OperationEventAuthority::default(),

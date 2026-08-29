@@ -1,7 +1,7 @@
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
-use tracedecay_global_db::session_temporal::execution::{
+use tracedecay_session_temporal_store::execution::{
     AuthorizedTaskSessionExecutionRequestV1, TaskSessionExecutionOmissionV1,
     TaskSessionRankSelectorV1, TaskSessionSelectionCallbackErrorV1,
     TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,

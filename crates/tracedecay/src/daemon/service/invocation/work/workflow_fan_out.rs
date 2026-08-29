@@ -5,7 +5,7 @@ use tracedecay_application::{ApplicationProblem, RequestContext};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::super::current_micros;
 use super::workflow_run_control::workflow_run_problem;

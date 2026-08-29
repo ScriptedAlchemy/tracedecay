@@ -143,3 +143,69 @@ fn configuration_schema_refs_reject_unknown_operations() {
     assert!(configuration_surface_result_schema("configuration_get").is_ok());
     assert!(configuration_surface_request_schema("configuration_unknown").is_err());
 }
+
+#[test]
+fn invocation_payload_decode_wraps_stripped_get_and_set_bodies() {
+    let get = configuration_wire_request_from_invocation_payload(
+        "configuration_get",
+        serde_json::json!({"key": "mcp.tool_timings"}),
+    )
+    .expect("stripped get payload");
+    assert!(matches!(
+        get,
+        ConfigurationWireRequestV1::Get(request) if request.key.as_str() == "mcp.tool_timings"
+    ));
+
+    let set = configuration_wire_request_from_invocation_payload(
+        "configuration_set",
+        serde_json::json!({
+            "layer": {"kind": "default"},
+            "key": "mcp.tool_timings",
+            "value": {"kind": "boolean", "value": true},
+            "expected_revision": "revision.test-configuration-set",
+            "idempotency_key": "configuration.idempotency.test-set"
+        }),
+    )
+    .expect("stripped set payload");
+    assert!(matches!(set, ConfigurationWireRequestV1::Set(_)));
+}
+
+#[test]
+fn invocation_payload_decode_rejects_the_tagged_envelope() {
+    let error = configuration_wire_request_from_invocation_payload(
+        "configuration_get",
+        serde_json::json!({
+            "operation": "get",
+            "request": {"key": "mcp.tool_timings"}
+        }),
+    )
+    .expect_err("envelope must not admit as a get body");
+    assert_eq!(
+        error,
+        ApplicationContractError::Inconsistent {
+            field: "configuration surface request",
+        }
+    );
+}
+
+#[test]
+fn invocation_payload_decode_covers_every_configuration_operation_name() {
+    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+        match configuration_wire_request_from_invocation_payload(name, serde_json::json!({})) {
+            Ok(_) => {}
+            Err(ApplicationContractError::Inconsistent {
+                field: "configuration surface request",
+            }) => {}
+            Err(error) => panic!("{name} must be a known configuration operation: {error}"),
+        }
+    }
+    assert!(matches!(
+        configuration_wire_request_from_invocation_payload(
+            "configuration_unknown",
+            serde_json::json!({}),
+        ),
+        Err(ApplicationContractError::Inconsistent {
+            field: "configuration surface operation",
+        })
+    ));
+}

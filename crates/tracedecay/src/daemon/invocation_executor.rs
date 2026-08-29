@@ -316,11 +316,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                             operation.as_str(),
                         )
                         .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
-                    let typed = crate::application_surface::parse_application_surface_request(
-                        operation, payload,
-                    )
-                    .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
-                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
                         tracedecay_application::InvocationTarget::CurrentProject => None,
@@ -332,51 +328,66 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
                             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch
                     ) {
-                        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
+                        tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
-                        crate::daemon_client::InvocationCancellationPolicy::ReadOnly
+                        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly
                     };
-                    let request = match (operation, typed) {
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
-                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                    let request = match operation {
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                        | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch => {
+                            let request = tracedecay_application::configuration_wire_request_from_invocation_payload(
+                                operation.as_str(),
+                                payload,
+                            )
+                            .map_err(|_| {
+                                tracedecay_application::InvocationError::InvalidRequest
+                            })?;
+                            DaemonInvocationRequest::configuration(
+                                request_id.as_str(),
+                                operation,
                                 request,
-                            ),
-                        ) => DaemonInvocationRequest::configuration(
-                            request_id.as_str(),
-                            operation,
-                            request,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
-                        (
-                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
-                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
+                        crate::application_surface::ApplicationSurfaceOperation::FeedbackGet => {
+                            let typed = crate::application_surface::parse_application_surface_request(
+                                operation, payload,
+                            )
+                            .map_err(|_| {
+                                tracedecay_application::InvocationError::InvalidRequest
+                            })?;
+                            let crate::application_surface::ApplicationSurfaceRequest::Feedback(
                                 request,
-                            ),
-                        ) => DaemonInvocationRequest::feedback(
-                            request_id.as_str(),
-                            operation,
-                            request.request_handle,
-                            observed_at,
-                            deadline.clone(),
-                            cancellation_context,
-                        )
-                        .with_resolved_scope(scope),
+                            ) = typed
+                            else {
+                                return Err(
+                                    tracedecay_application::InvocationError::InvalidRequest,
+                                );
+                            };
+                            DaemonInvocationRequest::feedback(
+                                request_id.as_str(),
+                                operation,
+                                request.request_handle,
+                                observed_at,
+                                deadline.clone(),
+                                cancellation_context,
+                            )
+                            .with_resolved_scope(scope)
+                        }
                         _ => {
                             return Err(
                                 tracedecay_application::InvocationError::InvalidRequest,
                             );
                         }
                     }
-                    .with_delivery_route(crate::daemon_client::application_delivery_route(surface));
+                    .with_delivery_route(tracedecay_daemon_protocol::application_delivery_route(surface));
                     let response =
-                        <Self as crate::daemon_client::DaemonInvocationExecutor>::invoke_controlled(
+                        <Self as tracedecay_daemon_protocol::DaemonInvocationExecutor>::invoke_controlled(
                             self,
                             request,
                             deadline,
@@ -384,8 +395,8 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                             policy,
                         )
                         .await
-                        .map_err(crate::daemon_client::map_invocation_error)?;
-                    crate::daemon_client::application_response(
+                        .map_err(tracedecay_daemon_protocol::map_invocation_error)?;
+                    tracedecay_daemon_protocol::application_response(
                         request_id,
                         result_contract,
                         response.outcome,
@@ -424,7 +435,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         tracedecay_usecases::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
-                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
                     let authority = self.invocation.service.operation_events();
                     let admitted = authority
                         .resolve_invocation_context(
@@ -513,7 +524,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         tracedecay_usecases::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
-                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
                     let authority = self.invocation.service.operation_events();
                     let admitted = authority
                         .resolve_invocation_context(
@@ -556,21 +567,21 @@ async fn settle_in_process_invocation(
     remaining: Duration,
     cancellation: tracedecay_application::CancellationSignal,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
-    policy: crate::daemon_client::InvocationCancellationPolicy,
-) -> std::result::Result<DaemonInvocationResponse, crate::daemon_client::DaemonInvocationError> {
+    policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError> {
     use tracedecay_application::CancellationStage;
 
     let stage = match policy {
-        crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
             CancellationStage::DuringRead
         }
-        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+        tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect => {
             CancellationStage::EffectInFlight
         }
     };
     let invocation = invocation;
     tokio::pin!(invocation);
-    let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
+    let cancellation_wait = tracedecay_daemon_protocol::wait_for_cancellation(cancellation);
     tokio::pin!(cancellation_wait);
     let has_admitted_cancellation = admitted_cancellation.is_some();
     let admitted_cancellation_wait = async move {
@@ -582,7 +593,7 @@ async fn settle_in_process_invocation(
     tokio::pin!(admitted_cancellation_wait);
     let timed_out = tokio::select! {
         response = &mut invocation => {
-            return response.map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable);
+            return response.map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable);
         }
         () = &mut cancellation_wait => false,
         () = &mut admitted_cancellation_wait => false,
@@ -592,7 +603,7 @@ async fn settle_in_process_invocation(
         crate::daemon::request_cancellation::cancel(request_id);
     }
     match policy {
-        crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
             if tokio::time::timeout(Duration::from_secs(1), &mut invocation)
                 .await
                 .is_err()
@@ -600,12 +611,12 @@ async fn settle_in_process_invocation(
                 invocation.abort();
             }
             if timed_out {
-                Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
+                Err(tracedecay_daemon_protocol::DaemonInvocationError::TimedOut { stage })
             } else {
-                Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
+                Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled { stage })
             }
         }
-        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+        tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect => {
             // An authoritative effect settles itself: its own budget bounds it,
             // and when that budget expires after the commit point it reports
             // `PartialEffect` with a committed receipt. Waiting only
@@ -622,7 +633,7 @@ async fn settle_in_process_invocation(
                 Ok(Ok(response)) => Ok(response),
                 Ok(Err(_)) | Err(_) => Ok(DaemonInvocationResponse::problem(
                     request_id,
-                    crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+                    tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
                 )),
             }
         }
@@ -658,16 +669,16 @@ fn map_operation_event_invocation_error(
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocationExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInvocationExecutor {
     fn invoke_controlled(
         &self,
         request: DaemonInvocationRequest,
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationSignal,
-        policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
-        std::result::Result<DaemonInvocationResponse, crate::daemon_client::DaemonInvocationError>,
+        std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>,
     > {
         Box::pin(async move {
             use tracedecay_application::CancellationStage;
@@ -677,12 +688,12 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                     tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled,
                 )
             {
-                return Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
                     stage: CancellationStage::BeforeAdmission,
                 });
             }
-            let remaining = crate::daemon_client::deadline_remaining(&deadline).ok_or(
-                crate::daemon_client::DaemonInvocationError::TimedOut {
+            let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline).ok_or(
+                tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
                     stage: CancellationStage::BeforeAdmission,
                 },
             )?;
@@ -705,7 +716,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                 .await
             })
             .await
-            .map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable)?
+            .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?
         })
     }
 
@@ -714,7 +725,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
         subject_digest: tracedecay_domain::ManifestDigest,
         observed_at: tracedecay_domain::UtcMicros,
         event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
             let request_id = tracedecay_usecases::request_identity::mint_global_request_id(
                 tracedecay_usecases::request_identity::GlobalRequestSurface::FeedbackObservation,

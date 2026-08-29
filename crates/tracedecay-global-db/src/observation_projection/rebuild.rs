@@ -19,7 +19,7 @@ use tracedecay_store::{
     workflow_semantic_kind,
 };
 
-use super::super::session_temporal::record_canonical_observation_effect;
+use tracedecay_session_temporal_store::record_canonical_observation_effect;
 use super::apply::{
     apply_effect, apply_skip_disposition, derive_projection_for_rebuild,
     derive_projection_with_alias, stage_provider_usage_effects, verify_effect,

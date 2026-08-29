@@ -33,8 +33,8 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
+use tracedecay_daemon_protocol::DaemonInvocationExecutor;
+use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -113,10 +113,10 @@ pub(crate) async fn invoke_work_operation(
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
                 return tracedecay_api::work_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
+            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
                 WorkApplicationInvocationV1::$variant(decoded),
-                crate::daemon_client::invocation_now_micros(),
+                tracedecay_daemon_protocol::invocation_now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
@@ -130,7 +130,7 @@ pub(crate) async fn invoke_work_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkApplication {
                         scope,
                         outcome: WorkApplicationOutcomeV1::$variant(outcome),
                     } => Some((scope, *outcome)),
@@ -143,10 +143,10 @@ pub(crate) async fn invoke_work_operation(
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
                 return tracedecay_api::work_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
+            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
                 WorkApplicationInvocationV1::$variant(decoded),
-                crate::daemon_client::invocation_now_micros(),
+                tracedecay_daemon_protocol::invocation_now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
@@ -160,7 +160,7 @@ pub(crate) async fn invoke_work_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
+                    tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkApplication {
                         scope,
                         outcome: WorkApplicationOutcomeV1::$variant(outcome),
                     } => Some((scope, outcome)),

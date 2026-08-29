@@ -780,7 +780,7 @@ pub struct RemoteAuthorityArgs {
     #[arg(long, value_name = "FILE")]
     pub trust_root_file: Option<PathBuf>,
     /// Request timeout in seconds
-    #[arg(long, default_value_t = tracedecay::remote_command::DEFAULT_REMOTE_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = crate::remote_command::DEFAULT_REMOTE_TIMEOUT_SECS)]
     pub timeout_secs: u64,
     /// Strict typed `RemoteProtocolRequestV1` JSON file, or `-` to read stdin
     #[arg(long, value_name = "FILE")]
@@ -790,7 +790,7 @@ pub struct RemoteAuthorityArgs {
     pub json: bool,
 }
 
-impl From<RemoteAuthorityArgs> for tracedecay::remote_command::RemoteProtocolArgs {
+impl From<RemoteAuthorityArgs> for crate::remote_command::RemoteProtocolArgs {
     fn from(args: RemoteAuthorityArgs) -> Self {
         Self {
             endpoint: args.endpoint,
@@ -857,7 +857,7 @@ pub enum RemoteAction {
     },
 }
 
-impl From<RemoteAction> for tracedecay::remote_command::RemoteCommand {
+impl From<RemoteAction> for crate::remote_command::RemoteCommand {
     fn from(action: RemoteAction) -> Self {
         match action {
             RemoteAction::Status { json } => Self::Status { json },

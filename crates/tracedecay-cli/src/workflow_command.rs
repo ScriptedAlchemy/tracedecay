@@ -17,7 +17,7 @@ pub(crate) async fn run(
     let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
     let outcome =
-        tracedecay::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body)
+        crate::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body)
             .await?;
     if invocation.json {
         print!("{}", workflow_json_line(&outcome)?);

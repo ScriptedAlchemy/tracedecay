@@ -38,21 +38,21 @@ impl tracedecay_application::ApplicationInvocationExecutor for RecordingUnavaila
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for RecordingUnavailableExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke_controlled(
         &self,
-        _request: crate::daemon_contract::DaemonInvocationRequest,
+        _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         _cancellation: tracedecay_application::CancellationSignal,
-        _policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
-        Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+        Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
     fn observe_feedback(
@@ -60,10 +60,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for RecordingUnavailableExec
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_runtime_core::errors::Result<()>,
-    > {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

@@ -534,7 +534,7 @@ mod tests {
             .lcm_protect_session_raw_messages(provider, session_id)
             .await
             .expect("protect canonical raw message");
-        tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(database)
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(database)
             .materialize_pending_session_refresh_for_test(&session)
             .await
             .expect("materialize canonical temporal occurrence");
