@@ -616,9 +616,13 @@ fn doctor_warns_on_missing_or_running_disabled_units() {
         daemon_service_doctor_verdict(DaemonServiceState::RunningEnabled),
         DaemonServiceDoctorVerdict::Pass
     );
+    let missing = DaemonServiceState::Missing.lifecycle_operator_advice();
     assert!(
-        DaemonServiceState::Missing
-            .lifecycle_operator_advice()
-            .contains("install-service and ensure the service is running")
+        missing.contains("tracedecay daemon install-service"),
+        "missing unit must name install-service, got: {missing}"
+    );
+    assert!(
+        missing.contains("ensure the service is running"),
+        "missing unit keeps the generic ensure-running text, got: {missing}"
     );
 }

@@ -347,10 +347,24 @@ pub(crate) fn unavailable_daemon_socket_advice(
             )
         }
         Some(state) => state.lifecycle_operator_advice(),
-        None => {
-            "Run `tracedecay daemon install-service` and ensure the service is running.".to_string()
-        }
+        None => match installed_service_unit_present() {
+            Ok(true) => format!(
+                "TraceDecay daemon unit is installed but the socket is not available. Run {}.",
+                daemon_service_enable_now_remedy()
+            ),
+            Ok(false) | Err(_) => {
+                "Run `tracedecay daemon install-service` and ensure the service is running."
+                    .to_string()
+            }
+        },
     }
+}
+
+/// Unit-file presence only. Connect-path diagnosis must not spawn `systemctl`,
+/// which races tests that fake PATH and is slower than a socket miss.
+pub(crate) fn installed_service_unit_present() -> Result<bool> {
+    let service_path = service_unit_path()?;
+    service_unit_exists(&service_path)
 }
 
 impl DaemonServiceSpec {

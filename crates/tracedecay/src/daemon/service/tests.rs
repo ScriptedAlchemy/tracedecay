@@ -222,6 +222,51 @@ fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
 }
 
 #[test]
+fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let socket = PathBuf::from("/tmp/tracedecay.sock");
+
+    let missing = super::unavailable_daemon_socket_advice(&socket, None);
+    assert!(
+        missing.contains("install-service"),
+        "absent unit keeps install-service, got: {missing}"
+    );
+    assert!(
+        missing.contains("ensure the service is running"),
+        "absent unit keeps generic ensure-running text, got: {missing}"
+    );
+
+    let service_path = config_home
+        .join("systemd/user")
+        .join(crate::daemon::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    std::fs::write(
+        &service_path,
+        "[Service]\nExecStart=/opt/tracedecay daemon run\n",
+    )
+    .expect("unit file");
+
+    let installed = super::unavailable_daemon_socket_advice(&socket, None);
+    assert!(
+        installed.contains("unit is installed"),
+        "present unit must be named, got: {installed}"
+    );
+    assert!(
+        installed.contains("tracedecay daemon install-service"),
+        "present unit must name install-service, got: {installed}"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            installed.contains("systemctl --user enable --now tracedecay.service"),
+            "present unit must name enable --now, got: {installed}"
+        );
+    }
+}
+
+#[test]
 fn strict_restoration_requires_readiness_only_for_running_state() {
     assert!(super::restored_service_matches(
         DaemonServiceState::RunningEnabled,
