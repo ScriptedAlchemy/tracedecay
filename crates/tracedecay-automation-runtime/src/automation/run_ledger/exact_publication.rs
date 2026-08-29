@@ -359,7 +359,7 @@ fn run_record_exact_identity(record: &AutomationRunLedgerRecord) -> Result<(Mani
 
 /// Verifies or publishes the exact staged row under the canonical ledger lock.
 /// A previously published digest succeeds even after its spool was retired.
-#[hotpath::measure(label = "automation_run_ledger_publish_exact")]
+#[hotpath::measure(label = "automation.run_ledger.publish_exact", future = true)]
 pub async fn publish_staged_run_record_exact(
     dashboard_root: &Path,
     run_id: &str,
