@@ -173,6 +173,10 @@ struct GraphPublicationProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     commit_started: AtomicBool,
+    /// One warn per probe when the deadline first trips: interruption() is
+    /// polled from hot loops, and `DeadlineExceeded` is a unit error that
+    /// cannot otherwise be attributed to the deadline that armed it.
+    deadline_warned: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
@@ -188,6 +192,13 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
         if self.request_cancellation.is_cancelled() || self.lifecycle_cancellation.is_cancelled() {
             Some(RuntimeInterruptionV1::Cancelled)
         } else if Instant::now() >= self.deadline_at {
+            if !self.deadline_warned.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    event = "graph_db_deadline_exceeded",
+                    deadline_id = self.deadline.deadline_id.as_str(),
+                    "graph publication probe deadline exceeded"
+                );
+            }
             Some(RuntimeInterruptionV1::DeadlineExceeded)
         } else {
             None
@@ -438,6 +449,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -507,6 +519,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 cancellation: publish_cancellation_identity.clone(),
                 deadline: publish_deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let publish_control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -671,6 +684,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -878,6 +892,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1069,6 +1084,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1555,6 +1571,7 @@ impl RetainedCodeGraphRuntimeV1 {
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
             commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
         };
         let control = RuntimeRequestControlV1 {
             requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1833,6 +1850,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
@@ -1922,6 +1940,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 cancellation: cancellation_identity.clone(),
                 deadline: deadline_identity.clone(),
                 commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
             };
             let control = RuntimeRequestControlV1 {
                 requested_at: UtcMicros(crate::tracedecay::current_timestamp()),

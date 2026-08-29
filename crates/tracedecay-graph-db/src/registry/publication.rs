@@ -136,7 +136,7 @@ impl GraphDbRegistry {
         generation: &tracedecay_domain::CodeGenerationId,
         sealed_state_digest: &crate::SealedGraphStateDigest,
     ) -> Result<GraphReplayCollectionOutcome, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.publication")?;
         let database = self.resolve(registration.clone())?;
         let mut projections = Vec::new();
         let mut after = None;
@@ -209,7 +209,7 @@ impl GraphDbRegistry {
                     }
                     let source = crate::generation::checked_decode_replay_source(
                         &replay.publication.canonical_replay_source,
-                        &|| check_all(&registration, context),
+                        &|| check_all(&registration, context, "generation.publication"),
                     )?;
                     if let GraphGenerationReplaySource::SealedCodeGeneration(sealed) = &source
                         && &sealed.generation == generation
@@ -257,7 +257,7 @@ impl GraphDbRegistry {
                         })?;
                     let source =
                         crate::generation::checked_decode_replay_source(source_payload, &|| {
-                            check_all(&registration, context)
+                            check_all(&registration, context, "generation.publication")
                         })?;
                     if let GraphGenerationReplaySource::SealedCodeGeneration(sealed) = &source
                         && &sealed.generation == generation
@@ -287,7 +287,7 @@ impl GraphDbRegistry {
         if candidates.is_empty() {
             for (locator, _) in retired_cleanup {
                 database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration)
+                    check_registration_request(&registration, "publication.retired_cleanup")
                 })?;
             }
             return Ok(GraphReplayCollectionOutcome::Absent);
@@ -345,7 +345,7 @@ impl GraphDbRegistry {
                 // may leak derived bytes, but cannot destroy the source of an
                 // active relational replay.
                 if let Err(error) = database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration)
+                    check_registration_request(&registration, "publication.replay_retirement")
                 }) {
                     clear_retiring_fence(&database, &locator)?;
                     return Err(error);
@@ -379,7 +379,7 @@ impl GraphDbRegistry {
         generation: &tracedecay_domain::CodeGenerationId,
         sealed_state_digest: &crate::SealedGraphStateDigest,
     ) -> Result<bool, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.publication")?;
         let mut projection_after = None;
         loop {
             let request = GraphPublicationProjectionPageRequestV1::new(
@@ -420,7 +420,7 @@ impl GraphDbRegistry {
                             })?;
                         let source =
                             crate::generation::checked_decode_replay_source(payload, &|| {
-                                check_all(&registration, context)
+                                check_all(&registration, context, "generation.publication")
                             })?;
                         if let GraphGenerationReplaySource::SealedCodeGeneration(source) = source
                             && &source.generation == generation

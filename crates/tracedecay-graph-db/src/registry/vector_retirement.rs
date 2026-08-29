@@ -116,7 +116,7 @@ impl GraphDbRegistry {
         after: Option<SemanticVectorStageCensusCursor>,
         writer_fence: &SemanticVectorWriterFence,
     ) -> Result<SemanticVectorRetentionStep, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "vector.retirement")?;
         require_authority_binding(&registration, authority)?;
         if &writer_fence.binding != registration.binding() {
             return Err(GraphDbError::Conflict);
@@ -215,7 +215,7 @@ impl GraphDbRegistry {
         reservation: SemanticVectorRetirementReservation,
     ) -> Result<SemanticVectorRetentionAction, GraphDbError> {
         let database = self.registered_database(&registration)?;
-        let validation = check_all(&registration, context)
+        let validation = check_all(&registration, context, "vector.retirement")
             .and_then(|()| require_authority_binding(&registration, authority))
             .and_then(|()| {
                 (&writer_fence.binding == registration.binding())
@@ -466,7 +466,7 @@ fn finish_reserved_cancelled(
         return Err(GraphDbError::Conflict);
     }
     if let Err(error) = database.delete_cancelled_staged_generation(&record.plan, &|| {
-        check_registration_request(registration)
+        check_registration_request(registration, "vector.retirement.cleanup")
     }) {
         reservation.preserve_cleanup_fence();
         return Err(error);
@@ -566,7 +566,7 @@ fn finish_reserved_published(
             // reader reopening bytes whose authority has already retired.
             reservation.preserve_cleanup_fence();
             database.delete_generation_contents(&locator, &|| {
-                check_registration_request(registration)
+                check_registration_request(registration, "vector.retirement.cleanup")
             })?;
             Ok(SemanticVectorRetentionAction::Retired(
                 record.plan.semantic_generation_id.clone(),
@@ -602,7 +602,9 @@ fn converge_retired_cleanup(
     };
     cleanup.retirement.writer_fence = writer_fence.clone();
     let locator = locator_from_key(&cleanup.retirement.replay.key)?;
-    database.delete_generation_contents(&locator, &|| check_registration_request(registration))?;
+    database.delete_generation_contents(&locator, &|| {
+        check_registration_request(registration, "vector.retirement.cleanup")
+    })?;
     match authority
         .finalize_retired_replay_cleanup(&cleanup.retirement.replay, context)
         .map_err(map_publication_error)?

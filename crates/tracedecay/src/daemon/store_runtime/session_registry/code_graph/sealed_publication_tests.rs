@@ -79,6 +79,7 @@ fn with_publication_context<T>(
         cancellation: cancellation.clone(),
         deadline: deadline.clone(),
         commit_started: AtomicBool::new(false),
+        deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
         requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
