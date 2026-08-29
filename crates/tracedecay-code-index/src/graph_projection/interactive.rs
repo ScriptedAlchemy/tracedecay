@@ -74,6 +74,11 @@ pub(super) struct InteractiveCatalogCache {
     scan_builds: std::sync::atomic::AtomicUsize,
 }
 
+/// Seeds per batch traversal, under the store's `MAX_BATCH_TRAVERSAL_STARTS`
+/// (100k) with headroom. A whole-repo census chunks its seeds across several
+/// traversals rather than being refused for having too many.
+const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
+
 impl InteractiveCatalogCache {
     pub(super) fn new() -> Self {
         Self {
@@ -623,18 +628,29 @@ impl CodeGraphInteractiveReader {
     ) -> Result<Vec<CodeGraphSemanticEdgeV1>, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
         let members: BTreeSet<_> = occurrences.iter().cloned().collect();
-        let per_seed = self.semantic_neighbors(
-            occurrences,
-            kinds,
-            AdjacencyDirection::Outgoing,
-            max_relations,
-            cancellation,
-        )?;
-        let mut edges: Vec<_> = per_seed
-            .into_iter()
-            .flatten()
-            .filter(|edge| members.contains(&edge.edge.to_occurrence))
-            .collect();
+        // Seeds are chunked because the store bounds one batch traversal's
+        // starts (`MAX_BATCH_TRAVERSAL_STARTS`, 100k). A whole-repo census -
+        // dead code, unused symbols - legitimately has more seeds than that,
+        // and refusing it turned a complete answer into a typed budget error.
+        // The bound exists to cap one call's working set, which chunking
+        // preserves: each traversal still costs at most one chunk, and the
+        // per-seed relation budget is unchanged.
+        let mut edges: Vec<CodeGraphSemanticEdgeV1> = Vec::new();
+        for chunk in occurrences.chunks(SEMANTIC_NEIGHBOR_SEED_CHUNK) {
+            let per_seed = self.semantic_neighbors(
+                chunk,
+                kinds,
+                AdjacencyDirection::Outgoing,
+                max_relations,
+                Arc::clone(&cancellation),
+            )?;
+            edges.extend(
+                per_seed
+                    .into_iter()
+                    .flatten()
+                    .filter(|edge| members.contains(&edge.edge.to_occurrence)),
+            );
+        }
         edges.sort_by(|left, right| compare_edges(&left.edge, &right.edge));
         edges.dedup();
         Ok(edges)
