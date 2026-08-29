@@ -3325,6 +3325,56 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(())
     }
 
+    /// Seat the core query fallback while an exact committed semantic
+    /// activation is still warming. Unlike a standalone mount, this preserves
+    /// the committed revision fence and never replaces an already-usable query
+    /// authority (including one installed by a completed activation).
+    pub(in crate::daemon) async fn mount_query_authority_for_committed_fallback(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        expected_revision: &ConfigurationRevisionId,
+        authority: Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot mount committed query fallback before its worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "committed query fallback scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        let activation =
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if worktree.query_activation_revision.as_ref() != Some(expected_revision)
+            || worktree
+                .query_activation_redundancy
+                .as_ref()
+                .map(|redundancy| redundancy.configuration_revision())
+                != Some(expected_revision)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "committed query fallback revision is no longer desired".to_owned(),
+            ));
+        }
+        if worktree.query_authority.is_none() {
+            worktree.query_authority = Some((scope.scope_digest.clone(), authority));
+        }
+        Ok(())
+    }
+
     /// Install the observability lane for one mounted worktree. Installation
     /// is once per mount: a repeated install against the same mounted worktree
     /// keeps the incumbent lane, and a worktree that is not mounted is a typed

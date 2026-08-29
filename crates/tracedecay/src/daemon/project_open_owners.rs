@@ -1246,6 +1246,7 @@ async fn register_semantic_activation_owner(
     let observer = invocation.query_activation_registrar(project_root, session_db.clone());
     if let Some(current_state) = current_state {
         let mut activation_restore = InitialSemanticActivationRestoreV1::Mounted;
+        let mut deferred_activation_revision = None;
         if current_state.audit().is_empty() {
             let cursor_keys = Arc::new(
                 session_db
@@ -1277,6 +1278,7 @@ async fn register_semantic_activation_owner(
                     message: "semantic retrieval state has no current committed transition"
                         .to_owned(),
                 })?;
+            let committed_revision = committed.state.configuration_revision().clone();
             activation_restore = classify_initial_semantic_activation_restore(
                 observer.activation_committed(committed).await,
             )
@@ -1284,6 +1286,7 @@ async fn register_semantic_activation_owner(
                 message: format!("semantic retrieval activation restore failed: {error}"),
             })?;
             if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
+                deferred_activation_revision = Some(committed_revision);
                 hotpath::gauge!("daemon.semantic.activation_restore.deferred_total").inc(1_u64);
                 tracing::info!(
                     event = "semantic_activation_restore",
@@ -1294,13 +1297,25 @@ async fn register_semantic_activation_owner(
             }
         }
         let query_mount = if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
-            match session_db.load_session_cursor_key_provider_result().await {
-                Ok(cursor_keys) => {
+            match (
+                session_db.load_session_cursor_key_provider_result().await,
+                deferred_activation_revision.as_ref(),
+            ) {
+                (Ok(cursor_keys), Some(expected_revision)) => {
                     invocation
-                        .mount_core_query_authority_for_project(project_root, &scope, &cursor_keys)
+                        .mount_core_query_authority_for_committed_fallback(
+                            project_root,
+                            &scope,
+                            expected_revision,
+                            &cursor_keys,
+                        )
                         .await
                 }
-                Err(error) => {
+                (Ok(_), None) => Err(crate::daemon::code_index_scheduler::query_runtime::
+                    QueryRuntimeMountErrorV1::Mount(
+                        "deferred semantic activation has no committed revision".to_owned(),
+                    )),
+                (Err(error), _) => {
                     tracing::debug!(
                         event = "query_authority_mount",
                         outcome = "unavailable",
@@ -1336,6 +1351,7 @@ async fn register_semantic_activation_owner(
                     if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
                         query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
                             session_db: session_db.clone(),
+                            committed_revision: deferred_activation_revision.clone(),
                         }
                     } else {
                         query_authority_upgrade::DeferredQueryAuthorityMountV1::Configured {
@@ -1389,6 +1405,7 @@ async fn register_semantic_activation_owner(
                             scope.clone(),
                             query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
                                 session_db: session_db.clone(),
+                                committed_revision: None,
                             },
                         );
                     }

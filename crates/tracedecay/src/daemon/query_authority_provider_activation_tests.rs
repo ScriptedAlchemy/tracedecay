@@ -103,6 +103,26 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .await
         .expect("reserve semantic activation");
     registry
+        .mount_query_authority_for_committed_fallback(
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            Arc::clone(&standalone_query_authority),
+        )
+        .await
+        .expect("mount core fallback under the exact committed fence");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "semantic warm-up must not remove exact, lexical, and graph search"
+    );
+    registry
         .install_committed_query_authorities(
             project.path(),
             &scope,
