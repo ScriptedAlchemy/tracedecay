@@ -510,7 +510,7 @@ fn rollback_branch_tracking(
     branch_name: &str,
     db_file: &str,
 ) -> crate::errors::Result<()> {
-    admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
+    super::admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
 }
 
 fn prune_missing_branch_dbs(

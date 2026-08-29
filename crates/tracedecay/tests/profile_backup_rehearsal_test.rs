@@ -10,10 +10,6 @@ use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
     read_store_manifest, write_store_manifest_to_path,
 };
-use tracedecay_maintenance::profile_backup::{
-    ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
-    set_rehearsal_publication_fault_for_test,
-};
 
 struct ReleasedProfileFixture {
     profile: PathBuf,
