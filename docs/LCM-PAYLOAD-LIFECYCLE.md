@@ -83,7 +83,7 @@ has the full map.
   session- or message-delete API anywhere in `src`; future delete APIs must use
   the same owner-authorized payload path.
 - **Memory deletion is a separate subsystem.** Hard-deleting a memory fact
-  (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) never touches LCM payloads or
+  (`crates/tracedecay-runtime-core/src/store/memory/`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) never touches LCM payloads or
   session storage.
 - **Re-externalization / inline-conversion orphans are not reconciled.** `upsert_inline_raw_message`
   (`raw.rs:139`) nulls `payload_ref` and sets `storage_kind='inline'` without removing the
@@ -267,7 +267,7 @@ investigate before the reference is tombstoned.
 
 | Trigger | Behavior |
 |---|---|
-| **Memory fact hard-delete** | No LCM effect. Memory facts live in `memory_facts` and never cite LCM payloads (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`). Independent subsystem. |
+| **Memory fact hard-delete** | No LCM effect. Memory facts live in `memory_facts` and never cite LCM payloads (`crates/tracedecay-runtime-core/src/store/memory/`, `crates/tracedecay-dashboard-api/src/memory_api.rs`). Independent subsystem. |
 | **Session delete** (no public API today) | MUST route through the payload-aware deleter for every payload owned by `(provider, session_id)`, **or** explicitly delete the `sessions` row and leave the files for GC. Contract requires one of these two be *documented*; the recommended path is "delete `sessions` row, leave files, let GC reap after grace" because it is simplest and crash-safe (FK cascade drops the `lcm_*` rows; orphan files become GC candidates). The deleter is used only when immediate file removal is required. |
 | **Message delete** (no public API today) | Same two options as session delete, scoped to one message: either call the deleter (removes that message's referenced payloads synchronously) or drop the raw row and let GC reap the now-unreferenced payloads after grace. **Caveat:** because refs can be shared via nested placeholders within the same message, a message-delete reap must verify the ref is referenced by *no* surviving row before removing it. |
 | **Doctor** | Read-only diagnosis/evidence. It may report retention and GC candidates, but it never deletes rows, removes files, tombstones references, or applies a cleanup. Deferred cleanup is owned by the daemon or an explicitly authorized owner operation. |
