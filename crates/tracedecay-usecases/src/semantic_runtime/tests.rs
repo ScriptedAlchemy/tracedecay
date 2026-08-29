@@ -156,6 +156,54 @@ fn only_a_current_receipt_routes_to_semantic_search() {
 }
 
 #[test]
+fn acquisition_progress_failure_and_disablement_are_typed_lexical_fallbacks() {
+    let pin = SemanticConfigurationPinV1::from_current(&configuration()).unwrap();
+    let digest = "a".repeat(64);
+    let model_id = "JinaEmbeddingsV2BaseCode".to_owned();
+    for (state, reason) in [
+        (
+            SemanticRuntimeStateV1::SelectedNotDownloaded {
+                model_id: model_id.clone(),
+                artifact_digest: digest.clone(),
+            },
+            SemanticFallbackReasonV1::SelectedNotDownloaded,
+        ),
+        (
+            SemanticRuntimeStateV1::Downloading {
+                model_id: model_id.clone(),
+                artifact_digest: digest.clone(),
+                bytes_received: 1,
+                bytes_total: 2,
+            },
+            SemanticFallbackReasonV1::Downloading,
+        ),
+        (
+            SemanticRuntimeStateV1::Failed {
+                model_id: model_id.clone(),
+                artifact_digest: digest.clone(),
+                detail: "connection refused to unroutable endpoint".to_owned(),
+                retryable: true,
+            },
+            SemanticFallbackReasonV1::ModelFailed,
+        ),
+        (
+            SemanticRuntimeStateV1::Unavailable {
+                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
+            },
+            SemanticFallbackReasonV1::ConfigurationUnavailable,
+        ),
+    ] {
+        let status = SemanticRuntimeStatusV1::new(Some(pin.clone()), state);
+        assert_eq!(status.validate(), Ok(()));
+        assert_eq!(
+            status.route(),
+            SemanticRuntimeRouteV1::LexicalFallback { reason },
+            "acquisition and disablement must stay on the semantic lane's typed fallback"
+        );
+    }
+}
+
+#[test]
 fn incomplete_stale_failed_and_incompatible_generations_are_omitted() {
     let pin = SemanticConfigurationPinV1::from_current(&configuration()).unwrap();
     for reason in [
