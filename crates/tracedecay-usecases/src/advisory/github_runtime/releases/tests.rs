@@ -125,6 +125,12 @@ fn provider_release_page_accepts_encoded_git_tag_and_asset_names() {
 #[test]
 fn continuation_accepts_only_the_exact_https_release_collection() {
     let endpoint = "https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases";
+    let release_scope = |current_page| GitHubLinkPageScopeV1 {
+        rest_base_uri: "https://api.github.com",
+        endpoint,
+        current_page,
+        page_size: GITHUB_RELEASE_PAGE_SIZE_V1,
+    };
     let mut headers = ureq::http::HeaderMap::new();
     headers.insert(
         "link",
@@ -132,10 +138,7 @@ fn continuation_accepts_only_the_exact_https_release_collection() {
             .parse()
             .unwrap(),
     );
-    assert_eq!(
-        next_release_page(&headers, "https://api.github.com", endpoint, 1),
-        Ok(Some(2))
-    );
+    assert_eq!(link_next_page(&headers, &release_scope(1)), Ok(Some(2)));
 
     headers.insert(
         "link",
@@ -143,10 +146,7 @@ fn continuation_accepts_only_the_exact_https_release_collection() {
             .parse()
             .unwrap(),
     );
-    assert_eq!(
-        next_release_page(&headers, "https://api.github.com", endpoint, 1),
-        Err(())
-    );
+    assert_eq!(link_next_page(&headers, &release_scope(1)), Err(()));
 
     headers.insert(
         "link",
@@ -154,10 +154,7 @@ fn continuation_accepts_only_the_exact_https_release_collection() {
             .parse()
             .unwrap(),
     );
-    assert_eq!(
-        next_release_page(&headers, "https://api.github.com", endpoint, 20),
-        Ok(Some(21))
-    );
+    assert_eq!(link_next_page(&headers, &release_scope(20)), Ok(Some(21)));
 
     headers.insert(
         "link",
@@ -165,10 +162,7 @@ fn continuation_accepts_only_the_exact_https_release_collection() {
             .parse()
             .unwrap(),
     );
-    assert_eq!(
-        next_release_page(&headers, "https://api.github.com", endpoint, 1),
-        Err(())
-    );
+    assert_eq!(link_next_page(&headers, &release_scope(1)), Err(()));
 
     headers.insert(
         "link",
@@ -178,10 +172,7 @@ fn continuation_accepts_only_the_exact_https_release_collection() {
         .parse()
         .unwrap(),
     );
-    assert_eq!(
-        next_release_page(&headers, "https://api.github.com", endpoint, 1),
-        Err(())
-    );
+    assert_eq!(link_next_page(&headers, &release_scope(1)), Err(()));
 }
 
 #[test]
@@ -200,7 +191,7 @@ fn provider_denial_and_rate_limit_are_distinct() {
         ReleaseHttpDispositionV1::Unavailable
     ));
     headers.insert("retry-after", "-1".parse().unwrap());
-    assert!(retry_at(&headers).is_none());
+    assert!(retry_after_at(&headers).is_none());
 }
 
 #[test]

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
-use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_application::{CancellationContext, Deadline, try_now_micros};
 use tracedecay_runtime_core::errors::Result;
 
 const SOURCE_SEARCH_CEILING: Duration = Duration::from_secs(10);
@@ -66,11 +66,7 @@ where
 }
 
 fn remaining_budget(deadline: &Deadline) -> Option<Duration> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_micros()
-        .min(i64::MAX as u128) as i64;
+    let now = try_now_micros().ok()?.0;
     let remaining = deadline.expires_at.0.checked_sub(now)?;
     if remaining <= 0 {
         return None;
@@ -81,14 +77,12 @@ fn remaining_budget(deadline: &Deadline) -> Option<Duration> {
 #[cfg(test)]
 mod bounded_source_search_tests {
     use super::*;
+    use tracedecay_application::now_micros;
     use tracedecay_domain::UtcMicros;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn elapsed_deadline_cancels_the_off_thread_worker() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+        let now = now_micros().0;
         let deadline = Deadline::new(UtcMicros(now + 20_000)).unwrap();
         let cancellation = CancellationContext::active("cancel.grep-deadline-test").unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();

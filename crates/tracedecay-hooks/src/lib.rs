@@ -57,6 +57,7 @@ pub use spool::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{NativeHostIdentityV1, UtcMicros};
 
@@ -269,6 +270,19 @@ impl HookEventEnvelopeV2 {
     }
 }
 
+/// Wire identity for [`HookEventEnvelopeV2`] `project_id`, `repository_id`,
+/// and `worktree_id`.
+///
+/// SHA-256 of the framing `"{domain}:{value}"`, truncated to the first 16
+/// bytes. This is the only constructor those fields may use: a producer or
+/// consumer copy that drifts makes envelope matching fail closed with no error.
+pub fn envelope_identity_hash16(domain: &str, value: &str) -> [u8; 16] {
+    let digest = Sha256::digest(format!("{domain}:{value}").as_bytes());
+    let mut output = [0; 16];
+    output.copy_from_slice(&digest[..16]);
+    output
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookCapabilityV1 {
@@ -438,6 +452,17 @@ mod tests {
                 boundary: HookBoundaryV1::Start,
             },
         }
+    }
+
+    #[test]
+    fn envelope_identity_hash16_pins_wire_contract() {
+        assert_eq!(
+            envelope_identity_hash16("project", "example.project"),
+            [
+                0xd4, 0x75, 0x08, 0x00, 0x99, 0x5b, 0x32, 0xd4, 0x5d, 0xeb, 0x05, 0x22, 0xf3, 0x66,
+                0x9f, 0xfb
+            ]
+        );
     }
 
     #[test]

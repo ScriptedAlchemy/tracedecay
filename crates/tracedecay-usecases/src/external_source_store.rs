@@ -1,11 +1,11 @@
 //! Production capture-to-store path for canonical external sources.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracedecay_application::{
     SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureApplicationV1,
+    try_now_micros,
 };
 use tracedecay_domain::{
     ComponentVersion, LocatorDigest, ManifestDigest, ObservationScopeV1, ProviderId,
@@ -875,11 +875,7 @@ fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
 }
 
 fn runtime_now() -> Result<UtcMicros, RuntimeExternalSourceErrorV1> {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(invalid)?
-        .as_micros();
-    Ok(UtcMicros(i64::try_from(micros).map_err(invalid)?))
+    try_now_micros().map_err(invalid)
 }
 
 fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, RuntimeExternalSourceErrorV1> {

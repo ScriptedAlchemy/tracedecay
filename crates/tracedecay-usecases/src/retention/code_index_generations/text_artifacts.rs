@@ -3,13 +3,18 @@
 //! The durable generation index is the only completed-artifact liveness authority; collection uses a bounded quarantine journal so recovery can roll back or finish without guessing from wall-clock age.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
+use super::journal::{
+    BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
+};
+use super::receipt_store;
+use super::receipt_store::{ReceiptStoreSpec, receipt_digest_file_component};
 use super::{
     ACTIVE_POINTER_FILE, CodeGenerationRetentionErrorV1, CodeGenerationRetentionPlanV1,
     CodeGenerationStoreLockV1, CodeTextArtifactRetentionCandidateV1,
@@ -23,11 +28,26 @@ use super::{
     TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
     TEXT_ARTIFACT_TRANSACTION_FILE, TEXT_ARTIFACT_TRANSACTION_SCHEMA,
     code_text_artifacts_root, durable_generation_index_digest, generation_file_digest,
-    is_lowercase_sha256, observe_cancel, open_file_sha256_hex_cancellable,
-    path_still_names_open_file, read_active_pointer, regular_file_exists,
-    remove_empty_stage_root, retain_bounded_generation_index_with_text_head,
-    sha256_file_component, storage, sync_directory, validate_durable_generation_index,
-    validate_sealed_generation_identity, validate_text_artifact_descriptor,
+    observe_cancel, open_file_sha256_hex_cancellable, path_still_names_open_file,
+    read_active_pointer, regular_file_exists, remove_empty_stage_root,
+    retain_bounded_generation_index_with_text_head, sha256_file_component, storage,
+    sync_directory, validate_durable_generation_index, validate_sealed_generation_identity,
+    validate_text_artifact_descriptor,
+};
+
+const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
+    CodeTextArtifactRetentionTransactionV1,
+> = BoundedJournalSpec {
+    file_name: TEXT_ARTIFACT_TRANSACTION_FILE,
+    max_bytes: MAX_TRANSACTION_BYTES,
+    label: "text-artifact retention transaction",
+    write_context: "code-text-artifact-retention-transaction",
+    validate: validate_text_artifact_transaction,
+};
+
+const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+    directory: TEXT_ARTIFACT_RECEIPTS_DIRECTORY,
+    label: "text-artifact retention receipt",
 };
 
 /// Durably attach a verified text artifact to its sealed generation entry.
@@ -353,14 +373,14 @@ pub(super) fn completed_text_artifact_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("text-artifact-")?
         .strip_suffix(".bin")
-        .filter(|digest| is_lowercase_sha256(digest))
+        .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
 pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix(".text-artifact-")?
         .strip_suffix(".staging")
-        .filter(|digest| is_lowercase_sha256(digest))
+        .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
 pub(super) fn is_corrupt_text_artifact_file(file_name: &str) -> bool {
@@ -371,7 +391,7 @@ pub(super) fn is_corrupt_text_artifact_file(file_name: &str) -> bool {
         return false;
     };
     let digest = digest.strip_suffix(".bin").unwrap_or(digest);
-    !suffix.is_empty() && is_lowercase_sha256(digest)
+    !suffix.is_empty() && is_lowercase_hex(digest, 64)
 }
 
 pub(super) fn verify_completed_text_artifact(
@@ -501,7 +521,7 @@ pub(super) fn recover_pending_text_artifact_transaction_unlocked(
 }
 
 pub(super) fn text_artifact_transaction_path(store_root: &Path) -> PathBuf {
-    store_root.join(TEXT_ARTIFACT_TRANSACTION_FILE)
+    journal_path(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn text_artifact_transaction_stage_root(
@@ -517,51 +537,13 @@ pub(super) fn persist_text_artifact_transaction(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    validate_text_artifact_transaction(transaction)?;
-    let bytes = serde_json::to_vec(transaction).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "text-artifact retention transaction serialization failed: {error}"
-        ))
-    })?;
-    atomic_write(
-        &text_artifact_transaction_path(store_root),
-        "code-text-artifact-retention-transaction",
-        &bytes,
-        DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(storage)
+    persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, transaction)
 }
 
 pub(super) fn load_text_artifact_transaction(
     store_root: &Path,
 ) -> Result<Option<CodeTextArtifactRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    let path = text_artifact_transaction_path(store_root);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(error)),
-    };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_TRANSACTION_BYTES {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "text-artifact retention transaction '{}' is not a bounded regular file",
-            path.display()
-        )));
-    }
-    let bytes = std::fs::read(&path).map_err(storage)?;
-    if bytes.len() as u64 != metadata.len() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "text-artifact retention transaction '{}' changed during read",
-            path.display()
-        )));
-    }
-    let transaction = serde_json::from_slice(&bytes).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "text-artifact retention transaction '{}' is unreadable: {error}",
-            path.display()
-        ))
-    })?;
-    validate_text_artifact_transaction(&transaction)?;
-    Ok(Some(transaction))
+    load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn validate_text_artifact_transaction(
@@ -594,7 +576,7 @@ pub(super) fn validate_text_artifact_transaction(
             "text-artifact transaction active pointer does not match its receipt".to_owned(),
         ));
     }
-    if !is_lowercase_sha256(&transaction.receipt.receipt_digest) {
+    if !is_lowercase_hex(&transaction.receipt.receipt_digest, 64) {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "text-artifact transaction receipt digest is not a SHA-256 file component".to_owned(),
         ));
@@ -647,40 +629,16 @@ pub(super) fn validate_text_artifact_candidate(
     Ok(())
 }
 
-pub(super) fn text_artifact_receipt_path(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> PathBuf {
-    store_root
-        .join(TEXT_ARTIFACT_RECEIPTS_DIRECTORY)
-        .join(format!("receipt-{}.json", receipt.receipt_digest))
-}
-
-pub(super) fn text_artifact_receipt_bytes(
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> Result<Vec<u8>, CodeGenerationRetentionErrorV1> {
-    serde_json::to_vec(receipt).map_err(|error| {
-        CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "text-artifact retention receipt serialization failed: {error}"
-        ))
-    })
-}
-
 pub(super) fn text_artifact_receipt_is_durable(
     store_root: &Path,
     receipt: &CodeTextArtifactRetentionReceiptV1,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let path = text_artifact_receipt_path(store_root, receipt);
-    if !regular_file_exists(&path)? {
-        return Ok(false);
-    }
-    let existing = std::fs::read(&path).map_err(storage)?;
-    if existing != text_artifact_receipt_bytes(receipt)? {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "text-artifact retention receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    Ok(true)
+    receipt_store::receipt_is_durable(
+        store_root,
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
 }
 
 #[cfg(test)]
@@ -851,12 +809,7 @@ pub(super) fn ensure_text_artifact_transaction_liveness(
 pub(super) fn clear_text_artifact_transaction(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let path = text_artifact_transaction_path(store_root);
-    match std::fs::remove_file(&path) {
-        Ok(()) => sync_directory(store_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage(error)),
-    }
+    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn build_text_artifact_receipt(
@@ -885,11 +838,7 @@ pub(super) fn build_text_artifact_receipt(
     };
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    let receipt_digest = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_owned();
+    let receipt_digest = receipt_digest_file_component(&TEXT_ARTIFACT_RECEIPT_STORE, digest.as_str())?;
     Ok(CodeTextArtifactRetentionReceiptV1 {
         schema: TEXT_ARTIFACT_RECEIPT_SCHEMA.to_owned(),
         receipt_digest,
@@ -906,36 +855,12 @@ pub(super) fn write_text_artifact_receipt(
     store_root: &Path,
     receipt: &CodeTextArtifactRetentionReceiptV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let receipts_root = store_root.join(TEXT_ARTIFACT_RECEIPTS_DIRECTORY);
-    std::fs::create_dir_all(&receipts_root).map_err(storage)?;
-    let final_path = text_artifact_receipt_path(store_root, receipt);
-    let bytes = text_artifact_receipt_bytes(receipt)?;
-    if final_path.exists() {
-        let existing = std::fs::read(&final_path).map_err(storage)?;
-        if existing == bytes {
-            return Ok(());
-        }
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "text-artifact retention receipt digest collides with different bytes".to_owned(),
-        ));
-    }
-    let temporary = receipts_root.join(format!(
-        ".receipt-{}.{}.tmp",
-        receipt.receipt_digest,
-        std::process::id()
-    ));
-    if temporary.exists() {
-        std::fs::remove_file(&temporary).map_err(storage)?;
-    }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(storage)?;
-    file.write_all(&bytes).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
-    std::fs::rename(&temporary, &final_path).map_err(storage)?;
-    sync_directory(&receipts_root)
+    receipt_store::write_receipt(
+        store_root,
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        receipt,
+    )
 }
 
 pub(super) fn total_text_artifact_bytes(artifacts: &[CodeTextArtifactRetentionCandidateV1]) -> u64 {

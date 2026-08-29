@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_application::clock::try_now_micros;
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_domain::feedback::{
     GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1, GitHubReviewAuthorClassV1,
@@ -179,9 +179,10 @@ where
             let (outcome, coverage) =
                 provider_state(metadata.status, metadata.next_cursor.is_some());
             if metadata.status != GitHubReadNetworkStatusV1::Ok {
-                return self.ingress(request, outcome, coverage, Vec::new(), now_micros()?);
+                let fetched_at = try_now_micros().ok()?;
+                return self.ingress(request, outcome, coverage, Vec::new(), fetched_at);
             }
-            let fetched_at = now_micros()?;
+            let fetched_at = try_now_micros().ok()?;
             let mut pull_request = None;
             let items = match request.operation {
                 GitHubReviewReadOperationV1::RestGetPullRequest => {
@@ -648,14 +649,6 @@ fn review_version_digest(
         observed_commit_id,
     ))
     .ok()
-}
-
-fn now_micros() -> Option<UtcMicros> {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_micros();
-    Some(UtcMicros(i64::try_from(micros).ok()?))
 }
 
 fn review_state(state: &str) -> Option<GitHubReviewStateV1> {

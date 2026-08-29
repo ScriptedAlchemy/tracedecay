@@ -12,7 +12,8 @@ use tracedecay_hooks::{
     HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
     HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1,
     HookTransportDispositionV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
-    SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, finish_synchronous_hook,
+    SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, envelope_identity_hash16,
+    finish_synchronous_hook,
 };
 #[cfg(test)]
 use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
@@ -80,7 +81,7 @@ pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8
         .identity
         .project_id
         .as_deref()
-        .map(|project_id| domain_hash16(project_id, "project"))
+        .map(|project_id| envelope_identity_hash16("project", project_id))
 }
 
 pub fn publish_daemon_bindings(layout: &crate::storage::StoreLayout) -> crate::errors::Result<()> {
@@ -152,17 +153,17 @@ fn binding_identity_from_scope(
     binding_revision: u64,
 ) -> ([u8; 16], [u8; 16], [u8; 16], u64) {
     (
-        domain_hash16(scope.project_id.as_str(), "project"),
-        domain_hash16(scope.repository_id.as_str(), "repository"),
-        domain_hash16(scope.worktree_id.as_str(), "worktree"),
+        envelope_identity_hash16("project", scope.project_id.as_str()),
+        envelope_identity_hash16("repository", scope.repository_id.as_str()),
+        envelope_identity_hash16("worktree", scope.worktree_id.as_str()),
         binding_revision.max(1),
     )
 }
 
 pub fn project_and_worktree_locators_for_scope(scope: &ResolvedScope) -> ([u8; 16], [u8; 16]) {
     (
-        domain_hash16(scope.project_id.as_str(), "project"),
-        domain_hash16(scope.worktree_id.as_str(), "worktree"),
+        envelope_identity_hash16("project", scope.project_id.as_str()),
+        envelope_identity_hash16("worktree", scope.worktree_id.as_str()),
     )
 }
 
@@ -970,10 +971,6 @@ fn hash32(bytes: &[u8]) -> [u8; 32] {
 
 pub fn protected_session_id_for_native(session_id: &str) -> [u8; 32] {
     hash32(session_id.as_bytes())
-}
-
-fn domain_hash16(value: &str, domain: &str) -> [u8; 16] {
-    hash16(format!("{domain}:{value}").as_bytes())
 }
 
 fn domain_hash32(value: &str, domain: &str) -> [u8; 32] {
