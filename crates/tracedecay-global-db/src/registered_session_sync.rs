@@ -3,6 +3,8 @@ use tracedecay_runtime_core::errors::TraceDecayError;
 
 use crate::{RegisteredGlobalDb, global_db_operation_error};
 
+const SESSION_SYNC_RECOVERY_PAGE_ROWS: i64 = 8;
+
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
     pub async fn list_session_sync_source_frontiers(
@@ -99,6 +101,60 @@ impl RegisteredGlobalDb {
             let value = row
                 .get(1)
                 .map_err(|error| global_db_operation_error("decode session sync value", error))?;
+            journals.push((key, value));
+        }
+        Ok(journals)
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.registered.session_sync.recovery_page"
+    )]
+    /// Reads one keyset page of journals that can still require recovery.
+    /// Completed receipts may each retain multi-megabyte source frontiers, so
+    /// startup must neither materialize them nor accumulate every live receipt
+    /// in one exact-SQL response.
+    pub async fn list_incomplete_session_sync_journal_page(
+        &self,
+        key_prefix: &str,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, String)>, TraceDecayError> {
+        let snapshot = self.read_snapshot().await.map_err(|error| {
+            global_db_operation_error("open incomplete session sync journals", error)
+        })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT key, value
+                 FROM session_backfill_meta
+                 WHERE key >= ?1 AND key < ?2 AND key > ?3
+                   AND CASE
+                       WHEN json_valid(value)
+                       THEN COALESCE(json_extract(value, '$.status') != 'complete', 1)
+                       ELSE 1
+                   END
+                 ORDER BY key
+                 LIMIT ?4",
+                params![
+                    key_prefix,
+                    format!("{key_prefix}\u{10ffff}"),
+                    after_key.unwrap_or(""),
+                    SESSION_SYNC_RECOVERY_PAGE_ROWS,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                global_db_operation_error("list incomplete session sync journals", error)
+            })?;
+        let mut journals = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            global_db_operation_error("step incomplete session sync journals", error)
+        })? {
+            let key = row.get(0).map_err(|error| {
+                global_db_operation_error("decode incomplete session sync key", error)
+            })?;
+            let value = row.get(1).map_err(|error| {
+                global_db_operation_error("decode incomplete session sync value", error)
+            })?;
             journals.push((key, value));
         }
         Ok(journals)
