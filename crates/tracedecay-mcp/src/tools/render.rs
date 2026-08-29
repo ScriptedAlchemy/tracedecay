@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::context_headings::CONTEXT_PRIORITY_HEADINGS;
 use crate::output_format::{RequestedOutputFormat, requested_output_format};
 use crate::path_tree::format_compact_path_list;
 use crate::response_handles::{
@@ -16,21 +17,9 @@ use crate::tools::MAX_RESPONSE_CHARS;
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-/// Must match `context/formatter.rs` headings so truncated context keeps
-/// late priority sections. Copied here so rendering does not import the
-/// sibling-owned root `context` module.
-const CONTEXT_PRIORITY_HEADINGS: &[&str] = &[
-    "### Memory Matches",
-    "### Entry Points",
-    "### Related Symbols",
-    "### Index Coverage Hint",
-    "### Extension Points",
-    "### Test Coverage",
-    "seen_node_ids:",
-    "### Code",
-];
-
-fn format_relative_time(timestamp: u64) -> String {
+/// Formats a UNIX timestamp as a human-readable relative time (e.g. "2m ago").
+/// Returns "never" when the timestamp is 0.
+pub fn format_relative_time(timestamp: u64) -> String {
     if timestamp == 0 {
         return "never".to_string();
     }

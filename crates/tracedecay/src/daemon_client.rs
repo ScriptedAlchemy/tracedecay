@@ -32,12 +32,7 @@ use tracedecay_usecases::request_identity::{
 
 pub type ScopeSelector = InvocationTarget;
 
-/// Presentation-only format requested by an adapter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RequestedOutputFormat {
-    Markdown,
-    Json,
-}
+pub use tracedecay_mcp::{RequestedOutputFormat, requested_output_format};
 
 /// The shared cancellation reference carried into an application invocation.
 pub type CancellationRef = CancellationSignal;

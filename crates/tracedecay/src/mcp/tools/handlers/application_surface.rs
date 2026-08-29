@@ -277,10 +277,7 @@ fn render_result_parts(
     let text =
         super::super::render::finalize_with_format(
             project_root,
-            match requested_format {
-                RequestedOutputFormat::Json => tracedecay_mcp::RequestedOutputFormat::Json,
-                RequestedOutputFormat::Markdown => tracedecay_mcp::RequestedOutputFormat::Markdown,
-            },
+            requested_format,
             &value,
             || markdown.unwrap_or_default(),
         );

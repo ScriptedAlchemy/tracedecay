@@ -1,7 +1,4 @@
 //! Host-side ast-grep binary resolution for catalog gating.
-//!
-//! Copied with the portable catalog so this crate does not depend on the root
-//! `external_tools` module (sibling-owned, headed to `-code-index`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

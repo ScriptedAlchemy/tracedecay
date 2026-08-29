@@ -13,6 +13,7 @@ mod plugin_conformance_tests;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+// Phase 2 removes these composition-root re-exports once callers import mcp directly.
 pub use tracedecay_mcp::tools::{render, renderers};
 pub use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, render_tool_cli_help, short_tool_name,
@@ -26,6 +27,7 @@ pub use catalog_discovery::{
     default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
     get_catalog_filtered_tool_definitions_with_warming_budget,
 };
+// Phase 2 removes these composition-root re-exports once callers import mcp directly.
 pub use tracedecay_mcp::{
     ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
     context_description, explore_call_budget, format_capable_tool_names, get_tool_definitions,

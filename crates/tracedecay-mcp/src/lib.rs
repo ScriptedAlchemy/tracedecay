@@ -47,7 +47,8 @@
 
 pub mod application_output;
 mod catalog_error;
-mod host_cli;
+pub mod context_headings;
+pub mod host_cli;
 pub mod jsonrpc;
 pub mod output_format;
 pub mod path_tree;
@@ -57,9 +58,16 @@ pub mod tools;
 pub mod transport;
 
 pub use catalog_error::McpCatalogError;
+pub use context_headings::{
+    CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
+    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
+    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_PRIORITY_HEADINGS,
+    CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
+};
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
-pub use output_format::RequestedOutputFormat;
+pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use project_access::registered_project_reader_tool_names;
+pub use tools::render::format_relative_time;
 pub use tools::{
     MAX_RESPONSE_CHARS, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolRegistryMode, ToolResult,
     apply_context_warming_budget, ast_grep_available, ast_grep_diagnostics_json,

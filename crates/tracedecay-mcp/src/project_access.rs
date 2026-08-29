@@ -1,9 +1,7 @@
 /// Tools whose schema advertises a registered-project reader selector.
 ///
-/// Kept here so catalog assembly does not import the root dispatch-binding
-/// table. The root binding table remains the authority for dispatch groups;
-/// `mcp/tools/binding.rs` tests that this list matches
-/// `RegisteredProjectAccess::Reader` rows.
+/// This list is the sole Reader authority. Root `MCP_TOOL_BINDINGS` derives
+/// `RegisteredProjectAccess::Reader` from these names at construction.
 pub fn registered_project_reader_tool_names() -> Vec<&'static str> {
     REGISTERED_PROJECT_READER_TOOL_NAMES.to_vec()
 }
