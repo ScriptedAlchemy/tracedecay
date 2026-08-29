@@ -404,7 +404,7 @@ fn collect_eligible_messages_jsonl_walk(
             return;
         }
         let file_name = entry.file_name();
-        let name_bytes = super::source::os_str_byte_len(&file_name);
+        let name_bytes = crate::runtime::source::os_str_byte_len(&file_name);
         if name_bytes > bounds.max_path_bytes {
             *skipped_oversized_entries = skipped_oversized_entries.saturating_add(1);
             continue;
@@ -770,7 +770,7 @@ mod tests {
         // Prove lookalike lifecycle bags are not promoted into session_messages
         // kind=goal (the legacy goals surface) or metadata keys.
         let input: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/vibe/workflow_lookalike.input.json"
+            "../../../../../tests/fixtures/provider_normalization/vibe/workflow_lookalike.input.json"
         ))
         .expect("Vibe workflow lookalike input");
         let meta = VibeMeta {

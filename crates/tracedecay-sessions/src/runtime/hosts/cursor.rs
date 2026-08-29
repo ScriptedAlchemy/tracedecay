@@ -1968,11 +1968,11 @@ mod tests {
     #[test]
     fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
         let native: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
+            "../../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
         ))
         .expect("Cursor golden input");
         let expected: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/cursor/tool_use.expected_envelope.json"
+            "../../../../../tests/fixtures/provider_normalization/cursor/tool_use.expected_envelope.json"
         ))
         .expect("Cursor golden expected envelope");
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
@@ -2025,11 +2025,11 @@ mod tests {
     #[test]
     fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
         let native: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.input.json"
+            "../../../../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.input.json"
         ))
         .expect("Cursor workflow lookalike input");
         let expected: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.expected_envelope.json"
+            "../../../../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.expected_envelope.json"
         ))
         .expect("Cursor workflow lookalike expected");
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();

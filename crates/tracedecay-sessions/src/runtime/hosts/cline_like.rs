@@ -967,7 +967,7 @@ mod observation_tests {
         let task = tasks.join("checked-in-native");
         std::fs::create_dir_all(&task).unwrap();
         let mut metadata: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+            "../../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
         ))
         .unwrap();
         metadata["workspacePath"] = Value::String(project.to_string_lossy().into_owned());
@@ -978,10 +978,10 @@ mod observation_tests {
         .unwrap();
         let fixture = match api_filename {
             "api_messages.json" => include_str!(
-                "../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
+                "../../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
             ),
             "api_conversation_history.json" => include_str!(
-                "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
+                "../../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
             ),
             other => panic!("unsupported checked-in Cline-family fixture {other}"),
         };
@@ -990,7 +990,7 @@ mod observation_tests {
         std::fs::write(
             task.join("ui_messages.json"),
             include_str!(
-                "../../../../tests/fixtures/transcript_golden/cline_like/input/ui_messages.json"
+                "../../../../../tests/fixtures/transcript_golden/cline_like/input/ui_messages.json"
             ),
         )
         .unwrap();
@@ -1496,16 +1496,16 @@ mod observation_tests {
     }
 
     const GOLDEN_API_HISTORY: &str = include_str!(
-        "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
+        "../../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
     );
     const GOLDEN_API_MESSAGES: &str = include_str!(
-        "../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
+        "../../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
     );
     const GOLDEN_EXPECTED_ASSISTANT: &str = include_str!(
-        "../../../../tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json"
+        "../../../../../tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json"
     );
     const GOLDEN_PARSER_PROVENANCE: &str = include_str!(
-        "../../../../tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json"
+        "../../../../../tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json"
     );
 
     #[test]

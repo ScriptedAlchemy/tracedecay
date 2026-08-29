@@ -4,32 +4,23 @@ pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 // Runtime modules are public because the root composition crate mounts these
 // concrete provider and storage authorities directly.
-pub mod claude;
-pub mod claude_observation;
-pub mod cline_like;
-pub mod codex;
-pub mod codex_app_server;
-pub mod cursor;
-pub mod cursor_composer;
+mod hosts;
+pub use hosts::{
+    claude, claude_observation, cline_like, codex, codex_app_server, cursor, cursor_composer,
+    hermes, kimi, kiro, opencode, vibe,
+};
+pub(in crate::runtime) use hosts::{opencode_frontier, opencode_part_scan, opencode_snapshot};
 pub mod git_correlation;
-pub mod hermes;
 mod host_scan;
 pub mod ingest;
 mod ingest_byte_budget;
 mod jsonl_observation_admission;
-pub mod kimi;
-pub mod kiro;
 pub mod lcm;
-pub mod opencode;
-mod opencode_frontier;
-mod opencode_part_scan;
-mod opencode_snapshot;
 mod pipeline_metrics;
 pub mod shared;
 pub mod snapshot_observation;
 pub mod source;
 pub mod store_port;
-pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;
 pub mod workflow_state;

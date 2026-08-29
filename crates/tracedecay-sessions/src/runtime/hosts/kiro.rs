@@ -1537,11 +1537,11 @@ mod observation_tests {
         // Provider-parser path: modern_messages → normalize_kiro_snapshot_observations
         // → canonical_snapshot_envelope (not a hand-built canonical record).
         let input: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
+            "../../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
         ))
         .expect("Kiro golden input");
         let expected: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/provider_normalization/kiro/workspace_session.expected_envelope.json"
+            "../../../../../tests/fixtures/provider_normalization/kiro/workspace_session.expected_envelope.json"
         ))
         .expect("Kiro golden expected envelope");
         let session_id = input["sessionId"].as_str().unwrap();
