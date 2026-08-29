@@ -19,10 +19,8 @@ use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdCon
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
-#[path = "store_maintenance/graph_replay.rs"]
 mod graph_replay;
 #[cfg(test)]
-#[path = "store_maintenance/vector_retention_tests.rs"]
 mod vector_retention_tests;
 use graph_replay::log_code_generation_retention_degraded;
 

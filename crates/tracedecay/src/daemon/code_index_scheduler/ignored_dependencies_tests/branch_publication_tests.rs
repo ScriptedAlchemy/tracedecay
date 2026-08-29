@@ -304,7 +304,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            Arc::clone(&graph_runtime),
+            graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             super::super::CodeGraphActivationPolicyV1::Enabled,
         )

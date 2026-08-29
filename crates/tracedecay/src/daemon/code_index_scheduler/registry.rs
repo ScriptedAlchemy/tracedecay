@@ -2256,9 +2256,7 @@ impl CodeIndexSchedulerRegistryV1 {
         semantic_schedule: Option<
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
-        graph_runtime: Arc<
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-        >,
+        graph_runtime: Arc<dyn crate::daemon::store_runtime::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {

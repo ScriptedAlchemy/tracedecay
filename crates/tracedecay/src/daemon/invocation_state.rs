@@ -494,7 +494,7 @@ impl DaemonInvocationState {
                 project_root,
                 store_root,
                 semantic_schedule,
-                graph_runtime,
+                graph_runtime.code_graph_seat_port(),
                 graph_publication_database,
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
