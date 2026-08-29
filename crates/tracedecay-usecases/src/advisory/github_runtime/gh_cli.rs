@@ -48,6 +48,8 @@ const GH_EXECUTABLE_V1: &str = "gh";
 #[cfg(not(any(test, feature = "test-transport")))]
 const GH_AUTH_TOKEN_ARGV_V1: [&str; 2] = ["auth", "token"];
 /// Upper bound on accepted token bytes, matching the secret newtype's own cap.
+/// Compiled with the production probe, and with unit tests that share the cap.
+#[cfg(any(test, not(feature = "test-transport")))]
 const MAX_GH_TOKEN_BYTES_V1: usize = 4096;
 /// A local credential helper that has not answered within this bound is killed.
 #[cfg(not(any(test, feature = "test-transport")))]
@@ -381,12 +383,12 @@ pub(super) fn public_repository_read_credential_v1(
 
 /// Test-only guard installing an exact token source and clearing every
 /// retained authority (and its cached probe) on both ends of its lifetime.
-#[cfg(any(test, feature = "test-transport"))]
-pub struct GhCliTokenSourceGuardV1;
+#[cfg(test)]
+struct GhCliTokenSourceGuardV1;
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl GhCliTokenSourceGuardV1 {
-    pub fn install(source: Arc<dyn GhCliTokenSourceV1>) -> Self {
+    fn install(source: Arc<dyn GhCliTokenSourceV1>) -> Self {
         clear_retained_gh_authorities_v1();
         if let Ok(mut installed) = installed_gh_cli_token_source_v1().lock() {
             *installed = Some(source);
@@ -395,7 +397,7 @@ impl GhCliTokenSourceGuardV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl Drop for GhCliTokenSourceGuardV1 {
     fn drop(&mut self) {
         if let Ok(mut installed) = installed_gh_cli_token_source_v1().lock() {
@@ -405,7 +407,7 @@ impl Drop for GhCliTokenSourceGuardV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 fn clear_retained_gh_authorities_v1() {
     let Ok(mut authorities) = retained_gh_authorities_v1().lock() else {
         return;
