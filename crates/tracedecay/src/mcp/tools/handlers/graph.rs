@@ -19,7 +19,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 
-use crate::context::CONTEXT_SEEN_NODE_IDS_LABEL;
+use crate::mcp::tools::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};

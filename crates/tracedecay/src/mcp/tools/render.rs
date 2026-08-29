@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::context::CONTEXT_PRIORITY_HEADINGS;
+use crate::mcp::tools::context_headings::CONTEXT_PRIORITY_HEADINGS;
 use crate::daemon_client::RequestedOutputFormat;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{

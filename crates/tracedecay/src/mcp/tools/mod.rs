@@ -5,6 +5,7 @@
 //! - `handlers`: tool call implementations (`handle_*` functions)
 
 pub(crate) mod binding;
+pub(crate) mod context_headings;
 mod definitions;
 pub mod dispatch;
 pub(crate) mod handlers;
