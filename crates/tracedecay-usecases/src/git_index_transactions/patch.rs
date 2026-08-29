@@ -16,13 +16,13 @@ struct NativePatchDigestMaterial<'a> {
 /// A patch fragment produced by the fixed preview builder. Its fields are
 /// private so callers cannot pass opaque patch text to the native executor.
 #[derive(Clone, Debug)]
-pub(crate) struct ValidatedIndexPatch {
+pub struct ValidatedIndexPatch {
     hunk: HunkRefV1,
     bytes: Vec<u8>,
 }
 
 impl ValidatedIndexPatch {
-    pub(crate) fn new(hunk: HunkRefV1, bytes: Vec<u8>) -> Result<Self, NativeGitIndexError> {
+    pub fn new(hunk: HunkRefV1, bytes: Vec<u8>) -> Result<Self, NativeGitIndexError> {
         hunk.validate()?;
         if bytes.is_empty() || bytes.len() > MAX_PATCH_BYTES {
             return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
@@ -85,7 +85,7 @@ impl ValidatedIndexPatch {
         Ok(Self { hunk, bytes })
     }
 
-    pub(crate) fn hunk(&self) -> &HunkRefV1 {
+    pub fn hunk(&self) -> &HunkRefV1 {
         &self.hunk
     }
 

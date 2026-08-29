@@ -12,7 +12,7 @@ use super::process::{read_optional_file, run_command_with_stdin, worktree_mode};
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 
 impl FixedGitIndexRunner {
-    pub(crate) fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let head_paths = match self.head_state()? {
             GitHeadStateV1::Unborn { .. } => Vec::new(),
             GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
@@ -73,13 +73,13 @@ impl FixedGitIndexRunner {
         canonical_sha256(&manifest).map_err(Into::into)
     }
 
-    pub(crate) fn untracked_name_digest(
+    pub fn untracked_name_digest(
         &self,
     ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
         self.other_name_digest(false)
     }
 
-    pub(crate) fn ignored_name_digest(
+    pub fn ignored_name_digest(
         &self,
     ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
         self.other_name_digest(true)
@@ -105,12 +105,12 @@ impl FixedGitIndexRunner {
         Ok(nul_paths(&self.run_git("ls-files", &args)?.stdout))
     }
 
-    pub(crate) fn configuration_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn configuration_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let output = self.run_git("config", &["config", "--null", "--show-origin", "--list"])?;
         canonical_sha256(&output.stdout).map_err(Into::into)
     }
 
-    pub(crate) fn filesystem_capabilities_digest(
+    pub fn filesystem_capabilities_digest(
         &self,
     ) -> Result<ManifestDigest, NativeGitIndexError> {
         let output = self.run_git_output(&[
@@ -132,7 +132,7 @@ impl FixedGitIndexRunner {
         canonical_sha256(&capabilities).map_err(Into::into)
     }
 
-    pub(crate) fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let paths = self.run_git("ls-files", &["ls-files", "-z"])?;
         let mut command = self.command();
         command
@@ -144,7 +144,7 @@ impl FixedGitIndexRunner {
         canonical_sha256(&attributes.stdout).map_err(Into::into)
     }
 
-    pub(crate) fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
+    pub fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
         let output = self.run_git_output(&[
             "config",
             "--get-regexp",
@@ -162,7 +162,7 @@ impl FixedGitIndexRunner {
         })
     }
 
-    pub(crate) fn sparse_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn sparse_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let sparse_path = self.git_dir.join("info").join("sparse-checkout");
         let sparse_bytes = read_optional_file(&sparse_path)?;
         let config = self.run_git_output(&[
@@ -191,7 +191,7 @@ impl FixedGitIndexRunner {
         canonical_sha256(&(sparse_bytes, config, sparse_entries)).map_err(Into::into)
     }
 
-    pub(crate) fn submodule_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+    pub fn submodule_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let gitlinks = self
             .run_git("ls-files", &["ls-files", "--stage", "-z"])?
             .stdout
