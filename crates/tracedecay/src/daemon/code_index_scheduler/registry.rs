@@ -4971,7 +4971,7 @@ impl tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityP
         let registry = self.clone();
         Box::pin(async move {
             let root = project_root.canonicalize().ok()?;
-            let current = registry.latest_complete_ready(&root).await?;
+            let current = registry.latest_complete_fresh(&root).await?;
             let snapshot = current.generation.snapshot();
             Some(
                 tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
