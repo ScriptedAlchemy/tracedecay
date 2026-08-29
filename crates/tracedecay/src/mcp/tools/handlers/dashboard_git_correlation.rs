@@ -12,7 +12,7 @@ use crate::dashboard::{
     DashboardGitCorrelationReadErrorV1, DashboardGitCorrelationReadFutureV1,
     DashboardGitCorrelationReadPortV1, DashboardGitCorrelationReadV1,
 };
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::GlobalDbGitCorrelationStore;
 
 pub struct DashboardGitCorrelationReadAdapter {

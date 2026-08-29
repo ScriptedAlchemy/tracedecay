@@ -75,7 +75,7 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
     let probe = DropProbe(Arc::clone(&dropped));
     let open = async move {
         let _probe = probe;
-        std::future::pending::<crate::errors::Result<()>>().await
+        std::future::pending::<tracedecay_runtime_core::errors::Result<()>>().await
     };
 
     let error = tokio::time::timeout(
@@ -99,7 +99,7 @@ async fn project_owner_half_close_can_still_receive_a_bounded_result() {
     drop(input);
     let result = super::super::await_project_owner_or_disconnect(&mut transport, async {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        Ok::<_, crate::errors::TraceDecayError>(17)
+        Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>(17)
     })
     .await
     .expect("half-closed owner lookup");
@@ -738,7 +738,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
         "user-session-read-test",
     )
     .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &client_identity.profile_root,
         daemon_authority.record().epoch,
         &daemon_authority.record().process_run_id,
@@ -1333,7 +1333,7 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let project_id = crate::storage::read_repository_identity_marker(&primary)
@@ -1349,7 +1349,7 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .upsert_code_project(
             &project_id,
             &linked,
-            crate::worktree::git_common_dir(&linked).as_deref(),
+            tracedecay_runtime_core::worktree::git_common_dir(&linked).as_deref(),
             None,
             Some("main"),
         )

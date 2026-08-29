@@ -15,7 +15,7 @@ use tracedecay_usecases::host_admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -202,7 +202,7 @@ impl HostAdmissionTestRuntimeV1 {
         )?;
         let session_registry = {
             let profile_key =
-                crate::lifecycle_lease::canonical_or_original(identity.profile_root());
+                tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
             // Held across construction so two concurrent opens of one profile
             // cannot race into two registries (the loser would fail the
             // exclusive profile session store open).
@@ -519,7 +519,7 @@ impl HostAdmissionTestRuntimeV1 {
                     "host-admission-test-message:{}:{}",
                     message.provider, message.message_id
                 ),
-                crate::global_db::ParseOffset::default(),
+                tracedecay_global_db::ParseOffset::default(),
             )
             .await)
     }
@@ -557,7 +557,7 @@ impl HostAdmissionTestRuntimeV1 {
         session: &tracedecay_sessions::runtime::SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
         source: &str,
-        offset: crate::global_db::ParseOffset,
+        offset: tracedecay_global_db::ParseOffset,
     ) -> Result<Vec<i64>> {
         let database = self.session_database_for_test(scope)?;
         if !database
@@ -707,7 +707,7 @@ impl HostAdmissionTestRuntimeV1 {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Result<crate::global_db::CodeProjectRecord> {
+    ) -> Result<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .upsert_code_project(
                 project_id,
@@ -724,7 +724,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         alias_path: &Path,
         project_id: &str,
-    ) -> Result<crate::global_db::ProjectAliasRecord> {
+    ) -> Result<tracedecay_global_db::ProjectAliasRecord> {
         self.profile_database
             .upsert_project_alias(alias_path, project_id)
             .await
@@ -733,15 +733,15 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn upsert_store_instance(
         &self,
-        upsert: crate::global_db::StoreInstanceUpsert,
-    ) -> Result<crate::global_db::StoreInstanceRecord> {
+        upsert: tracedecay_global_db::StoreInstanceUpsert,
+    ) -> Result<tracedecay_global_db::StoreInstanceRecord> {
         self.profile_database.upsert_store_instance(upsert).await
     }
 
     #[doc(hidden)]
     pub async fn append_profile_analytics_event_for_test(
         &self,
-        event: &crate::global_db::AnalyticsEventInsert,
+        event: &tracedecay_global_db::AnalyticsEventInsert,
     ) -> Result<i64> {
         self.profile_database
             .append_analytics_event(event)
@@ -755,8 +755,8 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn query_profile_analytics_events_for_test(
         &self,
-        query: &crate::global_db::AnalyticsEventQuery,
-    ) -> Result<Vec<crate::global_db::AnalyticsEventRecord>> {
+        query: &tracedecay_global_db::AnalyticsEventQuery,
+    ) -> Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
         self.profile_database
             .query_analytics_events(query)
             .await

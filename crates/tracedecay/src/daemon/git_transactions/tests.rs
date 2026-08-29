@@ -37,7 +37,7 @@ use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
     DaemonGitIndexTransactionServiceRegistry,
 };
-use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
 #[test]
 fn same_repository_mutations_never_enter_the_native_section_together() {

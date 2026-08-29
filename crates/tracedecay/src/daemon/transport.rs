@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const AUTH_PREFACE_PROTOCOL: &str = "tracedecay-daemon-v1";
 

@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use tracedecay_application::retrieval::RedundancySurfaceRequestV1;
 use tracedecay_application::retrieval::grep_analysis::RedundancyResultV1;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
-use crate::redundancy::round4;
+use tracedecay_runtime_core::redundancy::round4;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;

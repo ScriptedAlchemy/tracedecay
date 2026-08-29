@@ -20,7 +20,7 @@ pub(in crate::daemon::service::invocation) use recovery::{
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     mut projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -318,7 +318,7 @@ pub(super) fn reconcile_workflow_fan_out(
 
 fn reconcile_cancelled_fan_out(
     registered: &RegisteredWorkRuntime,
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -381,7 +381,7 @@ fn reconcile_cancelled_fan_out(
 }
 
 fn settle_workflow_fan_out(
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     attempts: &[tracedecay_domain::WorkAttemptV1],
@@ -487,7 +487,7 @@ fn settle_workflow_fan_out(
 
 fn request_fan_out_cancellation(
     context: &RequestContext,
-    services: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     attempt_processes: &super::super::work_attempt_exec::WorkAttemptProcessRegistryV1,
     plan: &tracedecay_domain::WorkflowFanOutPlanV1,
     terminal: &[tracedecay_domain::WorkAttemptV1],
@@ -545,7 +545,7 @@ fn request_fan_out_cancellation(
 }
 
 fn apply_scheduler_command(
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
     command: tracedecay_domain::WorkflowRunCommand,
     operation: &str,
@@ -583,7 +583,7 @@ fn apply_scheduler_command(
 pub(in crate::daemon::service::invocation) fn admit_workflow_child(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
-    services: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {

@@ -12,7 +12,7 @@ use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::service::invocation::daemon_operation_event_authority;
 use crate::daemon::session_retrieval::DaemonSessionLookupPrimitiveV1;
 use crate::daemon::{DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 
 #[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]
@@ -21,7 +21,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     project_root: &Path,
     graph: Arc<crate::tracedecay::TraceDecay>,
     server: &McpServer,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: &str,
 ) -> Result<()> {

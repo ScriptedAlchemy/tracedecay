@@ -5,7 +5,7 @@ use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
 };
 use super::*;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::ToolResult;
 
 mod tool_dispatch;
@@ -21,7 +21,7 @@ struct PreparedToolCall {
 
 struct DispatchedToolCall {
     cg: Arc<TraceDecay>,
-    selected_owner: Option<crate::global_db::ProjectRegistryContext>,
+    selected_owner: Option<tracedecay_global_db::ProjectRegistryContext>,
     selected_scope: Option<tracedecay_application::ResolvedScope>,
     outcome: Result<ToolResult>,
     elapsed_us: Option<u64>,
@@ -58,7 +58,7 @@ pub(super) fn invocation_target_for_route(
 
 pub(super) fn accounting_project_root<'a>(
     active_root: &'a Path,
-    selected_owner: Option<&'a crate::global_db::ProjectRegistryContext>,
+    selected_owner: Option<&'a tracedecay_global_db::ProjectRegistryContext>,
     selected_scope: Option<&tracedecay_application::ResolvedScope>,
 ) -> Option<&'a Path> {
     match (selected_owner, selected_scope) {
@@ -88,7 +88,7 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
         "memory_min_trust",
     ];
 
-    if crate::analytics::is_skill_view_tool(tool_name) {
+    if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name) {
         return arguments.clone();
     }
     let Some(map) = arguments.as_object() else {
@@ -766,7 +766,7 @@ impl McpServer {
         let tracedecay_dir = &cg.store_layout().data_root;
         let current = cg.active_branch();
 
-        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(tracedecay_dir) {
+        let branches: Vec<Value> = match tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir) {
             Some(meta) => meta
                 .branches
                 .iter()
@@ -1116,7 +1116,7 @@ impl McpServer {
         // wrong branch is the most serious of these warnings to
         // surface to the agent.
         if include_connection_worktree_warning && let Some(ref m) = self.worktree_mismatch {
-            let notice = crate::worktree::worktree_mismatch_notice(m);
+            let notice = tracedecay_runtime_core::worktree::worktree_mismatch_notice(m);
             if let Some(content) = result
                 .value
                 .get_mut("content")

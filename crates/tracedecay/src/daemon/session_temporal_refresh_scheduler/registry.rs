@@ -17,7 +17,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 #[derive(Default, Debug, Eq, PartialEq)]
 pub(super) struct SessionTemporalRefreshPassReport {

@@ -15,7 +15,7 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreRuntimeRegistryFailure, StoreShardIdV1,
     TraceDecayError, process_runtime_generation, registry_open_error,
 };
-use crate::db::engine::TestConnection;
+use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
@@ -52,7 +52,7 @@ async fn project_sessions_pending_convergence(
     ProjectId,
     PathBuf,
     PathBuf,
-    crate::db::DaemonDatabaseScope,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
 ) {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
@@ -67,7 +67,7 @@ async fn project_sessions_pending_convergence(
     // Production enters the daemon database scope before constructing the
     // session registry. Keep that authority alive for the whole fixture so
     // these daemon-maintenance tests never rely on ambient temp-path authority.
-    let database_scope = crate::db::enter_daemon_database_scope(&profile_root, 1, project_name)
+    let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, project_name)
         .expect("daemon database scope");
     let project_id = ProjectId::new(project_name).expect("typed project identity");
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
@@ -78,20 +78,20 @@ async fn project_sessions_pending_convergence(
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let authority = crate::db::DatabaseAuthority::acquire_test(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &sessions_path,
         "seed project sessions registered schema fixture",
     )
     .expect("project sessions fixture database authority");
-    let (database, _) = crate::db::Database::publish_registered_test_runtime_for_profile_identity(
+    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_for_profile_identity(
         &sessions_path,
         &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
-        crate::db::TestRuntimeProfileIdentityV1::new(
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1::new(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
         ),
-        crate::db::TestDatabaseRuntimeScope::ProjectSessions {
+        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
             project_id: project_id.clone(),
         },
     )
@@ -138,7 +138,7 @@ fn accepting_memory_write_control() -> FactWriteControl {
 }
 
 async fn add_profile_schema_fact(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     label: &str,
 ) -> ProjectMemoryCurationMutationTarget {
     let memory = memory_application_for_db(FactOwnerV1::Profile, database)
@@ -212,7 +212,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let first_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("first daemon authority");
-    let first_database_scope = crate::db::enter_daemon_database_scope(
+    let first_database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         first_authority.record().epoch,
         "first session runtime registry",
@@ -240,7 +240,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let second_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("successor daemon authority");
-    let _second_database_scope = crate::db::enter_daemon_database_scope(
+    let _second_database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         second_authority.record().epoch,
         "successor session runtime registry",
@@ -274,12 +274,12 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "existing profile memory schema")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "existing profile memory schema")
             .expect("daemon database scope");
     let memory_path =
         tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
-    crate::db::migrations::create_schema_connection(&seed)
+    tracedecay_runtime_core::db::migrations::create_schema_connection(&seed)
         .await
         .expect("create the profile memory fixture at the production schema");
     drop(seed);
@@ -371,7 +371,7 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "profile sessions identity pin")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "profile sessions identity pin")
             .expect("daemon database scope");
     let user_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
@@ -400,7 +400,7 @@ async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         1,
         "concurrent profile sessions mount",
@@ -441,7 +441,7 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
         "remote-node registry",
@@ -520,7 +520,7 @@ async fn profile_sessions_mount_rejects_incompatible_schema_through_registered_r
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         1,
         "incompatible profile sessions schema",
@@ -572,7 +572,7 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
     std::fs::create_dir_all(&project_root).expect("project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         1,
         "typed project sessions enrollment",
@@ -838,7 +838,7 @@ async fn background_convergence_failure_remains_observable_as_degraded() {
         )
         .expect("seed corruption behind missing guards");
     let connection = TestConnection::open(&sessions_path);
-    crate::global_db::schema_contract::ensure_authority_invariant_schema(&connection)
+    tracedecay_global_db::schema_contract::ensure_authority_invariant_schema(&connection)
         .await
         .expect(
             "restore admission-critical guard triggers after seeding historical row corruption",
@@ -883,7 +883,7 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
     std::fs::create_dir_all(&conflicting_project_root).expect("conflicting project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         1,
         "conflicting project sessions enrollment",
@@ -930,7 +930,7 @@ async fn worktree_graph_mount_does_not_require_git() {
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 13, "non-git worktree graph")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 13, "non-git worktree graph")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -973,7 +973,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 19, "generic graph runtime")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 19, "generic graph runtime")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -1003,8 +1003,8 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
             match project_database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
                 Err(
-                    crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-                    | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                    tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
                 ) => {
                     tokio::task::yield_now().await;
                 }
@@ -1116,7 +1116,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
             .expect("project enrollment");
     }
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 17, "shared code graph")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 17, "shared code graph")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -1194,7 +1194,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     let project_id = ProjectId::new("project.derived-graph-corrupt").expect("project id");
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         23,
         "corrupt derived graph project open",
@@ -1275,8 +1275,8 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     assert_eq!(reopened.database_path(), database_path);
     assert!(matches!(
         reopened.issue_memory_graph_runtime_operation(),
-        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-            | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
+        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+            | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
     ));
     drop(reopened);
     tokio::time::timeout(
@@ -1432,7 +1432,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 11, "project graph publication")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 11, "project graph publication")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -1458,7 +1458,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
             .expect("daemon project graph authority");
     assert_eq!(
         main_authority.role(),
-        crate::db::DatabaseAuthorityRole::Daemon
+        tracedecay_runtime_core::db::DatabaseAuthorityRole::Daemon
     );
     let main = registry
         .project_graph(
@@ -1531,7 +1531,7 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
     gix::init(&project_root).expect("initialize project repository");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope = crate::db::enter_daemon_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         1,
         "read-only deleted worktree mount",

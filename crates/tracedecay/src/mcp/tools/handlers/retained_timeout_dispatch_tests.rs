@@ -277,7 +277,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for FactStoreCurateSuccessEx
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -348,7 +348,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ExpiredDeadlineExecutor 
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -542,7 +542,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for PostCommitPartialEffectE
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -613,7 +613,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for PreCommitInterruptionExe
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

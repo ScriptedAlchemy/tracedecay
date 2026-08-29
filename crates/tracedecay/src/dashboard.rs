@@ -53,7 +53,7 @@ pub fn register_test_schema_installer() {
 pub async fn dashboard_automation_authority_for_test(
     cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
     profile_root: impl AsRef<std::path::Path>,
-) -> crate::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
+) -> tracedecay_runtime_core::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
     let profile_root = profile_root.as_ref().canonicalize()?;
     let project_root = cg.project_root().canonicalize()?;
     let configuration = hotpath::future!(
@@ -61,12 +61,12 @@ pub async fn dashboard_automation_authority_for_test(
         label = "dashboard.automation.configuration"
     )
     .await
-    .map_err(|error| crate::errors::TraceDecayError::Config {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("dashboard automation fixture configuration is unavailable: {error}"),
     })?;
     let configured_project_root = configuration.target.project_root.canonicalize()?;
     if configured_project_root != project_root {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "dashboard automation fixture configuration resolved a different project root"
                 .to_owned(),
         });
@@ -74,7 +74,7 @@ pub async fn dashboard_automation_authority_for_test(
     let project_id = configuration.target.project_id.clone();
     let scope =
         crate::daemon::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
-            .map_err(|error| crate::errors::TraceDecayError::Config {
+            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("dashboard automation fixture scope is invalid: {error}"),
             })?;
     let project_database = hotpath::future!(
@@ -89,7 +89,7 @@ pub async fn dashboard_automation_authority_for_test(
         &configuration.snapshot.effective_behavior_digest,
         &configuration.snapshot.resolution_provenance_digest,
     ))
-    .map_err(|error| crate::errors::TraceDecayError::Config {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("dashboard automation fixture policy digest failed: {error}"),
     })?;
     let writer = standalone_dashboard_automation_writer();
@@ -142,8 +142,8 @@ pub async fn dashboard_automation_authority_for_test(
 #[doc(hidden)]
 pub async fn dashboard_configuration_authorities_for_test(
     cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
-    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
-) -> crate::errors::Result<(
+    profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+) -> tracedecay_runtime_core::errors::Result<(
     std::sync::Arc<dyn DashboardApplicationRuntime>,
     std::sync::Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>,
 )> {
@@ -159,8 +159,8 @@ pub async fn dashboard_configuration_authorities_for_test(
 #[doc(hidden)]
 pub struct DashboardGraphTestRuntimeV1 {
     profile_root: std::path::PathBuf,
-    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
-    profile_sessions_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     registry: std::sync::Arc<
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     >,
@@ -169,7 +169,7 @@ pub struct DashboardGraphTestRuntimeV1 {
 
 #[cfg(feature = "test-transport")]
 impl DashboardGraphTestRuntimeV1 {
-    pub async fn open(profile_root: impl AsRef<std::path::Path>) -> crate::errors::Result<Self> {
+    pub async fn open(profile_root: impl AsRef<std::path::Path>) -> tracedecay_runtime_core::errors::Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -210,11 +210,11 @@ impl DashboardGraphTestRuntimeV1 {
         })
     }
 
-    pub fn profile_database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+    pub fn profile_database(&self) -> tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         self.profile_database.clone()
     }
 
-    pub fn profile_sessions_database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+    pub fn profile_sessions_database(&self) -> tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         self.profile_sessions_database.clone()
     }
 
@@ -222,7 +222,7 @@ impl DashboardGraphTestRuntimeV1 {
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
-    ) -> crate::errors::Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let registered = hotpath::future!(
             self.registry
                 .project_sessions(project_id.clone(), [project_root.to_path_buf()]),
@@ -242,7 +242,7 @@ impl DashboardGraphTestRuntimeV1 {
             )
             .await?;
             let graph_proxy = project_database.memory_graph_runtime().ok_or_else(|| {
-                crate::errors::TraceDecayError::Database {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
                     operation: "bind dashboard project graph".to_owned(),
                     message: "project memory database has no verified graph runtime".to_owned(),
                 }
@@ -258,7 +258,7 @@ impl DashboardGraphTestRuntimeV1 {
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
-    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+    ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
         // Fixture identity is pinned in the sanctioned `.git/` repository
         // identity marker; nothing is written into the working tree.
         crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())?;
@@ -276,7 +276,7 @@ impl DashboardGraphTestRuntimeV1 {
         )
         .await?;
         if layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "dashboard graph identity differs from its test authority".to_owned(),
             });
         }
@@ -298,7 +298,7 @@ impl DashboardGraphTestRuntimeV1 {
     pub async fn reopen(
         &self,
         project_root: &std::path::Path,
-    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+    ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
         let options = crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
@@ -316,12 +316,12 @@ impl DashboardGraphTestRuntimeV1 {
             .identity
             .project_id
             .as_deref()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "dashboard graph fixture has no project identity".to_owned(),
             })
             .and_then(|project_id| {
                 tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
-                    crate::errors::TraceDecayError::Config {
+                    tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: format!("invalid dashboard graph fixture identity: {error}"),
                     }
                 })
@@ -351,8 +351,8 @@ impl DashboardGraphTestRuntimeV1 {
 #[doc(hidden)]
 pub async fn dashboard_lcm_read_authority_for_test(
     cg: &crate::tracedecay::TraceDecay,
-    registry: &crate::global_db::RegisteredGlobalDb,
-    project_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
+    project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
     let root = match hotpath::future!(
         crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry),
@@ -384,7 +384,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub fn dashboard_git_correlation_read_authority_for_test(
-    project_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    project_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> std::sync::Arc<dyn DashboardGitCorrelationReadPortV1> {
     std::sync::Arc::new(
         crate::mcp::tools::handlers::DashboardGitCorrelationReadAdapter::new(project_database),
@@ -399,17 +399,17 @@ pub fn dashboard_git_correlation_read_authority_for_test(
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn record_project_span_for_test(
-    project_database: &crate::global_db::RegisteredGlobalDb,
+    project_database: &tracedecay_global_db::RegisteredGlobalDb,
     observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
     merge_gap_secs: i64,
-) -> crate::errors::Result<i64> {
+) -> tracedecay_runtime_core::errors::Result<i64> {
     hotpath::future!(
         crate::store::GlobalDbGitCorrelationStore::new(project_database)
             .record_span_observation(observation, merge_gap_secs),
         label = "dashboard.span.persist"
     )
     .await
-    .map_err(|error| crate::errors::TraceDecayError::Database {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: "record dashboard test git span".to_owned(),
         message: error.to_string(),
     })

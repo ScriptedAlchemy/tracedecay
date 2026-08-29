@@ -1,4 +1,4 @@
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use std::path::Path;
 
 use super::super::{StoreAdministration, remote_recovery_lifecycle};
@@ -6,7 +6,7 @@ use super::super::{StoreAdministration, remote_recovery_lifecycle};
 impl StoreAdministration {
     pub(super) async fn remote_deleted_project_roots(
         &self,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
         project_id: &str,
     ) -> Result<std::collections::BTreeSet<std::path::PathBuf>> {

@@ -26,12 +26,12 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::configuration::{
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
     ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
 };
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -304,7 +304,7 @@ pub struct RetentionConfig {
     pub session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig,
     /// Observation-evidence generation-scoped retention windows.
     #[serde(default)]
-    pub observation: crate::global_db::observation::retention::ObservationRetentionConfig,
+    pub observation: tracedecay_global_db::observation::retention::ObservationRetentionConfig,
     /// Orphan profile-sharded store collection window (days). `None` disables
     /// the sweep; the Doctor surface still reports findings read-only.
     #[serde(default = "default_orphan_store_gc_days")]
@@ -330,7 +330,7 @@ impl Default for RetentionConfig {
         Self {
             session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig::default(),
             observation:
-                crate::global_db::observation::retention::ObservationRetentionConfig::default(),
+                tracedecay_global_db::observation::retention::ObservationRetentionConfig::default(),
             orphan_store_gc_days: default_orphan_store_gc_days(),
             incident_debris_retention_days: default_incident_debris_retention_days(),
             compaction: default_compaction_threshold(),
@@ -1758,7 +1758,7 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
             .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
     };
     let dir_name = active_data_dir_name(project_path);
-    let mut command = Command::new(crate::git::git_program());
+    let mut command = Command::new(tracedecay_runtime_core::git::git_program());
     command
         .arg("-C")
         .arg(project_path)
@@ -1871,7 +1871,7 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
         return Some(root);
     }
     let candidate =
-        crate::worktree::git_worktree_root(start).unwrap_or_else(|| start.to_path_buf());
+        tracedecay_runtime_core::worktree::git_worktree_root(start).unwrap_or_else(|| start.to_path_buf());
     if crate::tracedecay::TraceDecay::has_initialized_store(&candidate).await {
         Some(candidate)
     } else {
@@ -1891,7 +1891,7 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         discover_project_root(&cwd)
-            .or_else(|| crate::worktree::git_worktree_root(&cwd))
+            .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(&cwd))
             .unwrap_or(cwd)
     }
 }

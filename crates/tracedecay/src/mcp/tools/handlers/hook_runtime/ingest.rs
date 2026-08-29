@@ -1,5 +1,5 @@
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;

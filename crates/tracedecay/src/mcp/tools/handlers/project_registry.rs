@@ -5,7 +5,7 @@
 //! [`ProjectRegistryReadPort`] instead of a `RegisteredGlobalDb`, and receive
 //! presentation views plus the typed missing-registry and unresolved states.
 //!
-//! Genuine read failures keep [`crate::errors::TraceDecayError`] so an
+//! Genuine read failures keep [`tracedecay_runtime_core::errors::TraceDecayError`] so an
 //! unreadable registry stays a failure instead of collapsing into a
 //! successful empty listing.
 
@@ -15,7 +15,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::project_registry::{ProjectRegistryView, PublicCodeProject};
 
 /// Which registered project a context read names.

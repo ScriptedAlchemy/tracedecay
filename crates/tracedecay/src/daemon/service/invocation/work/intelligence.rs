@@ -19,7 +19,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::daemon_contract::{
     DaemonInvocationProblem, DaemonInvocationResponse, WorkApplicationOutcomeV1,
 };
-use crate::global_db::configuration::{
+use tracedecay_global_db::configuration::{
     OwnedGlobalDbConfigurationControlStore, contracts::ConfigurationControlStore as _,
 };
 
@@ -63,7 +63,7 @@ pub(super) fn generate_proposal(
 #[hotpath::measure(label = "daemon.service.work.execution_history")]
 pub(super) fn execution_history(
     registered: &RegisteredWorkRuntime,
-    services: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,

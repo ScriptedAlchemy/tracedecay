@@ -72,7 +72,7 @@ fn repository_identity_marker_rejects_unknown_schema() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn marker_test() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let marker_path = tracedecay::worktree::git_common_dir(&project)
+    let marker_path = tracedecay_runtime_core::worktree::git_common_dir(&project)
         .unwrap()
         .join("tracedecay-project.json");
     fs::write(

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use crate::types::NodeKind;
 

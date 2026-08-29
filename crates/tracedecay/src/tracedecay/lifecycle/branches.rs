@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::branch;
-use crate::branch_meta;
+use tracedecay_runtime_core::branch_meta;
 use crate::config::{
     db_filename, install_usecase_runtime_configuration_authority,
     materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::DatabaseAccessMode;
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::db::DatabaseAccessMode;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
@@ -126,7 +126,7 @@ impl TraceDecay {
         project_root: &Path,
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
-        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
@@ -246,7 +246,7 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
+        let internal_detached_scope = tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
             .as_deref()
             == Some(branch_name);
         Ok(Self {

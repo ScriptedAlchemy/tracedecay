@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 mod store_runtime;
 
@@ -199,11 +199,11 @@ pub struct ReaderLaneOccupancy {
 }
 
 impl ReaderPoolOccupancy {
-    fn from_pool(snapshot: &crate::db::engine::ReaderPoolSnapshot) -> Self {
+    fn from_pool(snapshot: &tracedecay_runtime_core::db::engine::ReaderPoolSnapshot) -> Self {
         Self {
             state: match snapshot.state {
-                crate::db::engine::ReaderPoolState::Ready => "ready".to_string(),
-                crate::db::engine::ReaderPoolState::Draining => "draining".to_string(),
+                tracedecay_runtime_core::db::engine::ReaderPoolState::Ready => "ready".to_string(),
+                tracedecay_runtime_core::db::engine::ReaderPoolState::Draining => "draining".to_string(),
             },
             snapshot_admissions: snapshot.snapshot_admissions,
             general: ReaderLaneOccupancy {
@@ -781,15 +781,15 @@ async fn collect_database_with_generation_census(
         (None, None)
     };
     let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));
-    let writer_owner = match crate::db::probe_writer_owner(&db_path) {
-        Ok(crate::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
-        Ok(crate::db::WriterOwnership::Active(owner)) => WriterOwnerSnapshot::Active {
+    let writer_owner = match tracedecay_runtime_core::db::probe_writer_owner(&db_path) {
+        Ok(tracedecay_runtime_core::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
+        Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => WriterOwnerSnapshot::Active {
             pid: owner.pid,
             started_epoch_ms: owner.started_epoch_ms,
             version: owner.version,
             intent: owner.intent,
         },
-        Ok(crate::db::WriterOwnership::ActiveUnknown) => WriterOwnerSnapshot::ActiveUnknown,
+        Ok(tracedecay_runtime_core::db::WriterOwnership::ActiveUnknown) => WriterOwnerSnapshot::ActiveUnknown,
         Err(error) => WriterOwnerSnapshot::ProbeFailed {
             error: error.to_string(),
         },
@@ -1230,8 +1230,8 @@ mod tests {
 
     #[test]
     fn reader_pool_occupancy_projects_both_lanes_onto_the_wire() {
-        let occupancy = ReaderPoolOccupancy::from_pool(&crate::db::engine::ReaderPoolSnapshot {
-            state: crate::db::engine::ReaderPoolState::Draining,
+        let occupancy = ReaderPoolOccupancy::from_pool(&tracedecay_runtime_core::db::engine::ReaderPoolSnapshot {
+            state: tracedecay_runtime_core::db::engine::ReaderPoolState::Draining,
             general_workers: 8,
             available_general: 1,
             health_workers: 1,

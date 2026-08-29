@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tracedecay_lsp::percent_hex_nibble;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 /// Returns the first plausible unexpanded `${...}` template variable in a
@@ -199,7 +199,7 @@ fn proxy_serve_handshake(
             |_| crate::config::SyncConfig::default().auto_init,
             |config| config.auto_init,
         ))
-    .then(|| crate::worktree::git_worktree_root(&resolved_path))
+    .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
     .filter(|root| !crate::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::branch_meta::BranchMeta;
+use tracedecay_runtime_core::branch_meta::BranchMeta;
 
 mod admin;
 mod snapshots;
@@ -47,14 +47,14 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
         // to re-ask git.
         return repo.find_reference(&refname).is_ok();
     }
-    if !crate::worktree::git_may_resolve_repo(project_root) {
+    if !tracedecay_runtime_core::worktree::git_may_resolve_repo(project_root) {
         return false;
     }
-    crate::git::git_output(project_root, &["show-ref", "--verify", "--quiet", &refname]).is_some()
+    tracedecay_runtime_core::git::git_output(project_root, &["show-ref", "--verify", "--quiet", &refname]).is_some()
 }
 
 fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
-    crate::git::git_capture(
+    tracedecay_runtime_core::git::git_capture(
         project_root,
         &["rev-list", "--count", &format!("{from_ref}..{to_ref}")],
     )?
@@ -86,7 +86,7 @@ mod default_branch_tests {
     use super::*;
 
     fn run_git(project_root: &Path, args: &[&str]) {
-        let output = std::process::Command::new(crate::git::git_program())
+        let output = std::process::Command::new(tracedecay_runtime_core::git::git_program())
             .args(args)
             .current_dir(project_root)
             .output()
@@ -252,7 +252,7 @@ pub enum BranchTrackingPreparation {
 
 pub struct PreparedBranchTracking {
     branch_name: String,
-    entry: crate::branch_meta::BranchEntry,
+    entry: tracedecay_runtime_core::branch_meta::BranchEntry,
 }
 
 /// Typed result of retiring an unpublished branch-tracking entry.
@@ -278,21 +278,21 @@ pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
     tracedecay_dir: &Path,
-) -> crate::errors::Result<BranchTrackingPreparation> {
-    use crate::branch_meta;
+) -> tracedecay_runtime_core::errors::Result<BranchTrackingPreparation> {
+    use tracedecay_runtime_core::branch_meta;
 
     let _branch_lock = {
         let mut attempts = 0;
         loop {
             match try_acquire_branch_add_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
-                Err(crate::errors::TraceDecayError::SyncLock { .. })
+                Err(tracedecay_runtime_core::errors::TraceDecayError::SyncLock { .. })
                     if attempts < BRANCH_LOCK_RETRY_ATTEMPTS =>
                 {
                     attempts += 1;
                     tokio::time::sleep(BRANCH_LOCK_RETRY_INTERVAL).await;
                 }
-                Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
+                Err(tracedecay_runtime_core::errors::TraceDecayError::SyncLock { .. }) => {
                     return Ok(BranchTrackingPreparation::Deferred);
                 }
                 Err(e) => return Err(e),
@@ -304,7 +304,7 @@ pub async fn prepare_branch_tracking_in_layout(
     let (mut meta, metadata_was_missing) = match branch_meta::load_branch_meta(tracedecay_dir) {
         Some(meta) => (meta, false),
         None if meta_path.exists() => {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!(
                     "corrupt branch metadata at '{}'; repair or remove it before adding branch tracking",
                     meta_path.display()
@@ -313,7 +313,7 @@ pub async fn prepare_branch_tracking_in_layout(
         }
         None => {
             let default = detect_default_branch(project_root).ok_or_else(|| {
-                crate::errors::TraceDecayError::Config {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
                         "cannot initialize missing branch metadata at '{}': repository default branch is unknown (detached HEAD or no default ref)",
                         meta_path.display()
@@ -338,7 +338,7 @@ pub async fn prepare_branch_tracking_in_layout(
     // A name that sanitizes to empty (e.g. "..") can never be a real git
     // branch; refuse it instead of publishing nonsense tracking metadata.
     if sanitize_branch_name(branch_name).is_empty() {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("cannot track branch '{branch_name}': not a valid branch name"),
         });
     }
@@ -352,7 +352,7 @@ pub async fn prepare_branch_tracking_in_layout(
     let db_file = crate::config::db_filename(tracedecay_dir).to_owned();
     meta.add_branch(branch_name, &db_file, &parent);
     let entry = meta.branches.get(branch_name).cloned().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!(
                 "branch tracking prepared '{branch_name}' without a matching metadata entry"
             ),
@@ -375,7 +375,7 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     let project_root = temp.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
     let run_git = |args: &[&str]| {
-        let output = std::process::Command::new(crate::git::git_program())
+        let output = std::process::Command::new(tracedecay_runtime_core::git::git_program())
             .args(args)
             .current_dir(&project_root)
             .output()
@@ -410,7 +410,7 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
         .unwrap();
 
     assert!(matches!(outcome, BranchTrackingPreparation::AlreadyTracked));
-    let meta = crate::branch_meta::load_branch_meta(&data_dir).unwrap();
+    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&data_dir).unwrap();
     assert_eq!(meta.default_branch, "main");
     assert_eq!(meta.branches.len(), 1);
     let default = meta.branches.get("main").unwrap();
@@ -432,16 +432,16 @@ async fn already_tracked_branch_persists_pruned_missing_database_entries() {
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
 
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("stale", "branches/missing.db", "main");
-    crate::branch_meta::save_branch_meta(&data_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&data_dir, &meta).unwrap();
 
     let outcome = prepare_branch_tracking_in_layout(&project_root, "main", &data_dir)
         .await
         .unwrap();
 
     assert!(matches!(outcome, BranchTrackingPreparation::AlreadyTracked));
-    let persisted = crate::branch_meta::load_branch_meta(&data_dir).unwrap();
+    let persisted = tracedecay_runtime_core::branch_meta::load_branch_meta(&data_dir).unwrap();
     assert!(!persisted.is_tracked("stale"));
 }
 
@@ -455,16 +455,16 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     let db_path = branches_dir.join("feature.db");
     std::fs::write(&db_path, b"graph").unwrap();
 
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
     std::fs::create_dir(data_dir.join("branch-meta.json.tmp")).unwrap();
 
     let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db")
         .expect_err("blocked metadata publication must fail rollback");
 
     assert!(db_path.exists());
-    let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
+    let persisted = tracedecay_runtime_core::branch_meta::load_branch_meta(data_dir).unwrap();
     assert!(persisted.is_tracked("feature"));
     assert!(
         error.to_string().contains("cannot retire failed branch"),
@@ -488,9 +488,9 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
         std::fs::write(path, b"sqlite").unwrap();
     }
 
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
 
     rollback_branch_tracking(data_dir, "feature", "branches/feature.db").unwrap();
 
@@ -498,7 +498,7 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
     assert!(db_path.with_extension("db-wal").exists());
     assert!(db_path.with_extension("db-shm").exists());
     assert!(
-        !crate::branch_meta::load_branch_meta(data_dir)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(data_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -507,15 +507,15 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
     // Load-modify-save under the shared branch lock; the preparation no
     // longer holds it across the sync.
-    crate::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
+    tracedecay_runtime_core::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
 }
 
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,
-) -> crate::errors::Result<PreparedBranchRollbackOutcome> {
+) -> tracedecay_runtime_core::errors::Result<PreparedBranchRollbackOutcome> {
     let _branch_lock = acquire_branch_lock_blocking(tracedecay_dir)?;
-    let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
+    let Some(mut meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir) else {
         return Ok(PreparedBranchRollbackOutcome::NoMatch);
     };
     if meta.branches.get(&prepared.branch_name) != Some(&prepared.entry) {
@@ -524,7 +524,7 @@ pub fn rollback_prepared_branch_tracking(
     if meta.remove_branch(&prepared.branch_name).is_none() {
         return Ok(PreparedBranchRollbackOutcome::NoMatch);
     }
-    crate::branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
+    tracedecay_runtime_core::branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
     Ok(PreparedBranchRollbackOutcome::RolledBack)
 }
 
@@ -533,13 +533,13 @@ fn rollback_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,
     db_file: &str,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
 }
 
 fn prune_missing_branch_dbs(
     tracedecay_dir: &Path,
-    meta: &mut crate::branch_meta::BranchMeta,
+    meta: &mut tracedecay_runtime_core::branch_meta::BranchMeta,
 ) -> bool {
     let missing: Vec<String> = meta
         .branches

@@ -116,7 +116,7 @@ pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
         text.metadata().manifest().privacy_domain.clone()

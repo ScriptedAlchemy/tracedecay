@@ -45,8 +45,8 @@ use tracedecay_usecases::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
@@ -102,7 +102,7 @@ fn enrich_markdown_sections(
     else {
         return;
     };
-    let Ok(source) = crate::sync::read_source_file(absolute_path) else {
+    let Ok(source) = tracedecay_runtime_core::sync::read_source_file(absolute_path) else {
         return;
     };
     SectionEnrichment::new(Some(project_root), crate::tracedecay::current_timestamp())

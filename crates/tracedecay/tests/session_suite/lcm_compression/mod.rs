@@ -114,7 +114,7 @@ async fn insert_registered_raw_messages(
             &session,
             &messages,
             "lcm-compression-test-fixture",
-            tracedecay::global_db::ParseOffset::default(),
+            tracedecay_global_db::ParseOffset::default(),
         )
         .await
         .expect("registered raw message fixture")

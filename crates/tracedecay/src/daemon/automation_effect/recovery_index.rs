@@ -25,7 +25,7 @@ use super::{
     journal::{self, DurableAutomationAdmission},
     projection::project_recovered_committed_receipts,
 };
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
 const MAX_PENDING_AUTOMATION_EFFECTS: usize = 256;
@@ -379,7 +379,7 @@ async fn reconcile_indexed_automation_effect(
                 .ok_or_else(|| contract_error("prepared journal changed during recovery"))?;
             let terminal = journal::read_indexed_terminal_blocking(&prepared_path)?
                 .ok_or_else(|| contract_error("prepared journal lost its terminal sidecar"))?;
-            Ok::<_, crate::errors::TraceDecayError>((terminal, publication))
+            Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>((terminal, publication))
         })
         .await
         .map_err(|error| contract_error(format!("prepared terminal reader failed: {error}")))??;
@@ -536,7 +536,7 @@ async fn persist_reserved_recovery(
             Some(&write_cancellation),
         )?
         else {
-            return Ok::<bool, crate::errors::TraceDecayError>(false);
+            return Ok::<bool, tracedecay_runtime_core::errors::TraceDecayError>(false);
         };
         remove_pending_blocking(&root, &path)?;
         Ok(true)

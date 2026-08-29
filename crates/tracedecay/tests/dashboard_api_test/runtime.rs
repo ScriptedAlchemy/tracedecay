@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay::dashboard;
-use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,

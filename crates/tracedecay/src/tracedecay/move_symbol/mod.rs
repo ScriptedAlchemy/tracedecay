@@ -14,7 +14,7 @@ mod use_parsing;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::types::{MoveHint, MoveResult, Visibility};
 use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
 use tracedecay_domain::RelationEdgeKindV1;

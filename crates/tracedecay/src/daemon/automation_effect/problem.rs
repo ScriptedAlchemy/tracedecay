@@ -10,7 +10,7 @@ use tracedecay_application::{
 use tracedecay_automation::backend::AgentTaskFailureClass;
 
 use super::{AutomationSettledProblem, contract_error};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) fn reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
@@ -355,7 +355,7 @@ mod tests {
         let problem = runtime_problem(
             &context,
             &cancellation,
-            &crate::errors::TraceDecayError::Config {
+            &tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "backend disconnected after admission".to_owned(),
             },
         )

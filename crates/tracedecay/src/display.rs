@@ -452,7 +452,7 @@ pub fn print_gain_total(
 }
 
 pub fn print_gain_history<F: Fn(u64) -> Option<f64>>(
-    rows: &[crate::global_db::SavingsDay],
+    rows: &[tracedecay_global_db::SavingsDay],
     to_usd: F,
 ) {
     println!(

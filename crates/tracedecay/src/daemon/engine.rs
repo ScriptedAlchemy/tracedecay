@@ -76,7 +76,7 @@ pub(super) struct DaemonEngine {
 #[hotpath::measure(label = "daemon.engine.git_index_transactions", future = true)]
 pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
     store_administration: &StoreAdministration,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_root: &Path,
     project_id: Option<&str>,
 ) -> Result<()> {
@@ -91,7 +91,7 @@ pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
 
 fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
     store_administration: &'a StoreAdministration,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_root: &'a Path,
     project_id: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
@@ -109,7 +109,7 @@ fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
                     message: format!("git index transaction project identity is invalid: {error}"),
                 }
             })?;
-        let Some(repository_root) = crate::worktree::git_worktree_root(project_root) else {
+        let Some(repository_root) = tracedecay_runtime_core::worktree::git_worktree_root(project_root) else {
             // Non-Git projects remain valid TraceDecay projects. They advertise no
             // Git mutation authority and must not fail project-open admission.
             return Ok(());

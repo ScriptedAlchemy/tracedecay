@@ -62,7 +62,7 @@ impl DaemonLspOwnerRegistrar {
         &self,
         project_root: PathBuf,
         scope_grant: CapabilityGrantSnapshot,
-        registered_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        registered_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         database: Database,
         code_index: Arc<crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
         runtime: tokio::runtime::Handle,

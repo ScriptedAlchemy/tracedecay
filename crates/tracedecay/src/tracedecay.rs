@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
-use crate::db::{Database, DatabaseStorageTelemetryHandle};
-use crate::errors::Result;
+use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
+use tracedecay_runtime_core::errors::Result;
 use crate::storage::{self, StoreLayout};
 
 #[cfg(test)]
@@ -34,7 +34,7 @@ pub(crate) use lifecycle::git_remote_url;
 /// syncing a Rust codebase's semantic knowledge graph.
 pub struct TraceDecay {
     db: Database,
-    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     store_runtime_registry:
         Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
@@ -60,7 +60,7 @@ pub struct TraceDecay {
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
-    _standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
+    _standalone_maintenance_scope: Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
 }
 
 const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
@@ -96,7 +96,7 @@ impl TraceDecay {
         &self.store_runtime_registry
     }
 
-    pub(crate) fn profile_database(&self) -> &crate::global_db::RegisteredGlobalDbLeaseV1 {
+    pub(crate) fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         &self.profile_database
     }
 

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::application_surface::ApplicationSurfaceOperation;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::operation_stream::OperationRequestControls;
 
 use super::*;

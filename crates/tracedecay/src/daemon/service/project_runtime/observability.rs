@@ -15,7 +15,7 @@ use tracedecay_usecases::observability::{
 /// exactly one of each runs per registered store authority no matter how many
 /// project roots (linked worktrees) mount observability for that store.
 struct StoreObservabilityCoreV1 {
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     // Canonical configuration resolution provenance is store-wide. Exact
     // digest equality proves that linked-root policy differences come only
     // from their scopes; a different provenance must not reuse this owner.
@@ -28,7 +28,7 @@ struct StoreObservabilityCoreV1 {
 
 impl StoreObservabilityCoreV1 {
     fn start(
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         configuration_provenance_revision: ManifestDigest,
         producer: BoundedObservabilityProducerV1,
         delivery_capacity: usize,
@@ -88,8 +88,8 @@ impl StoreObservabilityCoreV1 {
 /// Logical shard ids alone never match: two stores that share a
 /// brain/profile/project id remain distinct authorities.
 fn same_registered_store_authority(
-    incumbent: &crate::global_db::RegisteredGlobalDbLeaseV1,
-    candidate: &crate::global_db::RegisteredGlobalDbLeaseV1,
+    incumbent: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    candidate: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> bool {
     incumbent.binding() == candidate.binding()
         && incumbent.verified_locator() == candidate.verified_locator()
@@ -125,7 +125,7 @@ enum StoreObservabilityStateV1 {
 }
 
 struct StoreObservabilityEntryV1 {
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     state: StoreObservabilityStateV1,
 }
 
@@ -197,7 +197,7 @@ impl StoreObservabilityRegistryV1 {
     #[hotpath::measure(label = "daemon.service.project_runtime.observability_acquire")]
     pub(crate) fn acquire_or_start(
         &self,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         mount: &StoreObservabilityMountV1,
         start_producer: impl FnOnce() -> Result<
             BoundedObservabilityProducerV1,
@@ -440,7 +440,7 @@ impl RegisteredObservabilityProducerV1 {
         Arc::clone(&self.producer)
     }
 
-    pub(crate) fn database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+    pub(crate) fn database(&self) -> tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         self.core.database.clone()
     }
 
@@ -456,7 +456,7 @@ impl RegisteredObservabilityProducerV1 {
 
     pub(crate) fn matches(
         &self,
-        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         configuration_provenance_revision: &ManifestDigest,
         identity: &ObservabilityProducerIdentityV1,
     ) -> bool {

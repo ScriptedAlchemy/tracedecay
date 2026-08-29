@@ -24,7 +24,7 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::DaemonLcmAuthority;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 const LCM_ACTOR_ID: &str = "actor.daemon.lcm";
 const LCM_GRANT_ID: &str = "grant.daemon.lcm";

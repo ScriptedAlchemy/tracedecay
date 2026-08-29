@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
 use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 use tracedecay::mcp::ToolResult;
@@ -381,7 +381,7 @@ pub(crate) async fn handle_tool_call(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay::errors::Result<ToolResult> {
+) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -454,7 +454,7 @@ pub(crate) async fn handle_tool_call_with_runtime(
     mut args: serde_json::Value,
     server_stats: Option<serde_json::Value>,
     scope_prefix: Option<&str>,
-) -> tracedecay::errors::Result<ToolResult> {
+) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
@@ -470,7 +470,7 @@ async fn handle_project_open_source_edit_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
     mut args: Value,
-) -> tracedecay::errors::Result<ToolResult> {
+) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let graph = TraceDecay::open(cg.project_root()).await?;
     let server = McpServer::new(graph, None).await;
     server
@@ -530,7 +530,7 @@ pub(crate) async fn handle_production_source_edit_tool_call(
     mut args: Value,
     _server_stats: Option<Value>,
     _scope_prefix: Option<&str>,
-) -> tracedecay::errors::Result<ToolResult> {
+) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
     if !owns_format && let Some(object) = args.as_object_mut() {
         object
@@ -628,7 +628,7 @@ async fn call_project_open_source_edit_server(
     server: &McpServer,
     tool_name: &str,
     arguments: Value,
-) -> tracedecay::errors::Result<ToolResult> {
+) -> tracedecay_runtime_core::errors::Result<ToolResult> {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -960,7 +960,7 @@ pub(crate) fn extract_first_json_content(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
-pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
+pub(crate) fn expect_tool_error<T>(result: tracedecay_runtime_core::errors::Result<T>) -> String {
     match result {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),
@@ -1000,7 +1000,7 @@ pub(crate) async fn seed_project_registry(
         .await
         .unwrap();
     let store = runtime
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+        .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
             store_id: "store_alpha".to_string(),
             project_id: project.project_id.clone(),
             store_kind: "code_project".to_string(),
@@ -1013,7 +1013,7 @@ pub(crate) async fn seed_project_registry(
         .await
         .unwrap();
     runtime
-        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+        .upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
             graph_scope_id: "scope_alpha_main".to_string(),
             project_id: project.project_id.clone(),
             store_id: store.store_id.clone(),
@@ -1026,7 +1026,7 @@ pub(crate) async fn seed_project_registry(
         .await
         .unwrap();
     runtime
-        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+        .upsert_store_artifact(tracedecay_global_db::StoreArtifactUpsert {
             store_id: store.store_id,
             artifact_kind: "graph_db".to_string(),
             relpath: "projects/proj_alpha/tracedecay.db".to_string(),

@@ -22,7 +22,7 @@ use tracedecay_application::{ApplicationOutcome, RemoteListenerReadV1};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const DEFAULT_REMOTE_TIMEOUT_SECS: u64 = 30;
 
@@ -542,7 +542,7 @@ mod tests {
         CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
     };
 
-    use crate::errors::TraceDecayError;
+    use tracedecay_runtime_core::errors::TraceDecayError;
 
     fn observed_fixture() -> RemoteOperationalStatusReadV1 {
         let status: RemoteOperationalStatusV1 = serde_json::from_value(serde_json::json!({

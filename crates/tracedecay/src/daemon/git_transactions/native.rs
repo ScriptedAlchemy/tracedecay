@@ -1607,7 +1607,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
-) -> crate::errors::Result<RepositoryStateSnapshotV1> {
+) -> tracedecay_runtime_core::errors::Result<RepositoryStateSnapshotV1> {
     capture_exact_snapshot(
         repository_root,
         project_id,
@@ -1619,8 +1619,8 @@ pub(crate) fn capture_exact_snapshot_for_test(
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-fn test_snapshot_error(error: impl std::fmt::Display) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config {
+fn test_snapshot_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("failed to capture exact Git test snapshot: {error}"),
     }
 }

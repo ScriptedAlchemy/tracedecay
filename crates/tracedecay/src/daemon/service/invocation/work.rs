@@ -107,7 +107,7 @@ pub(super) async fn execute_work_application(
 }
 
 fn publish_committed_task_activity_in_background(
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_root: PathBuf,
     detail: Option<String>,
 ) {

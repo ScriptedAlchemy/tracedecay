@@ -32,6 +32,7 @@ mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 mod update_cmd;
+mod upgrade;
 mod work_command;
 mod workflow_command;
 
@@ -244,7 +245,7 @@ fn is_daemon_run(command: Option<&Commands>) -> bool {
     )
 }
 
-fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Result<()> {
+fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay_runtime_core::errors::Result<()> {
     if !is_daemon_run(command) {
         return Ok(());
     }
@@ -263,12 +264,12 @@ fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Re
             .as_ref()
             .map(|(source, value)| (*source, value.as_str())),
     )
-    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|index| format!("tracedecay-cpu-{index}"))
         .build_global()
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("failed to start daemon CPU pool: {error}"),
         })
 }
@@ -439,7 +440,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn async_main() -> tracedecay::errors::Result<CommandOutcome> {
+fn async_main() -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
@@ -515,7 +516,7 @@ fn async_main() -> tracedecay::errors::Result<CommandOutcome> {
             .max_blocking_threads(blocking_threads)
             .thread_stack_size(ASYNC_STACK_BYTES)
             .build()
-            .map_err(|e| tracedecay::errors::TraceDecayError::Config {
+            .map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("failed to start async runtime: {e}"),
             })
     })?;
@@ -600,7 +601,7 @@ fn command_profile_label(matches: &ArgMatches) -> String {
     }
 }
 
-async fn run(cli: Cli) -> tracedecay::errors::Result<CommandOutcome> {
+async fn run(cli: Cli) -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
     let host_bundle = HostBundleCliOptions {
         component: cli.component,
         dry_run: cli.dry_run,
@@ -686,7 +687,7 @@ async fn run_startup_preamble(command: &Commands) {
 async fn resolve_registered_project_root(
     project_id: Option<String>,
     project_path: Option<String>,
-) -> tracedecay::errors::Result<Option<PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Option<PathBuf>> {
     let Some(selector) = project_id.or(project_path) else {
         return Ok(None);
     };
@@ -703,7 +704,7 @@ async fn resolve_registered_project_root(
         .get("project")
         .and_then(|project| project.get("display_root"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "registered project not found for selector".to_string(),
         })?;
     Ok(Some(PathBuf::from(display_root)))
@@ -713,7 +714,7 @@ pub(crate) async fn resolve_cli_project_root(
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
-) -> tracedecay::errors::Result<PathBuf> {
+) -> tracedecay_runtime_core::errors::Result<PathBuf> {
     if let Some(root) = resolve_registered_project_root(project_id, project_path).await? {
         return Ok(root);
     }
@@ -829,14 +830,14 @@ fn validate_host_bundle_options(
     command: &Commands,
     family: CommandFamily,
     host_bundle: &HostBundleCliOptions,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     // `wipe` is the one non-lifecycle command that destroys deployed state, so
     // it takes the same `--yes` confirmation as the lifecycle mutations instead
     // of an interactive-only `go!` prompt. It owns no host component and has no
     // preview, so `--component` and `--dry-run` stay rejected.
     if matches!(command, Commands::Wipe { .. }) {
         if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {
-            return Err(tracedecay::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "wipe accepts --yes to confirm; --component, --dry-run, and --adopt are only valid \
                           with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
@@ -855,7 +856,7 @@ fn validate_host_bundle_options(
         }
     ) {
         if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {
-            return Err(tracedecay::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "storage resets accept --yes to confirm; --component, --dry-run, and --adopt are \
                           only valid with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
@@ -875,14 +876,14 @@ fn validate_host_bundle_options(
             || host_bundle.yes
             || host_bundle.adopt)
     {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message:
                 "--component, --dry-run, --yes, and --adopt are only valid with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
         });
     }
     if host_bundle.adopt && !host_bundle.yes {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message:
                 "--adopt requires --yes because it authorizes taking ownership of existing bytes"
                     .to_string(),
@@ -894,7 +895,7 @@ fn validate_host_bundle_options(
             Commands::Install { .. } | Commands::UpdatePlugin { .. } | Commands::Reinstall { .. }
         )
     {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "--adopt is valid only with install, update-plugin, or reinstall".to_string(),
         });
     }
@@ -916,7 +917,7 @@ fn is_full_component_set_adoption(command: &Commands, host_bundle: &HostBundleCl
 async fn dispatch_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
-) -> tracedecay::errors::Result<CommandOutcome> {
+) -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
     let family = CommandFamily::for_command(&command);
     validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
@@ -955,7 +956,7 @@ async fn dispatch_command(
 async fn dispatch_project_command(
     command: Commands,
     assume_yes: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Init {
             path,
@@ -1022,7 +1023,7 @@ async fn dispatch_project_command(
 }
 
 #[hotpath::measure(label = "cli.memory.status", future = true)]
-async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Result<()> {
+async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         MemoryAction::Status {
             json,
@@ -1052,7 +1053,7 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Re
     Ok(())
 }
 
-async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Tool {
             project,
@@ -1096,7 +1097,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
             let url = result
                 .get("url")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon dashboard response omitted URL".to_string(),
                 })?;
             // The daemon keys hosted dashboards by canonicalized project
@@ -1170,7 +1171,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
     Ok(())
 }
 
-async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Result<()> {
+async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         DaemonAction::Run {
             socket,
@@ -1206,7 +1207,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
             remote_tls_key,
         } => {
             let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "tracedecay not found on PATH".to_string(),
                 }
             })?;
@@ -1231,7 +1232,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
             if cfg!(windows) {
                 let profile_root = tracedecay::daemon::installed_service_socket_path()?
                     .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "installed Windows daemon task has no absolute profile root"
                             .to_string(),
                     })?;
@@ -1276,7 +1277,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
 async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let full_reinstall_preflight = matches!(
         &command,
         Commands::Reinstall {
@@ -1299,7 +1300,7 @@ async fn dispatch_agent_command(
         && !full_reinstall_preflight
         && !full_component_set_adoption
     {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "--dry-run and --yes require --component to select the target host component"
                 .to_string(),
         });
@@ -1313,7 +1314,7 @@ async fn dispatch_agent_command(
         } => {
             if host_bundle.component.is_some() {
                 if local || automation || no_dashboard {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "--component cannot be combined with --local, --automation, or --no-dashboard"
                             .to_string(),
                     });
@@ -1338,7 +1339,7 @@ async fn dispatch_agent_command(
         Commands::Reinstall { local, agent } => {
             if host_bundle.component.is_some() {
                 if local {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "--component cannot be combined with --local".to_string(),
                     });
                 }
@@ -1363,7 +1364,7 @@ async fn dispatch_agent_command(
         Commands::UpdatePlugin { local, agent } => {
             if host_bundle.component.is_some() {
                 if local {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "--component cannot be combined with --local".to_string(),
                     });
                 }
@@ -1386,7 +1387,7 @@ async fn dispatch_agent_command(
         Commands::Uninstall { agent, local } => {
             if host_bundle.component.is_some() {
                 if local {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "--component cannot be combined with --local".to_string(),
                     });
                 }
@@ -1408,7 +1409,7 @@ async fn dispatch_agent_command(
         }
         Commands::FeedbackRollback { mut action } => {
             if host_bundle.component.is_some() || host_bundle.dry_run {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "feedback-rollback does not accept host-component selectors"
                         .to_string(),
                 });
@@ -1431,7 +1432,7 @@ async fn dispatch_agent_command(
                 agent_cmd::handle_host_bundle_artifact_command(action, host_bundle).await?;
             } else {
                 if host_bundle.component.is_some() {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "host-bundle recovery operates on the whole component set"
                             .to_string(),
                     });
@@ -1449,7 +1450,7 @@ async fn dispatch_agent_command(
     Ok(())
 }
 
-async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<CommandOutcome> {
+async fn dispatch_hook_command(command: Commands) -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
     let code = match command {
         hook_command @ (Commands::HookPreToolUse
         | Commands::HookPromptSubmit
@@ -1486,7 +1487,7 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
     Ok(CommandOutcome::Exit(code))
 }
 
-async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_update_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Upgrade { no_reinstall } => {
             update_cmd::run_upgrade_command(no_reinstall)?;
@@ -1527,11 +1528,11 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
             Some(target) => {
                 hotpath::measure_block!(
                     "cli.channel.switch",
-                    tracedecay::upgrade::switch_channel(&target)
+                    crate::upgrade::switch_channel(&target)
                 )?;
             }
             None => {
-                hotpath::measure_block!("cli.channel.show", tracedecay::upgrade::show_channel())
+                hotpath::measure_block!("cli.channel.show", crate::upgrade::show_channel())
             }
         },
         _ => unreachable!("non-update command passed to update dispatcher"),
@@ -1539,7 +1540,7 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
     Ok(())
 }
 
-async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_configuration_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
@@ -1555,7 +1556,7 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
             let value = result
                 .get("counter")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon counter response omitted counter".to_string(),
                 })?;
             println!("{value}");
@@ -1571,7 +1572,7 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
             let prev = result
                 .get("counter")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon counter response omitted counter".to_string(),
                 })?;
             hotpath::future!(
@@ -1599,7 +1600,7 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
     Ok(())
 }
 
-async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Doctor => {
             hotpath::future!(tracedecay::doctor::run_doctor(), label = "cli.doctor.run").await?;
@@ -1636,7 +1637,7 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::
     Ok(())
 }
 
-async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_knowledge_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Git { action } => {
             git_cmd::handle_git_action(action).await?;

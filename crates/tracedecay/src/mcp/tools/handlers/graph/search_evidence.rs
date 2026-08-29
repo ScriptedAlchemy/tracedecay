@@ -2,7 +2,7 @@ use std::future::Future;
 
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::server::CodeIndexSearchDisplayV1;
 use crate::mcp::tools::render::Md;
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;

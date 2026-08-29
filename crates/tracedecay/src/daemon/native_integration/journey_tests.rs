@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,

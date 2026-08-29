@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
 use super::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::DaemonDatabaseScope;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -32,7 +32,7 @@ async fn open_registered_db(
     let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
     let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
     let scope =
-        crate::db::enter_daemon_database_scope(profile_root, nonce, "orphan store sweep test")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, "orphan store sweep test")
             .unwrap();
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
@@ -1035,7 +1035,7 @@ async fn seed_store(
                 store_id, project_id, store_kind, storage_mode, store_relpath,
                 manifest_relpath, created_at, last_verified_at, last_write_at
              ) VALUES (?1, ?2, 'project', 'profile_sharded', ?3, NULL, ?4, NULL, ?4)",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 store_id,
                 project_id,
                 format!("stores/{store_id}"),
@@ -1062,7 +1062,7 @@ async fn seed_project(
                 project_id, canonical_root, display_root, created_at, last_seen_at
              ) VALUES (?1, ?2, ?2, ?3, ?3)
              ON CONFLICT(project_id) DO NOTHING",
-            crate::db::engine::params![project_id, root.as_str(), timestamp],
+            tracedecay_runtime_core::db::engine::params![project_id, root.as_str(), timestamp],
         )
         .await
         .unwrap();
@@ -1073,7 +1073,7 @@ async fn seed_project(
              ON CONFLICT(alias_path) DO UPDATE SET
                 project_id = excluded.project_id,
                 last_seen_at = excluded.last_seen_at",
-            crate::db::engine::params![root, project_id, timestamp],
+            tracedecay_runtime_core::db::engine::params![root, project_id, timestamp],
         )
         .await
         .unwrap();

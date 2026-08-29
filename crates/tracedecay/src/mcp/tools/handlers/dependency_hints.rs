@@ -8,7 +8,7 @@ use tracedecay_usecases::code_index::{
     CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::tools::render::{self, Md};
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 

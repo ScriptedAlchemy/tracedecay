@@ -10,8 +10,8 @@
 use serde_json::Value;
 use std::path::Path;
 
-use crate::errors::Result;
-use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use crate::mcp::tools::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
@@ -34,7 +34,7 @@ impl DaemonProjectRegistryReadService {
     /// lookup the `tracedecay projects` CLI performs for its own active
     /// project. An unregistered root simply has no active id.
     async fn active_project_id(&self, active_project_root: &Path) -> Result<Option<String>> {
-        let git_common_dir = crate::worktree::git_common_dir(active_project_root);
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(active_project_root);
         Ok(self
             .registry
             .project_registry_context_by_identity(active_project_root, git_common_dir.as_deref())
@@ -114,7 +114,7 @@ impl DaemonProjectRegistryReadService {
                 if !allow_git_identity {
                     return Ok(None);
                 }
-                let git_common_dir = crate::worktree::git_common_dir(path);
+                let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(path);
                 self.registry
                     .project_registry_context_by_identity(path, git_common_dir.as_deref())
                     .await

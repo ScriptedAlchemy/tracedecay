@@ -53,7 +53,7 @@ pub(crate) async fn handle_signature_search(
                 continue;
             }
             if let Some(prefix) = path_filter
-                && !crate::path_scope::path_matches_scope(file_path, Some(prefix))
+                && !tracedecay_runtime_core::path_scope::path_matches_scope(file_path, Some(prefix))
             {
                 continue;
             }

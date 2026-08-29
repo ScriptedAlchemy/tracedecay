@@ -22,7 +22,7 @@ use tracedecay_store::{
 use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::inline_graph_publication_input_digest;
 use crate::daemon::profile_identity;
-use crate::global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 
 mod concurrency;
 mod mount_scope;
@@ -40,7 +40,7 @@ impl ContractFixture {
         let profile_root = temp.path().join("profile");
         let identity =
             profile_identity::load_or_create(&profile_root).expect("profile identity authority");
-        let database_scope = crate::db::enter_daemon_database_scope(&profile_root, 29, label)
+        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 29, label)
             .expect("daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
@@ -63,7 +63,7 @@ impl ContractFixture {
     async fn mount_unbound(
         &self,
         project_id: &ProjectId,
-    ) -> (Arc<crate::db::Database>, RegisteredGlobalDbLeaseV1) {
+    ) -> (Arc<tracedecay_runtime_core::db::Database>, RegisteredGlobalDbLeaseV1) {
         let roots = self.project_roots(project_id);
         for root in &roots {
             std::fs::create_dir_all(root).expect("worktree root");
@@ -87,7 +87,7 @@ impl ContractFixture {
     async fn bind(
         &self,
         project_id: &ProjectId,
-    ) -> (Arc<crate::db::Database>, RegisteredGlobalDbLeaseV1) {
+    ) -> (Arc<tracedecay_runtime_core::db::Database>, RegisteredGlobalDbLeaseV1) {
         let (project_database, sessions) = self.mount_unbound(project_id).await;
         let runtime = project_database
             .memory_graph_runtime()
@@ -161,23 +161,23 @@ fn snapshot_through_trait(
 }
 
 fn mounted_graph_operation(
-    database: &crate::db::Database,
-) -> crate::db::MemoryGraphRuntimeOperationV1 {
+    database: &tracedecay_runtime_core::db::Database,
+) -> tracedecay_runtime_core::db::MemoryGraphRuntimeOperationV1 {
     database
         .issue_memory_graph_runtime_operation()
         .expect("mounted database issues one graph operation")
 }
 
 async fn await_mounted_graph_operation(
-    database: &crate::db::Database,
-) -> crate::db::MemoryGraphRuntimeOperationV1 {
+    database: &tracedecay_runtime_core::db::Database,
+) -> tracedecay_runtime_core::db::MemoryGraphRuntimeOperationV1 {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
                 Err(
-                    crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-                    | crate::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                    tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
                 ) => {
                     tokio::task::yield_now().await;
                 }
@@ -190,7 +190,7 @@ async fn await_mounted_graph_operation(
 }
 
 fn publish_through_database(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     manifest: &GraphGenerationManifest,
     idempotency_key: GraphIdempotencyKey,
     cancelled: bool,
@@ -200,7 +200,7 @@ fn publish_through_database(
 }
 
 fn reconcile_through_database(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     manifest: &GraphGenerationManifest,
     idempotency_key: GraphIdempotencyKey,
 ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
@@ -209,7 +209,7 @@ fn reconcile_through_database(
 }
 
 fn snapshot_through_database(
-    database: &crate::db::Database,
+    database: &tracedecay_runtime_core::db::Database,
     projection: &GraphProjectionIdentity,
 ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
     let operation = mounted_graph_operation(database);
@@ -332,7 +332,7 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
     assert!(!read_only.is_writable());
     assert!(matches!(
         read_only.issue_memory_graph_runtime_operation(),
-        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
     ));
     let retained = snapshot_through_database(&database, &projection)
         .expect("verified snapshot after rejected read-only bind")
@@ -660,7 +660,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let scope = crate::db::enter_daemon_database_scope(&profile_root, 31, "verified graph restart")
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 31, "verified graph restart")
         .expect("first database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
@@ -701,7 +701,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     drop((project_database, profile_database, registry, scope));
 
     let _restarted_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 32, "verified graph restart reopen")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 32, "verified graph restart reopen")
             .expect("restarted database scope");
     let restarted = DaemonSessionRuntimeRegistryV1::open(identity)
         .await

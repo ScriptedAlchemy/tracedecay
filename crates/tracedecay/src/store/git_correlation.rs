@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::db::DatabaseEngineReadSnapshot;
-use crate::global_db::{
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
+use tracedecay_global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
     VerifiedGraphRuntimeWeakProxyV1,
 };

@@ -6,7 +6,7 @@ use tracedecay_domain::{ProjectId, UserProfileId};
 
 use super::super::{DaemonInvocationService, InvocationProjectRuntimeIdentityV1};
 use crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1;
-use crate::db::Database;
+use tracedecay_runtime_core::db::Database;
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonContextScoutRuntimeRegistrationError {

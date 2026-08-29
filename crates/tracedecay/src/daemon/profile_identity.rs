@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::storage::PROFILE_IDENTITY_FILENAME;
 
 use super::authority::canonical_identity_path;
@@ -137,7 +137,7 @@ pub(super) fn load_or_create_pinned(
         ".{PROFILE_IDENTITY_FILENAME}.{}.tmp",
         record.profile_id.as_str()
     ));
-    crate::db::DatabaseAuthority::publish_record_atomically(
+    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
         &temporary,
         &path,
         &bytes,
@@ -190,7 +190,7 @@ fn read_existing_record(path: &Path) -> Result<Option<LocalProfileIdentityRecord
     };
     validate_private_identity_file(path, &metadata)?;
     let encoded =
-        crate::db::DatabaseAuthority::read_record_strict(path, PROFILE_IDENTITY_RECORD_NAME)?
+        tracedecay_runtime_core::db::DatabaseAuthority::read_record_strict(path, PROFILE_IDENTITY_RECORD_NAME)?
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!(
                     "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared while being read",

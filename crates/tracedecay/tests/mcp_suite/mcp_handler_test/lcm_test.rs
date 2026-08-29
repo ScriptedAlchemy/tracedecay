@@ -1652,7 +1652,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         .to_string_lossy()
         .into_owned();
     let store = registry
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+        .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
             store_id: format!("store_{project_id}"),
             project_id: project.project_id.clone(),
             store_kind: "code_project".to_string(),
@@ -1665,7 +1665,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         .await
         .expect("register test project store");
     registry
-        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+        .upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
             graph_scope_id: format!("scope_{project_id}"),
             project_id: project.project_id,
             store_id: store.store_id,
@@ -1821,7 +1821,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .to_string_lossy()
         .into_owned();
     let store = registry
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+        .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
             store_id: format!("store_{project_id}"),
             project_id: project.project_id.clone(),
             store_kind: "code_project".to_string(),
@@ -1834,7 +1834,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .await
         .expect("register test project store");
     registry
-        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+        .upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
             graph_scope_id: format!("scope_{project_id}"),
             project_id: project.project_id,
             store_id: store.store_id,

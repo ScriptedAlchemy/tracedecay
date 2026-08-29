@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::config::TraceDecayConfig;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {

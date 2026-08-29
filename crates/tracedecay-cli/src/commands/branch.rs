@@ -17,20 +17,20 @@ fn branch_list_rpc_args() -> serde_json::Value {
 }
 
 #[hotpath::measure(label = "cli.branch.dispatch", future = true)]
-pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay_runtime_core::errors::Result<()> {
     handle_branch_action_inner(action).await
 }
 
 fn handle_branch_action_inner(
     action: BranchAction,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested branch-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         use tracedecay::branch;
-        use tracedecay::branch_meta;
+        use tracedecay_runtime_core::branch_meta;
 
         match action {
             BranchAction::List { path } => {
@@ -44,7 +44,7 @@ fn handle_branch_action_inner(
                 )
                 .await?;
                 let diagnostics = status.get("branch_diagnostics").ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
+                    tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "daemon status omitted branch diagnostics".to_string(),
                     }
                 })?;
@@ -191,7 +191,7 @@ fn handle_branch_action_inner(
                 let branch_name = match name {
                     Some(n) => n,
                     None => branch::current_branch(&resolved.project_path).ok_or_else(|| {
-                        tracedecay::errors::TraceDecayError::Config {
+                        tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message:
                             "cannot detect current branch (detached HEAD?). Specify a branch name."
                                 .to_string(),
@@ -246,7 +246,7 @@ fn handle_branch_action_inner(
                         eprintln!("\x1b[32m✔\x1b[0m Branch '{name}' removed.");
                     }
                     branch::BranchAdminOutcome::NoChanges => {
-                        return Err(tracedecay::errors::TraceDecayError::Config {
+                        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                             message: "daemon branch remove returned no_changes".to_string(),
                         });
                     }
@@ -281,7 +281,7 @@ fn handle_branch_action_inner(
                         );
                     }
                     branch::BranchAdminOutcome::NotTracked => {
-                        return Err(tracedecay::errors::TraceDecayError::Config {
+                        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                             message: "daemon branch remove_all returned not_tracked".to_string(),
                         });
                     }
@@ -324,9 +324,9 @@ fn handle_branch_action_inner(
 
 fn parse_daemon_branch_admin_report(
     response: &serde_json::Value,
-) -> tracedecay::errors::Result<tracedecay::branch::BranchAdminReport> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay::branch::BranchAdminReport> {
     serde_json::from_value(response.clone()).map_err(|error| {
-        tracedecay::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("invalid daemon branch administration response: {error}"),
         }
     })
@@ -334,16 +334,16 @@ fn parse_daemon_branch_admin_report(
 
 fn parse_daemon_branch_add_outcome(
     response: &serde_json::Value,
-) -> tracedecay::errors::Result<tracedecay::branch::BranchAddOutcome> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay::branch::BranchAddOutcome> {
     match response.get("outcome").and_then(serde_json::Value::as_str) {
         Some("not_indexed") => Ok(tracedecay::branch::BranchAddOutcome::NotIndexed),
         Some("already_tracked") => Ok(tracedecay::branch::BranchAddOutcome::AlreadyTracked),
         Some("added") => Ok(tracedecay::branch::BranchAddOutcome::Added),
         Some("deferred") => Ok(tracedecay::branch::BranchAddOutcome::Deferred),
-        Some(outcome) => Err(tracedecay::errors::TraceDecayError::Config {
+        Some(outcome) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("daemon branch add returned unknown outcome: {outcome}"),
         }),
-        None => Err(tracedecay::errors::TraceDecayError::Config {
+        None => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "daemon branch add response omitted outcome".to_string(),
         }),
     }
@@ -353,7 +353,7 @@ fn parse_daemon_branch_add_outcome(
 /// reports the daemon's PR-autotrack status for a project.
 async fn handle_branch_autotrack_action(
     action: crate::cli::BranchAutotrackAction,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     use crate::cli::BranchAutotrackAction;
     use tracedecay::config::MIN_AUTO_TRACK_PR_POLL_SECS;
 
@@ -373,14 +373,14 @@ async fn handle_branch_autotrack_action(
             .await?;
             let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(enabled) = enabled
             else {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "PR auto-tracking setting is not boolean".to_owned(),
                 });
             };
             let tracedecay_domain::configuration::ConfigurationValueV1::Unsigned(poll_secs) =
                 poll_secs
             else {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "PR auto-tracking poll interval is not unsigned".to_owned(),
                 });
             };
@@ -428,14 +428,14 @@ async fn handle_branch_autotrack_action(
             let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(current_enabled) =
                 current_enabled
             else {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "PR auto-tracking setting is not boolean".to_owned(),
                 });
             };
             let tracedecay_domain::configuration::ConfigurationValueV1::Unsigned(current_poll_secs) =
                 current_poll_secs
             else {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "PR auto-tracking poll interval is not unsigned".to_owned(),
                 });
             };
@@ -484,7 +484,7 @@ async fn handle_branch_autotrack_action(
             .await?;
             let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(current) = current
             else {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "PR auto-tracking setting is not boolean".to_owned(),
                 });
             };
@@ -516,7 +516,7 @@ async fn handle_branch_autotrack_action(
 }
 
 #[cfg(unix)]
-async fn resolve_branch_data_root(project_path: &Path) -> tracedecay::errors::Result<PathBuf> {
+async fn resolve_branch_data_root(project_path: &Path) -> tracedecay_runtime_core::errors::Result<PathBuf> {
     Ok(
         tracedecay::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_path)
             .await?

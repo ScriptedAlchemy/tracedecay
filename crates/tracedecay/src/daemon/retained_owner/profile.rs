@@ -22,7 +22,7 @@ use tracedecay_usecases::context::ResolvedSessionIdentity;
 use super::lcm::DirectRetainedLcmPortV1;
 use super::memory::DirectRetainedMemoryPortV1;
 use super::session::DirectProfileRetainedSessionPortV1;
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 /// Exact mounted authorities for a profile-retained request.
 #[derive(Clone)]
@@ -394,7 +394,7 @@ mod tests {
     }
 
     async fn seed_temporal_message(
-        database: &crate::global_db::RegisteredGlobalDb,
+        database: &tracedecay_global_db::RegisteredGlobalDb,
         scope: ObservationScopeV1,
         session_id: &str,
         message_id: &str,
@@ -525,7 +525,7 @@ mod tests {
                     &owning_session,
                     std::slice::from_ref(&owning_message),
                     &format!("profile-retained-{message_id}.jsonl"),
-                    crate::global_db::ParseOffset::default(),
+                    tracedecay_global_db::ParseOffset::default(),
                 )
                 .await,
             "seed canonical owning transcript",
@@ -534,7 +534,7 @@ mod tests {
             .lcm_protect_session_raw_messages(provider, session_id)
             .await
             .expect("protect canonical raw message");
-        crate::global_db::session_temporal::GlobalDbSessionTemporalStore::new(database)
+        tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(database)
             .materialize_pending_session_refresh_for_test(&session)
             .await
             .expect("materialize canonical temporal occurrence");
@@ -629,7 +629,7 @@ mod tests {
         let profile_root = temporary.path().join("profile");
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
             "profile retained message search",
@@ -733,7 +733,7 @@ mod tests {
         let profile_root = temporary.path().join("profile");
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
             "profile retained project selection refusal",
@@ -793,7 +793,7 @@ mod tests {
         let profile_root = temporary.path().join("profile");
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
             1,
             "profile retained unsupported sessions-for",

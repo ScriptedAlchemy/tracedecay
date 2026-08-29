@@ -1,7 +1,7 @@
 use super::*;
 
 fn run_git(project_root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(crate::git::git_program())
+    let output = std::process::Command::new(tracedecay_runtime_core::git::git_program())
         .args(args)
         .current_dir(project_root)
         .output()
@@ -26,9 +26,9 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     run_git(&project_root, &["commit", "-m", "fixture"]);
     std::fs::create_dir_all(tracedecay_dir.join("branches")).unwrap();
     std::fs::write(tracedecay_dir.join(crate::config::DB_FILENAME), b"main").unwrap();
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
     std::fs::write(tracedecay_dir.join("branches/feature.db"), b"feature").unwrap();
     (temp, project_root, tracedecay_dir)
 }
@@ -46,17 +46,17 @@ fn prepare_remove(project_root: &Path, tracedecay_dir: &Path) -> PreparedBranchA
     .unwrap()
 }
 
-fn failpoint(message: &str) -> crate::errors::Result<()> {
-    Err(crate::errors::TraceDecayError::Config {
+fn failpoint(message: &str) -> tracedecay_runtime_core::errors::Result<()> {
+    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.to_string(),
     })
 }
 
 fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
-    let mut meta = crate::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
+    let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
     meta.add_branch(branch, crate::config::DB_FILENAME, "main");
-    crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
-    let source = crate::branch_meta::BranchGraphSourceDraftV1 {
+    tracedecay_runtime_core::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
+    let source = tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
         project_id: "project".to_owned(),
         repository_id: "repository".to_owned(),
         worktree_id: format!("worktree-{branch}"),
@@ -65,10 +65,10 @@ fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
         source_oid: format!("oid-{branch}"),
     };
     let outcome =
-        crate::branch_meta::publish_graph_source(tracedecay_dir, branch, None, source).unwrap();
+        tracedecay_runtime_core::branch_meta::publish_graph_source(tracedecay_dir, branch, None, source).unwrap();
     assert!(matches!(
         outcome,
-        crate::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
     ));
 }
 
@@ -83,7 +83,7 @@ fn selection_is_read_only_and_commit_unlinks_exact_family() {
     assert_eq!(prepared.database_paths(), std::slice::from_ref(&db));
     assert!(db.exists());
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -94,7 +94,7 @@ fn selection_is_read_only_and_commit_unlinks_exact_family() {
     assert!(!db.with_extension("db-wal").exists());
     assert!(!db.with_extension("db-shm").exists());
     assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -117,7 +117,7 @@ fn crash_before_metadata_cas_preserves_route_and_files() {
     assert!(error.to_string().contains("crash before metadata CAS"));
     assert!(db.exists());
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -140,7 +140,7 @@ fn crash_after_metadata_cas_leaves_only_unreferenced_files() {
     assert!(error.to_string().contains("crash after metadata CAS"));
     assert!(db.exists());
     assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -151,16 +151,16 @@ fn metadata_cas_rejects_changed_store_path_without_unlink() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
     let prepared = prepare_remove(&project_root, &tracedecay_dir);
-    let mut changed = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut changed = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     changed.branches.get_mut("feature").unwrap().db_file = "branches/recreated.db".to_owned();
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &changed).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &changed).unwrap();
 
     let error = prepared.commit().unwrap_err();
 
     assert!(error.to_string().contains("destructive CAS refused"));
     assert!(db.exists());
     assert_eq!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .branches["feature"]
             .db_file,
@@ -172,9 +172,9 @@ fn metadata_cas_rejects_changed_store_path_without_unlink() {
 fn gc_ref_reappearance_is_refused_before_metadata_cas() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
-    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
     let prepared = prepare_branch_admin_mutation(
         &project_root,
         &tracedecay_dir,
@@ -191,7 +191,7 @@ fn gc_ref_reappearance_is_refused_before_metadata_cas() {
     assert!(error.to_string().contains("reappeared"));
     assert!(db.exists());
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -211,7 +211,7 @@ fn nonempty_metadata_only_finish_fails_closed_without_deleting() {
     );
     assert!(db.exists());
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -231,7 +231,7 @@ fn compatibility_remove_fails_closed_without_deleting() {
     );
     assert!(db.exists());
     assert!(
-        crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -282,7 +282,7 @@ fn failed_branch_sync_rollback_retires_only_metadata() {
 
     assert!(db.exists());
     assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("feature")
     );
@@ -293,9 +293,9 @@ fn failed_branch_sync_rollback_retires_only_metadata() {
 #[test]
 fn removing_a_single_store_branch_never_deletes_the_project_store() {
     let (_temp, project_root, tracedecay_dir) = fixture();
-    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     meta.add_branch("topic", crate::config::DB_FILENAME, "main");
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
     let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
 
     let prepared = prepare_branch_admin_mutation(
@@ -318,7 +318,7 @@ fn removing_a_single_store_branch_never_deletes_the_project_store() {
     assert_eq!(report.outcome, BranchAdminOutcome::Removed);
     assert!(main_db.exists(), "the project store must survive removal");
     assert!(
-        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+        !tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir)
             .unwrap()
             .is_tracked("topic")
     );
@@ -358,11 +358,11 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
     let (_temp, project_root, tracedecay_dir) = fixture();
     let legacy_db = tracedecay_dir.join("branches/feature.db");
     let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
-    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     meta.add_branch("topic", crate::config::DB_FILENAME, "main");
     meta.branches.get_mut("topic").unwrap().last_synced_at = "0".to_string();
     meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let prepared = prepare_branch_admin_mutation(
         &project_root,
@@ -386,7 +386,7 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
         "legacy private store must be collected"
     );
     assert!(main_db.exists(), "the project store must survive GC");
-    let persisted = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let persisted = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     assert!(!persisted.is_tracked("topic"));
     assert!(!persisted.is_tracked("feature"));
 }
@@ -395,12 +395,12 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
 fn gc_carries_only_exact_sealed_single_store_provenance_for_retirement() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     add_sealed_single_store_branch(&tracedecay_dir, "feature/stale");
-    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     meta.branches
         .get_mut("feature/stale")
         .unwrap()
         .last_synced_at = "0".to_owned();
-    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let prepared = prepare_branch_admin_mutation(
         &project_root,

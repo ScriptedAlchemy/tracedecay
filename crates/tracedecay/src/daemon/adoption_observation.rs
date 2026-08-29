@@ -20,7 +20,7 @@ use tracedecay_tool_catalog::{CatalogContributionV1, ProfileId};
 use tracedecay_usecases::observability::record_adoption_eligibility;
 
 use super::log_daemon_event;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 /// Composed capability namespaces mapped onto the closed adoption capability
 /// families (`AdoptionEligibilityObservedV1::validate`). Prefix, not equality:
@@ -226,7 +226,7 @@ mod tests {
         let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id = ProjectId::new("project.adoption.census").expect("project id");
-        let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
             tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             project_id.clone(),

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ProjectId;
 
 use super::{StoreAdministration, http_application::DaemonHttpApplicationRegistry};
-pub(super) use crate::global_db::{RemoteDeletionFailureCode, RemoteDeletionPhase};
+pub(super) use tracedecay_global_db::{RemoteDeletionFailureCode, RemoteDeletionPhase};
 
 const MAX_REMOTE_DELETION_BODY_BYTES: usize = 16 * 1024;
 
@@ -28,7 +28,7 @@ pub(super) enum RemoteDeletionBootMode {
 #[hotpath::measure(label = "daemon.remote.deletion_boot", future = true)]
 pub(super) async fn resume_remote_account_deletion_for_boot(
     owners: &RemoteDeletionRuntimeOwners,
-) -> crate::errors::Result<RemoteDeletionBootMode> {
+) -> tracedecay_runtime_core::errors::Result<RemoteDeletionBootMode> {
     let Some(tombstone) = owners
         .administration
         .remote_account_deletion_tombstone()
@@ -249,7 +249,7 @@ pub(super) async fn dispatch_remote_deletion(
 #[derive(Debug)]
 pub(super) struct RemoteDeletionExecutionError {
     pub(super) receipt: RemoteDeletionReceipt,
-    pub(super) source: crate::errors::TraceDecayError,
+    pub(super) source: tracedecay_runtime_core::errors::TraceDecayError,
 }
 
 impl RemoteDeletionExecutionError {
@@ -258,7 +258,7 @@ impl RemoteDeletionExecutionError {
         code: RemoteDeletionFailureCode,
         phase: RemoteDeletionPhase,
         retryable: bool,
-        source: crate::errors::TraceDecayError,
+        source: tracedecay_runtime_core::errors::TraceDecayError,
     ) -> Self {
         receipt.status = if receipt.tombstone_recorded {
             if matches!(
@@ -303,7 +303,7 @@ async fn execute_remote_deletion(
                     RemoteDeletionFailureCode::InvalidRequest,
                     RemoteDeletionPhase::ValidateRequest,
                     false,
-                    crate::errors::TraceDecayError::Config {
+                    tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: format!("remote deletion project identity is invalid: {error}"),
                     },
                 )

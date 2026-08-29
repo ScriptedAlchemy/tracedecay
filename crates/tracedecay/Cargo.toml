@@ -424,7 +424,6 @@ dirs = "6"
 hex = "0.4"
 rayon = "1"
 getrandom = "0.2"
-self-replace = "1"
 memmap2 = "0.9"
 crossterm = "0.28"
 fs2 = "0.4"
@@ -447,8 +446,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [target.'cfg(not(windows))'.dependencies]
-flate2 = "1"
-tar = "0.4"
 
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
 # resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such

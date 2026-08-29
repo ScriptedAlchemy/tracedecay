@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
 
-use crate::db::Database;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) async fn await_bound_graph_runtime(
     database: &Database,

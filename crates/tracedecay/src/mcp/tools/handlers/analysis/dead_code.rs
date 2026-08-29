@@ -59,7 +59,7 @@ pub(crate) async fn handle_dead_code(
                     detail: "a dead-code candidate has no extraction-attested symbol metadata"
                         .to_owned(),
                 })?;
-            if !crate::path_scope::path_matches_scope(&file, scope_prefix) {
+            if !tracedecay_runtime_core::path_scope::path_matches_scope(&file, scope_prefix) {
                 continue;
             }
             files.push(file.clone());

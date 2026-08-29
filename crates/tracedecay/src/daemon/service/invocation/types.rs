@@ -613,7 +613,7 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 /// Retained daemon state for the typed Work application operations.
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
-    pub(super) database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    pub(super) database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) authority_digest: ManifestDigest,

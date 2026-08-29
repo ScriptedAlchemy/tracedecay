@@ -99,7 +99,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         "hook branch tracking must not write branch stores under repo-local marker storage"
     );
 
-    let meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("branch metadata must be published");
     let entry = meta
         .branches
@@ -144,7 +144,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         tracedecay::branch::BranchAddOutcome::AlreadyTracked,
         "replaying the exact branch/worktree route must preserve its sealed generation"
     );
-    let replay_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let replay_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("replayed branch metadata must remain published")
         .branches
         .get("feature/hook")
@@ -188,7 +188,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         tracedecay::branch::BranchAddOutcome::Added,
         "a new branch head must not be mistaken for an idempotent replay"
     );
-    let refreshed_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let refreshed_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("refreshed branch metadata must be published")
         .branches
         .get("feature/hook")
@@ -210,7 +210,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     // Branch-name equality alone is never an idempotence proof. A persisted
     // source with another worktree/ref/OID must be replaced by the exact
     // provenance captured for this mounted worktree.
-    let mut mismatched_meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let mut mismatched_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("refreshed branch metadata must remain readable");
     let mismatched = mismatched_meta
         .branches
@@ -223,7 +223,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     mismatched.worktree_root = "/fixture/foreign".to_owned();
     mismatched.reference = "refs/heads/foreign".to_owned();
     mismatched.source_oid = "f".repeat(40);
-    tracedecay::branch_meta::save_branch_meta(&shard_root, &mismatched_meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&shard_root, &mismatched_meta).unwrap();
 
     let repaired = harness
         .track_worktree_branch(&project, &project, "feature/hook")
@@ -234,7 +234,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         tracedecay::branch::BranchAddOutcome::Added,
         "foreign source provenance must not pass branch-name idempotence"
     );
-    let repaired_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let repaired_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("repaired branch metadata must be published")
         .branches
         .get("feature/hook")
@@ -267,7 +267,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .unwrap();
     assert_eq!(outcome, tracedecay::branch::BranchAddOutcome::Added);
 
-    let meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
         .expect("branch metadata must remain published");
     let second = meta
         .branches

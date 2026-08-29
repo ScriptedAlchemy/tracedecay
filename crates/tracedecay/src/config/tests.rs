@@ -580,7 +580,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     gdb.upsert_code_project(project_id, &project_root, None, None, None)
         .await
         .unwrap();
-    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+    gdb.upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
         store_id: "store_identity_only".to_string(),
         project_id: project_id.to_string(),
         store_kind: "code_project".to_string(),
@@ -660,7 +660,7 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     assert!(status.success(), "git init failed");
 
     let project_id = "proj_config_identity";
-    let git_common_dir = crate::worktree::git_common_dir(&project_root);
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project_root);
     gdb.upsert_code_project(
         project_id,
         &project_root,
@@ -670,7 +670,7 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     )
     .await
     .unwrap();
-    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+    gdb.upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
         store_id: "store_config_identity".to_string(),
         project_id: project_id.to_string(),
         store_kind: "code_project".to_string(),
@@ -727,7 +727,7 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
     gdb.upsert_code_project(project_id, &parent_root, None, None, None)
         .await
         .unwrap();
-    gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+    gdb.upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
         store_id: "store_parent_identity_only".to_string(),
         project_id: project_id.to_string(),
         store_kind: "code_project".to_string(),
@@ -1531,7 +1531,7 @@ mod runtime_configuration_cutover {
             )
             .expect("bind registered project database");
         let store =
-            crate::global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
+            tracedecay_global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
                 database.as_ref(),
             );
         let revision_id = revision_id("configuration.invalid.without-binding");
@@ -1551,7 +1551,7 @@ mod runtime_configuration_cutover {
             .expect_err("missing registered source binding must not be repaired");
         assert!(matches!(
             error,
-            crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+            tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
                 if authority == "configuration"
         ));
     }
@@ -1728,7 +1728,7 @@ mod runtime_configuration_cutover {
             )
             .expect("bind registered project database");
         let store =
-            crate::global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
+            tracedecay_global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
                 database.as_ref(),
             );
 
@@ -1783,7 +1783,7 @@ mod runtime_configuration_cutover {
             .expect_err("locator drift without the daemon binding id must stay a reset");
         assert!(matches!(
             error,
-            crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+            tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
                 if authority == "configuration"
         ));
     }
@@ -1865,7 +1865,7 @@ mod runtime_configuration_cutover {
             .await
             .expect_err("a layout without project identity has no resolvable authority");
         assert!(
-            matches!(error, crate::errors::TraceDecayError::Config { .. }),
+            matches!(error, tracedecay_runtime_core::errors::TraceDecayError::Config { .. }),
             "genuine unavailability must stay a typed configuration error, got {error:?}"
         );
     }
@@ -1904,7 +1904,7 @@ mod runtime_configuration_cutover {
         assert!(
             matches!(
                 error,
-                crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+                tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { ref authority, .. }
                     if authority == "configuration"
             ),
             "uninitialized durable configuration must remain a typed reset state: {error:?}"

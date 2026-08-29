@@ -27,12 +27,12 @@ use super::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
-use crate::db::{
+use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
@@ -711,7 +711,7 @@ impl MemoryStoreOwnerV1 {
 
     fn reserve_database_retirement(
         &self,
-    ) -> std::result::Result<crate::db::DatabaseOwnerRetirementReservationV1, String> {
+    ) -> std::result::Result<tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1, String> {
         let state = self
             .graph
             .lock()
@@ -1378,7 +1378,7 @@ impl ProjectSessionReplacementReservationV1 {
         &self,
         path: std::path::PathBuf,
     ) -> Result<(
-        crate::global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
+        tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
         tracedecay_store::StoreRuntimeBindingV1,
         tracedecay_store::VerifiedStoreLocatorV1,
         std::path::PathBuf,
@@ -1914,7 +1914,7 @@ impl ProjectSessionCandidateActivationV1 {
         &self,
     ) -> Result<(
         RegisteredGlobalDbLeaseV1,
-        crate::global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
+        tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
         tracedecay_store::StoreRuntimeBindingV1,
         tracedecay_store::VerifiedStoreLocatorV1,
     )> {
@@ -3034,7 +3034,7 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
 }
 
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
-    let process_run_id = crate::runtime_identity::process_run_id();
+    let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
     let daemon_generation = crate::daemon::authority::current_record(identity.profile_root())?
         .filter(|record| {
             record.process_run_id == process_run_id

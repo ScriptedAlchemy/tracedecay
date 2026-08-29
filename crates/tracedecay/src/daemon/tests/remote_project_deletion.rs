@@ -11,7 +11,7 @@ use crate::daemon::remote_deletion::{
     RemoteDeletionFailure, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionReceiptTarget, RemoteDeletionRuntimeOwners, RemoteDeletionStatus,
 };
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 #[tokio::test]
 async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_replay() {

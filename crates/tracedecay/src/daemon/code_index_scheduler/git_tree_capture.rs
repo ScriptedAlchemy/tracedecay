@@ -663,7 +663,7 @@ mod tests {
     }
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(crate::git::git_program())
+        let status = Command::new(tracedecay_runtime_core::git::git_program())
             .current_dir(root)
             .args(arguments)
             .status()
@@ -675,7 +675,7 @@ mod tests {
     }
 
     fn git_output(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new(crate::git::git_program())
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
             .current_dir(root)
             .args(arguments)
             .output()

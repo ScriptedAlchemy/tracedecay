@@ -7,7 +7,7 @@ use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, DatabaseAuthority, Result,
     open_runtime, session_registry_error,
 };
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 impl DaemonSessionRuntimeRegistryV1 {
     async fn project_graph_database(

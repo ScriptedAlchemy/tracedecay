@@ -35,7 +35,7 @@ pub async fn handle_gain(
     history: bool,
     range: &str,
     json_output: bool,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     handle_gain_inner(all, history, range, json_output).await
 }
 
@@ -44,15 +44,15 @@ fn handle_gain_inner(
     history: bool,
     range: &str,
     json_output: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + '_>>
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + '_>>
 {
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
-            .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config { message })?;
         let since =
-            i64::try_from(since).map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            i64::try_from(since).map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "savings range exceeds the supported timestamp domain".to_owned(),
             })?;
         let project_filter: Option<String> = if all {
@@ -78,7 +78,7 @@ fn handle_gain_inner(
             let rows = result
                 .get("history")
                 .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "daemon gain history response is missing history rows".to_owned(),
                 })?;
             let rows = rows
@@ -87,7 +87,7 @@ fn handle_gain_inner(
                 .map(serde_json::from_value::<SavingsDayPayload>)
                 .collect::<std::result::Result<Vec<_>, _>>()?
                 .into_iter()
-                .map(|row| tracedecay::global_db::SavingsDay {
+                .map(|row| tracedecay_global_db::SavingsDay {
                     day: row.day,
                     saved_tokens: row.saved_tokens,
                     calls: row.calls,

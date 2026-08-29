@@ -11,7 +11,7 @@ use super::{
     settle_scheduler_retained_automation,
 };
 use crate::daemon::automation_effect::AutomationEffectAdmission;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn log_scheduler_pre_admission_problem(

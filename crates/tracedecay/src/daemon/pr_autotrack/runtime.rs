@@ -90,7 +90,7 @@ async fn run(
 
 #[hotpath::measure(label = "daemon.pr_autotrack.tick", future = true)]
 async fn tick(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
     administration: &StoreAdministration,
     schedulers: &CodeIndexSchedulerRegistryV1,

@@ -14,7 +14,7 @@ const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 struct RmcpRouteFixture {
     _temp: TempDir,
-    _database_scope: crate::db::DaemonDatabaseScope,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     store_administration: StoreAdministration,
     #[cfg(unix)]
     engine: DaemonEngine,
@@ -221,7 +221,7 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     mut writer: W,
     handshake: &DaemonHandshake,
     server: &Arc<crate::mcp::McpServer>,
-    server_task: tokio::task::JoinHandle<crate::errors::Result<()>>,
+    server_task: tokio::task::JoinHandle<tracedecay_runtime_core::errors::Result<()>>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -548,7 +548,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { panic!("controlled RMCP fixture does not observe feedback") })
     }
 }

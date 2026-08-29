@@ -151,7 +151,7 @@ fn body_candidates(
     for candidate in candidates {
         let path = required_file_path(&candidate)?;
         let metadata = required_metadata(&candidate)?;
-        if scope_prefix.is_none_or(|scope| crate::path_scope::path_matches_scope(path, Some(scope)))
+        if scope_prefix.is_none_or(|scope| tracedecay_runtime_core::path_scope::path_matches_scope(path, Some(scope)))
         {
             let preference = NodeKind::from_str(&metadata.kind)
                 .map_or(u8::MAX, |kind| body_kind_preference(&kind));
@@ -176,7 +176,7 @@ fn source_body_for_node(
 ) -> Result<String> {
     let project_path = ProjectPath::resolve(project_root, Path::new(file_path));
     match project_path {
-        Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
+        Ok(ref path) => match tracedecay_runtime_core::sync::read_source_file(&path.absolute_path()) {
             Ok(source) => {
                 if !touched.iter().any(|path| path == file_path) {
                     touched.push(file_path.to_string());

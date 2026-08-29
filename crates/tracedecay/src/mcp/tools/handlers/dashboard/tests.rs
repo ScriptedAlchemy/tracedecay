@@ -15,7 +15,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     let completion = DashboardTaskCompletion(Arc::clone(&completed));
     let task = tokio::spawn(async move {
         let _completion = completion;
-        std::future::pending::<crate::errors::Result<()>>().await
+        std::future::pending::<tracedecay_runtime_core::errors::Result<()>>().await
     });
     manager.insert(
         project_root.clone(),

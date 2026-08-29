@@ -7,8 +7,8 @@ use tracedecay_application::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
@@ -42,7 +42,7 @@ enum AdminProjectAction {
 
 fn project_memory_application<'a>(
     cg: &TraceDecay,
-    db: &'a crate::db::Database,
+    db: &'a tracedecay_runtime_core::db::Database,
 ) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
     let owner = cg.project_memory_owner()?;
     MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
@@ -353,7 +353,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let owner_before = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
+        let owner_before = tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
 
         let apply_id = "automatic-fact.rpc.read-only";
         seed_automatic_fact_receipt(
@@ -437,7 +437,7 @@ mod tests {
             );
         }
 
-        let owner_after = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
+        let owner_after = tracedecay_runtime_core::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
         assert_eq!(owner_after, owner_before);
     }
 

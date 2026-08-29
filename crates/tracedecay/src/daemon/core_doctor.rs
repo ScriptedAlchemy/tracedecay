@@ -7,7 +7,7 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_jsonrpc::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
@@ -82,7 +82,7 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
 }
 
 fn doctor_runtime_temporal_report(
-    report: crate::global_db::SessionTemporalHealthReport,
+    report: tracedecay_global_db::SessionTemporalHealthReport,
 ) -> serde_json::Value {
     serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")
@@ -144,7 +144,7 @@ fn doctor_runtime_store_layout(
 }
 
 async fn doctor_literal_workspace_placeholder_paths(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     limit: usize,
 ) -> Vec<String> {
     if limit == 0 {
@@ -288,7 +288,7 @@ async fn doctor_runtime_value_inner(
             .map(|metadata| metadata.len()),
     };
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
-    let expected_schema_version = crate::db::migrations::SCHEMA_VERSION;
+    let expected_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let schema_version = if route_live {
         // Retained liveness proves that this route was admitted, but the fast
         // Doctor snapshot deliberately does not re-read the schema pragma.
@@ -351,7 +351,7 @@ async fn doctor_runtime_value_inner(
         Some(registry) => match Box::pin(registry.read_snapshot()).await {
             Ok(snapshot) => {
                 match Box::pin(
-                    crate::global_db::schema_stages::validate_observation_authority_connection(
+                    tracedecay_global_db::schema_stages::validate_observation_authority_connection(
                         &snapshot,
                     ),
                 )
@@ -620,12 +620,12 @@ mod doctor_runtime_route_tests {
             profile_root: Some(profile_root.to_path_buf()),
             global_db_path: Some(profile_root.join("registry.db")),
         };
-        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             profile_root,
             "core Doctor fixture initialization",
         )
         .expect("acquire fixture lifecycle authority");
-        let _database_scope = crate::db::enter_maintenance_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
             &lifecycle,
             profile_root,
             "core Doctor fixture initialization",
@@ -1091,7 +1091,7 @@ mod doctor_runtime_route_tests {
             crate::daemon::profile_identity::load_or_create(&profile)
                 .expect("load fixture profile identity"),
         );
-        let _database_scope = crate::db::enter_daemon_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile,
             REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
             "core-doctor-fast-runtime-health",
@@ -1242,9 +1242,9 @@ mod doctor_runtime_route_tests {
         let branch_graph = layout.data_root.join(branch_relpath);
         std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
         std::fs::copy(&default_graph, &branch_graph).unwrap();
-        let mut meta = crate::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
+        let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
         meta.add_branch("feature/doctor", branch_relpath, "main");
-        crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+        tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
         assert!(
             std::process::Command::new("git")
                 .args(["checkout", "-b", "feature/doctor"])

@@ -16,7 +16,7 @@ use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 
-use crate::global_db::WorkflowScopeFilter;
+use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,

@@ -28,8 +28,8 @@ use super::{
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
 use crate::catalog_composition::build_application_catalog_snapshot;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 

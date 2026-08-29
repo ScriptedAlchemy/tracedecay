@@ -16,7 +16,7 @@ use super::{
     DAEMON_PROJECT_SERVER_DRAIN_DEADLINE, DAEMON_STORE_CLOSE_RESERVE, DAEMON_TASK_ABORT_DEADLINE,
     DaemonLifecycle, core_lifecycle::DaemonShutdownClaim,
 };
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 type ProjectServerShutdownFuture =
     Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + Send + 'static>>;
@@ -510,7 +510,7 @@ mod tests {
 
     use super::*;
     use crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
-    use crate::errors::TraceDecayError;
+    use tracedecay_runtime_core::errors::TraceDecayError;
 
     /// A phase that never finishes used to spend the whole global deadline,
     /// so the phases behind it never ran: the project-server drain reported an

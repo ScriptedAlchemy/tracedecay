@@ -471,7 +471,7 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     let profile = TempDir::new().expect("profile temp dir");
     let fallback = TempDir::new().expect("fallback temp dir");
     let project = TempDir::new().expect("git project temp dir");
-    let git_status = std::process::Command::new(crate::git::git_program())
+    let git_status = std::process::Command::new(tracedecay_runtime_core::git::git_program())
         .args(["init", "-q"])
         .current_dir(project.path())
         .status()

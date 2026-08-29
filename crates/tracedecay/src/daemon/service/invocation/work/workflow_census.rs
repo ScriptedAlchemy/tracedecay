@@ -9,7 +9,7 @@ use super::RegisteredWorkRuntime;
 
 pub(super) fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
-    workflow: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    workflow: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -34,7 +34,7 @@ pub(super) fn persist_workflow_fan_out_census(
 
 fn try_persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
-    workflow: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    workflow: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -265,7 +265,7 @@ fn try_persist_workflow_fan_out_census(
 
 fn census_readiness(
     registered: &RegisteredWorkRuntime,
-    work: &crate::global_db::RegisteredWorkApplicationServicesV1,
+    work: &tracedecay_global_db::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
     attempts: &[tracedecay_domain::WorkAttemptV1],
@@ -426,7 +426,7 @@ struct WorkflowFanOutCensusObservationRecoveryInnerV1 {
 
 impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
     pub(in crate::daemon::service::invocation) fn mount(
-        database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: tracedecay_domain::ProjectId,
         producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     ) -> Result<Self, tracedecay_application::ApplicationContractError> {
@@ -563,7 +563,7 @@ impl Drop for WorkflowFanOutCensusObservationRecoveryInnerV1 {
 }
 
 fn read_pending_census_observations(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Result<
     Vec<tracedecay_application::WorkflowFanOutCensusObservationV1>,
     tracedecay_application::WorkflowFanOutCensusError,
@@ -613,7 +613,7 @@ fn pending_census_envelopes(
 }
 
 fn mark_durable_census_observations(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     observations: &[tracedecay_application::WorkflowFanOutCensusObservationV1],
 ) -> Result<(), tracedecay_application::WorkflowFanOutCensusError> {
     let workflow = database
