@@ -19,6 +19,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-retention/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-domain/hotpath",
@@ -41,6 +42,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
@@ -63,6 +65,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
@@ -134,6 +137,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 ] }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }

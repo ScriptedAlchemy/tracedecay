@@ -15,6 +15,7 @@ use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
+use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, ObservationStore};
 
