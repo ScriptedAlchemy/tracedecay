@@ -151,7 +151,7 @@ pub(super) enum CodeGraphActivationAuthorityV1 {
     Persistent {
         runtime:
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
-        project_database: Arc<crate::db::Database>,
+        project_database: Arc<tracedecay_runtime_core::db::Database>,
         policy: Arc<AtomicBool>,
     },
     #[cfg(test)]

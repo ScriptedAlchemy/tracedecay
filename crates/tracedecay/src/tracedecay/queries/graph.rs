@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
@@ -345,20 +345,20 @@ impl VerifiedGraphQuery {
 
 fn graph_projection_error(
     error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
-) -> crate::errors::TraceDecayError {
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
 }
 
-fn graph_invalid_request(detail: &str) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::project_route("code-graph-invalid-request", false, detail)
+fn graph_invalid_request(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-invalid-request", false, detail)
 }
 
-fn graph_budget_exhausted(detail: &str) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
+fn graph_budget_exhausted(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
 }
 
-fn graph_corrupt(detail: &str) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::project_route("code-graph-corrupt", false, detail)
+fn graph_corrupt(detail: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::project_route("code-graph-corrupt", false, detail)
 }
 
 impl TraceDecay {

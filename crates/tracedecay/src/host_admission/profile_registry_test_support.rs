@@ -84,7 +84,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn get_code_project(
         &self,
         project_id: &str,
-    ) -> Result<Option<crate::global_db::CodeProjectRecord>> {
+    ) -> Result<Option<tracedecay_global_db::CodeProjectRecord>> {
         self.profile_database.get_code_project(project_id).await
     }
 
@@ -92,7 +92,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn list_code_projects(
         &self,
         limit: usize,
-    ) -> Vec<crate::global_db::CodeProjectRecord> {
+    ) -> Vec<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .list_code_projects(limit)
             .await
@@ -116,7 +116,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         query: &str,
         limit: usize,
-    ) -> Vec<crate::global_db::CodeProjectRecord> {
+    ) -> Vec<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .search_code_projects(query, limit)
             .await
@@ -126,7 +126,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_registry_context_by_alias(
         &self,
         alias_path: &Path,
-    ) -> Result<Option<crate::global_db::ProjectRegistryContext>> {
+    ) -> Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
         self.profile_database
             .project_registry_context_by_alias(alias_path)
             .await
@@ -136,7 +136,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_registry_context_by_id(
         &self,
         project_id: &str,
-    ) -> Option<crate::global_db::ProjectRegistryContext> {
+    ) -> Option<tracedecay_global_db::ProjectRegistryContext> {
         self.profile_database
             .project_registry_context_by_id(project_id)
             .await
@@ -149,7 +149,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> Result<Option<crate::global_db::ProjectRegistryContext>> {
+    ) -> Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
         self.profile_database
             .project_registry_context_by_identity(project_root, git_common_dir)
             .await
@@ -159,7 +159,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_project_store_by_alias(
         &self,
         alias_path: &Path,
-    ) -> Option<crate::global_db::ProjectStoreResolution> {
+    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
         self.profile_database
             .resolve_project_store_by_alias(alias_path)
             .await
@@ -170,7 +170,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> Result<Option<crate::global_db::ProjectStoreResolution>> {
+    ) -> Result<Option<tracedecay_global_db::ProjectStoreResolution>> {
         self.profile_database
             .resolve_project_store_by_identity(project_root, git_common_dir)
             .await
@@ -180,7 +180,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_unique_project_store_by_git_remote(
         &self,
         git_remote_url: &str,
-    ) -> Option<crate::global_db::ProjectStoreResolution> {
+    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
         self.profile_database
             .resolve_unique_project_store_by_git_remote(git_remote_url)
             .await
@@ -191,8 +191,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
     ) -> std::result::Result<
-        crate::global_db::ProjectObservationStoreResolution,
-        crate::global_db::ProjectObservationStoreError,
+        tracedecay_global_db::ProjectObservationStoreResolution,
+        tracedecay_global_db::ProjectObservationStoreError,
     > {
         self.profile_database
             .resolve_project_observation_store(project_root)
@@ -219,12 +219,12 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn apply_registry_orphan_relink_report(
         &self,
-        report: &crate::global_db::registry_maintenance::RegistryOrphanRelinkReport,
+        report: &tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkReport,
     ) -> std::result::Result<
-        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
+        tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
         Vec<String>,
     > {
-        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(
+        tracedecay_global_db::registry_maintenance::apply_registry_orphan_relink_report(
             self.profile_database.as_ref(),
             report,
         )
@@ -234,12 +234,12 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn apply_single_registry_orphan_relink_report(
         &self,
-        report: &crate::global_db::registry_maintenance::RegistryOrphanRelinkReport,
+        report: &tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkReport,
     ) -> std::result::Result<
-        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
+        tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
         Vec<String>,
     > {
-        crate::global_db::registry_maintenance::apply_single_registry_orphan_relink_report(
+        tracedecay_global_db::registry_maintenance::apply_single_registry_orphan_relink_report(
             self.profile_database.as_ref(),
             report,
         )
@@ -249,16 +249,16 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn upsert_graph_scope(
         &self,
-        upsert: crate::global_db::GraphScopeUpsert,
-    ) -> Result<crate::global_db::GraphScopeRecord> {
+        upsert: tracedecay_global_db::GraphScopeUpsert,
+    ) -> Result<tracedecay_global_db::GraphScopeRecord> {
         self.profile_database.upsert_graph_scope(upsert).await
     }
 
     #[doc(hidden)]
     pub async fn upsert_store_artifact(
         &self,
-        upsert: crate::global_db::StoreArtifactUpsert,
-    ) -> Result<crate::global_db::StoreArtifactRecord> {
+        upsert: tracedecay_global_db::StoreArtifactUpsert,
+    ) -> Result<tracedecay_global_db::StoreArtifactRecord> {
         self.profile_database.upsert_store_artifact(upsert).await
     }
 }

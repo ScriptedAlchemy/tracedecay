@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -164,7 +164,7 @@ pub(crate) struct SourceEditInvocationV1 {
 pub(crate) type SourceEditFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = crate::errors::Result<
+                Output = tracedecay_runtime_core::errors::Result<
                     tracedecay_application::source_edit::SourceEditSurfaceResultV1,
                 >,
             > + Send
@@ -264,15 +264,15 @@ pub struct McpServer {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     profile_retained_authority:
         Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
-    accounting_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
     session_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Daemon-owned user-scope session store. All project servers borrow this
     /// shared authority instead of reopening `user-sessions.db` per tool call.
     user_session_db: Option<RegisteredGlobalDbLeaseV1>,
-    registered_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
-    registered_user_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    registered_user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
@@ -367,8 +367,8 @@ pub struct McpServer {
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
     /// spawn at most one pair of `git rev-parse` per session no matter how
-    /// many tool calls fire. See [`crate::worktree`].
-    worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
+    /// many tool calls fire. See [`tracedecay_runtime_core::worktree`].
+    worktree_mismatch: Option<tracedecay_runtime_core::worktree::WorktreeIndexMismatch>,
     /// Startup code-index catch-up lifecycle: dispatch claim, retained
     /// task handle, and readiness state behind one lock. Historical session
     /// convergence is owned by the daemon scheduler, not this server.
@@ -563,7 +563,7 @@ impl McpServer {
         cg: TraceDecay,
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
-    ) -> crate::errors::Result<Arc<Self>> {
+    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_servers_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
 
@@ -581,7 +581,7 @@ impl McpServer {
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
         retained_servers: Vec<Arc<McpServer>>,
-    ) -> crate::errors::Result<Arc<Self>> {
+    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
         let mut context = runtime.mcp_server_context_for_test(cg, scope_prefix)?;
         // Hook notifications require a durable admission spool before their
@@ -598,7 +598,7 @@ impl McpServer {
                 )
             })
             .await
-            .map_err(|error| crate::errors::TraceDecayError::Config {
+            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("test server host-admission task failed: {error}"),
             })?;
             let (admission_runtime, _) = admission_runtime?;
@@ -625,11 +625,11 @@ impl McpServer {
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_servers: Vec<Arc<McpServer>>,
-    ) -> crate::errors::Result<Arc<Self>> {
+    ) -> tracedecay_runtime_core::errors::Result<Arc<Self>> {
         context
             .host_admission_test_runtime
             .as_ref()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "registered test context is missing its host-admission runtime".to_owned(),
             })?;
         let retained_root = context.cg.project_root().to_path_buf();
@@ -643,16 +643,16 @@ impl McpServer {
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
         let resolver_slot = Arc::clone(&active_server_slot);
-        let active_root = crate::lifecycle_lease::canonical_or_original(&retained_root);
+        let active_root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
         let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
             let retained_servers = retained_servers.clone();
             let resolver_slot = Arc::clone(&resolver_slot);
             let active_root = active_root.clone();
             Box::pin(async move {
                 let requested =
-                    crate::lifecycle_lease::canonical_or_original(&request.requested_worktree_root);
+                    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&request.requested_worktree_root);
                 let registered =
-                    crate::lifecycle_lease::canonical_or_original(&request.registered_root);
+                    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&request.registered_root);
                 let project_id = request
                     .owner
                     .as_ref()
@@ -660,7 +660,7 @@ impl McpServer {
                 let mut matches = Vec::new();
                 for server in &retained_servers {
                     let graph = server.cg_snapshot().await;
-                    let root = crate::lifecycle_lease::canonical_or_original(graph.project_root());
+                    let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(graph.project_root());
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
@@ -672,7 +672,7 @@ impl McpServer {
                     return Ok(matches.pop());
                 }
                 if !matches.is_empty() {
-                    return Err(crate::errors::TraceDecayError::project_route(
+                    return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
                         "project_route_ambiguous",
                         false,
                         "multiple retained test servers match one registered project route",
@@ -813,7 +813,7 @@ impl McpServer {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
             tokio::task::spawn_blocking(move || {
-                crate::worktree::detect_scoped_worktree_index_mismatch(
+                tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
                     &project_root,
                     scope_prefix.as_deref(),
                 )
@@ -1170,7 +1170,7 @@ impl McpServer {
     #[doc(hidden)]
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         crate::daemon::project_open_owners::install_project_open_source_edit_owners_for_test(self)
             .await
     }
@@ -1353,7 +1353,7 @@ impl McpServer {
             stats["worktree_mismatch"] = json!({
                 "worktree_root": m.worktree_root.display().to_string(),
                 "index_root": m.index_root.display().to_string(),
-                "warning": crate::worktree::worktree_mismatch_warning(m),
+                "warning": tracedecay_runtime_core::worktree::worktree_mismatch_warning(m),
             });
         }
 

@@ -10,7 +10,7 @@ use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::Database;
+use tracedecay_runtime_core::db::Database;
 use crate::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
@@ -179,13 +179,13 @@ fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {
 }
 
 fn map_target_infrastructure_error(
-    error: crate::errors::TraceDecayError,
+    error: tracedecay_runtime_core::errors::TraceDecayError,
 ) -> RetainedSurfaceExecutionErrorV1 {
     match error {
-        crate::errors::TraceDecayError::ProfileResetRequired { .. } => {
+        tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired
         }
-        crate::errors::TraceDecayError::ResetRequired { .. } => {
+        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         }
         _ => RetainedSurfaceExecutionErrorV1::Unavailable,
@@ -261,13 +261,13 @@ mod tests {
     #[test]
     fn selected_target_infrastructure_failures_remain_typed() {
         assert!(matches!(
-            map_target_infrastructure_error(crate::errors::TraceDecayError::Config {
+            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "corrupt registry".to_owned(),
             }),
             RetainedSurfaceExecutionErrorV1::Unavailable
         ));
         assert!(matches!(
-            map_target_infrastructure_error(crate::errors::TraceDecayError::ProfileResetRequired {
+            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
                 component: "profile-memory",
                 found_version: Some(1),
                 required_version: 2,
@@ -275,7 +275,7 @@ mod tests {
             RetainedSurfaceExecutionErrorV1::ProfileResetRequired
         ));
         assert!(matches!(
-            map_target_infrastructure_error(crate::errors::TraceDecayError::reset_required(
+            map_target_infrastructure_error(tracedecay_runtime_core::errors::TraceDecayError::reset_required(
                 "project-memory",
                 "schema mismatch",
             )),

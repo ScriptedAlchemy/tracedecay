@@ -53,14 +53,14 @@ async fn init_with_maintenance(
     project_root: &Path,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay::errors::Result<TraceDecay> {
+) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
-    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
         "profile storage reset fixture initialization",
     )
     .unwrap();
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle,
         profile_root,
         "profile storage reset fixture initialization",
@@ -73,14 +73,14 @@ async fn open_with_maintenance(
     project_root: &Path,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay::errors::Result<TraceDecay> {
+) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
-    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
         "profile storage reset fixture open",
     )
     .unwrap();
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle,
         profile_root,
         "profile storage reset fixture open",
@@ -94,14 +94,14 @@ async fn open_branch_with_maintenance(
     branch_name: &str,
     profile_root: &Path,
     open_options: TraceDecayOpenOptions,
-) -> tracedecay::errors::Result<TraceDecay> {
+) -> tracedecay_runtime_core::errors::Result<TraceDecay> {
     prepare_maintenance_profile(profile_root);
-    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
         "profile storage reset fixture branch open",
     )
     .unwrap();
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle,
         profile_root,
         "profile storage reset fixture branch open",
@@ -162,7 +162,7 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     assert!(cg.db_path().is_file());
     assert_eq!(
         schema_version(&cg.db_path()),
-        tracedecay::db::migrations::SCHEMA_VERSION
+        tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
     );
     assert!(
         !shard_root.join("config.json").exists(),
@@ -193,7 +193,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     let db_path = initialized.db_path().to_path_buf();
     drop(initialized);
 
-    let incompatible_version = tracedecay::db::migrations::SCHEMA_VERSION - 1;
+    let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
         .pragma_update(None, "user_version", incompatible_version)
@@ -210,7 +210,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
     };
-    let tracedecay::errors::TraceDecayError::Database { message, operation } = error else {
+    let tracedecay_runtime_core::errors::TraceDecayError::Database { message, operation } = error else {
         panic!("incompatible profile store returned the wrong error: {error}");
     };
     assert_eq!(operation, "ensure_schema_current");
@@ -437,7 +437,7 @@ async fn branch_open_rejects_a_mismatched_maintenance_profile() {
     fs::create_dir_all(&project).unwrap();
     prepare_maintenance_profile(&requested_profile);
     prepare_maintenance_profile(&leased_profile);
-    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &leased_profile,
         "mismatched branch fixture",
     )

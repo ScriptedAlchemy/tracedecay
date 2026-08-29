@@ -1,6 +1,6 @@
 use super::DaemonSessionRuntimeRegistryV1;
-use crate::db::Database;
-use crate::errors::Result;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::errors::Result;
 
 pub(crate) async fn open_user_memory_db(
     registry: &DaemonSessionRuntimeRegistryV1,

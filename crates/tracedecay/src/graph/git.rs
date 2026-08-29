@@ -5,14 +5,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 /// Returns a map of `file_path` → `commit_count` for the last `days` days.
 /// Shells out to `git log --format= --name-only --since='{days} days ago'`.
 /// Returns an empty map if git is not available or not a repo.
 #[hotpath::measure(label = "daemon.git.graph.file_churn", future = true)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
-    let output = tokio::process::Command::new(crate::git::git_program())
+    let output = tokio::process::Command::new(tracedecay_runtime_core::git::git_program())
         .args([
             "log",
             "--format=",

@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use super::{SessionRuntimeRegistryEntryV1, StoreAdministration, authority};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 pub(in crate::daemon) struct SessionRuntimeMemoryGraphReconciliationShutdownV1 {

@@ -10,9 +10,9 @@ use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 /// State retained after independent owners publish and consumed only after the
 /// durable code-index generation has mounted.
 pub(crate) struct ProjectOpenDependentOwnerState {
-    pub(in crate::daemon::project_open_owners) database: crate::db::Database,
+    pub(in crate::daemon::project_open_owners) database: tracedecay_runtime_core::db::Database,
     pub(in crate::daemon::project_open_owners) session_db:
-        crate::global_db::RegisteredGlobalDbLeaseV1,
+        tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(in crate::daemon::project_open_owners) graph: Arc<crate::tracedecay::TraceDecay>,
     pub(in crate::daemon::project_open_owners) code_graph:
         Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,

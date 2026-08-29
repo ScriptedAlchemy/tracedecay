@@ -1210,7 +1210,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
-    let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
         tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         root,
         id::<ProjectId>(PROJECT),

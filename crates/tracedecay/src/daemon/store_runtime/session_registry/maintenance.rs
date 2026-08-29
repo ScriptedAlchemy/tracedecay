@@ -141,7 +141,7 @@ impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn schedule(
         &self,
         database: RegisteredGlobalDbLeaseV1,
-        convergence: Option<crate::global_db::schema_stages::RegisteredSchemaConvergence>,
+        convergence: Option<tracedecay_global_db::schema_stages::RegisteredSchemaConvergence>,
     ) {
         let shard_id = database.binding().shard_id.clone();
         let mut tasks = self

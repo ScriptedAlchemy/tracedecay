@@ -266,11 +266,11 @@ fn isolate_codex_app_server_binary(root: &std::path::Path) -> EnvVarGuard {
 fn enter_test_daemon_database_scope(
     profile_root: &std::path::Path,
     label: &str,
-) -> crate::db::DaemonDatabaseScope {
+) -> tracedecay_runtime_core::db::DaemonDatabaseScope {
     // One election token per profile so nested fixture helpers (initialize,
     // then a later sibling-project init) refcount the same daemon scope
     // instead of overlapping a maintenance lease.
-    crate::db::enter_daemon_database_scope(profile_root, 1, "test-daemon")
+    tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, 1, "test-daemon")
         .unwrap_or_else(|error| panic!("enter test daemon database scope ({label}): {error}"))
 }
 
@@ -279,7 +279,7 @@ async fn initialize_test_project(
     client_identity: &DaemonClientIdentity,
 ) -> crate::storage::StoreLayout {
     prepare_test_profile_root(&client_identity.profile_root);
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &client_identity.profile_root,
         "daemon test fixture initialization",
     )
@@ -312,7 +312,7 @@ fn test_handshake_defaults() -> DaemonHandshake {
         allow_initialize_root_routing: false,
         client_identity: test_client_identity(),
         client_version: super::binary_version().to_string(),
-        client_instance_id: crate::runtime_identity::process_run_id().to_string(),
+        client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,

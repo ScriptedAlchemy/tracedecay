@@ -23,7 +23,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime:
         Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
-    pub(super) graph_publication_database: Arc<crate::db::Database>,
+    pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(crate::git::git_program())
+        let status = Command::new(tracedecay_runtime_core::git::git_program())
             .current_dir(root)
             .args(arguments)
             .status()

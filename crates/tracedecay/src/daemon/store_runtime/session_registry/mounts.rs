@@ -31,7 +31,7 @@ use super::{
     open_runtime_with_presence, register_registered_schema_installer, registry_open_error,
     runtime_incarnation, session_registry_error,
 };
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 struct UnavailableRemoteSpoolKeyringV1;
 
@@ -473,7 +473,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             )
         })?;
         hotpath::future!(
-            crate::db::migrations::ensure_schema_current(&database),
+            tracedecay_runtime_core::db::migrations::ensure_schema_current(&database),
             label = "daemon.session_registry.mount.schema_migrate"
         )
         .await?;

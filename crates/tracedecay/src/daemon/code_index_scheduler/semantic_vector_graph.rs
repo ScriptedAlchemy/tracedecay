@@ -563,7 +563,7 @@ pub(crate) struct DaemonSemanticVectorGraphProviderV1 {
     project_root: PathBuf,
     schedulers: CodeIndexSchedulerRegistryV1,
     runtime: Arc<DaemonSessionRuntimeRegistryV1>,
-    project_database: Arc<crate::db::Database>,
+    project_database: Arc<tracedecay_runtime_core::db::Database>,
 }
 
 impl DaemonSemanticVectorGraphProviderV1 {
@@ -572,7 +572,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
         project_root: PathBuf,
         schedulers: CodeIndexSchedulerRegistryV1,
         runtime: Arc<DaemonSessionRuntimeRegistryV1>,
-        project_database: Arc<crate::db::Database>,
+        project_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Self {
         Self {
             project_id,

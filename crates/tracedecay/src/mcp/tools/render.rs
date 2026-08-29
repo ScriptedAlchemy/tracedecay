@@ -14,7 +14,7 @@ use crate::mcp::response_handles::{
     store_response_handle,
 };
 use crate::path_tree::format_compact_path_list;
-use crate::text::utf8_prefix_at_or_before;
+use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use crate::tracedecay::current_timestamp;
 
 use super::MAX_RESPONSE_CHARS;

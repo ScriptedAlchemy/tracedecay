@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreResult};
 
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;

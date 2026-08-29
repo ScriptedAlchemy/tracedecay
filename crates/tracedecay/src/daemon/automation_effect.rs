@@ -37,7 +37,7 @@ use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_re
 use crate::daemon::service::invocation::{
     DaemonInvocationService, RegisteredRetainedRequestContextError,
 };
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 mod authority;
 mod contract;
@@ -105,13 +105,13 @@ pub(crate) struct RetainedSettlementWaiter<T> {
 }
 
 pub(crate) struct ReusedSchedulerSkipStartError {
-    error: crate::errors::TraceDecayError,
+    error: tracedecay_runtime_core::errors::TraceDecayError,
     _authority: AutomationEffectAuthority,
     _guard: AutomationRunSettlementGuard,
 }
 
 impl ReusedSchedulerSkipStartError {
-    pub(crate) fn into_error(self) -> crate::errors::TraceDecayError {
+    pub(crate) fn into_error(self) -> tracedecay_runtime_core::errors::TraceDecayError {
         self.error
     }
 }
@@ -302,8 +302,8 @@ struct RetainedPairOwnerOutcome {
 pub(crate) struct RetainedSettlementPairWaiter {
     first: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
     second: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
-    first_submission_error: Option<crate::errors::TraceDecayError>,
-    second_submission_error: Option<crate::errors::TraceDecayError>,
+    first_submission_error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
+    second_submission_error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
 }
 
 impl RetainedSettlementPairWaiter {
@@ -385,7 +385,7 @@ fn submit_pair_request(
     sender: Option<SyncSender<DeferredSettlementRequest>>,
     request: DeferredSettlementRequest,
     leg: &'static str,
-) -> Option<crate::errors::TraceDecayError> {
+) -> Option<tracedecay_runtime_core::errors::TraceDecayError> {
     let Some(sender) = sender else {
         return Some(contract_error(format!(
             "retained settlement pair {leg} request channel was already transferred"
@@ -1131,7 +1131,7 @@ impl AutomationEffectAuthority {
     fn finish_projection_failure<T>(
         self,
         guard: RetainedSettlementGuardOwner,
-        error: crate::errors::TraceDecayError,
+        error: tracedecay_runtime_core::errors::TraceDecayError,
     ) -> Result<T> {
         let terminal =
             AutomationSettledTerminal::Problem(self.admission.recovery_problem().clone());
@@ -1333,7 +1333,7 @@ impl AutomationEffectAuthority {
             actor: context.actor().clone(),
             scope: context.scope().clone(),
             request_id: context.request_id().clone(),
-            process_run_id: crate::runtime_identity::process_run_id().to_owned(),
+            process_run_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_owned(),
             recovery,
         };
         let reserve_path = journal_path.clone();

@@ -7,14 +7,14 @@ use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
 use crate::branch;
-use crate::branch_meta::{self, BranchMeta};
+use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use crate::config::{
     install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::storage::{self, StoreLayout};
 use crate::support::weak_registry::WeakRegistry;
 use tokio::sync::Mutex as AsyncMutex;
@@ -38,7 +38,7 @@ pub(crate) use registry::git_remote_url;
 
 #[cfg(not(any(test, feature = "test-transport")))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
-    WeakRegistry<PathBuf, crate::db::OwnedMaintenanceDatabaseScope>,
+    WeakRegistry<PathBuf, tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>,
 > = LazyLock::new(WeakRegistry::new);
 
 /// One standalone session runtime registry per profile, process-wide.
@@ -56,7 +56,7 @@ static STANDALONE_SESSION_REGISTRIES: LazyLock<
 async fn join_standalone_session_registry(
     identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
-    let profile_key = crate::lifecycle_lease::canonical_or_original(identity.profile_root());
+    let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
     let registries = STANDALONE_SESSION_REGISTRIES.lock().await;
     if let Some(registry) = registries.get_live(&profile_key) {
         return Ok(registry);
@@ -89,21 +89,21 @@ impl TraceDecay {
     fn standalone_maintenance_scope(
         open_options: &TraceDecayOpenOptions,
         operation: &'static str,
-    ) -> Result<Arc<crate::db::OwnedMaintenanceDatabaseScope>> {
+    ) -> Result<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>> {
         let profile_root = open_options.resolved_profile_root()?;
         STANDALONE_MAINTENANCE_SCOPES.retain_live();
-        let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
+        let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
         if let Some(scope) = STANDALONE_MAINTENANCE_SCOPES.get_live(&profile_key) {
             return Ok(scope);
         }
         let lifecycle =
-            crate::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, operation)?;
-        let scope = Arc::new(crate::db::enter_owned_maintenance_database_scope(
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, operation)?;
+        let scope = Arc::new(tracedecay_runtime_core::db::enter_owned_maintenance_database_scope(
             lifecycle,
             &profile_root,
             operation,
         )?);
-        let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
+        let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root);
         STANDALONE_MAINTENANCE_SCOPES.insert(profile_key, &scope);
         Ok(scope)
     }
@@ -128,8 +128,8 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
         let profile_root = open_options.resolved_profile_root()?;
-        if !crate::db::is_isolated_test_path(project_root)
-            || !crate::db::is_isolated_test_path(&profile_root)
+        if !tracedecay_runtime_core::db::is_isolated_test_path(project_root)
+            || !tracedecay_runtime_core::db::is_isolated_test_path(&profile_root)
         {
             return Err(configuration_runtime_unavailable());
         }
@@ -140,8 +140,8 @@ impl TraceDecay {
             message: format!("invalid standalone test project identity: {error}"),
         })?;
         let registry_key = (
-            crate::lifecycle_lease::canonical_or_original(&profile_root),
-            crate::lifecycle_lease::canonical_or_original(project_root),
+            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root),
+            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(project_root),
         );
         // The async lock is held across construction so two concurrent opens
         // of the same key cannot race into two runtimes.
@@ -236,7 +236,7 @@ impl TraceDecay {
     pub async fn init_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
-        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if let Some(message) =
@@ -436,7 +436,7 @@ impl TraceDecay {
 
     async fn ensure_database_schema_current(db: &Database) -> Result<()> {
         let current = Self::schema_version(db, "ensure_schema_current").await?;
-        let supported = crate::db::migrations::SCHEMA_VERSION;
+        let supported = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
         if current != supported {
             return Err(TraceDecayError::reset_required(
                 "graph store",
@@ -504,7 +504,7 @@ impl TraceDecay {
     pub async fn open_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
-        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
@@ -653,7 +653,7 @@ impl TraceDecay {
     ) -> (Option<String>, Option<String>) {
         let graph_scope = active_branch
             .clone()
-            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
+            .or_else(|| tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root));
         let (_, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,
@@ -710,7 +710,7 @@ impl TraceDecay {
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
-        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     ) -> Result<Self> {
         let profile_root = open_options.resolved_profile_root()?;
         if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
@@ -852,7 +852,7 @@ mod tests {
             .pragma_update(
                 None,
                 "user_version",
-                crate::db::migrations::SCHEMA_VERSION - 1,
+                tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1,
             )
             .expect("stamp incompatible graph schema");
         drop(connection);

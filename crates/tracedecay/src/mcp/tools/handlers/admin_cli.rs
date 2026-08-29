@@ -12,8 +12,8 @@ use tracedecay_application::session_sync::{
 use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -348,14 +348,14 @@ async fn dispatch_admin_cli(
         AdminCliAction::RegistryGc { prefix, apply } => {
             let profile_root = context.require_profile_root()?;
             let report = if apply {
-                crate::global_db::registry_maintenance::apply_registry_gc(
+                tracedecay_global_db::registry_maintenance::apply_registry_gc(
                     global_db,
                     profile_root,
                     prefix,
                 )
                 .await?
             } else {
-                crate::global_db::registry_maintenance::registry_gc_report(
+                tracedecay_global_db::registry_maintenance::registry_gc_report(
                     global_db,
                     profile_root,
                     prefix,
@@ -501,7 +501,7 @@ async fn active_project_id(
     cg: &TraceDecay,
     global_db: &RegisteredGlobalDb,
 ) -> Result<Option<String>> {
-    let git_common_dir = crate::worktree::git_common_dir(cg.project_root());
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(cg.project_root());
     Ok(global_db
         .project_registry_context_by_identity(cg.project_root(), git_common_dir.as_deref())
         .await?
@@ -534,7 +534,7 @@ async fn registry_context(
         {
             Some(context) => Some(context),
             None if RegisteredGlobalDb::is_explicit_project_path_selector(&selector_text) => {
-                let git_common_dir = crate::worktree::git_common_dir(selector);
+                let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(selector);
                 global_db
                     .project_registry_context_by_identity(selector, git_common_dir.as_deref())
                     .await?

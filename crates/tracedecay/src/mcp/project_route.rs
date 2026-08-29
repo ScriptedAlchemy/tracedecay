@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use serde_json::Value;
 
 use super::hook_events;
-use crate::global_db::ProjectRegistryContext;
+use tracedecay_global_db::ProjectRegistryContext;
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
 
@@ -25,9 +25,9 @@ pub(crate) struct ResolvedProjectRoute {
 impl ResolvedProjectRoute {
     pub(crate) fn retained_server(
         &self,
-    ) -> crate::errors::Result<Arc<crate::mcp::server::McpServer>> {
+    ) -> tracedecay_runtime_core::errors::Result<Arc<crate::mcp::server::McpServer>> {
         self.server.upgrade().ok_or_else(|| {
-            crate::errors::TraceDecayError::project_route(
+            tracedecay_runtime_core::errors::TraceDecayError::project_route(
                 "project_route_unavailable",
                 true,
                 format!(
@@ -56,11 +56,11 @@ impl std::fmt::Debug for ResolvedProjectRoute {
 pub(crate) async fn resolve_registered_project_route(
     context: ProjectRegistryContext,
     requested_path: &Path,
-    global_db: &crate::global_db::RegisteredGlobalDb,
+    global_db: &tracedecay_global_db::RegisteredGlobalDb,
     resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
-) -> crate::errors::Result<ResolvedProjectRoute> {
+) -> tracedecay_runtime_core::errors::Result<ResolvedProjectRoute> {
     let Some(resolver) = resolver else {
-        return Err(crate::errors::TraceDecayError::project_route(
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
             "registered project server resolver is unavailable",
@@ -72,7 +72,7 @@ pub(crate) async fn resolve_registered_project_route(
         requested_path.clone(),
     );
     let server = resolver(request.clone()).await?.ok_or_else(|| {
-        crate::errors::TraceDecayError::project_route(
+        tracedecay_runtime_core::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
             format!(
@@ -123,18 +123,18 @@ pub(crate) struct ProjectRouteFailure {
 }
 
 impl ProjectRouteFailure {
-    pub(crate) fn into_error(self) -> crate::errors::TraceDecayError {
-        crate::errors::TraceDecayError::project_route(
+    pub(crate) fn into_error(self) -> tracedecay_runtime_core::errors::TraceDecayError {
+        tracedecay_runtime_core::errors::TraceDecayError::project_route(
             self.kind.reason_code(),
             self.kind.retryable(),
             self.detail,
         )
     }
 
-    pub(crate) fn from_selection_error(error: &crate::errors::TraceDecayError) -> Self {
+    pub(crate) fn from_selection_error(error: &tracedecay_runtime_core::errors::TraceDecayError) -> Self {
         let detail = error.to_string();
         let kind = match error {
-            crate::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
+            tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
                 match reason_code.as_str() {
                     "project_route_not_found" => ProjectRouteFailureKind::NotFound,
                     "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
@@ -142,17 +142,17 @@ impl ProjectRouteFailure {
                     _ => ProjectRouteFailureKind::Unavailable,
                 }
             }
-            crate::errors::TraceDecayError::Config { message }
+            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
                 if message.contains("not found for selector") =>
             {
                 ProjectRouteFailureKind::NotFound
             }
-            crate::errors::TraceDecayError::Config { message }
+            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
                 if message.contains("ambiguous") || message.contains("multiple stores") =>
             {
                 ProjectRouteFailureKind::Ambiguous
             }
-            crate::errors::TraceDecayError::Config { message }
+            tracedecay_runtime_core::errors::TraceDecayError::Config { message }
                 if message.contains("registry is unavailable")
                     || message.contains("profile identity") =>
             {
@@ -252,12 +252,12 @@ impl HookProjectRouteCache {
             .session_id
             .as_deref()
             .filter(|identity| !identity.is_empty())
-            .and_then(|identity| crate::privacy::protect_sensitive_structural_id(identity).ok());
+            .and_then(|identity| tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok());
         let thread_id = metadata
             .thread_id
             .as_deref()
             .filter(|identity| !identity.is_empty())
-            .and_then(|identity| crate::privacy::protect_sensitive_structural_id(identity).ok());
+            .and_then(|identity| tracedecay_runtime_core::privacy::protect_sensitive_structural_id(identity).ok());
         if let Some(session_id) = session_id.as_deref() {
             self.insert_session_workspace_route(session_id.to_owned(), route.clone());
             if let Some(thread_id) = thread_id.as_deref()
@@ -382,15 +382,15 @@ pub(crate) struct SharedHookProjectRouteCache {
 }
 
 impl SharedHookProjectRouteCache {
-    fn unavailable(operation: &str) -> crate::errors::TraceDecayError {
-        crate::errors::TraceDecayError::project_route(
+    fn unavailable(operation: &str) -> tracedecay_runtime_core::errors::TraceDecayError {
+        tracedecay_runtime_core::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,
             format!("project route cache is unavailable during {operation}"),
         )
     }
 
-    pub(crate) fn snapshot(&self) -> crate::errors::Result<HookProjectRouteCache> {
+    pub(crate) fn snapshot(&self) -> tracedecay_runtime_core::errors::Result<HookProjectRouteCache> {
         let state = self
             .inner
             .lock()
@@ -400,7 +400,7 @@ impl SharedHookProjectRouteCache {
         Ok(cache)
     }
 
-    pub(crate) fn store(&self, cache: &HookProjectRouteCache) -> crate::errors::Result<()> {
+    pub(crate) fn store(&self, cache: &HookProjectRouteCache) -> tracedecay_runtime_core::errors::Result<()> {
         let mut state = self.inner.lock().map_err(|_| Self::unavailable("update"))?;
         state.cache.clone_from(cache);
         state.cache.connection_route = None;
@@ -414,7 +414,7 @@ impl SharedHookProjectRouteCache {
     pub(crate) fn refresh_into(
         &self,
         target: &mut HookProjectRouteCache,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let state = self
             .inner
             .lock()
@@ -433,7 +433,7 @@ impl SharedHookProjectRouteCache {
         &self,
         profile_id: &tracedecay_domain::UserProfileId,
         project_id: &str,
-    ) -> Result<(), crate::errors::TraceDecayError> {
+    ) -> Result<(), tracedecay_runtime_core::errors::TraceDecayError> {
         let mut state = self
             .inner
             .lock()
@@ -488,7 +488,7 @@ pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), (
             let Some(raw) = map.get(*key).and_then(Value::as_str) else {
                 continue;
             };
-            let protected = crate::privacy::protect_sensitive_structural_id(raw).map_err(|_| ())?;
+            let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(raw).map_err(|_| ())?;
             map.insert((*key).to_string(), Value::String(protected));
         }
         Ok(())
@@ -511,7 +511,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         if value.is_empty() {
             return None;
         }
-        crate::privacy::protect_sensitive_structural_id(value).ok()
+        tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok()
     }
 
     [Some(arguments), arguments.get("_meta")]
@@ -588,7 +588,7 @@ mod tests {
             ][..],
         ] {
             assert!(
-                Command::new(crate::git::git_program())
+                Command::new(tracedecay_runtime_core::git::git_program())
                     .args(args)
                     .current_dir(&project)
                     .status()

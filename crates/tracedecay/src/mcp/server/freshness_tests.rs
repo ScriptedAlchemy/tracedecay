@@ -3,7 +3,7 @@ use super::{
 };
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 struct FreshnessRuntime {
     registry: DaemonSessionRuntimeRegistryV1,
-    _scope: crate::db::DaemonDatabaseScope,
+    _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
 }
 
 impl FreshnessRuntime {
@@ -22,7 +22,7 @@ impl FreshnessRuntime {
             .expect("restrict freshness profile root");
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");
-        let scope = crate::db::enter_daemon_database_scope(
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),
             1,
             "host-admission-test-runtime",
@@ -46,7 +46,7 @@ impl FreshnessRuntime {
 }
 
 fn git(root: &std::path::Path, args: &[&str]) {
-    let ok = std::process::Command::new(crate::git::git_program())
+    let ok = std::process::Command::new(tracedecay_runtime_core::git::git_program())
         .current_dir(root)
         .args(args)
         .output()
@@ -98,9 +98,9 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     let layout = cg.store_layout().clone();
     drop(cg);
 
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
     std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
     std::fs::copy(
         &layout.graph_db_path,
@@ -248,7 +248,7 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
 
 #[test]
 fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
-    let error = crate::errors::TraceDecayError::hook_runtime_with_status(
+    let error = tracedecay_runtime_core::errors::TraceDecayError::hook_runtime_with_status(
         "observation_cursor_conflict",
         true,
         "Claude observation store operation failed",
@@ -268,7 +268,7 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
 
 #[test]
 fn project_route_error_messages_keep_retry_authority_when_clients_hide_error_data() {
-    let error = crate::errors::TraceDecayError::ProjectRoute {
+    let error = tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
         reason_code: "code-graph-unavailable".to_owned(),
         retryable: true,
         detail: "the verified code graph is not ready for the exact project root".to_owned(),

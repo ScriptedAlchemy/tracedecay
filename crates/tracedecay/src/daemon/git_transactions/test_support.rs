@@ -30,7 +30,7 @@ use super::service::{
     NativeGitIndexApplyOutcomeV1, NativeGitIndexApplyResult,
 };
 use super::store::DaemonGitIndexTransactionStore;
-use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
 pub(super) type TestPort = DaemonGitIndexTransactionPort<
     DaemonGitIndexTransactionStore,

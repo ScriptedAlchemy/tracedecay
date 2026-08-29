@@ -256,7 +256,7 @@ fn daemon_handshake_advertises_binary_version() {
     );
     assert_eq!(
         value["client_instance_id"],
-        serde_json::json!(crate::runtime_identity::process_run_id())
+        serde_json::json!(tracedecay_runtime_core::runtime_identity::process_run_id())
     );
 }
 
@@ -267,7 +267,7 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
         "no TraceDecay database found at '/repo/store.db'",
     ];
     for message in missing_messages {
-        let error = crate::errors::TraceDecayError::Config {
+        let error = tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: message.to_string(),
         };
         assert!(
@@ -276,7 +276,7 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
         );
     }
 
-    let unrelated = crate::errors::TraceDecayError::Config {
+    let unrelated = tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: "identity cutover conflict".to_string(),
     };
     assert!(!super::super::is_missing_index_error(&unrelated));

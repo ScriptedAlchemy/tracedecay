@@ -131,7 +131,7 @@ async fn stage_foreign_scoped_observation(
             "INSERT INTO sanitization_receipts
                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
              VALUES (?1, ?2, ?3, ?4)",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 receipt.receipt().receipt_id().as_str(),
                 receipt.receipt().sanitizer_version().as_str(),
                 observation.payload_reference().digest().as_str(),
@@ -146,7 +146,7 @@ async fn stage_foreign_scoped_observation(
                 (observation_id, payload_digest, receipt_id, observation_json,
                  committed_cursor_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 observation.observation_id().as_str(),
                 observation.payload_reference().digest().as_str(),
                 receipt.receipt().receipt_id().as_str(),

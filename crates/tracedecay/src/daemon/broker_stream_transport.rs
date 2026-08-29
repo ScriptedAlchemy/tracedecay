@@ -495,7 +495,7 @@ mod peer_close_tests {
         recorder: Arc<BoundedDeliverySettlementRecorderV1>,
         authority: Arc<DeliverySettlementAuthorityV1>,
         producer: Arc<BoundedObservabilityProducerV1>,
-        db: crate::global_db::RegisteredGlobalDbLeaseV1,
+        db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
     }
 
@@ -503,7 +503,7 @@ mod peer_close_tests {
         let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id = ProjectId::new("project.rmcp.delivery").expect("project id");
-        let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
             tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             project_id.clone(),

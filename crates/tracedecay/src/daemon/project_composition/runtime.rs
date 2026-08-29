@@ -14,15 +14,15 @@ use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 
 #[hotpath::measure(label = "daemon.project.compose.bind_graph", future = true)]
 pub(super) async fn bind_verified_project_graph_runtime(
-    database: Arc<crate::db::Database>,
+    database: Arc<tracedecay_runtime_core::db::Database>,
     sessions: &RegisteredGlobalDb,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let Some(graph_proxy) = database.memory_graph_runtime() else {
         return Ok(());
     };
     sessions
         .bind_project_graph_runtime(graph_proxy)
-        .map_err(|_| crate::errors::TraceDecayError::Config {
+        .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "project graph runtime was already mounted for project sessions".to_owned(),
         })
 }

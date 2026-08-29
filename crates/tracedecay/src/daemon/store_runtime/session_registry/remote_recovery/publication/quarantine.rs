@@ -5,7 +5,7 @@ use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use super::{RestorePublicationV1, Result, session_registry_error};
 use crate::daemon::store_runtime::session_registry::ProjectSessionTerminalVacancyAuthorityV1;
-use crate::db::DatabaseAuthority;
+use tracedecay_runtime_core::db::DatabaseAuthority;
 
 const REMOTE_RESTORE_QUARANTINE_VERSION: &str = "tracedecay.remote-restore.v3";
 

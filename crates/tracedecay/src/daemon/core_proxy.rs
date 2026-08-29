@@ -22,7 +22,7 @@ use super::{
     binary_version, connect_with_restart_grace, connection_for_socket_path, log_daemon_event,
     version_skew_action,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::StdioTransport;
 #[cfg(unix)]
 use crate::mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
@@ -392,8 +392,8 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
 #[hotpath::measure(label = "daemon.engine.proxy.initialize_route", future = true)]
 pub(crate) async fn resolve_daemon_initialize_route(
     params: Option<&serde_json::Value>,
-    registry: Option<&crate::global_db::RegisteredGlobalDb>,
-) -> crate::errors::Result<Option<InitializeRouteMetadata>> {
+    registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> tracedecay_runtime_core::errors::Result<Option<InitializeRouteMetadata>> {
     let roots = crate::mcp::server::initialize_root_paths(params);
     if let Some(registry) = registry {
         for root in &roots {

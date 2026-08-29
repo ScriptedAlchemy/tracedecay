@@ -287,7 +287,7 @@ fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
 
 pub(crate) fn repository_id_for(project_root: &Path) -> Result<RepositoryId, IdentityErrorV1> {
     let common =
-        crate::worktree::git_common_dir(project_root).unwrap_or_else(|| project_root.to_path_buf());
+        tracedecay_runtime_core::worktree::git_common_dir(project_root).unwrap_or_else(|| project_root.to_path_buf());
     repository_id_for_common_dir(&common)
 }
 

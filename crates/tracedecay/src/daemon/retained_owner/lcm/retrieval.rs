@@ -40,7 +40,7 @@ use crate::daemon::session_retrieval::{
     SessionRetrievalFilters, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
     SessionTemporalMetadataView,
 };
-use crate::timeutil::SearchTimeBound;
+use tracedecay_runtime_core::timeutil::SearchTimeBound;
 
 const MAX_RESULTS: usize = 100;
 const EXPAND_QUERY_CONCURRENCY: usize = 8;

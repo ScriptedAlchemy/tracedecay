@@ -6,8 +6,8 @@ use tracedecay_tool_catalog::BindingSurface;
 
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::daemon_client::InvocationCancellationPolicy;
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;

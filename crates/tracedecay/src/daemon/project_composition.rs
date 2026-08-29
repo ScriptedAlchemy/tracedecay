@@ -396,7 +396,7 @@ async fn production_project_server_inner(
     let registry_db = registered_profile_db.clone();
     let profile_identity = store_administration.profile_identity()?.clone();
     let accounting_db =
-        crate::global_db::global_accounting_enabled().then(|| registered_profile_db.clone());
+        tracedecay_global_db::global_accounting_enabled().then(|| registered_profile_db.clone());
     let ProjectCodeIndexAuthorities {
         publication_identity: code_index_publication_identity,
         project_id: code_search_project_id,
@@ -1390,7 +1390,7 @@ fn register_route_store_telemetry(
     sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,
     scope: &tracedecay_application::ResolvedScope,
-    session_databases: [&crate::global_db::RegisteredGlobalDb; 3],
+    session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
 ) {
     let record_telemetry_registration = |path: &Path, registered: bool| {
         if !registered {

@@ -11,7 +11,7 @@ async fn repository_marker_resolves_through_symlinked_root() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn linked() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_symlink_root";
     write_repository_identity_marker(&project, project_id).unwrap();
 
@@ -30,7 +30,7 @@ async fn repository_marker_resolves_through_symlinked_root() {
         .await
         .unwrap();
     register_identity_store(&db, project_id, &project, &git_common_dir).await;
-    let via_link_common_dir = tracedecay::worktree::git_common_dir(&link).unwrap();
+    let via_link_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&link).unwrap();
     let resolution = db
         .resolve_project_store_by_identity(&link, Some(&via_link_common_dir))
         .await
@@ -48,7 +48,7 @@ async fn repository_marker_survives_rename_within_parent() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_rename";
     write_repository_identity_marker(&project, project_id).unwrap();
 
@@ -67,7 +67,7 @@ async fn repository_marker_survives_rename_within_parent() {
             .project_id,
         project_id
     );
-    let renamed_common_dir = tracedecay::worktree::git_common_dir(&renamed).unwrap();
+    let renamed_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&renamed).unwrap();
     let resolution = db
         .resolve_project_store_by_identity(&renamed, Some(&renamed_common_dir))
         .await
@@ -87,7 +87,7 @@ async fn repository_marker_survives_move_across_parents() {
     fs::create_dir_all(&new_parent).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn moved() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_move";
     write_repository_identity_marker(&project, project_id).unwrap();
 
@@ -104,7 +104,7 @@ async fn repository_marker_survives_move_across_parents() {
             .project_id,
         project_id
     );
-    let moved_common_dir = tracedecay::worktree::git_common_dir(&moved).unwrap();
+    let moved_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&moved).unwrap();
     let resolution = db
         .resolve_project_store_by_identity(&moved, Some(&moved_common_dir))
         .await
@@ -123,7 +123,7 @@ async fn repository_marker_resolves_through_two_symlink_aliases() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn aliased() {}\n").unwrap();
     init_repo_with_commit(&project);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let project_id = "proj_two_aliases";
     write_repository_identity_marker(&project, project_id).unwrap();
     symlink(&project, &alias_a).unwrap();
@@ -143,7 +143,7 @@ async fn repository_marker_resolves_through_two_symlink_aliases() {
                 .project_id,
             project_id
         );
-        let alias_common_dir = tracedecay::worktree::git_common_dir(alias).unwrap();
+        let alias_common_dir = tracedecay_runtime_core::worktree::git_common_dir(alias).unwrap();
         let resolution = db
             .resolve_project_store_by_identity(alias, Some(&alias_common_dir))
             .await
@@ -197,7 +197,7 @@ async fn moved_repo_with_reused_old_path_accepts_marker_and_self_heals() {
     // A writable open rewrites the marker's git_common_dir to the current dir,
     // self-healing so subsequent reads no longer take the disambiguation path.
     write_repository_identity_marker(&new_path, x_id).unwrap();
-    let new_common_dir = tracedecay::worktree::git_common_dir(&new_path).unwrap();
+    let new_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&new_path).unwrap();
     let healed = read_repository_identity_marker(&new_path).unwrap().unwrap();
     assert_eq!(healed.project_id, x_id);
     assert_eq!(Path::new(&healed.git_common_dir), new_common_dir.as_path());
@@ -241,7 +241,7 @@ async fn resolve_project_store_by_identity_propagates_marker_conflict() {
     fs::create_dir_all(original.join("src")).unwrap();
     fs::write(original.join("src/lib.rs"), "pub fn conflicting() {}\n").unwrap();
     init_repo_with_commit(&original);
-    let git_common_dir = tracedecay::worktree::git_common_dir(&original).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&original).unwrap();
     let project_id = "proj_conflict";
     write_repository_identity_marker(&original, project_id).unwrap();
 
@@ -251,7 +251,7 @@ async fn resolve_project_store_by_identity_propagates_marker_conflict() {
     register_identity_store(&db, project_id, &original, &git_common_dir).await;
 
     copy_dir_all(&original, &copy);
-    let copy_common_dir = tracedecay::worktree::git_common_dir(&copy).unwrap();
+    let copy_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&copy).unwrap();
 
     // The conflict must surface as a typed error (fail closed) rather than being
     // swallowed into `None` and minting a fresh path-hash identity.

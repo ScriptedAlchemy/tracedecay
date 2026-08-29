@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::server::{
     SourceEditExecutor, SourceEditInvocationV1, SourceEditReconciliationExecutor,
     SourceEditReconciliationInvocationV1, SourceEditRollbackExecutor,
@@ -660,14 +660,14 @@ mod tests {
         ManifestDigest::new(value).unwrap()
     }
 
-    async fn fixture_graph(project_root: &Path) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
+    async fn fixture_graph(project_root: &Path) -> (TraceDecay, tracedecay_runtime_core::db::DaemonDatabaseScope) {
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         };
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
-        let database_scope = crate::db::enter_daemon_database_scope(
+        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             identity.profile_root(),
             1,
             "mcp-source-edit-test-runtime",

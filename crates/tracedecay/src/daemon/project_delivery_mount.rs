@@ -9,7 +9,7 @@ use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 pub(super) async fn ensure_project_delivery_settlement(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: &ResolvedScope,
     access: &ProjectSourceAccessSnapshot,
 ) -> Result<ManifestDigest> {

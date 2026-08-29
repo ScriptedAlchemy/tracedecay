@@ -195,12 +195,12 @@ async fn test_scout_owner(
     crate::daemon::store_runtime::register_registered_schema_installer();
     let database_path = temporary.path().join("edit-stop-feedback.db");
     let database_authority =
-        crate::db::DatabaseAuthority::acquire_test(&database_path, "edit stop feedback")
+        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "edit stop feedback")
             .expect("database authority");
-    let database = crate::db::Database::publish_test_runtime(
+    let database = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &database_authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .expect("project database")

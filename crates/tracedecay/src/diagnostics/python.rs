@@ -20,7 +20,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 
 use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 pub struct PyrightDriver;
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 #[derive(Debug, Serialize)]

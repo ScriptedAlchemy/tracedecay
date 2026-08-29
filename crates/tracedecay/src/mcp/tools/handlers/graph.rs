@@ -20,7 +20,7 @@ use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 
 use crate::context::CONTEXT_SEEN_NODE_IDS_LABEL;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
@@ -615,7 +615,7 @@ fn context_graph_projection(
         for symbol in selected.iter().take(max_code_blocks) {
             let metadata = required_graph_metadata(symbol)?;
             let file_path = required_graph_file_path(symbol)?;
-            let source = crate::sync::read_source_file(&cg.project_root().join(file_path))?;
+            let source = tracedecay_runtime_core::sync::read_source_file(&cg.project_root().join(file_path))?;
             code_blocks.push(ContextCodeBlockV1 {
                 node_id: symbol.occurrence.as_str().to_owned(),
                 file: file_path.to_owned(),
@@ -1320,7 +1320,7 @@ fn cached_file_lines<'a>(
 
 /// Trims and length-caps a source line for use as a preview snippet.
 fn snippet_text(line: &str) -> String {
-    crate::text::utf8_prefix_at_or_before(line.trim(), 160).to_string()
+    tracedecay_runtime_core::text::utf8_prefix_at_or_before(line.trim(), 160).to_string()
 }
 
 /// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
@@ -1487,7 +1487,7 @@ pub(super) async fn handle_rename_preview(
             let mut references =
                 Vec::<RenamePreviewReferenceV1>::with_capacity(reference_inputs.len());
             for input in reference_inputs {
-                let source = crate::sync::read_source_file(&project_root.join(&input.file))?;
+                let source = tracedecay_runtime_core::sync::read_source_file(&project_root.join(&input.file))?;
                 let line = line_for_byte_offset(&source, input.evidence_start_byte)?;
                 let snippet = cached_file_lines(&project_root, &mut lines_cache, &input.file)
                     .and_then(|lines| reference_line_snippet(lines, Some(line), &walk_symbol_name));
@@ -1971,7 +1971,7 @@ pub(super) async fn handle_implementations(
                 let metadata = required_graph_metadata(&n)?;
                 let file_path = required_graph_file_path(&n)?;
                 let abs_path = project_root.join(file_path);
-                let source = crate::sync::read_source_file(&abs_path)?;
+                let source = tracedecay_runtime_core::sync::read_source_file(&abs_path)?;
                 let end_line = graph_symbol_end_line(metadata)?;
                 let body = super::info::extract_lines(&source, metadata.start_line, end_line);
                 if !touched.iter().any(|path| path == file_path) {
@@ -2032,7 +2032,7 @@ fn collect_method_bodies(
     for (file_path, _, child) in methods {
         let metadata = required_graph_metadata(&child)?;
         let abs_path = project_root.join(&file_path);
-        let source = crate::sync::read_source_file(&abs_path)?;
+        let source = tracedecay_runtime_core::sync::read_source_file(&abs_path)?;
         let end_line = graph_symbol_end_line(metadata)?;
         let body = super::info::extract_lines(&source, metadata.start_line, end_line);
         out.push(json!({

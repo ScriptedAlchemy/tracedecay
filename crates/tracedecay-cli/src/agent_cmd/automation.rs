@@ -11,24 +11,24 @@ pub(crate) struct CodexAutomationInstall;
 pub(super) fn validate_codex_automation_flags(
     agent: Option<&str>,
     automation: Option<CodexAutomationInstall>,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     if automation.is_none() {
         return Ok(());
     }
     if agent != Some("codex") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "`--automation` is only supported with `--agent codex`".to_string(),
         });
     }
     Ok(())
 }
 
-pub(super) fn validate_codex_automation_project_path() -> tracedecay::errors::Result<PathBuf> {
+pub(super) fn validate_codex_automation_project_path() -> tracedecay_runtime_core::errors::Result<PathBuf> {
     let project_path =
-        std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
+        std::env::current_dir().map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("could not determine current project directory: {e}"),
         })?;
-    std::fs::canonicalize(&project_path).map_err(|e| tracedecay::errors::TraceDecayError::Config {
+    std::fs::canonicalize(&project_path).map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!(
             "could not canonicalize project directory {}: {e}",
             project_path.display()
@@ -40,7 +40,7 @@ pub(super) async fn install_codex_daemon_automation(
     project_path: &Path,
     _home: &Path,
     _options: CodexAutomationInstall,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let patch = AutomationConfigPatch {
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
@@ -71,7 +71,7 @@ pub(super) async fn install_codex_daemon_automation(
 
 async fn initialize_codex_daemon_automation_project(
     project_path: &Path,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     broker_codex_daemon_automation_project(
         project_path,
         |handshake| async move {
@@ -92,11 +92,11 @@ pub(super) async fn broker_codex_daemon_automation_project<I, IFut, R, T>(
     project_path: &Path,
     initialize: I,
     complete: R,
-) -> tracedecay::errors::Result<T>
+) -> tracedecay_runtime_core::errors::Result<T>
 where
     I: FnOnce(tracedecay::daemon::DaemonHandshake) -> IFut,
-    IFut: std::future::Future<Output = tracedecay::errors::Result<()>>,
-    R: FnOnce(&Path) -> tracedecay::errors::Result<T>,
+    IFut: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>,
+    R: FnOnce(&Path) -> tracedecay_runtime_core::errors::Result<T>,
 {
     let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
         Some(project_path.to_path_buf()),

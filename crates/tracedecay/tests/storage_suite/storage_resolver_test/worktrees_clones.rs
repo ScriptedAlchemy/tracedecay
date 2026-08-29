@@ -248,7 +248,7 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         .unwrap();
     }
 
-    let git_common_dir = tracedecay::worktree::git_common_dir(&project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).unwrap();
     let global_db = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
@@ -321,10 +321,10 @@ async fn same_remote_clone_is_not_considered_initialized_without_local_identity(
         "session storage must not use a same-remote clone as repository identity",
     );
 
-    let original_identity = tracedecay::worktree::git_common_dir(&project)
+    let original_identity = tracedecay_runtime_core::worktree::git_common_dir(&project)
         .unwrap()
         .join("tracedecay-project.json");
-    let copied_identity = tracedecay::worktree::git_common_dir(&clone)
+    let copied_identity = tracedecay_runtime_core::worktree::git_common_dir(&clone)
         .unwrap()
         .join("tracedecay-project.json");
     fs::copy(original_identity, copied_identity).unwrap();

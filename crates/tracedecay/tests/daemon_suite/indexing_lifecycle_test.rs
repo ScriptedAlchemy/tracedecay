@@ -193,7 +193,7 @@ fn initialize_tracedecay(home: &Path, project: &Path) -> String {
 
 fn exact_identity(project: &Path, project_id: String) -> ExactIndexIdentity {
     let canonical_project = project.canonicalize().expect("canonical fixture project");
-    let common_dir = tracedecay::worktree::git_common_dir(&canonical_project)
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&canonical_project)
         .expect("fixture Git common directory");
     ExactIndexIdentity {
         project_id,

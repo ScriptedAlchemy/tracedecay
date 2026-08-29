@@ -4,7 +4,7 @@ use crate::resolve_cli_project_root;
 
 pub(super) async fn handle_automation_runs_command(
     action: AutomationRunsAction,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     use tracedecay_agent_hosts::automation::run_ledger::{
         find_run_record, load_run_records, read_run_artifact_payload,
     };
@@ -38,7 +38,7 @@ pub(super) async fn handle_automation_runs_command(
         AutomationRunsAction::View { run_id, json, .. } => {
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("automation run not found: {run_id}"),
                 })?;
             if json {
@@ -58,14 +58,14 @@ pub(super) async fn handle_automation_runs_command(
         } => {
             let record = find_run_record(&dashboard_root, &run_id)
                 .await?
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("automation run not found: {run_id}"),
                 })?;
             let artifact = record
                 .artifacts
                 .iter()
                 .find(|artifact| artifact.kind == kind)
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("automation run artifact not found: {run_id}/{kind}"),
                 })?;
             let payload =
@@ -153,7 +153,7 @@ fn print_automation_run_artifact(
     run_id: &str,
     artifact: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifact,
     payload: &serde_json::Value,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     println!("run_id: {run_id}");
     println!("artifact: {}", artifact.kind);
     println!("path: {}", artifact.path);

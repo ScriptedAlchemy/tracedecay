@@ -233,7 +233,7 @@ pub(super) async fn fixture_graph(
 ) -> (
     TraceDecay,
     FixtureCodeGraphReadPort,
-    crate::db::DaemonDatabaseScope,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
 ) {
     let profile_root = project_root.join(".tracedecay-test-profile");
     let open_options = TraceDecayOpenOptions {
@@ -241,7 +241,7 @@ pub(super) async fn fixture_graph(
         global_db_path: Some(profile_root.join("global.db")),
     };
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
-    let database_scope = crate::db::enter_daemon_database_scope(
+    let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
         "source-edit-owner-test-runtime",
@@ -471,7 +471,7 @@ pub(super) struct EffectUnknownFixture {
     pub(super) project: TempDir,
     pub(super) graph: TraceDecay,
     pub(super) code_graph: FixtureCodeGraphReadPort,
-    pub(super) _database_scope: crate::db::DaemonDatabaseScope,
+    pub(super) _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     pub(super) request: SourceEditEffectRequestV1,
     pub(super) authorization: FixtureSourceEditAuthorization,
     pub(super) result: SourceEditApplicationResult,

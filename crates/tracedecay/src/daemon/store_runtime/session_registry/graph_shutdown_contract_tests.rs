@@ -44,7 +44,7 @@ fn write_control() -> FactWriteControl {
     )
 }
 
-async fn add_fact(database: &crate::db::Database, owner: &FactOwnerV1, label: &str) {
+async fn add_fact(database: &tracedecay_runtime_core::db::Database, owner: &FactOwnerV1, label: &str) {
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
         .expect("owner-bound memory application");
     let actor = ActorId::new("actor.graph-shutdown-contract").expect("contract actor identity");
@@ -75,7 +75,7 @@ async fn add_fact(database: &crate::db::Database, owner: &FactOwnerV1, label: &s
     ));
 }
 
-async fn wait_for_reconciliation(database: &crate::db::Database) {
+async fn wait_for_reconciliation(database: &tracedecay_runtime_core::db::Database) {
     let owner = database
         .memory_graph_reconciliation_task_owner()
         .expect("mounted graph reconciliation owner");
@@ -96,7 +96,7 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
     let project_id = ProjectId::new("project.graph-shutdown-contract").expect("project id");
     let project_root = enrolled_root(temp.path(), &project_id);
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 53, "graph shutdown contract")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 53, "graph shutdown contract")
             .expect("daemon database scope");
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
@@ -168,7 +168,7 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
     let profile_root = temp.path().join("profile");
     let project_id = ProjectId::new("project.graph-shutdown-transition").expect("project id");
     let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 59, "graph shutdown transition")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 59, "graph shutdown transition")
             .expect("daemon database scope");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)

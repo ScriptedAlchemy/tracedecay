@@ -26,7 +26,7 @@ use super::workflow_fan_out::reconcile_workflow_fan_out;
 /// before any event is journaled.
 pub(super) fn start_workflow_run(
     registered: &RegisteredWorkRuntime,
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     request: tracedecay_application::WorkflowRunStartRequest,
     input_digest: &ManifestDigest,
@@ -224,7 +224,7 @@ pub(super) fn start_workflow_run(
 }
 
 pub(super) fn apply_workflow_run_command(
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     run_id: &tracedecay_domain::RunId,
     expected_sequence: u64,
     command: tracedecay_domain::WorkflowRunCommand,
@@ -251,7 +251,7 @@ pub(super) fn apply_workflow_run_command(
 /// command identity derived from the caller's, so replays settle identically.
 pub(super) fn cancel_workflow_run(
     registered: &RegisteredWorkRuntime,
-    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    services: &tracedecay_global_db::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
     request: tracedecay_application::WorkflowRunCancelRequest,
     input_digest: &ManifestDigest,

@@ -19,7 +19,7 @@ pub(super) fn automatic_fact_receipt_view_rpc_args(id: &str) -> serde_json::Valu
 
 pub(super) async fn handle_automation_facts_command(
     action: AutomationFactsAction,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let path = match &action {
         AutomationFactsAction::List { path, .. } | AutomationFactsAction::View { path, .. } => {
             path.clone()

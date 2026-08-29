@@ -95,7 +95,7 @@ use crate::daemon::service::invocation::{
     unregister_hook_orchestration_runtime,
 };
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 
@@ -156,7 +156,7 @@ impl Drop for AdvisoryHookNoticeRegistrationV1 {
 struct ScoutHookRegistrationV1 {
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
-    lifecycle_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
+    lifecycle_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     lifecycle_registered_here: bool,
     orchestrator: Arc<BoundedHookOrchestratorV1>,
 }
@@ -526,7 +526,7 @@ struct ProjectOpenScoutProducerV1 {
     project_root: std::path::PathBuf,
     scope: tracedecay_application::ResolvedScope,
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
     requester: tracedecay_domain::ActorId,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1667,7 +1667,7 @@ async fn resolve_github_stack_observability(
     // Mirrors the native-integration mount condition at project open: the
     // standard pull-request fallback exists exactly when this project is an
     // admitted Git worktree (project open fails earlier otherwise).
-    let native_git_fallback_mounted = crate::worktree::git_worktree_root(project_root).is_some();
+    let native_git_fallback_mounted = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
     let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
         state.scope.clone(),
         topology_policy,
@@ -1814,7 +1814,7 @@ fn resolve_production_github_identity(
     if pull.target != *target || head != feedback_scope.head_commit_id {
         return None;
     }
-    let merge_base = Command::new(crate::git::git_program())
+    let merge_base = Command::new(tracedecay_runtime_core::git::git_program())
         .args([
             "-C",
             &project_root.to_string_lossy(),

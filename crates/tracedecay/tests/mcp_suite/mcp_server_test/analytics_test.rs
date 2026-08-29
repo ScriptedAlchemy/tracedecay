@@ -464,7 +464,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
     // cargo-test opt-out is present, so the default-on path is exercised.
     let _enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
     let _disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
-    assert!(tracedecay::global_db::global_accounting_enabled());
+    assert!(tracedecay_global_db::global_accounting_enabled());
 
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
@@ -521,7 +521,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
 #[tokio::test]
 async fn global_accounting_env_overrides() {
     let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    use tracedecay::global_db::{AccountingMode, global_accounting_mode};
+    use tracedecay_global_db::{AccountingMode, global_accounting_mode};
 
     let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
     let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");

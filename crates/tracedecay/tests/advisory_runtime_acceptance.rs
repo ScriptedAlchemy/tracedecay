@@ -623,7 +623,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
     let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
     let provider_body_digest =
         ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
-    let retained_body = tracedecay::privacy::sanitize_provider_metadata_text(body).unwrap();
+    let retained_body = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body).unwrap();
     let seed = GitHubReviewAnchorSeedV1 {
         comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
         author_node_id: "BOT_kgDOC98s_g".to_owned(),

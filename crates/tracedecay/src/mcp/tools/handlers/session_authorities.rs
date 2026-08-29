@@ -1,4 +1,4 @@
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or

@@ -444,7 +444,7 @@ async fn unknown_census_still_degrades_to_the_offline_inventory() {
 async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
     let fixture = open_unseated_graph_fixture().await;
     let global_db =
-        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("vector-refusals").await;
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("vector-refusals").await;
     let scope = tracedecay_application::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.retention-fixture").expect("project id"),
         tracedecay_domain::RepositoryId::new("repository.retention-fixture")

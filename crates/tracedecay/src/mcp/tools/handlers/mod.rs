@@ -159,8 +159,8 @@ use super::binding::{
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
@@ -233,10 +233,10 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
-    pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
-    pub(crate) registered_project_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
-    pub(crate) registered_profile_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
-    pub(crate) registered_savings_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) accounting_db: Option<&'a tracedecay_global_db::RegisteredGlobalDb>,
+    pub(crate) registered_project_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_profile_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_savings_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
     pub(crate) dashboard_session_retrieval_identity:

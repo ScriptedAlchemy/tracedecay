@@ -101,12 +101,12 @@ pub(crate) async fn handle_todos(
 
                 'outer: for file in &files {
                     if let Some(prefix) = path.as_deref()
-                        && !crate::path_scope::path_matches_scope(file, Some(prefix))
+                        && !tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(prefix))
                     {
                         continue;
                     }
                     let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
-                    let source = crate::sync::read_source_file(&project_path.absolute_path())
+                    let source = tracedecay_runtime_core::sync::read_source_file(&project_path.absolute_path())
                         .map_err(|error| TraceDecayError::Config {
                             message: format!("cannot read indexed source '{file}': {error}"),
                         })?;

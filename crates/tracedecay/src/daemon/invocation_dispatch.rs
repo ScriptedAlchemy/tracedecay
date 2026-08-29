@@ -27,7 +27,7 @@ fn semantic_invocation_interruption_response(
         })
 }
 
-fn record_project_open_refusal(operation: &str, error: &crate::errors::TraceDecayError) {
+fn record_project_open_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
     hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -39,7 +39,7 @@ fn record_project_open_refusal(operation: &str, error: &crate::errors::TraceDeca
     );
 }
 
-fn record_project_route_refusal(operation: &str, error: &crate::errors::TraceDecayError) {
+fn record_project_route_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
     hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -418,7 +418,7 @@ pub(super) async fn git_service_for_project_path(
     project_path: Option<&Path>,
 ) -> Option<git_transactions::DaemonGitInvocationOwner> {
     let project_path = project_path?;
-    let repository_root = crate::worktree::git_worktree_root(project_path)
+    let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_path)
         .unwrap_or_else(|| project_path.to_path_buf());
     store_administration
         .git_index_transaction_services()
@@ -433,7 +433,7 @@ pub(super) async fn native_integration_service_for_project_path(
     project_path: Option<&Path>,
 ) -> Option<native_integration::DaemonNativeIntegrationOwner> {
     let project_path = project_path?;
-    let repository_root = crate::worktree::git_worktree_root(project_path)
+    let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_path)
         .unwrap_or_else(|| project_path.to_path_buf());
     store_administration
         .native_integration_services()
@@ -704,7 +704,7 @@ pub(super) async fn execute_daemon_invocation(
 }
 
 fn project_open_problem(
-    error: &crate::errors::TraceDecayError,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
     workflow_application: bool,
     git_operation: bool,
 ) -> service::invocation::DaemonInvocationProblem {
@@ -717,7 +717,7 @@ fn project_open_problem(
     // budget was gone, never learning that the only legal action is `reset`.
     if matches!(
         error,
-        crate::errors::TraceDecayError::ResetRequired { authority, .. }
+        tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { authority, .. }
             if workflow_application || authority != "workflow"
     ) {
         service::invocation::DaemonInvocationProblem::ResetRequired
@@ -898,7 +898,7 @@ mod workflow_reset_tests {
     #[test]
     fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
         let error =
-            crate::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
         assert_eq!(
             project_open_problem(&error, true, false),
             service::invocation::DaemonInvocationProblem::ResetRequired
@@ -925,7 +925,7 @@ mod workflow_reset_tests {
 
     #[test]
     fn failed_project_open_keeps_the_terminal_problem_split() {
-        let failed = crate::errors::TraceDecayError::Config {
+        let failed = tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "project store rejected".to_owned(),
         };
         assert_eq!(

@@ -56,7 +56,7 @@ fn scheduler_unavailable(detail: &str) -> String {
 
 async fn git_authority_available(repo_root: &Path) -> bool {
     let repo = repo_root.to_path_buf();
-    tokio::task::spawn_blocking(move || crate::worktree::git_worktree_root(&repo).is_some())
+    tokio::task::spawn_blocking(move || tracedecay_runtime_core::worktree::git_worktree_root(&repo).is_some())
         .await
         .ok()
         .unwrap_or(false)
@@ -557,7 +557,7 @@ fn run_git_with_control(
     args: &[&str],
     control: &PrCommandControl,
 ) -> Result<std::process::Output, tracedecay_runtime_core::git::GitCommandError> {
-    let mut command = std::process::Command::new(crate::git::git_program());
+    let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
     command.args(args).current_dir(repo_root);
     disable_git_credential_prompt(&mut command);
     let bounds = tracedecay_runtime_core::git::GitCommandBounds {
@@ -1186,7 +1186,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
     data_root: &Path,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch: &str,
-    source: &crate::branch_meta::BranchGraphSourceV1,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceV1,
     lifecycle: ManualBranchLifecycleLeaseV1,
 ) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
     if !lifecycle.matches_branch(branch) {
@@ -1253,7 +1253,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
 pub(crate) fn manual_branch_source_owns_artifacts(
     data_root: &Path,
     branch: &str,
-    source: &crate::branch_meta::BranchGraphSourceV1,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceV1,
 ) -> bool {
     let canonical_data_root = data_root
         .canonicalize()

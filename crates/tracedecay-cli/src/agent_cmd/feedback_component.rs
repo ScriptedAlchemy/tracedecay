@@ -10,7 +10,7 @@ use tracedecay::agents::host_bundle_v2::{
 
 pub(super) fn selected_feedback_component(
     aggregate: &HostComponentSetReceiptV1,
-) -> tracedecay::errors::Result<HostBundleComponentV1> {
+) -> tracedecay_runtime_core::errors::Result<HostBundleComponentV1> {
     if aggregate
         .component_manifests
         .iter()
@@ -23,7 +23,7 @@ pub(super) fn selected_feedback_component(
     {
         return Ok(HostBundleComponentV1::ContextMcp);
     }
-    Err(tracedecay::errors::TraceDecayError::Config {
+    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: "aggregate receipt has no selected feedback component".to_string(),
     })
 }
@@ -31,14 +31,14 @@ pub(super) fn selected_feedback_component(
 pub(super) fn live_feedback_receipt(
     home: &Path,
     aggregate: &HostComponentSetReceiptV1,
-) -> tracedecay::errors::Result<(HostBundleManifestV1, HostBundleInstallReceiptV1)> {
+) -> tracedecay_runtime_core::errors::Result<(HostBundleManifestV1, HostBundleInstallReceiptV1)> {
     let component = selected_feedback_component(aggregate)?;
     let mut manifest = aggregate
         .component_manifests
         .iter()
         .find(|manifest| manifest.component == component)
         .cloned()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "aggregate receipt has no selected feedback manifest".to_string(),
         })?;
     let mut receipt = aggregate
@@ -46,7 +46,7 @@ pub(super) fn live_feedback_receipt(
         .iter()
         .find(|receipt| receipt.component == component)
         .cloned()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "aggregate receipt has no selected feedback receipt".to_string(),
         })?;
     let companion_owned_paths = companion_owned_live_paths(home, aggregate)?;
@@ -67,7 +67,7 @@ pub(super) fn live_feedback_receipt(
 pub(super) fn companion_owned_live_paths(
     home: &Path,
     aggregate: &HostComponentSetReceiptV1,
-) -> tracedecay::errors::Result<BTreeSet<String>> {
+) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
     let selected = selected_feedback_component(aggregate)?;
     Ok(aggregate
         .component_receipts

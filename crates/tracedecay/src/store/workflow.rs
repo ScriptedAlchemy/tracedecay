@@ -7,8 +7,8 @@ use std::path::Path;
 use tracedecay_domain::ProjectId;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::db::engine::params;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
@@ -22,7 +22,7 @@ use tracedecay_sessions::runtime::workflow_state::{WorkflowStateItem, list_unfin
 
 /// Borrowed adapter over an already-open project-sessions database.
 /// The holder `D` is generic so callers that own a
-/// [`crate::global_db::RegisteredGlobalDbLeaseV1`]
+/// [`tracedecay_global_db::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked

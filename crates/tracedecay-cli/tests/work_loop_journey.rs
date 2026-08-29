@@ -230,7 +230,7 @@ impl ProductionDaemon {
             .as_str()
             .expect("registered project id")
             .to_owned();
-        let git_common_dir = tracedecay::worktree::git_common_dir(&project)
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project)
             .expect("registered Git common directory");
         let repository_id = format!(
             "repository.daemon.{}",

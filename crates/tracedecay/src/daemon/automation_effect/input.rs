@@ -10,7 +10,7 @@ use tracedecay_application::retained_surfaces::{
 use tracedecay_domain::{RunId, UtcMicros};
 
 use super::contract_error;
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 pub(crate) fn memory_curator_run_request(
     run_id: &str,

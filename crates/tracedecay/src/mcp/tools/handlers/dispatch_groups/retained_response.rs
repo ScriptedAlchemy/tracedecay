@@ -4,7 +4,7 @@ use tracedecay_application::{
 };
 
 use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationProblem};
-use crate::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 use super::{retained_problem_envelope, retained_safe_diagnostic};
 

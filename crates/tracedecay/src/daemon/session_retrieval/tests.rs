@@ -148,7 +148,7 @@ fn real_page_kernel(
 }
 
 async fn seed_real_page_fixture(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
     root: &TemporalAuthorizedRoot,
     rank: usize,
 ) -> RealPageFixture {
@@ -279,7 +279,7 @@ async fn seed_real_page_fixture(
         .lcm_protect_session_raw_messages(&provider, &session_id)
         .await
         .expect("protect canonical raw message");
-    crate::global_db::session_temporal::GlobalDbSessionTemporalStore::new(database)
+    tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(database)
         .materialize_pending_session_refresh_for_test(
             &SessionId::new(session_id.clone()).expect("refresh session"),
         )
@@ -314,7 +314,7 @@ async fn seed_real_page_fixture(
 async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     const RESULTS: usize = 50;
     let harness =
-        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("page-batch").await;
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("page-batch").await;
     let root = real_page_root("root.page");
     let mut fixtures = Vec::with_capacity(RESULTS);
     for rank in 0..RESULTS {
@@ -473,7 +473,7 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
 #[tokio::test]
 async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     let harness =
-        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("page-scope").await;
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("page-scope").await;
     let root = real_page_root("root.page");
     let fixture = seed_real_page_fixture(harness.registered.as_ref(), &root, 0).await;
     let service = DaemonSessionRetrievalService::new(
@@ -821,7 +821,7 @@ fn cursor_stale_lcm_retrieval_requires_cursorless_restart() {
 #[tokio::test]
 async fn cursor_stale_session_retrieval_remains_typed_at_daemon_boundary() {
     let harness =
-        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("cursor-stale").await;
     let service = DaemonSessionRetrievalService::new(
         harness.registered.clone(),
         DaemonSessionRetrievalRoot::profile().expect("profile retrieval root"),

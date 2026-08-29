@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::project_route::{
     HookProjectRouteCache, ProjectRouteFailure, ProjectRouteFailureKind, WorkspaceProjectRoute,
 };
@@ -205,7 +205,7 @@ pub(crate) async fn resolve_private_project_route(
     {
         Ok(Some(context)) => Some(context),
         Ok(None) => {
-            let git_common_dir = crate::worktree::git_common_dir(&selected_path);
+            let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&selected_path);
             match registry_db
                 .project_registry_context_by_identity(&selected_path, git_common_dir.as_deref())
                 .await
@@ -289,8 +289,8 @@ async fn resolve_initialize_root_project_path(
         }
     }
 
-    if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
-        let git_common_dir = crate::worktree::git_common_dir(&git_root);
+    if let Some(git_root) = tracedecay_runtime_core::worktree::git_worktree_root(&root) {
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&git_root);
         match registry_db
             .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
             .await
@@ -400,7 +400,7 @@ mod tests {
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
         let git_common_dir =
-            crate::worktree::git_common_dir(&old_root).expect("resolve git common dir");
+            tracedecay_runtime_core::worktree::git_common_dir(&old_root).expect("resolve git common dir");
         registry
             .upsert_code_project(
                 "proj_renamed",
@@ -468,7 +468,7 @@ mod tests {
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
         let git_common_dir =
-            crate::worktree::git_common_dir(&primary_root).expect("resolve git common dir");
+            tracedecay_runtime_core::worktree::git_common_dir(&primary_root).expect("resolve git common dir");
         registry
             .upsert_code_project(
                 "proj_primary",

@@ -2,7 +2,7 @@
 //! joining and compaction, reasoning summaries, and message deduplication.
 
 use tempfile::TempDir;
-use tracedecay::global_db::ParseOffset;
+use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::codex::CodexSource;
 
 use crate::codex::{write_codex_rollout, write_codex_rollout_with_goal_context, write_jsonl};

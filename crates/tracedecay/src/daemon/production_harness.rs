@@ -26,7 +26,7 @@ pub fn capture_exact_git_snapshot_for_test(
     repository_id: tracedecay_domain::RepositoryId,
     worktree_id: tracedecay_domain::WorktreeId,
     captured_at: tracedecay_domain::UtcMicros,
-) -> crate::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
     git_transactions::capture_exact_snapshot_for_test(
         repository_root,
         project_id,
@@ -46,8 +46,8 @@ struct ProductionProjectHarnessResourcesV1 {
     #[cfg_attr(not(test), allow(dead_code))]
     http_application_registry: http_application::DaemonHttpApplicationRegistry,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
-    _database_scope: crate::db::DaemonDatabaseScope,
-    _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _lifecycle_lease: tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 }
 
 /// In-process owner for the same production project composition used by the
@@ -208,11 +208,11 @@ impl ProductionProjectCompositionHarnessV1 {
         let (profile_identity, lifecycle_lease, database_scope) =
             hotpath::measure_block!("daemon.harness.identity", {
                 let profile_identity = profile_identity::load_or_create(&profile_root)?;
-                let lifecycle_lease = crate::lifecycle_lease::acquire_shared_for_profile(
+                let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
                     &profile_root,
                     "in-process production composition",
                 )?;
-                let database_scope = crate::db::enter_daemon_database_scope(
+                let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
                     &profile_root,
                     1,
                     "in-process-production-composition",
@@ -382,8 +382,8 @@ impl ProductionProjectCompositionHarnessV1 {
     #[hotpath::measure(label = "daemon.harness.read_profile_analytics", future = true)]
     pub async fn read_profile_analytics_events(
         &self,
-        query: &crate::global_db::AnalyticsEventQuery,
-    ) -> Result<Vec<crate::global_db::AnalyticsEventRecord>> {
+        query: &tracedecay_global_db::AnalyticsEventQuery,
+    ) -> Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
         let resources = self
             .resources
             .as_ref()
@@ -407,7 +407,7 @@ impl ProductionProjectCompositionHarnessV1 {
     #[hotpath::measure(label = "daemon.harness.append_profile_analytics", future = true)]
     pub async fn append_profile_analytics_events_for_test(
         &self,
-        events: &[crate::global_db::AnalyticsEventInsert],
+        events: &[tracedecay_global_db::AnalyticsEventInsert],
     ) -> Result<Vec<i64>> {
         let resources = self
             .resources
@@ -435,7 +435,7 @@ impl ProductionProjectCompositionHarnessV1 {
         &self,
         project: Option<&str>,
         since: i64,
-    ) -> Result<crate::global_db::SavingsTotal> {
+    ) -> Result<tracedecay_global_db::SavingsTotal> {
         let resources = self
             .resources
             .as_ref()
@@ -821,7 +821,7 @@ mod code_index_activation_test {
                 "seed project",
             ],
         ] {
-            let status = Command::new(crate::git::git_program())
+            let status = Command::new(tracedecay_runtime_core::git::git_program())
                 .args(&arguments)
                 .current_dir(&project)
                 .status()

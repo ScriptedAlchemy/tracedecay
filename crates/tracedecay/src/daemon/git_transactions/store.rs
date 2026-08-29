@@ -26,7 +26,7 @@ use tracedecay_store::{
     GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
-use crate::global_db::{
+use tracedecay_global_db::{
     GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDbLeaseV1,
 };
 
@@ -111,7 +111,7 @@ impl ActorDatabase {
         &self,
         observed_at: UtcMicros,
         limit: usize,
-    ) -> GitIndexTransactionStoreResult<crate::global_db::GitIndexPreviewInputGcResult> {
+    ) -> GitIndexTransactionStoreResult<tracedecay_global_db::GitIndexPreviewInputGcResult> {
         #[cfg(test)]
         if let Self::Registered {
             gc_observer: Some(observer),
@@ -765,7 +765,7 @@ mod gc_tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
     fn registered_database(label: &str) -> RegisteredGlobalDbHarness {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -154,8 +154,8 @@ pub(crate) use crate::daemon_contract::{
     HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
 };
-use crate::db::Database;
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::production_semantic_authorities;
 #[cfg(test)]
 use tracedecay_application::{
@@ -300,7 +300,7 @@ pub(crate) struct DaemonInvocationService {
     work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
     worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
     session_holder_databases:
-        Arc<Mutex<BTreeMap<PathBuf, crate::global_db::RegisteredGlobalDbLeaseV1>>>,
+        Arc<Mutex<BTreeMap<PathBuf, tracedecay_global_db::RegisteredGlobalDbLeaseV1>>>,
     /// Per-project fan-out of observed native-integration transaction
     /// statuses. The invocation handler publishes; LSP sessions read and
     /// notify. Created on demand under one project-root key shared by both.
@@ -437,7 +437,7 @@ impl DaemonInvocationService {
     /// cleanup holders even when no project-store mirror exists.
     pub(crate) async fn mount_session_holder_databases(
         &self,
-        databases: impl IntoIterator<Item = crate::global_db::RegisteredGlobalDbLeaseV1>,
+        databases: impl IntoIterator<Item = tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     ) {
         let mut mounted = self.session_holder_databases.lock().await;
         for database in databases {

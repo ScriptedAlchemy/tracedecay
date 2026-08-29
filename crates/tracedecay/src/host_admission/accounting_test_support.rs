@@ -5,7 +5,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn append_analytics_event_for_test(
         &self,
         scope: HostAdmissionScope,
-        event: &crate::global_db::AnalyticsEventInsert,
+        event: &tracedecay_global_db::AnalyticsEventInsert,
     ) -> Result<i64> {
         let database = match scope {
             HostAdmissionScope::Project => self.project_database_for_test()?,
@@ -24,7 +24,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn append_analytics_events_for_test(
         &self,
         scope: HostAdmissionScope,
-        events: &[crate::global_db::AnalyticsEventInsert],
+        events: &[tracedecay_global_db::AnalyticsEventInsert],
     ) -> Result<Vec<i64>> {
         let database = match scope {
             HostAdmissionScope::Project => self.project_database_for_test()?,
@@ -42,7 +42,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn append_profile_analytics_events_for_test(
         &self,
-        events: &[crate::global_db::AnalyticsEventInsert],
+        events: &[tracedecay_global_db::AnalyticsEventInsert],
     ) -> Result<Vec<i64>> {
         self.append_analytics_events_for_test(HostAdmissionScope::Profile, events)
             .await
@@ -134,7 +134,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project: Option<&str>,
         since: i64,
-    ) -> crate::global_db::SavingsTotal {
+    ) -> tracedecay_global_db::SavingsTotal {
         self.profile_database.sum_savings(project, since).await
     }
 
@@ -143,7 +143,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project: Option<&str>,
         since: i64,
-    ) -> Vec<crate::global_db::SavingsDay> {
+    ) -> Vec<tracedecay_global_db::SavingsDay> {
         self.profile_database.savings_history(project, since).await
     }
 

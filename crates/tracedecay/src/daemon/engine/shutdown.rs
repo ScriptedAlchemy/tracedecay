@@ -261,7 +261,7 @@ impl DaemonEngine {
             let terminal_owner = shutdown_engine.memory_graph_reconciliation_shutdown_owner();
             let server_engine = shutdown_engine.clone();
             DaemonShutdownPlan::new(
-                tokio::task::JoinSet::<crate::errors::Result<()>>::new(),
+                tokio::task::JoinSet::<tracedecay_runtime_core::errors::Result<()>>::new(),
                 owner_phases,
                 move |project_server_deadline| async move {
                     server_engine

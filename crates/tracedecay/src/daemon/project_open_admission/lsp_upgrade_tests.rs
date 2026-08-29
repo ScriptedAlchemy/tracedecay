@@ -5,7 +5,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::{ProjectOpenTaskClaim, ProjectOpenTasks, ProjectOpenWaitOutcome, ProjectRouteKey};
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
     ProjectRouteKey {

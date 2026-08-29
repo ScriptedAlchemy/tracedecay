@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 
 use super::TraceDecay;
@@ -95,7 +95,7 @@ impl TraceDecay {
         if matches!(adoption, MovedStoreAdoption::Never) {
             return Ok(None);
         }
-        if crate::worktree::git_common_dir(project_root).is_some() {
+        if tracedecay_runtime_core::worktree::git_common_dir(project_root).is_some() {
             return Ok(None);
         }
 

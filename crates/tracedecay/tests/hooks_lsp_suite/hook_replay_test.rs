@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::global_db::AnalyticsEventQuery;
+use tracedecay_global_db::AnalyticsEventQuery;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{StorageMode, default_profile_sharded_layout};
 

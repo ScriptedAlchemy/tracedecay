@@ -22,8 +22,8 @@ use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_re
 
 use super::daemon::daemon_tool_json;
 
-fn configuration_error(message: impl Into<String>) -> tracedecay::errors::TraceDecayError {
-    tracedecay::errors::TraceDecayError::Config {
+fn configuration_error(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }
@@ -32,7 +32,7 @@ fn cli_configuration_idempotency_key(
     project_id: &ProjectId,
     expected_revision: &ConfigurationRevisionId,
     mutations: &[ConfigurationDirectMutationRequestV1],
-) -> tracedecay::errors::Result<ConfigurationIdempotencyKey> {
+) -> tracedecay_runtime_core::errors::Result<ConfigurationIdempotencyKey> {
     let digest = canonical_sha256(&(
         "tracedecay.cli.configuration-mutation.v1",
         project_id,
@@ -52,7 +52,7 @@ fn cli_user_configuration_idempotency_key(
     profile_id: &UserProfileId,
     expected_revision: &ConfigurationRevisionId,
     mutations: &[ConfigurationDirectMutationRequestV1],
-) -> tracedecay::errors::Result<ConfigurationIdempotencyKey> {
+) -> tracedecay_runtime_core::errors::Result<ConfigurationIdempotencyKey> {
     let digest = canonical_sha256(&(
         "tracedecay.cli.user-configuration-mutation.v1",
         profile_id,
@@ -75,7 +75,7 @@ fn cli_user_configuration_idempotency_key(
 fn configuration_deadline(
     operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
-) -> tracedecay::errors::Result<Deadline> {
+) -> tracedecay_runtime_core::errors::Result<Deadline> {
     let application_operation =
         tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|error| configuration_error(error.to_string()))?
@@ -99,7 +99,7 @@ async fn invoke_configuration_surface(
     project_path: &Path,
     operation: ApplicationSurfaceOperation,
     request: ConfigurationWireRequestV1,
-) -> tracedecay::errors::Result<ApplicationEnvelope<serde_json::Value>> {
+) -> tracedecay_runtime_core::errors::Result<ApplicationEnvelope<serde_json::Value>> {
     let request_id = mint_global_request_id(GlobalRequestSurface::Cli)
         .map_err(|error| configuration_error(error.to_string()))?;
     let observed_at = invocation_now_micros();
@@ -147,7 +147,7 @@ async fn invoke_configuration_surface(
 
 pub(crate) async fn current_configuration_revision(
     project_path: &Path,
-) -> tracedecay::errors::Result<ConfigurationRevisionId> {
+) -> tracedecay_runtime_core::errors::Result<ConfigurationRevisionId> {
     let envelope = invoke_configuration_surface(
         project_path,
         ApplicationSurfaceOperation::ConfigurationObservedState,
@@ -183,7 +183,7 @@ pub(crate) async fn current_configuration_revision(
 pub(crate) async fn current_project_setting(
     project_path: &Path,
     key: &str,
-) -> tracedecay::errors::Result<ConfigurationValueV1> {
+) -> tracedecay_runtime_core::errors::Result<ConfigurationValueV1> {
     let key = SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?;
     let envelope = invoke_configuration_surface(
         project_path,
@@ -207,7 +207,7 @@ pub(crate) async fn current_project_setting(
 
 pub(crate) async fn canonical_upload_enabled(
     project_path: &Path,
-) -> tracedecay::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     match current_project_setting(project_path, USER_UPLOAD_ENABLED_SETTING_KEY).await? {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
         _ => Err(configuration_error(
@@ -221,7 +221,7 @@ pub(crate) async fn mutate_project_configuration(
     project_id: &ProjectId,
     expected_revision: ConfigurationRevisionId,
     mutations: Vec<ConfigurationDirectMutationRequestV1>,
-) -> tracedecay::errors::Result<Option<EffectReceipt>> {
+) -> tracedecay_runtime_core::errors::Result<Option<EffectReceipt>> {
     if mutations.is_empty() {
         return Ok(None);
     }
@@ -265,7 +265,7 @@ async fn mutate_user_configuration(
     profile_id: &UserProfileId,
     expected_revision: ConfigurationRevisionId,
     mutations: Vec<ConfigurationDirectMutationRequestV1>,
-) -> tracedecay::errors::Result<Option<EffectReceipt>> {
+) -> tracedecay_runtime_core::errors::Result<Option<EffectReceipt>> {
     if mutations.is_empty() {
         return Ok(None);
     }
@@ -287,7 +287,7 @@ async fn mutate_user_configuration(
 fn configuration_effect_receipt(
     envelope: ApplicationEnvelope<serde_json::Value>,
     idempotency_key: &ConfigurationIdempotencyKey,
-) -> tracedecay::errors::Result<EffectReceipt> {
+) -> tracedecay_runtime_core::errors::Result<EffectReceipt> {
     let ApplicationOutcome::Effect(effect) = envelope.outcome else {
         return Err(configuration_error(
             "configuration mutation returned a non-effect outcome",
@@ -311,7 +311,7 @@ pub(crate) fn project_configuration_set(
     project_id: &ProjectId,
     key: &str,
     value: ConfigurationValueV1,
-) -> tracedecay::errors::Result<ConfigurationDirectMutationRequestV1> {
+) -> tracedecay_runtime_core::errors::Result<ConfigurationDirectMutationRequestV1> {
     Ok(ConfigurationDirectMutationRequestV1::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: project_id.clone(),
@@ -328,7 +328,7 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
 }
 
 #[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
-pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_runtime_core::errors::Result<()> {
     let resolved =
         super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
             .await?;
@@ -368,7 +368,7 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::R
 pub(crate) async fn handle_gitignore(
     path: Option<String>,
     action: Option<String>,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     handle_gitignore_inner(path, action).await
 }
 
@@ -376,7 +376,7 @@ fn handle_gitignore_inner(
     path: Option<String>,
     action: Option<String>,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay::errors::Result<()>> + Send + 'static>,
+    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested gitignore-settings future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -448,7 +448,7 @@ fn handle_gitignore_inner(
                 report_configuration_receipt(receipt.as_ref());
             }
             Some(other) => {
-                return Err(tracedecay::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!("unknown action '{other}': expected 'on' or 'off'"),
                 });
             }
@@ -463,7 +463,7 @@ fn handle_gitignore_inner(
                 let enabled = response
                     .get("git_ignore")
                     .and_then(serde_json::Value::as_bool)
-                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                         message: "daemon gitignore status omitted git_ignore".to_string(),
                     })?;
                 let status = if enabled { "on" } else { "off" };

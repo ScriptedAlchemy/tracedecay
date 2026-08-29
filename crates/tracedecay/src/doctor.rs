@@ -31,9 +31,9 @@ pub(crate) mod registry_drift;
 /// registered reader pool instead of an ad-hoc connection.
 #[cfg(test)]
 pub(crate) struct DoctorTestRuntime {
-    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-    _scope: crate::db::DaemonDatabaseScope,
+    _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
 }
 
 #[cfg(test)]
@@ -54,7 +54,7 @@ impl DoctorTestRuntime {
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("load Doctor test profile identity");
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
-        let scope = crate::db::enter_daemon_database_scope(profile_root, nonce, label)
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, label)
             .expect("enter Doctor test database scope");
         let registry =
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
@@ -77,15 +77,15 @@ impl DoctorTestRuntime {
         }
     }
 
-    pub(crate) fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
+    pub(crate) fn database(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
         self.database.as_ref()
     }
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
 #[hotpath::measure(label = "doctor.run", future = true)]
-pub async fn run_doctor() -> crate::errors::Result<()> {
-    let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
+pub async fn run_doctor() -> tracedecay_runtime_core::errors::Result<()> {
+    let _lifecycle_lease = match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited("doctor") {
         Ok(lease) => lease,
         Err(error) => {
             eprintln!("tracedecay doctor could not start: {error}");
@@ -217,7 +217,7 @@ fn render_doctor_finding(
 
 fn canonical_daemon_doctor_report(
     status: &serde_json::Value,
-) -> crate::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
+) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
     let Some(doctor_report) = status.get("doctor_report") else {
         return Ok(None);
     };
@@ -228,23 +228,23 @@ fn canonical_daemon_doctor_report(
         Some("observed") => {}
         Some("unknown" | "unsupported") => return Ok(None),
         Some(kind) => {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("daemon canonical Doctor report has unknown typed state: {kind}"),
             });
         }
         None => {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon canonical Doctor report omitted its typed state".to_string(),
             });
         }
     }
     let report = doctor_report.get("report").cloned().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "observed daemon Doctor response omitted its report".to_string(),
         }
     })?;
     serde_json::from_value(report).map(Some).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("daemon canonical Doctor report violated its wire contract: {error}"),
         }
     })
@@ -308,13 +308,13 @@ fn database_health_from_storage_runtime_findings<'a>(
 fn doctor_result(
     dc: &DoctorCounters,
     storage_health: &DatabaseHealth,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     match storage_health {
-        DatabaseHealth::Failed { reason } => Err(crate::errors::TraceDecayError::Config {
+        DatabaseHealth::Failed { reason } => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("doctor storage health check failed [{reason}]"),
         }),
         DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if dc.issues > 0 => {
-            Err(crate::errors::TraceDecayError::Config {
+            Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("doctor found {} issue(s)", dc.issues),
             })
         }
@@ -323,7 +323,7 @@ fn doctor_result(
 }
 
 #[hotpath::measure(label = "doctor.daemon_status", future = true)]
-async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
+async fn daemon_project_status(project_path: &Path) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
     let handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path.to_path_buf()),
         None,
@@ -365,19 +365,19 @@ fn daemon_doctor_runtime_args() -> serde_json::Value {
 /// but malformed remains a terminal contract violation.
 const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
 
-fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
+fn daemon_runtime_status(result: &serde_json::Value) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
     let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
     let mut storage =
         runtime
             .get("database")
             .cloned()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: RUNTIME_TELEMETRY_PENDING.to_string(),
             })?;
     let storage =
         storage
             .as_object_mut()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon runtime database telemetry was not an object".to_string(),
             })?;
     if let Some(pid) = runtime.pointer("/process/pid").cloned() {
@@ -432,7 +432,7 @@ impl DatabaseHealth {
 fn report_daemon_diagnostics_unavailable(
     dc: &mut DoctorCounters,
     db_path: Option<&Path>,
-    error: &crate::errors::TraceDecayError,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
 ) {
     dc.warn(&format!(
         "Canonical Doctor report unavailable from the sole daemon owner: {error}. Health remains unknown; Doctor did not open SQLite."
@@ -631,16 +631,16 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
 }
 
 #[hotpath::measure(label = "doctor.config.upload", future = true)]
-async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result<bool> {
+async fn configured_upload_enabled(project_path: &Path) -> tracedecay_runtime_core::errors::Result<bool> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: error.to_string(),
         }
     })?;
     let request_id =
         mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|error| {
-            crate::errors::TraceDecayError::Config {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("could not create Doctor configuration request: {error}"),
             }
         })?;
@@ -660,40 +660,40 @@ async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result
         )),
         RequestedOutputFormat::Json,
     )
-    .map_err(|error| crate::errors::TraceDecayError::Config {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: error.to_string(),
     })?;
     let result = execute_application_surface(operation, dispatched, Some(&client))
         .await
-        .map_err(|error| crate::errors::TraceDecayError::Config {
+        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: error.to_string(),
         })?;
     let envelope = result
         .result
-        .map_err(|problem| crate::errors::TraceDecayError::Config {
+        .map_err(|problem| tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("{}: {}", problem.problem.code, problem.problem.message),
         })?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "configuration get returned a non-evidence outcome".to_owned(),
         });
     };
     let setting: ResolvedSetting = serde_json::from_value(evidence.payload.ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "configuration get omitted its payload".to_owned(),
         }
     })?)
-    .map_err(|error| crate::errors::TraceDecayError::Config {
+    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("configuration get returned an invalid setting: {error}"),
     })?;
     if setting.key != key {
-        return Err(crate::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "configuration get returned the wrong setting".to_owned(),
         });
     }
     match setting.effective_value {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(crate::errors::TraceDecayError::Config {
+        _ => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "worldwide counter upload setting is not boolean".to_owned(),
         }),
     }
@@ -702,7 +702,7 @@ async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result
 /// Check canonical user configuration and pending upload state.
 fn check_user_config(
     dc: &mut DoctorCounters,
-    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
+    upload_enabled: Result<&bool, &tracedecay_runtime_core::errors::TraceDecayError>,
 ) {
     eprintln!("\n\x1b[1mUser config\x1b[0m");
     match upload_enabled {
@@ -772,7 +772,7 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 #[hotpath::measure(label = "doctor.check.network")]
 fn check_network(
     dc: &mut DoctorCounters,
-    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
+    upload_enabled: Result<&bool, &tracedecay_runtime_core::errors::TraceDecayError>,
 ) {
     eprintln!("\n\x1b[1mNetwork\x1b[0m");
     match upload_enabled {
