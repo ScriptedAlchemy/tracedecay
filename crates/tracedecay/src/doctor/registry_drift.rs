@@ -4,7 +4,7 @@ use tracedecay_application::doctor::{
     DoctorStorageFindingKindV1, DoctorStorageFindingV1,
 };
 
-use crate::retention::orphan_stores::{
+use tracedecay_maintenance::retention::orphan_stores::{
     OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding, UnverifiableReason,
 };
 
@@ -131,7 +131,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::retention::orphan_stores::{StoreContentFence, StoreDirectoryFence};
+    use tracedecay_maintenance::retention::orphan_stores::{StoreContentFence, StoreDirectoryFence};
 
     fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
         OrphanStoreFinding {

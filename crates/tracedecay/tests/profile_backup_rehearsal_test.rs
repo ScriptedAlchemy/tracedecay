@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay::profile_backup::{
+use tracedecay_maintenance::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
     set_rehearsal_publication_fault_for_test,
 };

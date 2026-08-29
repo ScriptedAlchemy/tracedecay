@@ -357,11 +357,11 @@ fn handle_reset_authority(
 async fn brokered_storage_report(
     project_id: Option<&str>,
     project_root: Option<&Path>,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::retention::storage_report::StorageReport> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay_maintenance::retention::storage_report::StorageReport> {
     const PAGE_LIMIT: usize = 8;
     const MAX_PAGES: usize = 4096;
 
-    let mut report = tracedecay::retention::storage_report::StorageReport::default();
+    let mut report = tracedecay_maintenance::retention::storage_report::StorageReport::default();
     let mut cursor = None;
     for _ in 0..MAX_PAGES {
         // One entry per page: the call count exposes how many pages a report
@@ -385,11 +385,11 @@ async fn brokered_storage_report(
             .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon storage report authority timed out after 10 seconds".to_string(),
             })??;
-        let page: tracedecay::retention::storage_report::StorageReport =
+        let page: tracedecay_maintenance::retention::storage_report::StorageReport =
             serde_json::from_value(value)?;
         merge_storage_report_page(&mut report, page);
         if report.coverage.state
-            == tracedecay::retention::storage_report::StorageReportCoverageState::Complete
+            == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Complete
         {
             return Ok(report);
         }
@@ -404,8 +404,8 @@ async fn brokered_storage_report(
 }
 
 fn merge_storage_report_page(
-    report: &mut tracedecay::retention::storage_report::StorageReport,
-    page: tracedecay::retention::storage_report::StorageReport,
+    report: &mut tracedecay_maintenance::retention::storage_report::StorageReport,
+    page: tracedecay_maintenance::retention::storage_report::StorageReport,
 ) {
     if report.profile_root.is_empty() {
         report.profile_root = page.profile_root;
@@ -450,7 +450,7 @@ async fn handle_storage_report(
             (Some(project_id), Some(project_root)) => {
                 // Offline runs have no mounted code graph, so vector liveness
                 // is unprovable and the retention dry run reports unavailable.
-                tracedecay::retention::storage_report::build_project_storage_report(
+                tracedecay_maintenance::retention::storage_report::build_project_storage_report(
                     &profile_root,
                     project_id,
                     project_root,
@@ -458,7 +458,7 @@ async fn handle_storage_report(
                 )
             }
             (None, None) => {
-                tracedecay::retention::storage_report::build_storage_report(&profile_root).await
+                tracedecay_maintenance::retention::storage_report::build_storage_report(&profile_root).await
             }
             _ => unreachable!("clap requires project id and root together"),
         };
@@ -473,13 +473,13 @@ async fn handle_storage_report(
     // A partial total is a floor, not the profile size; say which families are
     // missing rather than printing a number that reads as complete.
     match profile_total.state {
-        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Complete => {
+        tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Complete => {
             println!(
                 "  profile total: {} bytes",
                 format_bytes(profile_total.accounted_bytes)
             );
         }
-        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Partial => {
+        tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Partial => {
             println!(
                 "  profile total: at least {} bytes (incomplete)",
                 format_bytes(profile_total.accounted_bytes)
@@ -544,7 +544,7 @@ async fn handle_storage_report(
     }
     for availability in &report.code_generation_retention_availability {
         if availability.state
-            == tracedecay::retention::storage_report::StorageReportAvailabilityState::Unavailable
+            == tracedecay_maintenance::retention::storage_report::StorageReportAvailabilityState::Unavailable
         {
             println!(
                 "  code-index retention unavailable for {}: {}",
@@ -565,7 +565,7 @@ async fn handle_storage_report(
         );
     }
     if report.coverage.state
-        == tracedecay::retention::storage_report::StorageReportCoverageState::Partial
+        == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Partial
     {
         println!(
             "  coverage: partial; resume with cursor {}",
@@ -594,7 +594,7 @@ fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay_r
     let backup = tracedecay::daemon::with_quiesced_installed_service(
         "complete profile backup",
         |lifecycle| {
-            tracedecay::profile_backup::create_complete_profile_backup(
+            tracedecay_maintenance::profile_backup::create_complete_profile_backup(
                 &profile_root,
                 Path::new(&destination),
                 &backup_id,
@@ -617,7 +617,7 @@ fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let manifest = tracedecay::profile_backup::rehearse_complete_profile_backup(
+    let manifest = tracedecay_maintenance::profile_backup::rehearse_complete_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )

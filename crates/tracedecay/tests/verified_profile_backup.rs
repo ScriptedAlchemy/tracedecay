@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::profile_backup::{
+use tracedecay_maintenance::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
 };
 use tracedecay_graph_db::{
@@ -250,7 +250,7 @@ fn verified_backup_restores_databases_that_open_and_accept_writes() {
     let (profile, _) = seed_profile(&temp);
     let backup = create_backup(&temp, &profile);
 
-    let manifest = tracedecay::profile_backup::load_and_verify_backup(&backup).unwrap();
+    let manifest = tracedecay_maintenance::profile_backup::load_and_verify_backup(&backup).unwrap();
     assert_eq!(manifest.source_brain_id, BRAIN_ID);
     assert_eq!(manifest.source_profile_id, PROFILE_ID);
     assert_eq!(manifest.projects.len(), 1);

@@ -35,7 +35,7 @@ use super::{
     plan_unregistered_collection,
 };
 
-pub(crate) const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
+pub const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
 const MAX_UNREGISTERED_STORE_PAGE_LIMIT: usize = 64;
 const UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER: usize = 8;
 
@@ -48,7 +48,7 @@ pub(super) enum ProjectDirectoryWorkV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum UnregisteredSweepCompletionV1 {
+pub enum UnregisteredSweepCompletionV1 {
     #[default]
     Complete,
     Cancelled,
@@ -70,7 +70,7 @@ impl UnregisteredSweepCompletionV1 {
 /// One daemon/Doctor-owned page. The cursor is an opaque position in the
 /// profile's project directory; callers persist it only after this page has
 /// reached a terminal completion state.
-pub(crate) struct UnregisteredStoreSweepRequestV1<'a> {
+pub struct UnregisteredStoreSweepRequestV1<'a> {
     pub(crate) cursor: Option<String>,
     pub(crate) limit: usize,
     pub(crate) retention_secs: i64,
@@ -82,20 +82,20 @@ pub(crate) struct UnregisteredStoreSweepRequestV1<'a> {
 
 /// Inspection/confirmation/apply receipt for exactly one bounded page.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct UnregisteredStoreSweepReport {
-    pub(crate) plan: UnregisteredCollectionPlan,
-    pub(crate) applied: bool,
-    pub(crate) outcome: CollectionOutcome,
-    pub(crate) next_cursor: Option<String>,
-    pub(crate) completion: UnregisteredSweepCompletionV1,
+pub struct UnregisteredStoreSweepReport {
+    pub plan: UnregisteredCollectionPlan,
+    pub applied: bool,
+    pub outcome: CollectionOutcome,
+    pub next_cursor: Option<String>,
+    pub completion: UnregisteredSweepCompletionV1,
 }
 
 /// Performs the full inspection → confirmation → apply journey for one page,
 /// honoring cancellation/deadline before each bounded filesystem/registry
 /// action. A cancellation never reports an empty successful page or mutates a
 /// partially inspected plan.
-#[hotpath::measure(label = "retention.orphan.sweep_unregistered_page", future = true)]
-pub(crate) async fn sweep_unregistered_store_page(
+#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered_page", future = true)]
+pub async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     request: UnregisteredStoreSweepRequestV1<'_>,
@@ -440,7 +440,7 @@ pub(super) fn read_project_directory_page(
                 project_id,
                 quarantine_name: name,
             })
-        } else if crate::storage::validate_project_id(&name).is_ok() {
+        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
             Some(ProjectDirectoryWorkV1::Project(name))
         } else {
             None
@@ -733,7 +733,7 @@ pub(super) fn read_project_directory_page(
                 project_id,
                 quarantine_name: name,
             });
-        } else if crate::storage::validate_project_id(&name).is_ok() {
+        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
             work.push(ProjectDirectoryWorkV1::Project(name));
         }
         if work.len() == limit || scanned >= scan_limit {
@@ -820,7 +820,7 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantined_project_id(name).is_some() || crate::storage::validate_project_id(name).is_ok()
+    quarantined_project_id(name).is_some() || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
@@ -867,7 +867,7 @@ fn ensure_portable_inventory_header(
         }
     })?;
     let temporary = portable_inventory_temporary_path(inventory)?;
-    crate::storage::PrivateStoreIo::write_file_atomically_durable(
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically_durable(
         inventory,
         &temporary,
         portable_inventory_header(signature).as_bytes(),
@@ -994,9 +994,9 @@ pub(super) fn advance_portable_inventory(
     // splice bytes into a record or publish completion for a concurrently
     // changing inventory. A contender yields without blocking the admission;
     // the page retains its opaque cursor and retries this bounded slice.
-    let lock_path = crate::storage::append_lock_path(inventory);
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(inventory);
     let _writer_lock =
-        match crate::storage::try_acquire_sidecar_lock(&lock_path).map_err(|error| {
+        match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("acquire unregistered inventory writer lock: {error}"),
             }

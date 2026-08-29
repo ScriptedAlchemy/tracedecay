@@ -125,7 +125,7 @@ impl StoreDebrisCapability {
 }
 
 #[must_use]
-#[hotpath::measure(label = "retention.incident.sweep")]
+#[hotpath::measure(label = "maintenance.incident_debris.sweep")]
 pub fn sweep_incident_debris(
     census: &[StoreCensusEntry],
     profile_root: &Path,
@@ -179,6 +179,7 @@ fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSwe
     report
 }
 
+#[hotpath::measure(label = "maintenance.incident_debris.scan")]
 pub fn scan_incident_debris(
     entry: &StoreCensusEntry,
     profile_root: &Path,

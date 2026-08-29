@@ -1915,7 +1915,8 @@ mod runtime_configuration_cutover {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::config::{CompactionThresholdConfig, RetentionConfig, SyncConfig};
+    use crate::config::{RetentionConfig, SyncConfig};
+    use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 
     #[test]
     fn default_retention_runs_only_safe_bounded_maintenance() {
