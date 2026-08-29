@@ -143,7 +143,10 @@ pub(super) fn open_store_directory_nofollow(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Err(CollectionFailureKind::PayloadChanged)
         }
-        Err(_) => Err(CollectionFailureKind::InspectFailed),
+        Err(_) => Err(classify_unreadable_store_leaf(
+            &capability.parent,
+            &capability.leaf_name,
+        )),
     }
 }
 
@@ -157,7 +160,10 @@ pub(super) fn capture_store_directory_fence(
             .map(|root| StoreDirectoryFence::Present { root })
             .map_err(|_| CollectionFailureKind::InspectFailed),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(StoreDirectoryFence::Missing),
-        Err(_) => Err(CollectionFailureKind::InspectFailed),
+        Err(_) => Err(classify_unreadable_store_leaf(
+            &capability.parent,
+            &capability.leaf_name,
+        )),
     }
 }
 
@@ -200,7 +206,12 @@ fn capture_store_content_fence_impl(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(StoreContentFence::Missing);
         }
-        Err(_) => return Err(CollectionFailureKind::InspectFailed),
+        Err(_) => {
+            return Err(classify_unreadable_store_leaf(
+                &capability.parent,
+                &capability.leaf_name,
+            ));
+        }
     };
     capture_store_content_fence_in_dir_controlled(&root, control)
         .map(StoreContentFence::Present)
@@ -325,6 +336,19 @@ fn metadata_inode(_metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
     Err(io::Error::other(
         "orphan-store filesystem identity is unsupported",
     ))
+}
+
+/// A leaf that is not a real directory at the physical profile-relative path
+/// is outside the store authority, even when a symlink target resolves back
+/// inside the profile. Intermediate `open_dir_nofollow` failures already use
+/// this classification; the leaf must match.
+fn classify_unreadable_store_leaf(parent: &Dir, leaf_name: &OsStr) -> CollectionFailureKind {
+    match parent.symlink_metadata(leaf_name) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            CollectionFailureKind::OutsideProfile
+        }
+        _ => CollectionFailureKind::InspectFailed,
+    }
 }
 
 fn check_control(control: Option<CollectionControl<'_>>) -> Result<(), CollectionFailureKind> {

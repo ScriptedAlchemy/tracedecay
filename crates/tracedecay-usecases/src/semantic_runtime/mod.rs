@@ -108,9 +108,10 @@ pub use redundancy::{
     commit_project_semantic_redundancy_authority,
     commit_project_semantic_redundancy_authority_under_gate,
     prepare_project_semantic_redundancy_authority, project_committed_semantic_pins,
-    project_semantic_activation_gate, project_semantic_redundancy_generation,
-    project_semantic_redundancy_revision, project_semantic_retained_code_generation,
-    project_semantic_retained_vector_generations, retain_project_semantic_code_sources,
+    project_semantic_activation_gate, project_semantic_activation_receipt,
+    project_semantic_redundancy_generation, project_semantic_redundancy_revision,
+    project_semantic_retained_code_generation, project_semantic_retained_vector_generations,
+    retain_project_semantic_code_sources,
 };
 pub(crate) use redundancy::{
     register_project_semantic_redundancy_generation,

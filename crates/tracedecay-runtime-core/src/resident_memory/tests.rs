@@ -360,11 +360,17 @@ fn watermarks_derive_from_the_configured_limit_and_keep_low_below_high() {
     let pressure = ResidentMemoryPressureV1::new(limit);
     assert_eq!(
         pressure.high_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(limit, RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1)
+        resident_memory_watermark_bytes_v1(
+            limit,
+            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1
+        )
     );
     assert_eq!(
         pressure.low_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(limit, RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1)
+        resident_memory_watermark_bytes_v1(
+            limit,
+            RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1
+        )
     );
     assert!(pressure.low_watermark_bytes() < pressure.high_watermark_bytes());
     assert_eq!(pressure.state(), ResidentMemoryPressureStateV1::Unobserved);

@@ -12,7 +12,6 @@ use parking_lot::{
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
-use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::recovery::{
     load_quarantined_projections, map_open_error, projection_mismatch,
     validate_or_initialize_format,
@@ -21,6 +20,7 @@ use crate::state::{
     FormatState, latest_projection, load_entity_locator, outgoing_relation_projections,
     projection_entities, projection_relations, publication,
 };
+use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
     GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
@@ -68,10 +68,7 @@ pub(crate) struct Inner {
     /// generations this database sealed. Derived artifacts: see
     /// `crate::sealed_store`.
     pub(crate) sealed_generations: RwLock<
-        BTreeMap<
-            crate::lease::GenerationLocator,
-            Arc<crate::sealed_store::SealedGenerationStore>,
-        >,
+        BTreeMap<crate::lease::GenerationLocator, Arc<crate::sealed_store::SealedGenerationStore>>,
     >,
     /// Set on a reopened sealed store handle: every write path behind
     /// [`GraphDb::write_guard`] then refuses with the typed

@@ -48,8 +48,14 @@ fn fixture_manifest() -> GraphGenerationManifest {
                         property_name("name"),
                         GraphProperty::String(format!("symbol_{index}")),
                     ),
-                    (property_name("arity"), GraphProperty::I64(i64::from(index % 4))),
-                    (property_name("exported"), GraphProperty::Bool(index % 2 == 0)),
+                    (
+                        property_name("arity"),
+                        GraphProperty::I64(i64::from(index % 4)),
+                    ),
+                    (
+                        property_name("exported"),
+                        GraphProperty::Bool(index % 2 == 0),
+                    ),
                     (
                         property_name("score"),
                         GraphProperty::F64(f64::from(index) / 7.0),
@@ -72,7 +78,10 @@ fn fixture_manifest() -> GraphGenerationManifest {
                 entity_ref(index),
                 entity_ref(0),
                 GraphRelationKind::new("calls").unwrap(),
-                BTreeMap::from([(property_name("weight"), GraphProperty::I64(i64::from(index)))]),
+                BTreeMap::from([(
+                    property_name("weight"),
+                    GraphProperty::I64(i64::from(index)),
+                )]),
             )
             .unwrap(),
         );

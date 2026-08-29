@@ -26,22 +26,22 @@ use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 #[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
+#[cfg(test)]
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 /// Only the generation fixtures build tagged digests; production here works in
 /// untagged hex, so importing this unconditionally is an unused-import error.
 #[cfg(test)]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
-#[cfg(test)]
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
+mod generation_transactions;
 mod graph_replay_release;
 mod journal;
 mod locking;
 mod receipt_store;
 mod scope_quarantine;
-mod generation_transactions;
 mod scope_roots;
 mod text_artifacts;
 pub use graph_replay_release::{
@@ -70,14 +70,12 @@ use generation_transactions::{
     cleanup_committed_transaction_under_graph_replay_pool_lock, clear_transaction,
     expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
     open_file_sha256_hex_cancellable, path_still_names_open_file, persist_transaction,
-    receipt_is_durable, regular_file_exists, remove_empty_stage_root,
-    rollback_staged_transaction, stage_collectable_generations, transaction_path, write_receipt,
+    receipt_is_durable, regular_file_exists, remove_empty_stage_root, rollback_staged_transaction,
+    stage_collectable_generations, transaction_path, write_receipt,
 };
-use receipt_store::receipt_digest_file_component;
 #[cfg(test)]
-use generation_transactions::{
-    transaction_stage_root, verify_existing_graph_replay_pool_entry,
-};
+use generation_transactions::{transaction_stage_root, verify_existing_graph_replay_pool_entry};
+use receipt_store::receipt_digest_file_component;
 use scope_roots::is_code_index_scope_hash;
 #[cfg(test)]
 use scope_roots::{
@@ -85,14 +83,14 @@ use scope_roots::{
     scope_receipt_digest, scope_receipt_path, scope_stage_root, scope_transaction_path,
     validate_scope_transaction, write_scope_receipt,
 };
-use text_artifacts::{
-    execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
-    recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
-};
 #[cfg(test)]
 use text_artifacts::{
     build_text_artifact_receipt, persist_text_artifact_transaction,
     stage_collectable_text_artifacts, total_text_artifact_bytes, write_text_artifact_receipt,
+};
+use text_artifacts::{
+    execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
+    recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
 };
 
 use generation_scan::read_generation_metadata;
@@ -336,7 +334,6 @@ pub enum CodeGenerationRetentionErrorV1 {
     #[error("code-generation retention cancelled")]
     Cancelled,
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGenerationRetentionModeV1 {
@@ -855,14 +852,12 @@ fn plan_code_generation_retention_with_verification_cancellable(
     })
 }
 
-
 fn generation_file_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("generation-")?
         .strip_suffix(".json")
         .filter(|digest| is_lowercase_hex(digest, 64))
 }
-
 
 /// `graph_replay_pool_root` is the project graph's replay pool. When present,
 /// every retired generation survives retention as a hard-linked pool entry
@@ -1444,8 +1439,6 @@ fn build_receipt(
     })
 }
 
-
-
 fn sync_directory(path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
     tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
         .map_err(storage)
@@ -1456,7 +1449,6 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
         total.saturating_add(generation.size_bytes)
     })
 }
-
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())

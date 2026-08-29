@@ -23,12 +23,12 @@ use crate::recovery::{
     set_projection_quarantine,
 };
 use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
-use crate::verified_marker::GenerationVerification;
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_relation_deletion_page_checked,
 };
+use crate::verified_marker::GenerationVerification;
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef,
     GraphGenerationManifest, GraphGenerationManifestIdentity, GraphGenerationRelation,

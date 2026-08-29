@@ -85,7 +85,9 @@ fn assert_snapshot_reads(
         .unwrap()
         .expect("sealed entity:a must resolve");
     assert_eq!(
-        entity.properties.get(&GraphPropertyName::new("marker").unwrap()),
+        entity
+            .properties
+            .get(&GraphPropertyName::new("marker").unwrap()),
         Some(&GraphProperty::String(marker.to_owned())),
     );
     let relation = snapshot
@@ -273,7 +275,9 @@ fn bytes_rows_seal_in_replay_form_and_read_exactly() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        entity.properties.get(&GraphPropertyName::new("record").unwrap()),
+        entity
+            .properties
+            .get(&GraphPropertyName::new("record").unwrap()),
         Some(&GraphProperty::Bytes(payload)),
     );
 }

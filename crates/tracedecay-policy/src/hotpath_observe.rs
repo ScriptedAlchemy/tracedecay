@@ -24,7 +24,8 @@ pub(crate) fn authorization_outcome(
         }
         (
             _,
-            SourceAuthorizationDispositionV1::Deny | SourceAuthorizationDispositionV1::NotApplicable,
+            SourceAuthorizationDispositionV1::Deny
+            | SourceAuthorizationDispositionV1::NotApplicable,
         ) => {
             hotpath::gauge!("policy.authorization.outcome.denied").inc(1.0);
         }
