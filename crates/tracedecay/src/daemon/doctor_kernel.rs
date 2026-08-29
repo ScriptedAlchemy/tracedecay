@@ -677,7 +677,10 @@ fn orphan_store_findings_from_census(
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
     let classified = tracedecay_maintenance::retention::orphan_stores::classify_stores(census, now);
-    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(classified, retention_secs);
+    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+        classified,
+        retention_secs,
+    );
     storage_family_read(
         plan.collect
             .iter()

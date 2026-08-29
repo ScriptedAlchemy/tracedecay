@@ -50,7 +50,6 @@ use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::sqlite_read_snapshot::{BOUNDED_PROBE_BUSY_TIMEOUT, pragma_u64};
 
-
 /// Incremental-vacuum compaction trigger consumed by this pass and by daemon
 /// owner config. Threads [`CompactionTriggerPolicyV1`] through configured
 /// thresholds: the pass samples a store's free-page ratio and, when this
@@ -380,7 +379,9 @@ mod tests {
             default_branch: "main".to_string(),
             branches,
         };
-        let active = dir.path().join(tracedecay_runtime_core::config::DB_FILENAME);
+        let active = dir
+            .path()
+            .join(tracedecay_runtime_core::config::DB_FILENAME);
         let candidates = select_branch_db_candidates(dir.path(), &meta, &active);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].branch, "feature");
@@ -563,8 +564,11 @@ mod tests {
 
         // The mounted handle names the file through `real/`; branch-meta
         // rebuilds it through the symlinked `linked/`.
-        let candidates =
-            select_branch_db_candidates(&linked, &meta, &real.join(tracedecay_runtime_core::config::DB_FILENAME));
+        let candidates = select_branch_db_candidates(
+            &linked,
+            &meta,
+            &real.join(tracedecay_runtime_core::config::DB_FILENAME),
+        );
 
         assert!(
             candidates.is_empty(),

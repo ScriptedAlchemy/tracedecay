@@ -1423,7 +1423,12 @@ async fn maybe_run_global_retention(
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
-            tracedecay_maintenance::retention::prune_global_retention(database, &global_config, now_secs).await
+            tracedecay_maintenance::retention::prune_global_retention(
+                database,
+                &global_config,
+                now_secs,
+            )
+            .await
         })
         .await
     else {

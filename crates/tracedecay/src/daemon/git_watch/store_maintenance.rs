@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 
 use crate::branch::BranchAdminAction;
 use crate::config::RetentionConfig;
-use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
+use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -1940,15 +1940,19 @@ pub(super) async fn run_branch_compaction(
         return true;
     };
     let active_db_path = layout.graph_db_path.clone();
-    let candidates = tracedecay_maintenance::retention::branch_compaction::select_branch_db_candidates(
-        &layout.data_root,
-        &meta,
-        &active_db_path,
-    );
+    let candidates =
+        tracedecay_maintenance::retention::branch_compaction::select_branch_db_candidates(
+            &layout.data_root,
+            &meta,
+            &active_db_path,
+        );
     if candidates.is_empty() {
         return true;
     }
-    let report = tracedecay_maintenance::retention::branch_compaction::compact_branch_databases(&candidates, config);
+    let report = tracedecay_maintenance::retention::branch_compaction::compact_branch_databases(
+        &candidates,
+        config,
+    );
     if report.policy_invalid {
         // Never silent: an out-of-range threshold disables the pass entirely
         // and would otherwise be indistinguishable from "nothing to compact".

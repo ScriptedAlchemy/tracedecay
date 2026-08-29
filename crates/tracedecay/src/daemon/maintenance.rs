@@ -1551,14 +1551,17 @@ async fn run_cold_store_page(
                 }
             })?,
         );
-        let plan =
-            tracedecay_maintenance::retention::orphan_stores::plan_collection(findings, retention_window_secs(days));
-        let (outcome, _) = tracedecay_maintenance::retention::orphan_stores::execute_registered_collection(
-            profile_database,
-            &plan,
-            profile_root,
-        )
-        .await?;
+        let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+            findings,
+            retention_window_secs(days),
+        );
+        let (outcome, _) =
+            tracedecay_maintenance::retention::orphan_stores::execute_registered_collection(
+                profile_database,
+                &plan,
+                profile_root,
+            )
+            .await?;
         metrics.reclaimed_bytes = metrics
             .reclaimed_bytes
             .saturating_add(outcome.reclaimed_bytes);
