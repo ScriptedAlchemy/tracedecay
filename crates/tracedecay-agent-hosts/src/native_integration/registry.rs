@@ -127,14 +127,18 @@ impl NativeIntegrationStoreRegistry {
         F: FnOnce() -> NativeIntegrationStoreResult<DaemonNativeIntegrationStore>,
     {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(tracedecay_store::NativeIntegrationStoreError::Unavailable);
+            return Err(tracedecay_store::NativeIntegrationStoreError::unavailable(
+                "native integration store registry is shut down",
+            ));
         }
         let mut stores = self
             .stores
             .lock()
-            .map_err(|_| tracedecay_store::NativeIntegrationStoreError::Unavailable)?;
+            .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?;
         if self.closed.load(Ordering::SeqCst) {
-            return Err(tracedecay_store::NativeIntegrationStoreError::Unavailable);
+            return Err(tracedecay_store::NativeIntegrationStoreError::unavailable(
+                "native integration store registry is shut down",
+            ));
         }
         if let Some(existing) = stores.get(&path) {
             return Ok(existing.clone());
@@ -150,7 +154,7 @@ impl NativeIntegrationStoreRegistry {
             let mut retained = self
                 .stores
                 .lock()
-                .map_err(|_| tracedecay_store::NativeIntegrationStoreError::Unavailable)?;
+                .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?;
             retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
         };
         tokio::task::spawn_blocking(move || {
@@ -161,7 +165,7 @@ impl NativeIntegrationStoreRegistry {
             Ok(joined)
         })
         .await
-        .map_err(|_| tracedecay_store::NativeIntegrationStoreError::Unavailable)?
+        .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?
     }
 }
 

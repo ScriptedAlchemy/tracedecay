@@ -108,3 +108,19 @@ impl GitMutationWriteTransaction<'_> {
         }
     }
 }
+
+impl crate::sqlite_persist::PersistWriteTransaction for GitMutationWriteTransaction<'_> {
+    fn commit(
+        self,
+    ) -> impl std::future::Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send
+    {
+        GitMutationWriteTransaction::commit(self)
+    }
+
+    fn rollback(
+        self,
+    ) -> impl std::future::Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send
+    {
+        GitMutationWriteTransaction::rollback(self)
+    }
+}

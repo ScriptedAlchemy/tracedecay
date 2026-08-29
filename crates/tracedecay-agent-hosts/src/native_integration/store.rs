@@ -144,7 +144,9 @@ impl DaemonNativeIntegrationStore {
                     .enable_all()
                     .build();
                 let Ok(runtime) = runtime else {
-                    let _ = ready.send(Err(NativeIntegrationStoreError::Unavailable));
+                    let _ = ready.send(Err(NativeIntegrationStoreError::unavailable(
+                        "failed to start native integration store runtime",
+                    )));
                     return;
                 };
                 if ready.send(Ok(())).is_err() {
@@ -152,10 +154,10 @@ impl DaemonNativeIntegrationStore {
                 }
                 run_store_actor(&runtime, &database, &receiver);
             })
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)?;
+            .map_err(NativeIntegrationStoreError::unavailable)?;
         let startup = started
             .recv_timeout(NATIVE_INTEGRATION_STORE_ACTOR_TIMEOUT)
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)
+            .map_err(NativeIntegrationStoreError::unavailable)
             .and_then(|result| result);
         if let Err(error) = startup {
             drop(commands);
@@ -171,13 +173,17 @@ impl DaemonNativeIntegrationStore {
     fn submit(&self, command: StoreCommand) -> NativeIntegrationStoreResult<()> {
         self.commands
             .lock()
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)?
+            .map_err(NativeIntegrationStoreError::unavailable)?
             .as_ref()
-            .ok_or(NativeIntegrationStoreError::Unavailable)?
+            .ok_or_else(|| {
+                NativeIntegrationStoreError::unavailable(
+                    "native integration store actor is shut down",
+                )
+            })?
             .try_send(command)
             .map_err(|error| match error {
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    NativeIntegrationStoreError::Unavailable
+                    NativeIntegrationStoreError::unavailable(error)
                 }
             })
     }
@@ -189,7 +195,7 @@ impl DaemonNativeIntegrationStore {
             .recv_timeout(NATIVE_INTEGRATION_STORE_ACTOR_TIMEOUT)
             .map_err(|error| match error {
                 RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected => {
-                    NativeIntegrationStoreError::Unavailable
+                    NativeIntegrationStoreError::unavailable(error)
                 }
             })?
     }
@@ -217,19 +223,19 @@ impl DaemonNativeIntegrationStore {
     pub(crate) fn shutdown(&self) -> NativeIntegrationStoreResult<bool> {
         self.commands
             .lock()
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)?
+            .map_err(NativeIntegrationStoreError::unavailable)?
             .take();
         let worker = self
             .worker
             .lock()
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)?
+            .map_err(NativeIntegrationStoreError::unavailable)?
             .take();
         let Some(worker) = worker else {
             return Ok(false);
         };
-        worker
-            .join()
-            .map_err(|_| NativeIntegrationStoreError::Unavailable)?;
+        worker.join().map_err(|_| {
+            NativeIntegrationStoreError::unavailable("native integration store worker panicked")
+        })?;
         Ok(true)
     }
 }
