@@ -153,6 +153,7 @@ pub async fn ingest_project_sources_for_provider_without_registered_authority<
     )
 }
 
+#[hotpath::measure(label = "sessions.ingest.project", future = true)]
 async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     project_root: &Path,

@@ -339,7 +339,7 @@ export function GenerationAnchor() { return 1; }
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            Arc::clone(&graph_runtime),
+            graph_runtime.code_graph_seat_port(),
             project_database,
             super::CodeGraphActivationPolicyV1::Enabled,
         )

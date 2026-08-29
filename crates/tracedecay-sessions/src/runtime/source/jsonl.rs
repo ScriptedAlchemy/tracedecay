@@ -874,7 +874,6 @@ struct RawJsonlScanRequest {
 /// nominal batch cap: a capped read finishes at most one bounded complete record
 /// that crosses the cap, then leaves the remaining backlog for a later call.
 /// This guarantees cursor progress without allowing a second record past the cap.
-#[hotpath::measure]
 pub fn stream_new_jsonl(
     path: &Path,
     prev: StoredCursor,
@@ -903,7 +902,6 @@ pub fn stream_new_jsonl(
 /// `max_record_bytes` includes the terminating newline. Other providers retain
 /// [`stream_new_jsonl`]'s skip-and-advance behavior.
 #[cfg(test)]
-#[hotpath::measure]
 pub fn stream_new_jsonl_strict(
     path: &Path,
     prev: StoredCursor,
@@ -923,7 +921,7 @@ pub fn stream_new_jsonl_strict(
     })
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.source.stream_jsonl")]
 pub(super) fn stream_new_jsonl_with_policy(
     path: &Path,
     prev: StoredCursor,
@@ -1026,7 +1024,6 @@ pub struct RawNewJsonl {
 
 /// Strict bounded framing used by Claude's single-parse privacy boundary.
 #[cfg(test)]
-#[hotpath::measure]
 pub fn stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
@@ -1043,7 +1040,6 @@ pub fn stream_new_jsonl_raw_strict(
 }
 
 #[cfg(test)]
-#[hotpath::measure]
 pub fn try_stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
@@ -1053,7 +1049,6 @@ pub fn try_stream_new_jsonl_raw_strict(
     try_stream_new_jsonl_raw_strict_with_resume(path, prev, max_new_bytes, max_record_bytes, None)
 }
 
-#[hotpath::measure]
 pub fn try_stream_new_jsonl_raw_strict_with_resume(
     path: &Path,
     prev: StoredCursor,
@@ -1134,7 +1129,6 @@ struct PreparedJsonlScan<'a> {
 }
 
 impl<'a> PreparedJsonlScan<'a> {
-    #[hotpath::measure]
     fn capture(
         path: &Path,
         mut file: MeasuredJsonlFile<'a>,
@@ -1395,7 +1389,6 @@ struct RawJsonlBatchScanner<'a> {
 }
 
 impl<'a> RawJsonlBatchScanner<'a> {
-    #[hotpath::measure]
     fn start(
         path: &Path,
         prepared: PreparedJsonlScan<'a>,
@@ -1797,7 +1790,6 @@ impl<'a> RawJsonlBatchScanner<'a> {
     }
 }
 
-#[hotpath::measure]
 fn try_stream_new_jsonl_raw_from_file(
     path: &Path,
     file: std::fs::File,

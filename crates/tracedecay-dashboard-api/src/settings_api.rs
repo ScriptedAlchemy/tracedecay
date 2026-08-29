@@ -38,7 +38,7 @@ use crate::application::settings_control::{
 };
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
+use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
     ConfigurationRevisionId,

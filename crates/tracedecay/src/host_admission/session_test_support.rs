@@ -26,10 +26,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_agent_hosts::automation::scheduler::SessionActivity,
+        tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     > {
         Ok(
-            tracedecay_agent_hosts::automation::scheduler::load_session_activity(
+            tracedecay_automation_runtime::automation::scheduler::load_session_activity(
                 self.session_database_for_test(scope)?,
             )
             .await,

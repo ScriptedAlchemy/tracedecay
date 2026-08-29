@@ -21,7 +21,7 @@ use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;

@@ -177,6 +177,7 @@ pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_a
     )
 }
 
+#[hotpath::measure(label = "sessions.ingest.startup", future = true)]
 async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     registry_db: &A,

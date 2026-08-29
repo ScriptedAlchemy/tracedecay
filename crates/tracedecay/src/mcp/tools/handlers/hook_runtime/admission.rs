@@ -445,7 +445,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             tokio::time::timeout(
                 std::time::Duration::from_millis(50),
                 tokio::task::spawn_blocking(move || {
-                    crate::daemon::native_integration::github_stack_hook_available(
+                    tracedecay_agent_hosts::native_integration::github_stack_hook_available(
                         project_id,
                         worktree_id,
                     )
@@ -536,12 +536,12 @@ pub(super) fn hook_v2_profile_admit(
     profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Value> {
     let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
-        tracedecay_agent_hosts::automation::config_error(format!(
+        tracedecay_automation_runtime::automation::config_error(format!(
             "failed to resolve authenticated Hook V2 profile route: {error}"
         ))
     })?;
     if profile_identity.profile_root() != routed_profile_root.as_path() {
-        return Err(tracedecay_agent_hosts::automation::config_error(
+        return Err(tracedecay_automation_runtime::automation::config_error(
             "authenticated profile identity does not match the hook route",
         ));
     }
@@ -550,19 +550,21 @@ pub(super) fn hook_v2_profile_admit(
         .get("admission")
         .cloned()
         .ok_or_else(|| {
-            tracedecay_agent_hosts::automation::config_error(format!("{action} requires admission"))
+            tracedecay_automation_runtime::automation::config_error(format!(
+                "{action} requires admission"
+            ))
         })
         .and_then(|value| {
             serde_json::from_value::<tracedecay_hooks::ProfileScopedNativeHookAdmissionV1>(value)
                 .map_err(|error| {
-                    tracedecay_agent_hosts::automation::config_error(format!(
+                    tracedecay_automation_runtime::automation::config_error(format!(
                         "invalid profile-scoped Hook V2 admission: {error}"
                     ))
                 })
         })?;
     let binding = profile_hook_v2_binding(profile_identity, admission.decoded.host);
     let envelope = admission.into_envelope(&binding).map_err(|error| {
-        tracedecay_agent_hosts::automation::config_error(format!(
+        tracedecay_automation_runtime::automation::config_error(format!(
             "profile-scoped Hook V2 envelope rejected: {error}"
         ))
     })?;

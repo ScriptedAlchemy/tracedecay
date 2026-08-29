@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -13,6 +12,9 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCompleteCodeIndexV1,
 };
 use crate::code_index::graph_projection::CodeGraphProjectionStore;
+use crate::daemon::store_runtime::{
+    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+};
 
 /// Test-only injected retryable activation failures, keyed by worktree id.
 /// The worktree id is unique per test fixture, while generation ids are
@@ -149,8 +151,7 @@ fn take_injected_activation_gate(
 #[derive(Clone)]
 pub(super) enum CodeGraphActivationAuthorityV1 {
     Persistent {
-        runtime:
-            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         policy: Arc<AtomicBool>,
     },
@@ -296,12 +297,6 @@ impl CodeGraphActivationAuthorityV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CodeGraphReplayBindingV1 {
-    pub generations_root: PathBuf,
-    pub sealed_state_digest: SealedGraphStateDigest,
-}
-
 impl DaemonCodeIndexPublicationStoreV1 {
     pub(super) fn sealed_replay_binding(
         &self,
@@ -372,7 +367,7 @@ impl PendingInteractiveCatalogWarmV1 {
 impl LatestCompleteCodeIndexV1 {
     fn activate_persistent_graph(
         &self,
-        retained: crate::daemon::store_runtime::session_registry::RetainedCodeGraphRuntimeV1,
+        retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
         cancellation: Arc<AtomicBool>,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();

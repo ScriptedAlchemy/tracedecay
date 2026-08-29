@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use serde_json::{Map, Value, json};
 use tower::ServiceExt;
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::automatic_facts::{
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, record_session_automatic_facts,
 };
 use tracedecay_domain::{

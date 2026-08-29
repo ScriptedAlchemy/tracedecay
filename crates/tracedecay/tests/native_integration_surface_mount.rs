@@ -23,7 +23,7 @@ use tracedecay::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, parse_application_surface_request,
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
-use tracedecay::daemon_client::RequestedOutputFormat;
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_application::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,

@@ -9,7 +9,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationProblem, DaemonInvocationResponse, WorkflowApplicationInvocation,
     WorkflowApplicationOutcome,
 };
@@ -40,7 +40,7 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-    worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+    worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
 ) -> DaemonInvocationResponse {
     let Some(holder_root) = project_root.canonicalize().ok() else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
@@ -52,7 +52,7 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
     else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
     };
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
         tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS

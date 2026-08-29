@@ -33,7 +33,10 @@ mod status_cmd;
 mod tool_command;
 mod update_cmd;
 mod upgrade;
+mod remote_command;
+mod work_cli;
 mod work_command;
+mod workflow_cli;
 mod workflow_command;
 
 pub use tracedecay::serve;
@@ -1079,7 +1082,7 @@ async fn dispatch_runtime_command(
         Commands::Remote { action } => {
             hotpath::measure_block!(
                 "cli.remote.run",
-                tracedecay::remote_command::run(action.into())
+                crate::remote_command::run(action.into())
             )?;
         }
         Commands::Lsp { action } => {

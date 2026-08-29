@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::settle_in_process_invocation;
-use crate::daemon_client::InvocationCancellationPolicy;
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::InvocationCancellationPolicy;
+use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
 };
 use tracedecay_application::{CancellationSignal, clock::now_micros};
@@ -193,7 +193,7 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
 
     assert!(matches!(
         response,
-        Err(crate::daemon_client::DaemonInvocationError::Cancelled { .. })
+        Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled { .. })
     ));
     let guard = tokio::time::timeout(Duration::from_secs(1), quiescence)
         .await

@@ -9965,7 +9965,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            Arc::clone(&graph_runtime),
+            graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             super::CodeGraphActivationPolicyV1::Enabled,
         )
@@ -10092,7 +10092,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     let native_graph_before = std::fs::read(&native_graph_path).unwrap_or_default();
 
     let graph_activation = super::graph_activation::CodeGraphActivationAuthorityV1::Persistent {
-        runtime: Arc::clone(&graph_runtime),
+        runtime: graph_runtime.code_graph_seat_port(),
         project_database,
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };

@@ -17,8 +17,8 @@ use tracedecay::application_surface::{
     CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
     parse_application_surface_request, resolve_http_application_surface,
 };
-use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::retrieval::SymbolGraphScope;
 use tracedecay_application::{
@@ -94,9 +94,9 @@ async fn production_fixture() -> ProductionFixture {
         .output()
         .expect("run tracedecay init");
     assert_command_success("tracedecay init", &initialized);
-    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
         .expect("daemon handshake");
-    let client = DaemonInvocationClient::for_current(handshake).expect("daemon client");
+    let client = tracedecay::daemon::invocation_client_for_current(handshake).expect("daemon client");
     // `run_affected_tests` needs the verified code graph; honour the same
     // published pre-admission retry contract as the later surface reads.
     for name in [
@@ -679,9 +679,9 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
 
     let fresh_client = || {
         let handshake =
-            DaemonHandshake::for_current_client(Some(fixture.project.clone()), None, false, false)
+            tracedecay::daemon::handshake_for_current_client(Some(fixture.project.clone()), None, false, false)
                 .expect("daemon handshake");
-        DaemonInvocationClient::for_current(handshake).expect("daemon client")
+        tracedecay::daemon::invocation_client_for_current(handshake).expect("daemon client")
     };
     let client_a = fresh_client();
     let client_b = fresh_client();

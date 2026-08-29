@@ -1,4 +1,4 @@
-use tracedecay_agent_hosts::automation::agent_targets::{
+use tracedecay_automation_runtime::automation::agent_targets::{
     install_codex_managed_agents, remove_managed_agents,
 };
 

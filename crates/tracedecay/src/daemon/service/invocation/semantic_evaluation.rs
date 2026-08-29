@@ -8,7 +8,7 @@ enum SemanticExecutionInputV1 {
 
 enum SemanticExecutionOutcomeV1 {
     Qualified {
-        qualification: crate::daemon_contract::CanonicalQualificationBlob,
+        qualification: tracedecay_daemon_protocol::CanonicalQualificationBlob,
     },
     Published(Box<tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1>),
 }
@@ -34,7 +34,7 @@ impl SemanticInvocationControlV1 {
     }
 
     pub(in crate::daemon) fn from_request(
-        request: &crate::daemon_contract::DaemonInvocationRequest,
+        request: &tracedecay_daemon_protocol::DaemonInvocationRequest,
     ) -> Option<Self> {
         let (observed_at, deadline, cancellation) = match &request.payload {
             DaemonInvocationPayload::SemanticEvaluateAndPublish {
@@ -304,7 +304,7 @@ impl DaemonInvocationService {
                                 )
                             })?;
                             let qualification =
-                                crate::daemon_contract::CanonicalQualificationBlob::new(
+                                tracedecay_daemon_protocol::CanonicalQualificationBlob::new(
                                     qualification_bytes,
                                 )
                                 .map_err(|error| {

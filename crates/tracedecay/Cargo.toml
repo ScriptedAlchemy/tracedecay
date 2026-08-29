@@ -97,24 +97,25 @@ hotpath = [
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-automation/hotpath",
+    "tracedecay-automation-runtime/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-retention/hotpath",
     "tracedecay-dashboard-api/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-admission/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-maintenance/hotpath",
+    "tracedecay-mcp/hotpath",
     "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-search-eval/hotpath",
-    "tracedecay-sdk/hotpath",
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-sessions/hotpath",
@@ -132,24 +133,25 @@ hotpath-alloc = [
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
     "tracedecay-code-index-retention/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-admission/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-maintenance/hotpath-alloc",
+    "tracedecay-mcp/hotpath-alloc",
     "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-search-eval/hotpath-alloc",
-    "tracedecay-sdk/hotpath-alloc",
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -167,24 +169,25 @@ hotpath-cpu = [
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
     "tracedecay-code-index-retention/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-admission/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-maintenance/hotpath-cpu",
+    "tracedecay-mcp/hotpath-cpu",
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-search-eval/hotpath-cpu",
-    "tracedecay-sdk/hotpath-cpu",
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -286,6 +289,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 # out of a default or `production` build: they compile only under `cfg(test)`
 # or when a consumer asks for them explicitly.
 test-helpers = [
+    "tracedecay-automation-runtime/test-helpers",
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
 ]
@@ -295,9 +299,11 @@ test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
     "tracedecay-agent-hosts/test-transport",
+    "tracedecay-automation-runtime/test-transport",
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-host-admission/test-transport",
     "tracedecay-usecases/test-transport",
+    "tracedecay-mcp/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
     # test-transport-gated and drives the global-db session-temporal refresh
     # helpers; plain builds (no dev-dep feature unification) need the forward.
@@ -394,15 +400,17 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
-tracedecay-jsonrpc = { path = "../tracedecay-jsonrpc", version = "0.1.0" }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
@@ -417,7 +425,6 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
@@ -512,6 +519,10 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", fe
 # The root's cfg(test) host-admission support composes the dashboard test
 # authority, which lives behind the dashboard-api test-transport feature.
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
+# ChannelTransport used to be cfg(test) in this crate. After the move it lives
+# behind tracedecay-mcp's test-transport feature, so root unit tests must
+# enable that feature without putting it on the production CLI lane.
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["test-transport"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }

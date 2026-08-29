@@ -11,10 +11,10 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use crate::mcp::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
-use tracedecay_jsonrpc::{JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
-use super::transport::{BrokerReadHalf, BrokerWriteHalf};
+use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 use super::*;
 
 pub(super) struct BrokerStreamTransport {
@@ -286,7 +286,7 @@ impl BrokerStreamTransport {
     }
 }
 
-impl tracedecay_jsonrpc::McpTransport for BrokerStreamTransport {
+impl tracedecay_mcp::McpTransport for BrokerStreamTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
@@ -482,7 +482,7 @@ mod peer_close_tests {
         ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
-    use tracedecay_jsonrpc::McpTransport;
+    use tracedecay_mcp::McpTransport;
     use tracedecay_usecases::observability::{
         BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
         DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1,

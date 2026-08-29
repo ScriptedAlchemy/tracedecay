@@ -135,11 +135,11 @@ fn retained_effect_outcome(
 }
 
 struct StaticDaemonResponseExecutor {
-    response: Mutex<Option<crate::daemon_contract::DaemonInvocationResponse>>,
+    response: Mutex<Option<tracedecay_daemon_protocol::DaemonInvocationResponse>>,
 }
 
 impl StaticDaemonResponseExecutor {
-    fn new(response: crate::daemon_contract::DaemonInvocationResponse) -> Self {
+    fn new(response: tracedecay_daemon_protocol::DaemonInvocationResponse) -> Self {
         Self {
             response: Mutex::new(Some(response)),
         }
@@ -161,18 +161,18 @@ impl tracedecay_application::ApplicationInvocationExecutor for StaticDaemonRespo
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for StaticDaemonResponseExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonResponseExecutor {
     fn invoke_controlled(
         &self,
-        _request: crate::daemon_contract::DaemonInvocationRequest,
+        _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: Deadline,
         _cancellation: CancellationSignal,
-        _policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         let response = self
@@ -189,10 +189,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for StaticDaemonResponseExec
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_runtime_core::errors::Result<()>,
-    > {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -209,7 +206,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 async fn invoke_retained_http_with_response(
     operation: RetainedSurfaceOperation,
     request_id: RequestId,
-    response: crate::daemon_contract::DaemonInvocationResponse,
+    response: tracedecay_daemon_protocol::DaemonInvocationResponse,
 ) -> axum::response::Response {
     let deadline = Deadline::new(UtcMicros(1_000)).expect("deadline");
     let cancellation =
@@ -219,7 +216,7 @@ async fn invoke_retained_http_with_response(
         json!({"fact_id": "fact.retained.fixture"}),
     )
     .expect("retained request");
-    let invocation = crate::daemon_contract::DaemonInvocationRequest::retained_application(
+    let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
         request_id.as_str(),
         retained_request,
         UtcMicros(10),
@@ -238,7 +235,7 @@ async fn invoke_retained_http_with_response(
         },
         invocation,
         |outcome| match outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope,
                 outcome,
             } => tracedecay_application::retained_surface_outcome_matches_terminal(
@@ -261,7 +258,7 @@ fn rejects_each_untrusted_daemon_envelope_field_before_payload_selection() {
         RequestId::new("request.retained.http.caller").expect("caller request id");
     let daemon_request_id =
         RequestId::new("request.retained.http.daemon").expect("daemon request id");
-    let response = crate::daemon_contract::DaemonInvocationResponse::application_problem(
+    let response = tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
         caller_request_id.as_str(),
         retained_partial_effect_problem(operation, &caller_request_id, retained_scope("caller")),
     );
@@ -272,7 +269,7 @@ fn rejects_each_untrusted_daemon_envelope_field_before_payload_selection() {
     invalid_responses.push(invalid_protocol);
 
     let mut invalid_revision = response.clone();
-    invalid_revision.revision = crate::daemon_contract::DAEMON_INVOCATION_REVISION + 1;
+    invalid_revision.revision = tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION + 1;
     invalid_responses.push(invalid_revision);
 
     let mut invalid_request_id = response;
@@ -311,7 +308,7 @@ async fn registered_http_rejects_invalid_identity_without_exposing_its_receipt()
         RequestId::new("request.retained.http.outer").expect("caller request id");
     let daemon_request_id =
         RequestId::new("request.retained.http.untrusted").expect("daemon request id");
-    let response = crate::daemon_contract::DaemonInvocationResponse::application_problem(
+    let response = tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
         daemon_request_id.as_str(),
         retained_partial_effect_problem(operation, &daemon_request_id, retained_scope("daemon")),
     );
@@ -376,27 +373,27 @@ async fn registered_http_rejects_unbound_partial_effect_receipts_without_exposin
     committed_receipt.effect_class = EffectClass::SourceEdit;
 
     let responses = [
-        crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
             request_id.as_str(),
             scope.clone(),
             wrong_request,
         ),
-        crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
             request_id.as_str(),
             scope.clone(),
             wrong_operation,
         ),
-        crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
             request_id.as_str(),
             scope.clone(),
             wrong_scope,
         ),
-        crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
             request_id.as_str(),
             scope,
             wrong_effect_class,
         ),
-        crate::daemon_contract::DaemonInvocationResponse::application_problem(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
             request_id.as_str(),
             exact,
         ),
@@ -470,9 +467,9 @@ async fn registered_http_rejects_successes_with_the_wrong_payload_receipt_or_sco
         wrong_scope,
         wrong_effect_class,
     ] {
-        let response = crate::daemon_contract::DaemonInvocationResponse::with_outcome(
+        let response = tracedecay_daemon_protocol::DaemonInvocationResponse::with_outcome(
             request_id.as_str().to_owned(),
-            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
                 scope: scope.clone(),
                 outcome,
             },
@@ -501,9 +498,9 @@ async fn registered_http_serializes_an_exactly_bound_effect() {
             remaining_fact_count: 0,
         }),
     );
-    let response = crate::daemon_contract::DaemonInvocationResponse::with_outcome(
+    let response = tracedecay_daemon_protocol::DaemonInvocationResponse::with_outcome(
         request_id.as_str().to_owned(),
-        crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication { scope, outcome },
+        tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication { scope, outcome },
     );
 
     let response = invoke_retained_http_with_response(operation, request_id, response).await;
@@ -523,7 +520,7 @@ async fn registered_http_serializes_the_exact_valid_partial_effect_receipt() {
         unreachable!("fixture is a partial effect");
     };
     let expected_receipt = serde_json::to_value(committed_receipt).expect("receipt JSON");
-    let response = crate::daemon_contract::DaemonInvocationResponse::retained_application_problem(
+    let response = tracedecay_daemon_protocol::DaemonInvocationResponse::retained_application_problem(
         request_id.as_str(),
         scope,
         problem,

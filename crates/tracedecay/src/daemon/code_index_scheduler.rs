@@ -6555,6 +6555,7 @@ pub(crate) mod semantic_vector_graph;
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
+pub(crate) use crate::daemon::store_runtime::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use activation::{
     CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
 };
@@ -6565,7 +6566,6 @@ pub(crate) use cadence::{
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, newly_eligible_percentile,
 };
 pub(in crate::daemon) use graph_activation::CodeGraphActivationPolicyV1;
-pub(crate) use graph_activation::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,

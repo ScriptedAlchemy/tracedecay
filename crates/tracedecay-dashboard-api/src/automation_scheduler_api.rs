@@ -9,12 +9,12 @@ use serde_json::Value;
 use super::DashboardState;
 use super::automation_config_api::effective_automation_config;
 use super::util::{JsonError, internal_error};
-use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
-use tracedecay_agent_hosts::automation::config::AutomationConfig;
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
 };
-use tracedecay_agent_hosts::automation::scheduler::{
+use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
@@ -163,7 +163,7 @@ fn task_status(
     task: AgentTaskKind,
 ) -> std::result::Result<AutomationTaskStatusV1, JsonError> {
     let decision = if paused {
-        tracedecay_agent_hosts::automation::scheduler::AutomationScheduleDecision::skipped(
+        tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision::skipped(
             "scheduler_paused",
         )
     } else {
@@ -189,11 +189,13 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
         return "automation_disabled";
     }
     if config.host_mode
-        == tracedecay_agent_hosts::automation::config::AutomationHostMode::DelegatedHost
+        == tracedecay_automation_runtime::automation::config::AutomationHostMode::DelegatedHost
     {
         return "delegated_host";
     }
-    if config.backend == tracedecay_agent_hosts::automation::config::AutomationBackend::Disabled {
+    if config.backend
+        == tracedecay_automation_runtime::automation::config::AutomationBackend::Disabled
+    {
         return "backend_disabled";
     }
     "configured"
@@ -203,9 +205,11 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use tracedecay_agent_hosts::automation::backend::AgentTaskFailureClass;
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationTaskConfig};
-    use tracedecay_agent_hosts::automation::run_ledger::{
+    use tracedecay_automation_runtime::automation::backend::AgentTaskFailureClass;
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationTaskConfig,
+    };
+    use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
     };
 

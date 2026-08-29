@@ -494,7 +494,7 @@ impl DaemonInvocationState {
                 project_root,
                 store_root,
                 semantic_schedule,
-                graph_runtime,
+                graph_runtime.code_graph_seat_port(),
                 graph_publication_database,
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
@@ -934,7 +934,7 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = crate::daemon_client::DaemonInvocationExecutor::invoke_controlled(
+                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
@@ -945,7 +945,7 @@ impl DaemonInvocationState {
                     ),
                     deadline,
                     control_cancellation,
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
                 )
                 .await
                 .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;

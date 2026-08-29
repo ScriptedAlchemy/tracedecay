@@ -1,5 +1,5 @@
 use crate::branch::BranchAddOutcome;
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 use std::path::Path;

@@ -58,7 +58,7 @@ async fn answer_one_authenticated_proxy_request(
         .expect("read auth preface")
         .expect("auth preface line");
     let preface =
-        super::super::transport::DaemonAuthPreface::from_line(auth_line.trim()).expect("auth");
+        tracedecay_daemon_protocol::DaemonAuthPreface::from_line(auth_line.trim()).expect("auth");
     assert!(
         preface.authenticate(expected_token),
         "proxy must reload current daemon authority"
@@ -246,7 +246,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let dir = TempDir::new().expect("temp dir");
     let profile = dir.path().canonicalize().expect("canonical profile");
     let socket = profile.join("daemon.sock");
-    let endpoint = super::super::transport::DaemonEndpoint::Unix(socket.clone());
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone());
     let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first socket");
     let first_authority =
         super::super::authority::DaemonAuthority::acquire(&profile, &endpoint, "first")

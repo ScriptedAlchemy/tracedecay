@@ -129,7 +129,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
                 .map_or_else(|| "tool_dispatch_error".to_string(), bounded_failure_reason)
         );
     }
-    if tracedecay_agent_hosts::analytics::is_skill_view_tool(input.tool_name) {
+    if tracedecay_automation::analytics::is_skill_view_tool(input.tool_name) {
         metadata["arguments"] = input.arguments.clone();
         metadata["function"] = json!({
             "name": input.tool_name,

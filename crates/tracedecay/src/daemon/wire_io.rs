@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) async fn write_json_rpc_response(
     transport: &mut impl McpTransport,
-    response: &tracedecay_jsonrpc::JsonRpcResponse,
+    response: &tracedecay_mcp::JsonRpcResponse,
 ) -> Result<()> {
     let payload = hotpath::measure_block!(
         "daemon.wire.encode_response",
@@ -87,13 +87,10 @@ mod wire_bound_tests {
     };
     use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    use tracedecay_jsonrpc::McpTransport;
-    use tracedecay_sessions::admission::{
-    WIRE_RECORD_TOO_LARGE,
-    is_wire_oversized_io_error,
-};
+    use tracedecay_mcp::McpTransport;
+    use tracedecay_sessions::admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
-    use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};
+    use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
 
     #[tokio::test]
     async fn broker_transport_streams_hostile_frame_and_typed_rejection_has_no_payload() {

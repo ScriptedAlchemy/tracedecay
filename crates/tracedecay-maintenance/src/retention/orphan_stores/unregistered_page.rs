@@ -94,7 +94,10 @@ pub struct UnregisteredStoreSweepReport {
 /// honoring cancellation/deadline before each bounded filesystem/registry
 /// action. A cancellation never reports an empty successful page or mutates a
 /// partially inspected plan.
-#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered_page", future = true)]
+#[hotpath::measure(
+    label = "maintenance.orphan_stores.sweep_unregistered_page",
+    future = true
+)]
 pub async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -824,7 +827,8 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantined_project_id(name).is_some() || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
+    quarantined_project_id(name).is_some()
+        || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
@@ -1005,15 +1009,15 @@ pub(super) fn advance_portable_inventory(
     // changing inventory. A contender yields without blocking the admission;
     // the page retains its opaque cursor and retries this bounded slice.
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(inventory);
-    let _writer_lock =
-        match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let _writer_lock = match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path)
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("acquire unregistered inventory writer lock: {error}"),
-            }
-        })? {
-            Some(lock) => lock,
-            None => return Ok(Some(false)),
-        };
+            },
+        )? {
+        Some(lock) => lock,
+        None => return Ok(Some(false)),
+    };
     ensure_portable_inventory_header(inventory, signature)?;
     recover_portable_inventory_tail(inventory, signature).map_err(|error| {
         tracedecay_runtime_core::errors::TraceDecayError::Config {

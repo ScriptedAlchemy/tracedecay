@@ -5,11 +5,13 @@ members = [
     "crates/tracedecay-api",
     "crates/tracedecay-application",
     "crates/tracedecay-automation",
+    "crates/tracedecay-automation-runtime",
     "crates/tracedecay-capture",
     "crates/tracedecay-cli",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
     "crates/tracedecay-code-index-retention",
+    "crates/tracedecay-daemon-protocol",
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",
@@ -17,9 +19,9 @@ members = [
     "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
-    "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
     "crates/tracedecay-maintenance",
+    "crates/tracedecay-mcp",
     "crates/tracedecay-policy",
     "crates/tracedecay-private-fs",
     "crates/tracedecay-query",
@@ -179,7 +181,7 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # (tracedecay/0.5.42-vector-index-durable, which stacks vector-index
 # restore-at-open, the arena multi-chunk
 # fix, streaming serialization + mmap compact open, and twelve
-# compact/overlay/close correctness fixes on upstream v0.5.42 rev 3bc8911).
+# compact/overlay/close correctness fixes plus transaction-bounded WAL recovery).
 # The published crates carry a tiered-storage arena whose `HotVersionRef` can
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
@@ -187,8 +189,8 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # resolves sibling crates by path, so every grafeo crate must come from the
 # same fork rev — a mixed registry/git graph would build two type-incompatible
 # instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "26b9c1f6402bce74a5a00372bed99c01d3973f2d" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "26b9c1f6402bce74a5a00372bed99c01d3973f2d" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "26b9c1f6402bce74a5a00372bed99c01d3973f2d" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "26b9c1f6402bce74a5a00372bed99c01d3973f2d" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "26b9c1f6402bce74a5a00372bed99c01d3973f2d" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "fa21515d0c7c2edf41597e8706e2a56e972268dd" }

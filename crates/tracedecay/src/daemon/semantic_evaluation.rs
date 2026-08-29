@@ -42,6 +42,9 @@ use tracedecay_usecases::store::vector_generations::{
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use super::semantic_evaluation_shutdown::SemanticEvaluationShutdownJoinV1;
+
+pub(crate) use super::semantic_evaluation_shutdown::SemanticEvaluationShutdownReceiptV1;
 
 static RESOURCE_MEASUREMENT_LOCK_V1: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
@@ -565,21 +568,6 @@ impl Default for SemanticEvaluationWorkersV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SemanticEvaluationShutdownReceiptV1 {
-    pub(crate) joined_workers: usize,
-    /// Workers whose join surfaced a panic or abort instead of a cooperative
-    /// exit. They are no longer running but did not shut down cleanly.
-    pub(crate) failed_workers: usize,
-    pub(crate) remaining_workers: usize,
-}
-
-impl SemanticEvaluationShutdownReceiptV1 {
-    pub(crate) fn is_clean(self) -> bool {
-        self.remaining_workers == 0 && self.failed_workers == 0
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct DaemonSemanticEvaluationWorkerOwnerV1 {
     workers: Mutex<SemanticEvaluationWorkersV1>,
@@ -759,6 +747,16 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
             failed_workers,
             remaining_workers,
         }
+    }
+}
+
+impl SemanticEvaluationShutdownJoinV1 for DaemonSemanticEvaluationWorkerOwnerV1 {
+    fn cancel_and_join_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn Future<Output = SemanticEvaluationShutdownReceiptV1> + Send + '_>>
+    {
+        Box::pin(DaemonSemanticEvaluationWorkerOwnerV1::cancel_and_join_until(self, deadline))
     }
 }
 

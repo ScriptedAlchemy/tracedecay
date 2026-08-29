@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::runner::CombinedReviewAutomationOptions;
-use tracedecay_agent_hosts::automation::runner::{
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::runner::CombinedReviewAutomationOptions;
+use tracedecay_automation_runtime::automation::runner::{
     CombinedFailureTerminals, CombinedMemoryCompletedSkillFailure, CombinedRecordedFailure,
     CombinedReflectorPartial, CombinedReviewDispatch, CombinedSkillPartial, RetainedAutomationRun,
     RetainedAutomationSettlementDisposition, SessionReflectorAutomationRun,
@@ -98,12 +98,12 @@ fn admission_state(admission: &AutomationEffectAdmission) -> AdmissionState {
 }
 
 struct DeferredRunTerminal {
-    record: tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-    committed: Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+    record: tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+    committed: Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
 }
 
 struct DeferredProblemTerminal {
-    error: tracedecay_agent_hosts::automation::AutomationRunError,
+    error: tracedecay_automation_runtime::automation::AutomationRunError,
 }
 
 enum DeferredLegTerminal {
@@ -113,7 +113,9 @@ enum DeferredLegTerminal {
 }
 
 fn failed_leg_terminal(
-    record: Option<tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord>,
+    record: Option<
+        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+    >,
     error: Option<tracedecay_runtime_core::errors::TraceDecayError>,
     fallback_message: String,
 ) -> DeferredLegTerminal {
@@ -168,7 +170,7 @@ fn deferred_settlement_request(
 
 fn collect_settlement_result(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
     result: Result<DeferredSettlementOutcome>,
 ) -> Option<DeferredSettlementOutcome> {
@@ -226,8 +228,8 @@ trait ReplayLegSettlement {
     fn into_ledger_settlement(
         self,
     ) -> (
-        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
     );
 }
 
@@ -235,8 +237,8 @@ impl ReplayLegSettlement for SkillWriterAutomationRun {
     fn into_ledger_settlement(
         self,
     ) -> (
-        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
     ) {
         (self.ledger_record, self.committed_receipt)
     }
@@ -246,8 +248,8 @@ impl ReplayLegSettlement for SessionReflectorAutomationRun {
     fn into_ledger_settlement(
         self,
     ) -> (
-        tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+        tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+        Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
     ) {
         (self.ledger_record, self.committed_receipt)
     }
@@ -260,7 +262,7 @@ async fn settle_single_replay_leg<Run>(
     project_path: &Path,
     first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
     replay_completed: bool,
-    executing_kind: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    executing_kind: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     control: &AutomationRunControl,
     authority: AutomationEffectAuthority,
     retained: RetainedAutomationRun<Run>,
@@ -360,10 +362,10 @@ pub(super) async fn run_combined_scheduler_effect(
     memory: &TraceDecay,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
-    backend: &dyn tracedecay_agent_hosts::automation::backend::AgentTaskBackend,
-    retrieval: &dyn tracedecay_agent_hosts::automation::runner::AutomationSessionRetrieval,
+    backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
+    retrieval: &dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
     first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
@@ -371,7 +373,7 @@ pub(super) async fn run_combined_scheduler_effect(
         CombinedEffectAdmission::Conflict => {
             super::log_scheduler_admission_conflict(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::CombinedReview,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
             );
             CombinedEffectOutcome::Handled
         }
@@ -379,7 +381,7 @@ pub(super) async fn run_combined_scheduler_effect(
             for problem in problems {
                 super::log_scheduler_pre_admission_problem(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::CombinedReview,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
                     &problem,
                 );
             }
@@ -388,12 +390,12 @@ pub(super) async fn run_combined_scheduler_effect(
         CombinedEffectAdmission::Replay { reflector, skill } => {
             super::log_scheduler_automation_replay(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                 &reflector,
             );
             super::log_scheduler_automation_replay(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 &skill,
             );
             if reflector.is_completed() && skill.is_completed() {
@@ -410,7 +412,7 @@ pub(super) async fn run_combined_scheduler_effect(
         } => {
             super::log_scheduler_automation_replay(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                 &reflector,
             );
             let mut skill_options = options.skill_writer;
@@ -432,7 +434,7 @@ pub(super) async fn run_combined_scheduler_effect(
                 project_path,
                 first_error,
                 replay_completed,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 &skill_control,
                 *skill,
                 retained,
@@ -447,7 +449,7 @@ pub(super) async fn run_combined_scheduler_effect(
         } => {
             super::log_scheduler_automation_replay(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 &skill,
             );
             let mut reflector_options = options.session_reflector;
@@ -471,7 +473,7 @@ pub(super) async fn run_combined_scheduler_effect(
                 project_path,
                 first_error,
                 replay_completed,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                 &reflector_control,
                 *reflector,
                 retained,
@@ -527,10 +529,10 @@ async fn run_execute_pair(
     memory: &TraceDecay,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
-    backend: &dyn tracedecay_agent_hosts::automation::backend::AgentTaskBackend,
-    retrieval: &dyn tracedecay_agent_hosts::automation::runner::AutomationSessionRetrieval,
+    backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
+    retrieval: &dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
     first_error: &mut Option<tracedecay_runtime_core::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
@@ -580,13 +582,13 @@ async fn run_execute_pair(
             } = *failure;
             super::log_scheduler_task_error(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 &error,
             );
             if let Some(error) = skill_writer_record_error.as_ref() {
                 super::log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                     error,
                 );
             }
@@ -613,7 +615,7 @@ async fn run_execute_pair(
             let CombinedRecordedFailure { run, error } = *failure;
             super::log_scheduler_task_error(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::CombinedReview,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
                 &error,
             );
             (
@@ -640,7 +642,7 @@ async fn run_execute_pair(
             let fallback_message = error.to_string();
             super::log_scheduler_task_error(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::CombinedReview,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::CombinedReview,
                 &error,
             );
             if reflector_record.is_none()
@@ -648,7 +650,7 @@ async fn run_execute_pair(
             {
                 super::log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                     error,
                 );
             }
@@ -657,7 +659,7 @@ async fn run_execute_pair(
             {
                 super::log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                     error,
                 );
             }
@@ -685,13 +687,13 @@ async fn run_execute_pair(
             if let Some(error) = reflector_record_error.as_ref() {
                 super::log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                     error,
                 );
             }
             let reflector_terminal =
                 DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                    error: tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
+                    error: tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
                         run_id,
                         committed_receipt: Box::new(committed_receipt),
                         ledger_record: ledger_record.map(Box::new),
@@ -703,7 +705,7 @@ async fn run_execute_pair(
                     if let Some(error) = error.as_ref() {
                         super::log_scheduler_task_error(
                             project_path,
-                            tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                            tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                             error,
                         );
                     }
@@ -715,7 +717,7 @@ async fn run_execute_pair(
                 (None, Some(error)) => {
                     super::log_scheduler_task_error(
                         project_path,
-                        tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                        tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                         &error,
                     );
                     DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
@@ -743,17 +745,18 @@ async fn run_execute_pair(
             if let Some(error) = skill_writer_record_error.as_ref() {
                 super::log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                     error,
                 );
             }
             let skill_terminal = DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
-                error: tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
-                    run_id,
-                    committed_receipt: Box::new(committed_receipt),
-                    ledger_record: ledger_record.map(Box::new),
-                    detail,
-                },
+                error:
+                    tracedecay_automation_runtime::automation::AutomationRunError::PartialEffect {
+                        run_id,
+                        committed_receipt: Box::new(committed_receipt),
+                        ledger_record: ledger_record.map(Box::new),
+                        detail,
+                    },
             }));
             (
                 DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
@@ -804,13 +807,13 @@ async fn run_execute_pair(
         PairResultOrder::ReflectorFirst => {
             let reflector_outcome = collect_settlement_result(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                 first_error,
                 reflector_result,
             );
             let skill_outcome = collect_settlement_result(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 first_error,
                 skill_result,
             );
@@ -819,13 +822,13 @@ async fn run_execute_pair(
         PairResultOrder::SkillFirst => {
             let skill_outcome = collect_settlement_result(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
                 first_error,
                 skill_result,
             );
             let reflector_outcome = collect_settlement_result(
                 project_path,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
                 first_error,
                 reflector_result,
             );
@@ -1030,22 +1033,22 @@ mod tests {
 
     use fs2::FileExt;
     use tempfile::TempDir;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::backend::{
+    use tracedecay_application::{
+        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::backend::{
         AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     };
-    use tracedecay_agent_hosts::automation::config::AutomationConfig;
-    use tracedecay_agent_hosts::automation::run_ledger::{
+    use tracedecay_automation_runtime::automation::config::AutomationConfig;
+    use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunStatus, AutomationTrigger, find_run_record_exact_bounded_blocking,
         run_ledger_path,
     };
-    use tracedecay_agent_hosts::automation::runner::{
+    use tracedecay_automation_runtime::automation::runner::{
         AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
         CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
         run_skill_writer_with_backend_and_retrieval,
-    };
-    use tracedecay_application::{
-        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{
         AutomationTerminalV1, ManifestDigest, ObservabilityPayloadV1, ProjectId, RunId, SessionId,
@@ -1290,7 +1293,7 @@ mod tests {
             _request: &AgentTaskRequest,
         ) -> std::result::Result<
             AgentTaskResponse,
-            tracedecay_agent_hosts::automation::backend::AgentTaskError,
+            tracedecay_automation_runtime::automation::backend::AgentTaskError,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             panic!("a disabled scheduler run must not invoke its backend")
@@ -1484,7 +1487,7 @@ mod tests {
             &fixture.configuration_revision_id,
             &backend,
             &retrieval,
-            tracedecay_agent_hosts::automation::runner::SkillWriterAutomationOptions {
+            tracedecay_automation_runtime::automation::runner::SkillWriterAutomationOptions {
                 trigger: AutomationTrigger::Scheduler,
                 run_id: Some(prior_skill_run_id.to_owned()),
                 ..options.skill_writer.clone()
@@ -1621,7 +1624,7 @@ mod tests {
         .await
         .expect("current skill task lock appears while abandonment is blocked");
         assert!(
-            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+            tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
                 &fixture.dashboard_root,
                 AgentTaskKind::SkillWriter,
                 None,
@@ -1671,7 +1674,7 @@ mod tests {
         assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
         assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
         assert!(
-            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+            tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
                 &fixture.dashboard_root,
                 AgentTaskKind::SkillWriter,
                 None,

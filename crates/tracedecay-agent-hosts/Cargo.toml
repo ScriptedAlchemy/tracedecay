@@ -19,6 +19,7 @@ hotpath = [
     "hotpath/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-automation/hotpath",
+    "tracedecay-automation-runtime/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
@@ -26,6 +27,7 @@ hotpath = [
     "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store/hotpath",
     "tracedecay-temporal-query/hotpath",
@@ -38,6 +40,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
@@ -45,6 +48,7 @@ hotpath-alloc = [
     "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
     "tracedecay-temporal-query/hotpath-alloc",
@@ -57,6 +61,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
@@ -64,6 +69,7 @@ hotpath-cpu = [
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
     "tracedecay-temporal-query/hotpath-cpu",
@@ -77,7 +83,10 @@ token-counting = ["dep:tiktoken-rs"]
 # Test-only transport wiring; mirrors the root crate's `test-transport`.
 # Forwards to the kernel so this crate's test targets can reach the hidden
 # `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test` seams.
-test-transport = ["tracedecay-runtime-core/test-transport"]
+test-transport = [
+    "tracedecay-runtime-core/test-transport",
+    "tracedecay-automation-runtime/test-transport",
+]
 
 [dependencies]
 cap-fs-ext = "4.0.2"
@@ -87,11 +96,6 @@ same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "std",
-    "tls12",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -100,14 +104,16 @@ tempfile = "3"
 thiserror = "2"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.19", default-features = false }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
 tracing = "0.1"
 url = "2"
-webpki-roots = "1"
 yaml-edit = { version = "0.2.3", default-features = false }
 
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
@@ -116,6 +122,7 @@ tracedecay-host-integration = { path = "../tracedecay-host-integration", version
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }

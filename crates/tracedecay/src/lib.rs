@@ -52,7 +52,8 @@ pub mod accounting;
 pub mod agents;
 pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 pub mod analytics_bridge;
-pub mod application_output;
+// Phase 2 removes this composition-root re-export once callers import mcp directly.
+pub use tracedecay_mcp::application_output;
 pub mod application_surface;
 pub(crate) mod hint_outcomes;
 // Fixture surface for integration tests, assembled by the composition root.
@@ -70,8 +71,6 @@ pub use tracedecay_query as query;
 pub mod config;
 pub mod context;
 pub mod daemon;
-pub mod daemon_client;
-pub mod daemon_contract;
 pub mod dashboard;
 pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
@@ -86,7 +85,6 @@ mod hooks;
 mod host_admission_test;
 pub mod mcp;
 pub mod monitor;
-mod path_tree;
 pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod resolution;
@@ -95,7 +93,6 @@ pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;
-pub mod remote_command;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;
@@ -110,8 +107,6 @@ pub(crate) mod support;
 pub mod tracedecay;
 pub mod types;
 pub mod version;
-pub mod work_cli;
-pub mod workflow_cli;
 #[cfg(test)]
 #[path = "sessions/workflow_ingest_tests.rs"]
 mod workflow_ingest_tests;

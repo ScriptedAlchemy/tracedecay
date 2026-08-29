@@ -94,7 +94,10 @@ impl AgentIntegration for HermesIntegration {
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = self.host_registration_paths(home);
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+        let profile_root =
+            tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+                home,
+            );
         for plugin_dir in profile_plugin_dirs(home) {
             paths.extend(managed_skill_overlay_paths(&profile_root, &plugin_dir)?);
         }
@@ -118,12 +121,13 @@ impl AgentIntegration for HermesIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
-            exports.push(crate::automation::skill_targets::install_managed_skills(
+            exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Hermes,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
                 &plugin_dir,
             )?);
         }
@@ -157,7 +161,8 @@ fn hermes_registration_state(
     if !dashboard_wrapper::matches_policy(&default_plugin, dashboard_enabled) {
         return State::Repairable;
     }
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     for plugin_dir in plugin_dirs {
         let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
             return State::Corrupt;
@@ -501,9 +506,9 @@ fn existing_managed_skill_overlay_paths(plugin_dir: &Path) -> Result<Vec<PathBuf
 fn managed_skill_overlay_paths(profile_root: &Path, plugin_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = existing_managed_skill_overlay_paths(plugin_dir)?;
     paths.extend(
-        crate::automation::skill_targets::rendered_native_skill_overlay_files(
+        tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
             profile_root,
-            crate::automation::skill_targets::SkillInstallTarget::Hermes,
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
             plugin_dir,
         )?
         .into_iter()
@@ -515,9 +520,9 @@ fn managed_skill_overlay_paths(profile_root: &Path, plugin_dir: &Path) -> Result
 }
 
 fn managed_skill_overlay_is_current(profile_root: &Path, plugin_dir: &Path) -> Result<bool> {
-    let desired = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+    let desired = tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
         profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Hermes,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
         plugin_dir,
     )?
     .into_iter()
@@ -534,9 +539,9 @@ fn managed_skill_overlay_is_current(profile_root: &Path, plugin_dir: &Path) -> R
 }
 
 fn reconcile_managed_skill_overlay(profile_root: &Path, plugin_dir: &Path) -> Result<()> {
-    let desired = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+    let desired = tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
         profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Hermes,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
         plugin_dir,
     )?
     .into_iter()

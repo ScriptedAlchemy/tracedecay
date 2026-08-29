@@ -88,7 +88,7 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
         "memory_min_trust",
     ];
 
-    if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name) {
+    if tracedecay_automation::analytics::is_skill_view_tool(tool_name) {
         return arguments.clone();
     }
     let Some(map) = arguments.as_object() else {
@@ -121,7 +121,7 @@ pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGu
 /// Application-surface plumbing prepared once per dispatch: the typed request
 /// invocation executor, retained independently from dispatch settlement.
 struct ApplicationSurfaceDispatch<'a> {
-    invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
+    invocation_executor: Option<&'a dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 }
 
 /// Whether a tool reaches the typed daemon invocation boundary.
@@ -889,17 +889,17 @@ impl McpServer {
                 None => self
                     .application_surface_client
                     .get_or_try_init(|| async {
-                        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+                        let handshake = crate::daemon::handshake_for_current_client(
                             Some(cg.project_root().to_path_buf()),
                             self.scope_prefix.clone(),
                             false,
                             false,
                         )?;
-                        crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                        crate::daemon::invocation_client_for_current(handshake)
                     })
                     .await
                     .ok()
-                    .map(|client| client as &dyn crate::daemon_client::DaemonInvocationExecutor),
+                    .map(|client| client as &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor),
             }
         } else {
             None

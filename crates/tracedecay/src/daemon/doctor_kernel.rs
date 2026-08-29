@@ -1,26 +1,14 @@
-//! Daemon-side adapters for the read-only Doctor kernel source ports.
+//! Daemon-side Doctor signal gatherers for the read-only kernel source ports.
 //!
 //! The transport-neutral Doctor kernel
-//! ([`tracedecay_application::doctor`]) defines seven narrow source ports and one
-//! [`DoctorReportComposerV1`] that composes their findings into a
-//! [`DoctorReportV1`]. The kernel owns no store, runtime, or health formula; the
-//! adapters that read real daemon state live here, in the daemon that owns that
-//! state.
-//!
-//! Each adapter implements one port by returning a kernel *read* value it was
-//! constructed with. The read is resolved from a real daemon signal by the pure
-//! mapper functions in this module (`*_read` / `*_read_from_*`), so the honest
-//! mapping (unit-tested exhaustively) is kept separate from the thin IO that
-//! gathers the signal. Truthfulness is preserved end to end: a signal that
-//! cannot be consulted maps to the kernel's typed
+//! ([`tracedecay_application::doctor`]) owns the seven source-port adapters,
+//! [`DaemonRuntimeHealthSignalV1`], and [`compose_doctor_report`]. This module
+//! gathers live daemon signals (scheduler, diagnostic broker, registered
+//! stores, host-bundle receipts) and maps daemon-owned types into those kernel
+//! reads. Truthfulness is preserved end to end: a signal that cannot be
+//! consulted maps to the kernel's typed
 //! `Unsupported`/`Absent`/`Denied`/`Unknown` read — never a fabricated healthy
 //! result — and partial coverage carries its real reason.
-//!
-//! The [`compose_doctor_report`] factory wires all seven adapters into the kernel
-//! composer from a [`DoctorKernelInputsV1`] bundle. Any surface (the dashboard
-//! `/api/doctor/findings` handler, the MCP doctor tools) builds that bundle from
-//! the real signals it can reach and requests a composed report; the surface
-//! never re-implements the composition or the honest mapping.
 //!
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,17 +17,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::PinnedRuntimeConfiguration;
 use tracedecay_application::doctor::{
-    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
-    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
-    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
-    ConfigurationDriftV1, DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1,
-    DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
-    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
-    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    RuntimeLivenessV1, StorageDoctorPort,
+    AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
+    ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
+    DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorStorageFamilyReadV1,
+    DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationReadV1,
+    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
+    RemoteOperationalReadV1, advisory_feedback_read_from_publication, compose_doctor_report,
+    merge_storage_reads, runtime_health_read, storage_family_read,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -75,98 +60,6 @@ pub fn configuration_read_from_pin<E>(
     }
 }
 
-/// Adapter over the configuration authority (Configuration family).
-pub struct ConfigurationAuthorityDoctorAdapterV1 {
-    read: ConfigurationAuthorityReadV1,
-}
-
-impl ConfigurationAuthorityDoctorAdapterV1 {
-    /// Build the adapter from an already-resolved kernel read.
-    #[must_use]
-    pub fn from_read(read: ConfigurationAuthorityReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl ConfigurationAuthorityDoctorPort for ConfigurationAuthorityDoctorAdapterV1 {
-    fn configuration_health<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, ConfigurationAuthorityReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-}
-
-// === Daemon/runtime health (StorageRuntime family) ===========================
-
-/// The real daemon/runtime health signals the daemon reads from its own state.
-///
-/// This is the *daemon-side* read: the adapter runs inside the serving daemon
-/// and reports the convergence of its own startup health (schema migration,
-/// storage authority audit, temporal projections), not the external CLI socket
-/// probe. Each optional signal is `None` when the daemon has not determined it,
-/// so an undetermined signal weakens coverage rather than being assumed healthy.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DaemonRuntimeHealthSignalV1 {
-    /// The daemon runtime is serving requests (its actors are alive).
-    pub serving: bool,
-    /// Schema migration and compatibility projections have converged.
-    pub startup_converged: bool,
-    /// The storage quick-check passed, when the daemon has run it.
-    pub quick_check_ok: Option<bool>,
-    /// The storage authority audit passed, when the daemon has run it.
-    pub authority_audit_ok: Option<bool>,
-    /// The session temporal projections are healthy, when determined.
-    pub temporal_ok: Option<bool>,
-}
-
-/// Map a daemon runtime-health signal into its kernel read.
-///
-/// A daemon that is not serving is genuinely undetermined health, not a proven
-/// degraded condition: it reports `Unreachable`. A serving daemon whose storage
-/// authority signals prove a failure is `Stuck`; one that is serving but has not
-/// converged is `Degraded`; one that is serving, converged, and clean is
-/// `Healthy` — but only with complete coverage when every optional signal was
-/// actually observed. A missing signal drops coverage to partial (an honest
-/// "healthy so far as observed", never a healthy-complete claim).
-#[must_use]
-pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealthReadV1 {
-    if !signal.serving {
-        return RuntimeHealthReadV1::Observed {
-            liveness: RuntimeLivenessV1::Unreachable,
-            coverage: DoctorCoverageCompletenessV1::Unknown,
-        };
-    }
-    let proven_failure = signal.quick_check_ok == Some(false)
-        || signal.authority_audit_ok == Some(false)
-        || signal.temporal_ok == Some(false);
-    if proven_failure {
-        return RuntimeHealthReadV1::Observed {
-            liveness: RuntimeLivenessV1::Stuck,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-    }
-    if !signal.startup_converged {
-        return RuntimeHealthReadV1::Observed {
-            liveness: RuntimeLivenessV1::Degraded,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-    }
-    let fully_observed = signal.quick_check_ok == Some(true)
-        && signal.authority_audit_ok == Some(true)
-        && signal.temporal_ok == Some(true);
-    let coverage = if fully_observed {
-        DoctorCoverageCompletenessV1::Complete
-    } else {
-        DoctorCoverageCompletenessV1::Partial
-    };
-    RuntimeHealthReadV1::Observed {
-        liveness: RuntimeLivenessV1::Healthy,
-        coverage,
-    }
-}
-
 /// Run the exhaustive observation-authority invariant pass over an already
 /// acquired read snapshot of the registered profile authority.
 ///
@@ -198,50 +91,6 @@ async fn observation_authority_audit_ok(
     match registry.read_snapshot().await {
         Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
         Err(_) => None,
-    }
-}
-
-/// Adapter over the daemon/runtime health snapshot (`StorageRuntime` family).
-pub struct RuntimeHealthDoctorAdapterV1 {
-    read: RuntimeHealthReadV1,
-}
-
-impl RuntimeHealthDoctorAdapterV1 {
-    /// Build the adapter from an already-resolved kernel read.
-    #[must_use]
-    pub fn from_read(read: RuntimeHealthReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl RuntimeHealthDoctorPort for RuntimeHealthDoctorAdapterV1 {
-    fn runtime_health<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, RuntimeHealthReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-}
-
-pub struct OperationalAuditDoctorAdapterV1 {
-    read: OperationalAuditReadV1,
-}
-
-impl OperationalAuditDoctorAdapterV1 {
-    #[must_use]
-    pub fn from_read(read: OperationalAuditReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl OperationalAuditDoctorPort for OperationalAuditDoctorAdapterV1 {
-    fn operational_audit<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, OperationalAuditReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
     }
 }
 
@@ -290,123 +139,6 @@ fn host_integration_read_from_report(
     }
 }
 
-/// Adapter over host/agent integration conformance (Advisory family).
-pub struct HostIntegrationDoctorAdapterV1 {
-    read: HostIntegrationReadV1,
-}
-
-impl HostIntegrationDoctorAdapterV1 {
-    /// Build the adapter from an already-resolved kernel read.
-    #[must_use]
-    pub fn from_read(read: HostIntegrationReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl HostIntegrationDoctorPort for HostIntegrationDoctorAdapterV1 {
-    fn host_conformance<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, HostIntegrationReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-}
-
-// === Canonical advisory feedback (Advisory family) ==========================
-
-/// Project the latest exact-scope durable feedback publication into Doctor's
-/// distinct advisory port. Host conformance remains a separate source.
-#[must_use]
-pub fn advisory_feedback_read_from_publication(
-    publication: Option<&tracedecay_application::feedback::FeedbackCompletedPublicationV1>,
-    current_generation: Option<&tracedecay_domain::CodeGenerationId>,
-) -> AdvisoryFeedbackReadV1 {
-    let Some(publication) = publication else {
-        return AdvisoryFeedbackReadV1::Absent;
-    };
-    if publication.validate().is_err() {
-        return AdvisoryFeedbackReadV1::Unknown;
-    }
-    let Some(generation_id) = publication.input.target.generation_id.clone() else {
-        return AdvisoryFeedbackReadV1::Unknown;
-    };
-    let generation_current = current_generation == Some(&generation_id);
-    let summary = AdvisoryFeedbackSummaryReadV1 {
-        result_id: publication.result.result_id.clone(),
-        cycle_id: publication.result.cycle_id.clone(),
-        scope: publication.result.scope.clone(),
-        generation_id: generation_id.clone(),
-        generation_current,
-        termination: publication.result.termination,
-        provider_states: publication.result.provider_states.clone(),
-        total_findings: publication.result.total_findings,
-        returned_findings: publication.result.returned_findings,
-        omitted_findings: publication.result.omitted_findings,
-    };
-    let impact_anchors = publication
-        .result
-        .impact
-        .as_ref()
-        .map(|impact| impact.evidence_anchors.as_slice())
-        .unwrap_or_default();
-    let findings = publication
-        .result
-        .findings
-        .iter()
-        .map(|finding| {
-            let mut evidence_anchors = finding
-                .retrieval_anchor_id
-                .iter()
-                .cloned()
-                .chain(impact_anchors.iter().cloned())
-                .collect::<Vec<_>>();
-            evidence_anchors.sort();
-            evidence_anchors.dedup();
-            AdvisoryFeedbackFindingReadV1 {
-                result_id: publication.result.result_id.clone(),
-                cycle_id: publication.result.cycle_id.clone(),
-                finding_id: finding.finding_id.clone(),
-                scope: publication.result.scope.clone(),
-                generation_id: generation_id.clone(),
-                generation_current,
-                lifecycle: finding.lifecycle,
-                provider_state: finding.provider_state,
-                evidence_anchors,
-                total_findings: publication.result.total_findings,
-                returned_findings: publication.result.returned_findings,
-                omitted_findings: publication.result.omitted_findings,
-            }
-        })
-        .collect();
-    AdvisoryFeedbackReadV1::Observed {
-        summary: Box::new(summary),
-        findings,
-    }
-}
-
-/// Adapter over the mounted feedback owner's canonical read store.
-pub struct AdvisoryFeedbackDoctorAdapterV1 {
-    read: AdvisoryFeedbackReadV1,
-}
-
-impl AdvisoryFeedbackDoctorAdapterV1 {
-    #[must_use]
-    pub fn from_read(read: AdvisoryFeedbackReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl AdvisoryFeedbackDoctorPort for AdvisoryFeedbackDoctorAdapterV1 {
-    fn advisory_feedback<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-}
-
 // === Code/semantic index mount (SemanticIndex family) ========================
 
 /// Read the real code-index mount state from the daemon scheduler registry.
@@ -435,29 +167,6 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     CodeIndexMountReadV1::Observed {
         state,
         coverage: DoctorCoverageCompletenessV1::Complete,
-    }
-}
-
-/// Adapter over the code/semantic index mount state (`SemanticIndex` family).
-pub struct CodeIndexMountDoctorAdapterV1 {
-    read: CodeIndexMountReadV1,
-}
-
-impl CodeIndexMountDoctorAdapterV1 {
-    /// Build the adapter from an already-resolved kernel read.
-    #[must_use]
-    pub fn from_read(read: CodeIndexMountReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl CodeIndexMountDoctorPort for CodeIndexMountDoctorAdapterV1 {
-    fn code_index_mount<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
     }
 }
 
@@ -499,28 +208,6 @@ pub async fn language_server_read_from_broker(
 ) -> LanguageServerReadV1 {
     let statuses = broker.lock().await.project_engine_statuses();
     language_server_read_from_engine_states(statuses.into_iter().map(|status| status.state))
-}
-
-/// Adapter over live language-server/analyzer state.
-pub struct LanguageServerDoctorAdapterV1 {
-    read: LanguageServerReadV1,
-}
-
-impl LanguageServerDoctorAdapterV1 {
-    #[must_use]
-    pub fn from_read(read: LanguageServerReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl LanguageServerDoctorPort for LanguageServerDoctorAdapterV1 {
-    fn language_server_health<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, LanguageServerReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
 }
 
 // === Canonical Plan-26 observations (Observability family) ===================
@@ -613,63 +300,7 @@ pub fn ingest_refusal_read_from_censuses(
     }
 }
 
-/// Adapter over the canonical durable Plan-26 observation read model.
-pub struct ObservabilityDoctorAdapterV1 {
-    read: ObservabilityReadV1,
-    refusals: IngestRefusalCensusReadV1,
-}
-
-impl ObservabilityDoctorAdapterV1 {
-    #[must_use]
-    pub fn from_read(read: ObservabilityReadV1) -> Self {
-        Self {
-            read,
-            refusals: IngestRefusalCensusReadV1::Unknown,
-        }
-    }
-
-    #[must_use]
-    pub fn with_refusals(mut self, refusals: IngestRefusalCensusReadV1) -> Self {
-        self.refusals = refusals;
-        self
-    }
-}
-
-impl ObservabilityDoctorPort for ObservabilityDoctorAdapterV1 {
-    fn observability_health<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, ObservabilityReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-
-    fn ingest_refusal_census<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1> {
-        let read = self.refusals.clone();
-        Box::pin(async move { read })
-    }
-}
-
 // === Storage retention/size (Storage family) =================================
-
-/// Wrap a set of typed storage findings the daemon's retention producers
-/// emitted into a kernel read.
-///
-/// An empty finding set is a typed [`DoctorStorageFamilyReadV1::Absent`] — the
-/// runtime was consulted but produced nothing — never a fabricated healthy
-/// claim; the composer classifies an empty observed read as absent regardless,
-/// and this keeps the intent explicit at the source.
-#[must_use]
-pub fn storage_family_read(findings: Vec<DoctorStorageFindingV1>) -> DoctorStorageFamilyReadV1 {
-    if findings.is_empty() {
-        DoctorStorageFamilyReadV1::Absent
-    } else {
-        DoctorStorageFamilyReadV1::Observed { findings }
-    }
-}
 
 fn orphan_store_findings_from_census(
     census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
@@ -677,7 +308,10 @@ fn orphan_store_findings_from_census(
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
     let classified = tracedecay_maintenance::retention::orphan_stores::classify_stores(census, now);
-    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(classified, retention_secs);
+    let plan = tracedecay_maintenance::retention::orphan_stores::plan_collection(
+        classified,
+        retention_secs,
+    );
     storage_family_read(
         plan.collect
             .iter()
@@ -1198,102 +832,6 @@ pub(super) async fn collect_code_generation_retention_findings(
     }
 }
 
-/// Adapter over storage retention/size findings (Storage family).
-pub struct StorageDoctorAdapterV1 {
-    read: DoctorStorageFamilyReadV1,
-}
-
-impl StorageDoctorAdapterV1 {
-    /// Build the adapter from an already-resolved kernel read.
-    #[must_use]
-    pub fn from_read(read: DoctorStorageFamilyReadV1) -> Self {
-        Self { read }
-    }
-}
-
-impl StorageDoctorPort for StorageDoctorAdapterV1 {
-    fn storage_findings<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-    ) -> DoctorSourceFuture<'a, DoctorStorageFamilyReadV1> {
-        let read = self.read.clone();
-        Box::pin(async move { read })
-    }
-}
-
-// === Composer factory ========================================================
-
-/// The seven resolved kernel reads a daemon-owned Doctor report composes from.
-///
-/// A surface (the dashboard doctor-findings handler, the MCP doctor tools)
-/// builds this bundle from the real signals it can reach — via the `*_read` /
-/// `*_read_from_*` mappers in this module — and hands it to
-/// [`compose_doctor_report`]. A signal the surface cannot obtain carries its
-/// honest typed absence rather than a fabricated healthy read.
-#[derive(Clone, Debug)]
-pub struct DoctorKernelInputsV1 {
-    /// Configuration-authority read (Configuration family).
-    pub configuration: ConfigurationAuthorityReadV1,
-    /// Daemon/runtime health read (`StorageRuntime` family).
-    pub runtime: RuntimeHealthReadV1,
-    /// Remote HTTPS and exact registered-profile operational authority.
-    pub operational_audit: OperationalAuditReadV1,
-    /// Host/agent integration conformance read (Advisory family).
-    pub host: HostIntegrationReadV1,
-    /// Mounted canonical feedback-owner read (Advisory family).
-    pub advisory_feedback: AdvisoryFeedbackReadV1,
-    /// Live daemon language-server/analyzer read (`LanguageServer` family).
-    pub language_server: LanguageServerReadV1,
-    /// Code/semantic index mount read (`SemanticIndex` family).
-    pub code_index: CodeIndexMountReadV1,
-    /// Canonical durable Plan-26 feedback read (`Observability` family).
-    pub observability: ObservabilityReadV1,
-    /// Durable ingest-coverage refusal census (`Observability` family).
-    pub ingest_refusals: IngestRefusalCensusReadV1,
-    /// Storage retention/size read (Storage family).
-    pub storage: DoctorStorageFamilyReadV1,
-}
-
-/// Compose a Doctor report from the daemon-owned source adapters.
-///
-/// Wires all seven adapters into the kernel [`DoctorReportComposerV1`] and
-/// composes. The composer enumerates every finding family truthfully: a family
-/// whose read is unavailable is carried with its real evidence state and an
-/// explicit coverage record, and the report asserts health only when every
-/// family was consulted with complete coverage and every finding is healthy.
-#[hotpath::measure(label = "daemon.doctor.compose", future = true)]
-pub async fn compose_doctor_report(
-    context: &RequestContext,
-    inputs: &DoctorKernelInputsV1,
-) -> Result<DoctorReportV1, ApplicationContractError> {
-    let configuration =
-        ConfigurationAuthorityDoctorAdapterV1::from_read(inputs.configuration.clone());
-    let runtime = RuntimeHealthDoctorAdapterV1::from_read(inputs.runtime.clone());
-    let operational_audit =
-        OperationalAuditDoctorAdapterV1::from_read(inputs.operational_audit.clone());
-    let host = HostIntegrationDoctorAdapterV1::from_read(inputs.host.clone());
-    let advisory_feedback =
-        AdvisoryFeedbackDoctorAdapterV1::from_read(inputs.advisory_feedback.clone());
-    let language_server = LanguageServerDoctorAdapterV1::from_read(inputs.language_server.clone());
-    let code_index = CodeIndexMountDoctorAdapterV1::from_read(inputs.code_index.clone());
-    let observability = ObservabilityDoctorAdapterV1::from_read(inputs.observability.clone())
-        .with_refusals(inputs.ingest_refusals.clone());
-    let storage = StorageDoctorAdapterV1::from_read(inputs.storage.clone());
-
-    let composer = DoctorReportComposerV1::new()
-        .with_configuration(&configuration)
-        .with_runtime(&runtime)
-        .with_operational_audit(&operational_audit)
-        .with_host(&host)
-        .with_advisory_feedback(&advisory_feedback)
-        .with_language_server(&language_server)
-        .with_code_index(&code_index)
-        .with_observability(&observability)
-        .with_storage(&storage);
-
-    composer.compose(context).await
-}
-
 /// Live provider of the Remote Brain operational read. Every Doctor read
 /// re-observes the mounted remote authorities instead of freezing one value
 /// at project-composition time.
@@ -1589,77 +1127,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .with_table_growth_evidence(store_telemetry.table_growth_evidence))
         })
     })
-}
-
-fn merge_storage_reads(
-    first: DoctorStorageFamilyReadV1,
-    second: DoctorStorageFamilyReadV1,
-) -> DoctorStorageFamilyReadV1 {
-    let (mut findings, first_incomplete) = storage_read_parts(first);
-    let (second_findings, second_incomplete) = storage_read_parts(second);
-    findings.extend(second_findings);
-    let incomplete = first_incomplete.max(second_incomplete);
-
-    match (findings.is_empty(), incomplete) {
-        (false, Some(reason)) => DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason },
-        (false, None) => storage_family_read(findings),
-        (true, Some(DoctorStorageIncompleteReasonV1::Unsupported)) => {
-            DoctorStorageFamilyReadV1::Unsupported
-        }
-        (true, Some(DoctorStorageIncompleteReasonV1::Denied)) => DoctorStorageFamilyReadV1::Denied,
-        (true, Some(DoctorStorageIncompleteReasonV1::Unknown)) => {
-            DoctorStorageFamilyReadV1::Unknown
-        }
-        // A named degradation survives the merge with its reason intact: no
-        // producer that explained itself is reported as merely undetermined.
-        (true, Some(DoctorStorageIncompleteReasonV1::Unavailable { detail })) => {
-            DoctorStorageFamilyReadV1::Unavailable { detail }
-        }
-        (true, Some(DoctorStorageIncompleteReasonV1::ResetRequired { detail })) => {
-            DoctorStorageFamilyReadV1::ResetRequired { detail }
-        }
-        (true, Some(DoctorStorageIncompleteReasonV1::Corrupt { detail })) => {
-            DoctorStorageFamilyReadV1::Corrupt { detail }
-        }
-        (true, None) => DoctorStorageFamilyReadV1::Absent,
-    }
-}
-
-fn storage_read_parts(
-    read: DoctorStorageFamilyReadV1,
-) -> (
-    Vec<DoctorStorageFindingV1>,
-    Option<DoctorStorageIncompleteReasonV1>,
-) {
-    match read {
-        DoctorStorageFamilyReadV1::Observed { findings } => (findings, None),
-        DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason } => {
-            (findings, Some(reason))
-        }
-        DoctorStorageFamilyReadV1::Unsupported => (
-            Vec::new(),
-            Some(DoctorStorageIncompleteReasonV1::Unsupported),
-        ),
-        DoctorStorageFamilyReadV1::Absent => (Vec::new(), None),
-        DoctorStorageFamilyReadV1::Denied => {
-            (Vec::new(), Some(DoctorStorageIncompleteReasonV1::Denied))
-        }
-        DoctorStorageFamilyReadV1::Unknown => {
-            (Vec::new(), Some(DoctorStorageIncompleteReasonV1::Unknown))
-        }
-        DoctorStorageFamilyReadV1::Unavailable { detail } => (
-            Vec::new(),
-            Some(DoctorStorageIncompleteReasonV1::Unavailable { detail }),
-        ),
-        DoctorStorageFamilyReadV1::ResetRequired { detail } => (
-            Vec::new(),
-            Some(DoctorStorageIncompleteReasonV1::ResetRequired { detail }),
-        ),
-        DoctorStorageFamilyReadV1::Corrupt { detail } => (
-            Vec::new(),
-            Some(DoctorStorageIncompleteReasonV1::Corrupt { detail }),
-        ),
-    }
 }
 
 pub(crate) fn doctor_report_request_context(

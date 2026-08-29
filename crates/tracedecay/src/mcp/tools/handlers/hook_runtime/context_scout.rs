@@ -2,7 +2,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
-use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,

@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use tracedecay_agent_hosts::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -56,21 +56,22 @@ async fn run_one_host_receipt_review(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
 ) -> Result<HostReceiptReviewProgress> {
-    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::runner::{
         CombinedReviewAutomationOptions, SessionReflectorAutomationOptions,
         SkillWriterAutomationOptions, registered_project_automation_retrieval,
     };
 
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let Some(ready) =
-        tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
+        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
+            .await?
     else {
         return Ok(HostReceiptReviewProgress::Idle);
     };
     let pending = ready.pending;
-    if tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(&dashboard_root)
+    if tracedecay_automation_runtime::automation::scheduler::load_scheduler_control(&dashboard_root)
         .await?
         .paused
     {
@@ -181,7 +182,7 @@ async fn run_one_host_receipt_review(
         return Err(error);
     }
     if outcome.completed() {
-        tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+        tracedecay_automation_runtime::automation::host_receipts::mark_consumed(
             &dashboard_root,
             &pending.session_key,
             pending.generation,

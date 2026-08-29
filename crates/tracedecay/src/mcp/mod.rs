@@ -6,7 +6,8 @@
 
 pub(crate) mod hook_events;
 pub(crate) mod project_route;
-pub mod response_handles;
+// Phase 2 removes these composition-root re-exports once callers import mcp directly.
+pub use tracedecay_mcp::response_handles;
 pub(crate) mod scope;
 /// MCP server implementation.
 pub mod server;
@@ -17,12 +18,13 @@ pub(crate) mod tool_call_deadline;
 pub mod tools;
 
 /// JSON-RPC 2.0 transport types.
-pub mod transport;
+/// Phase 2 removes these composition-root re-exports once callers import mcp directly.
+pub use tracedecay_mcp::transport;
 
 pub(crate) use server::DatabaseOwnerReconciler;
 pub use server::McpServer;
 pub use tools::{ToolDefinition, ToolResult, get_tool_definitions, handle_tool_call};
-pub use transport::{
+pub use tracedecay_mcp::transport::{
     ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport, ReplayTransport,
     StdioTransport,
 };

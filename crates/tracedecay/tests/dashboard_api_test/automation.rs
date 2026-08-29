@@ -1,5 +1,5 @@
 use crate::dashboard_api_support::*;
-use tracedecay_agent_hosts::automation::backend::AgentTaskRetryAttempt;
+use tracedecay_automation_runtime::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
 fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
@@ -210,7 +210,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert_eq!(run["terminal"]["status"], "completed");
         assert_eq!(run["terminal"]["summary"]["accepted_count"], 1);
         assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
-        let records = tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+        let records = tracedecay_automation_runtime::automation::run_ledger::load_run_records(
             &dashboard_root,
             10,
         )
@@ -423,10 +423,10 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         // Schema-v2 ledger rows carry nonnegative Unix seconds; the RFC3339
         // form above stays for the schema-v1 artifact sidecar only.
         let ledger_unix_seconds = "1782259200";
-        let artifact = tracedecay_agent_hosts::automation::run_ledger::write_run_artifact(
+        let artifact = tracedecay_automation_runtime::automation::run_ledger::write_run_artifact(
             &dashboard_root,
             run_id,
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
+            tracedecay_automation_runtime::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
             &serde_json::json!({
                 "schema_version": 1,
                 "run_id": run_id,
@@ -438,14 +438,14 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         )
         .await
         .unwrap();
-        tracedecay_agent_hosts::automation::run_ledger::append_run_record(
+        tracedecay_automation_runtime::automation::run_ledger::append_run_record(
             &dashboard_root,
-            &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord {
+            &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord {
                 schema_version: 2,
                 run_id: run_id.to_string(),
                 trigger:
-                    tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::ManualCli,
-                task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+                    tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::ManualCli,
+                task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
                 task_key: Some("memory_curator".to_string()),
                 backend: "codex_app_server".to_string(),
                 backend_identity: None,
@@ -455,7 +455,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 strict_json: None,
                 model: Some("test-model".to_string()),
                 status:
-                    tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded,
+                    tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Succeeded,
                 evidence_hash: Some("sha256:evidence".to_string()),
                 input_hash: Some("sha256:input".to_string()),
                 output_hash: Some("sha256:output".to_string()),
@@ -536,10 +536,10 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 .is_some_and(|detail| detail.contains("not found"))
         );
 
-        let artifact_path = tracedecay_agent_hosts::automation::run_ledger::run_artifact_path(
+        let artifact_path = tracedecay_automation_runtime::automation::run_ledger::run_artifact_path(
             &dashboard_root,
             run_id,
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
+            tracedecay_automation_runtime::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
         )
         .unwrap();
         std::fs::write(&artifact_path, "{\"tampered\":true}\n").unwrap();
@@ -574,7 +574,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
-        use tracedecay_agent_hosts::automation::managed_skills::{
+        use tracedecay_automation_runtime::automation::managed_skills::{
             ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
             default_managed_skill_targets,
         };

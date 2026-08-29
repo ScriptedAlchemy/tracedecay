@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use tracedecay_agent_hosts::automation::config_error;
-use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
+use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_sessions::admission::{
@@ -25,7 +25,7 @@ pub(super) async fn user_review(
     profile_root: &Path,
     session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
 ) -> Result<Value> {
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 
     let provider = required_str(args, "provider")?;
     let session_id = args
@@ -61,8 +61,8 @@ async fn run_user_review(
     _provider: &str,
     _session_id: Option<String>,
     _run_id: Option<String>,
-    _trigger: tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger,
-) -> Result<tracedecay_agent_hosts::automation::runner::UserSessionAutomationRun> {
+    _trigger: tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger,
+) -> Result<tracedecay_automation_runtime::automation::runner::UserSessionAutomationRun> {
     Err(config_error(
         "projectless Hermes review is unavailable: automation requires a pinned project configuration",
     ))
@@ -73,10 +73,10 @@ async fn apply_projectless_hermes_receipt_plan(
     plan: crate::mcp::hook_events::HookEventPlan,
 ) -> HostAdmissionOutcome {
     let dashboard_root =
-        tracedecay_agent_hosts::automation::runner::user_automation_root(profile_root);
+        tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
     match plan {
         crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
-            match tracedecay_agent_hosts::automation::host_receipts::record(
+            match tracedecay_automation_runtime::automation::host_receipts::record(
                 &dashboard_root,
                 route,
                 receipt,
@@ -91,7 +91,7 @@ async fn apply_projectless_hermes_receipt_plan(
         crate::mcp::hook_events::HookEventPlan::MarkTurnIngested {
             route,
             transcript_watermark,
-        } => match tracedecay_agent_hosts::automation::host_receipts::mark_turn_ingested(
+        } => match tracedecay_automation_runtime::automation::host_receipts::mark_turn_ingested(
             &dashboard_root,
             route,
             &transcript_watermark,
@@ -229,9 +229,10 @@ async fn continue_projectless_hermes_review(
     session_db: &RegisteredGlobalDb,
 ) -> Result<Value> {
     let dashboard_root =
-        tracedecay_agent_hosts::automation::runner::user_automation_root(profile_root);
+        tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
     let Some(ready) =
-        tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
+        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
+            .await?
     else {
         return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
     };
@@ -259,14 +260,14 @@ async fn continue_projectless_hermes_review(
         "hermes",
         session_id,
         Some(format!("user_host_receipt_{}", ready.pending.generation)),
-        tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::HostReceipt,
+        tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::HostReceipt,
     )
     .await?;
     if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
         && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
         && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
     {
-        tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+        tracedecay_automation_runtime::automation::host_receipts::mark_consumed(
             &dashboard_root,
             &ready.pending.session_key,
             ready.pending.generation,

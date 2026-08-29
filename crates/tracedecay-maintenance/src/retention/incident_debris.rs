@@ -174,7 +174,8 @@ fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSwe
     hotpath::gauge!("maintenance.incident_debris.quarantined_total").inc(report.quarantined);
     hotpath::gauge!("maintenance.incident_debris.collected_total").inc(report.collected);
     hotpath::gauge!("maintenance.incident_debris.failed_total").inc(report.errors.len());
-    hotpath::gauge!("maintenance.incident_debris.reclaimed_bytes_total").inc(report.reclaimed_bytes);
+    hotpath::gauge!("maintenance.incident_debris.reclaimed_bytes_total")
+        .inc(report.reclaimed_bytes);
     hotpath::gauge!("maintenance.incident_debris.retained").set(report.retained);
     report
 }

@@ -486,18 +486,18 @@ fn spawn_noncooperative_test_task() -> (
 #[cfg(unix)]
 fn scheduled_automation_patch(
     enabled: bool,
-) -> tracedecay_agent_hosts::automation::config::AutomationConfigPatch {
-    tracedecay_agent_hosts::automation::config::AutomationConfigPatch {
+) -> tracedecay_automation_runtime::automation::config::AutomationConfigPatch {
+    tracedecay_automation_runtime::automation::config::AutomationConfigPatch {
         enabled: Some(enabled),
         backend: Some(
-            tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer,
+            tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer,
         ),
-        memory_curator: tracedecay_agent_hosts::automation::config::AutomationTaskPatch {
+        memory_curator: tracedecay_automation_runtime::automation::config::AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("every:5m".to_string())),
-            ..tracedecay_agent_hosts::automation::config::AutomationTaskPatch::default()
+            ..tracedecay_automation_runtime::automation::config::AutomationTaskPatch::default()
         },
-        ..tracedecay_agent_hosts::automation::config::AutomationConfigPatch::default()
+        ..tracedecay_automation_runtime::automation::config::AutomationConfigPatch::default()
     }
 }
 
@@ -505,7 +505,7 @@ fn scheduled_automation_patch(
 async fn apply_project_automation_patch_via_surface(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,
-    patch: tracedecay_agent_hosts::automation::config::AutomationConfigPatch,
+    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> Arc<crate::mcp::McpServer> {
     let server = engine
         .project_server(handshake)
@@ -519,11 +519,15 @@ async fn apply_project_automation_patch_via_surface(
         .await
         .expect("read pinned automation configuration");
     let configured =
-        tracedecay_agent_hosts::automation::config::from_configuration_snapshot(&current.snapshot)
-            .expect("decode pinned automation configuration");
-    let desired =
-        tracedecay_agent_hosts::automation::config::effective_config(&configured, Some(&patch))
-            .expect("apply automation configuration patch");
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &current.snapshot,
+        )
+        .expect("decode pinned automation configuration");
+    let desired = tracedecay_automation_runtime::automation::config::effective_config(
+        &configured,
+        Some(&patch),
+    )
+    .expect("apply automation configuration patch");
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = super::project_open_owners::resolved_scope_for_project(
         graph.project_root(),
@@ -551,7 +555,7 @@ async fn apply_project_automation_patch_via_surface(
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    let observed_at = crate::daemon_client::invocation_now_micros();
+    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
     let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
@@ -603,7 +607,7 @@ async fn apply_project_automation_patch_via_surface(
             tracedecay_application::PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
-            crate::daemon_client::RequestedOutputFormat::Json,
+            tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
     crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
