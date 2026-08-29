@@ -48,6 +48,7 @@ use tracedecay_domain::git::{
     GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitHunkV1,
     GitIndexEntryExpectationV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitStatusV1,
     HUNK_REF_SCHEMA_VERSION_V1, HunkDirectionV1, HunkRefV1, full_hunk_selection_bitmap,
+    parse_hunk_header,
 };
 use tracedecay_domain::research::time::UtcMicros;
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
@@ -1490,34 +1491,6 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
     Ok(entries)
 }
 
-/// Parse one `@@ -o[,l] +n[,l] @@[ section]` hunk header.
-fn parse_hunk_header(line: &str) -> Option<ParsedHunk> {
-    let body = line.strip_prefix("@@ -")?;
-    let (old, rest) = body.split_once(' ')?;
-    let rest = rest.strip_prefix('+')?;
-    let (new, rest) = rest.split_once(" @@")?;
-    let parse_range = |range: &str| -> Option<(u32, u32)> {
-        match range.split_once(',') {
-            Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
-            None => Some((range.parse().ok()?, 1)),
-        }
-    };
-    let (old_start, old_lines) = parse_range(old)?;
-    let (new_start, new_lines) = parse_range(new)?;
-    let section = {
-        let trimmed = rest.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
-    Some(ParsedHunk {
-        old_start,
-        old_lines,
-        new_start,
-        new_lines,
-        section,
-        body: Vec::new(),
-    })
-}
-
 /// Parse `git diff --patch` output into per-file sections. Combined
 /// (`diff --cc` / `diff --combined`) sections for unmerged paths are
 /// skipped: their hunk grammar is not the ordinary unified format.
@@ -1565,8 +1538,15 @@ fn parse_diff_patch(text: &str) -> Vec<PatchFile> {
             if let Some(hunk) = current_hunk.take() {
                 file.hunks.push(hunk);
             }
-            if let Some(hunk) = parse_hunk_header(line) {
-                current_hunk = Some(hunk);
+            if let Some(header) = parse_hunk_header(line) {
+                current_hunk = Some(ParsedHunk {
+                    old_start: header.old_start,
+                    old_lines: header.old_count,
+                    new_start: header.new_start,
+                    new_lines: header.new_count,
+                    section: header.section.map(str::to_owned),
+                    body: Vec::new(),
+                });
             }
             continue;
         }
