@@ -861,24 +861,30 @@ impl ApplicationProblem {
     }
 
     pub fn safe_message(&self) -> &str {
-        self.diagnostic()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .unwrap_or_else(|| match self {
-                Self::NotFoundOrNotAuthorized { .. } => {
-                    "The requested resource was not found or is not authorized"
-                }
-                Self::Cancelled { stage, .. } => match stage {
-                    CancellationStage::BeforeAdmission => {
-                        "The request was cancelled before admission"
-                    }
-                    _ => "The admitted request was cancelled",
-                },
-                Self::TimedOut { stage, .. } => match stage {
-                    CancellationStage::BeforeAdmission => "The request timed out before admission",
-                    _ => "The admitted request timed out",
-                },
-                _ => unreachable!("diagnostic-bearing problem handled above"),
-            })
+        // One exhaustive match: a new variant must choose its safe message
+        // here at compile time instead of reaching a runtime fallback.
+        match self {
+            Self::InvalidRequest { diagnostic, .. }
+            | Self::Conflict { diagnostic, .. }
+            | Self::PartialEffect { diagnostic, .. }
+            | Self::Stale { diagnostic, .. }
+            | Self::Unsupported { diagnostic, .. }
+            | Self::Unavailable { diagnostic, .. }
+            | Self::ExecutionFailed { diagnostic, .. }
+            | Self::ResetRequired { diagnostic, .. }
+            | Self::Saturated { diagnostic, .. } => diagnostic.message.as_str(),
+            Self::NotFoundOrNotAuthorized { .. } => {
+                "The requested resource was not found or is not authorized"
+            }
+            Self::Cancelled { stage, .. } => match stage {
+                CancellationStage::BeforeAdmission => "The request was cancelled before admission",
+                _ => "The admitted request was cancelled",
+            },
+            Self::TimedOut { stage, .. } => match stage {
+                CancellationStage::BeforeAdmission => "The request timed out before admission",
+                _ => "The admitted request timed out",
+            },
+        }
     }
 
     pub fn committed_receipt(&self) -> Option<&EffectReceipt> {
