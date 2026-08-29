@@ -252,7 +252,7 @@ fn run_prompt_with_optional_execution(
     thread_source: &str,
     execution: Option<CodexAppServerWorkExecution<'_>>,
 ) -> Result<CodexAppServerSummary> {
-    hotpath::measure_block!("sessions.codex_app_server.run", {
+    hotpath::measure_block!("sessions.hosts.codex_app_server.run", {
         let model = configured_model(config);
         let mut command = codex_app_server_command(&config.codex_bin);
         if let Some(execution) = &execution {
@@ -343,7 +343,7 @@ fn run_codex_protocol(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<CodexAppServerSummary> {
-    hotpath::measure_block!("sessions.codex_app_server.protocol", {
+    hotpath::measure_block!("sessions.hosts.codex_app_server.protocol", {
         let mut stdin = child
             .child
             .stdin
@@ -430,7 +430,7 @@ fn run_codex_protocol(
 }
 
 fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Child> {
-    hotpath::measure_block!("sessions.codex_app_server.spawn", {
+    hotpath::measure_block!("sessions.hosts.codex_app_server.spawn", {
         #[cfg(unix)]
         command.process_group(0);
         let deadline = Instant::now() + CODEX_APP_SERVER_SPAWN_RETRY_WINDOW;
@@ -551,14 +551,14 @@ fn terminate_process_tree(process_group: u32) {
 #[cfg(not(any(unix, windows)))]
 fn terminate_process_tree(_process_group: u32) {}
 
-#[hotpath::measure(label = "sessions.codex_app_server.send")]
+#[hotpath::measure(label = "sessions.hosts.codex_app_server.send")]
 fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
     writeln!(stdin, "{value}")?;
     stdin.flush()?;
     Ok(())
 }
 
-#[hotpath::measure(label = "sessions.codex_app_server.wait")]
+#[hotpath::measure(label = "sessions.hosts.codex_app_server.wait")]
 fn wait_for_response(
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
     deadline: Instant,
@@ -584,7 +584,7 @@ fn wait_for_turn_summary(
     deadline: Instant,
     thread_id: String,
 ) -> Result<CodexAppServerSummary> {
-    hotpath::measure_block!("sessions.codex_app_server.turn", {
+    hotpath::measure_block!("sessions.hosts.codex_app_server.turn", {
         let mut text = String::new();
         let mut model = None;
         loop {
@@ -700,7 +700,7 @@ fn find_model_id(value: &Value) -> Option<String> {
 }
 
 pub fn build_codex_summary_prompt(request: &LcmSummaryRequest) -> String {
-    hotpath::measure_block!("sessions.codex_app_server.prompt", {
+    hotpath::measure_block!("sessions.hosts.codex_app_server.prompt", {
         let mut prompt = String::new();
         prompt.push_str(
             "You are generating a durable TraceDecay LCM summary from Codex transcript messages.\n",

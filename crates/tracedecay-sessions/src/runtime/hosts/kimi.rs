@@ -86,7 +86,7 @@ impl KimiSource {
         frontier_path: Option<PathBuf>,
         mut budget: HostScanBudget,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
-        hotpath::measure_block!("sessions.kimi.discover", {
+        hotpath::measure_block!("sessions.hosts.kimi.discover", {
             let mut discovery = KimiDiscoveryReport {
                 files: bound_path_list(Vec::new(), bounds),
                 failures: Vec::new(),
@@ -290,7 +290,7 @@ impl KimiSource {
         })
     }
 
-    #[hotpath::measure(label = "sessions.kimi.metadata")]
+    #[hotpath::measure(label = "sessions.hosts.kimi.metadata")]
     fn metadata(
         &self,
         budget: &mut HostScanBudget,
@@ -407,7 +407,7 @@ pub async fn capture_kimi_observations(
                         scan_budget,
                     )
                 }),
-                label = "sessions.kimi.discover_task"
+                label = "sessions.hosts.kimi.discover_task"
             )
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
@@ -668,7 +668,7 @@ pub async fn capture_kimi_observations(
             .await?;
             Ok(outcome)
         },
-        label = "sessions.kimi.capture"
+        label = "sessions.hosts.kimi.capture"
     )
     .await
 }

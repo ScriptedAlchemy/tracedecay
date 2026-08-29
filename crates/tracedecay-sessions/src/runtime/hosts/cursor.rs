@@ -450,7 +450,6 @@ fn parse_cursor_jsonl(
 /// driver), so each call only parses and upserts transcript lines appended since
 /// the last run rather than re-reading the whole file. Repeated calls on an
 /// unchanged file are a no-op.
-#[hotpath::measure(label = "sessions.hosts.cursor.ingest_event", future = true)]
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     admission: &dyn HostAdmission,
