@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -4211,6 +4211,9 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// Wall-clock companion to `last_reconciled_at` for read-model projection.
     /// `None` until the first verified reconcile after open/restore.
     last_reconciled_at_micros: Option<i64>,
+    /// Lock-free mount companion for `last_reconciled_at_micros`. `0` means
+    /// none; dashboard freshness reads this when the scheduler mutex is busy.
+    last_reconciled_at_micros_slot: Arc<AtomicI64>,
     /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
     /// present source candidates at last reconcile. A quiet repository whose
     /// signature is unchanged resets the staleness clock without paying the
@@ -4389,6 +4392,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let verified_against_source = false;
         let freshness_unknown = true;
         let last_reconciled_at_micros = None;
+        let last_reconciled_at_micros_slot = Arc::new(AtomicI64::new(0));
         let latest_content_identity = None;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -4407,6 +4411,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             git_metadata,
             last_reconciled_at: Instant::now(),
             last_reconciled_at_micros,
+            last_reconciled_at_micros_slot,
             last_stat_signature: None,
             verified_against_source,
             freshness_unknown,
@@ -4470,6 +4475,10 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub(super) fn build_progress_slot(&self) -> CodeIndexBuildProgressSlotV1 {
         Arc::clone(&self.build_progress)
+    }
+
+    pub(super) fn last_reconciled_at_micros_slot(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.last_reconciled_at_micros_slot)
     }
 
     pub(super) fn historical_generation_owner(&self) -> HistoricalCodeIndexGenerationOwnerV1 {
@@ -5397,7 +5406,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.last_stat_signature = signature;
         self.freshness_unknown = false;
         self.last_reconciled_at = Instant::now();
-        self.last_reconciled_at_micros = Some(now_micros().0);
+        self.store_last_reconciled_at_micros(now_micros().0);
         self.verified_against_source = true;
     }
 
@@ -5579,7 +5588,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
                 self.last_reconciled_at = Instant::now();
-                self.last_reconciled_at_micros = Some(now_micros().0);
+                self.store_last_reconciled_at_micros(now_micros().0);
                 Ok(None)
             }
             _ => Ok(Some(self.reconcile_now()?)),
@@ -5636,7 +5645,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .is_ok_and(|signature| self.last_stat_signature.as_ref() == Some(&signature))
         {
             self.last_reconciled_at = Instant::now();
-            self.last_reconciled_at_micros = Some(now_micros().0);
+            self.store_last_reconciled_at_micros(now_micros().0);
             return false;
         }
         true
@@ -5657,6 +5666,12 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub(super) const fn last_reconciled_at_micros(&self) -> Option<i64> {
         self.last_reconciled_at_micros
+    }
+
+    fn store_last_reconciled_at_micros(&mut self, micros: i64) {
+        self.last_reconciled_at_micros = Some(micros);
+        self.last_reconciled_at_micros_slot
+            .store(micros, Ordering::Release);
     }
 
     pub(super) const fn verified_against_source(&self) -> bool {

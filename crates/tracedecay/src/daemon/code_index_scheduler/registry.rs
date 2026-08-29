@@ -12,7 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -497,6 +497,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Lock-free last-reconcile timestamp. `0` means none. Dashboard freshness
+    /// reads this when the scheduler mutex would block.
+    pub(super) last_reconciled_at_micros: Arc<AtomicI64>,
     pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
     /// owns a long reconcile or text-artifact transaction.
@@ -2368,6 +2371,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
         let historical_generation_owner = opened.historical_generation_owner();
+        let last_reconciled_at_micros = opened.last_reconciled_at_micros_slot();
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
@@ -3267,6 +3271,7 @@ impl CodeIndexSchedulerRegistryV1 {
             scheduler,
             historical_generation_owner,
             serving_generation,
+            last_reconciled_at_micros,
             text_generation,
             build_progress,
             serving_generation_epoch,
@@ -3919,6 +3924,7 @@ impl CodeIndexSchedulerRegistryV1 {
             scheduler,
             reconcile_in_progress,
             serving_generation,
+            last_reconciled_at_micros,
             text_generation,
             build_progress,
             hints,
@@ -3929,6 +3935,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.last_reconciled_at_micros),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
@@ -3979,11 +3986,19 @@ impl CodeIndexSchedulerRegistryV1 {
                         .count();
                     let ready = latest.is_some() || text_ready;
                     let stale = hook_hint_count != Some(0);
+                    let last_reconcile_micros = match last_reconciled_at_micros
+                        .load(Ordering::Acquire)
+                    {
+                        0 => None,
+                        micros => Some(micros),
+                    };
                     return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
-                        last_reconcile_micros: None,
+                        last_reconcile_micros,
                         staleness_state: Some(
-                            if refreshing && ready {
+                            if ready && last_reconcile_micros.is_some() && !stale {
+                                "fresh"
+                            } else if refreshing && ready {
                                 "refreshing"
                             } else if stale && ready {
                                 "stale"
