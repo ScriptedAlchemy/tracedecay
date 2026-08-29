@@ -82,7 +82,9 @@ fallback writable database.
 These foundations do not by themselves establish completion of the active
 product journeys or the full verification suite.
 
-**Open operational evidence (owner recorded, 2026-07-27).**
+**2026-07-27 operator snapshot; not current acceptance.** The bullets below
+are a dated operator observation from that day. They are not product
+invariants and do not by themselves keep a journey open.
 
 - Doctor currently reports
   `authority_audit_unavailable`, and Cursor Core has a component-ownership
@@ -100,10 +102,13 @@ product journeys or the full verification suite.
   owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
   semantic activation.
   Exact, lexical, and graph retrieval remain the required available fallback.
+  This snapshot does not mean semantic search is product-disabled.
 - A live profile was observed 237 minutes stale (the index later reported
   285 minutes stale while this reconciliation was being checked). Plan 25 and
   the active incremental-indexing slice own cadence/freshness diagnosis; the
   new serve-during-refresh behavior does not close that issue.
+  That 237-minute staleness observation is superseded by Plan 25's 2026-08-07
+  live-profile note that the defect did not reproduce.
 - Repository tests and normal CI remain incomplete or failing. Focused local
   success does not establish product acceptance, and unexecuted, skipped,
   empty-filter, or partial coverage must remain unresolved.
@@ -211,7 +216,9 @@ records the rejected mechanism, the reason, and the retained replacement:
 6. **The Cargo shim and `cargo-slot` are rejected.** The earlier local build
    shim was removed by explicit direction and is not product, contributor, CI,
    or release architecture. Stock Cargo behavior and portable repository
-   configuration supersede it.
+   configuration supersede it. Machine-local `kache cargo --` is a
+   compile-cache front-end that execs real Cargo; it is not a revived
+   cargo-slot and is not product or CI architecture.
 7. **Delivery choreography is not product authority.** Capability plans,
    production callers, direct behavior, and ordinary CI define completion;
    branch, worktree, or pull-request layouts do not.
@@ -870,6 +877,8 @@ Unmeasured speculative optimizations and placeholder benchmarks do not ship.
   [23](23-session-lcm-temporal-retrieval-and-evaluation.md),
   [25](25-code-intelligence-indexing-crate.md), and
   [31](31-native-fastembed-semantic-code-search.md).
+  Indexing runtime is `tracedecay-code-index-runtime`; generation retention is
+  `tracedecay-code-index-retention`.
 - Policy and delivery surfaces: [Plans 06](06-policy-crate.md), [08](08-tool-catalog-crate.md),
   [09](09-application-crate.md), [10](10-api-crate.md),
   [17](17-official-public-api-and-sdks.md),
