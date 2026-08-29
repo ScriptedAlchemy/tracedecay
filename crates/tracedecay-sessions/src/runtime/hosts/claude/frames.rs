@@ -177,7 +177,7 @@ pub fn scan_claude_source_frames(
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.hosts.claude.scan_frames")]
 pub fn try_scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
@@ -186,7 +186,7 @@ pub fn try_scan_claude_source_frames(
     try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, None)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.hosts.claude.scan_frames_resume")]
 pub fn try_scan_claude_source_frames_with_resume(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,

@@ -1866,7 +1866,7 @@ impl ActiveAdmission<'_> {
     }
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.observation.admit_jsonl", future = true)]
 pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
