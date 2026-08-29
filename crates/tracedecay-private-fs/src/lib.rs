@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io;
 
 pub mod background_cpu;
+pub mod capability_dir;
 pub mod framed_log;
 #[cfg(windows)]
 pub mod windows_file;

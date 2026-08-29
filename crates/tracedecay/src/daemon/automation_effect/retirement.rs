@@ -1,7 +1,5 @@
 //! Finalization of shipped proposal history after the main typed terminal.
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-use std::ffi::CString;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +13,7 @@ use tracedecay_agent_hosts::automation::automatic_facts::{
 };
 use tracedecay_application::retained_surfaces::AutomationTaskV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
+use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
@@ -340,7 +339,10 @@ fn complete_after_pending_removal_with(
                 let retired_name = retired_path.file_name().ok_or_else(|| {
                     contract_error("retired shipped proposal witness has no filename")
                 })?;
-                rename_noreplace(&parent, captured_name, retired_name).map_err(|error| {
+                crate::storage::retry_transient_file_op(|| {
+                    rename_noreplace(&parent, captured_name, &parent, retired_name)
+                })
+                .map_err(|error| {
                     contract_error(format!(
                         "captured shipped proposal source retirement failed: {error}"
                     ))
@@ -697,7 +699,9 @@ fn capture_exact_source_with_capture(
                 "captured shipped proposal source changed before typed retirement capture",
             ));
         }
-        match rename_noreplace(&parent, source_name, &tombstone_name) {
+        match crate::storage::retry_transient_file_op(|| {
+            rename_noreplace(&parent, source_name, &parent, &tombstone_name)
+        }) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(contract_error)?;
@@ -770,154 +774,13 @@ fn restore_captured_source(
     source: &OsStr,
     source_path: &Path,
 ) -> Result<()> {
-    rename_noreplace(parent, captured, source).map_err(|error| {
-        contract_error(format!(
-            "captured shipped proposal source conflicts with a replacement and could not be restored: {error}"
-        ))
-    })?;
-    sync_parent_directory(source_path, DirectorySyncPolicy::Strict).map_err(contract_error)
-}
-
-/// Atomically renames sibling paths without replacing an occupied destination.
-/// Platforms without a suitable primitive fail closed.
-fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both names are single-component C strings and both dirfds
-        // reference the same already-open retirement parent capability.
-        let result = unsafe {
-            libc::renameat2(
-                parent.as_raw_fd(),
-                from.as_ptr(),
-                parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both names are single-component C strings and RENAME_EXCL
-        // refuses an occupied destination.
-        let result = unsafe {
-            libc::renameatx_np(
-                parent.as_raw_fd(),
-                from.as_ptr(),
-                parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use std::os::windows::io::AsRawHandle;
-
-        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-        const FILE_NAME_NORMALIZED: u32 = 0;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-            fn GetFinalPathNameByHandleW(
-                file: *mut std::ffi::c_void,
-                file_path: *mut u16,
-                file_path_length: u32,
-                flags: u32,
-            ) -> u32;
-        }
-
-        let parent_path = windows_parent_path(|buffer, length| unsafe {
-            GetFinalPathNameByHandleW(parent.as_raw_handle(), buffer, length, FILE_NAME_NORMALIZED)
+    crate::storage::retry_transient_file_op(|| rename_noreplace(parent, captured, parent, source))
+        .map_err(|error| {
+            contract_error(format!(
+                "captured shipped proposal source conflicts with a replacement and could not be restored: {error}"
+            ))
         })?;
-        let from = parent_path
-            .join(from)
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let to = parent_path
-            .join(to)
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        return crate::storage::retry_transient_file_op(|| {
-            // SAFETY: both UTF-16 strings are NUL-terminated. Omitting
-            // MOVEFILE_REPLACE_EXISTING makes an occupied destination fail.
-            let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-            if moved != 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-    #[cfg(not(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        windows
-    )))]
-    {
-        let _ = (parent, from, to);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "atomic no-replace retirement capture is unavailable on this platform",
-        ))
-    }
-}
-
-#[cfg(windows)]
-fn windows_parent_path(get_path: impl Fn(*mut u16, u32) -> u32) -> std::io::Result<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-
-    let required = get_path(std::ptr::null_mut(), 0);
-    if required == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let capacity = required.checked_add(1).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "retirement parent path length overflowed",
-        )
-    })?;
-    let mut buffer = vec![0_u16; capacity as usize];
-    let written = get_path(buffer.as_mut_ptr(), buffer.len() as u32);
-    if written == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if written as usize >= buffer.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "retirement parent path changed while resolving its capability",
-        ));
-    }
-    buffer.truncate(written as usize);
-    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
+    sync_parent_directory(source_path, DirectorySyncPolicy::Strict).map_err(contract_error)
 }
 
 fn read_retirement_bytes(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
