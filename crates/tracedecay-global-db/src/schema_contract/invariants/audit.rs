@@ -688,6 +688,7 @@ struct ResolvedOutputAuthority {
     authorities: HashMap<(String, String), ProjectionOutputAuthority>,
     creators: HashMap<(String, String), i64>,
     provenance: HashMap<(String, i64), ProjectionProvenanceRow>,
+    projection_rows: crate::observation_projection::ProjectionRowsBatch,
 }
 
 impl ResolvedOutputAuthority {
@@ -813,13 +814,24 @@ async fn validate_message_projection_row(
         return Ok(false);
     };
     validate_provenance_row(owner_provenance, &owner_projection)?;
-    crate::observation_projection::verify_projection_rows(conn, &owner_projection)
-        .await
-        .map_err(|error| {
-            authority_violation(format!(
-                "projection output rows disagree with deterministic output: {error}"
-            ))
-        })?;
+    let owner_session = owner_projection.session();
+    let owner_message = owner_projection.message();
+    crate::observation_projection::verify_projection_rows_from_records(
+        conn,
+        &owner_projection,
+        resolved
+            .projection_rows
+            .session(&owner_session.provider, &owner_session.session_id),
+        resolved
+            .projection_rows
+            .message(&owner_message.provider, &owner_message.message_id),
+    )
+    .await
+    .map_err(|error| {
+        authority_violation(format!(
+            "projection output rows disagree with deterministic output: {error}"
+        ))
+    })?;
     Ok(true)
 }
 
@@ -1073,6 +1085,13 @@ async fn resolve_output_authority(
         authorities,
         creators: ProjectionOutputOwnership::load_batch(conn, &outputs).await?,
         provenance: ProjectionProvenanceRow::load_batch(conn, &observation_ids).await?,
+        projection_rows: crate::observation_projection::read_projection_rows_batch(conn, &outputs)
+            .await
+            .map_err(|error| {
+                authority_violation(format!(
+                    "projection output rows disagree with deterministic output: {error}"
+                ))
+            })?,
     })
 }
 
@@ -2485,6 +2504,16 @@ mod tests {
             0,
             "canonical-owner provenance must reuse the page authority instead of reading per output"
         );
+        assert_eq!(
+            counting.issued("FROM sessions WHERE provider = ?1 AND session_id = ?2"),
+            0,
+            "projected sessions must reuse the page authority instead of reading per output"
+        );
+        assert_eq!(
+            counting.issued("FROM session_messages WHERE provider = ?1 AND message_id = ?2"),
+            0,
+            "projected messages must reuse the page authority instead of reading per output"
+        );
 
         let authority_sql =
             counting.statement_containing("MAX(provenance.message_created) AS projector_owned");
@@ -2654,6 +2683,12 @@ mod tests {
             .unwrap(),
             creators,
             provenance: HashMap::new(),
+            projection_rows: crate::observation_projection::read_projection_rows_batch(
+                &connection,
+                &requested,
+            )
+            .await
+            .unwrap(),
         };
 
         let contested = resolved

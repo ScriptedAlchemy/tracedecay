@@ -19,6 +19,7 @@ pub(super) use schema::{
 };
 pub(crate) use state::rearm_queued_projection_retries;
 pub(super) use state::{
-    ProjectionOutputAuthority, read_output_authorities, resolve_output_projection,
-    verify_projection_rows,
+    ProjectionOutputAuthority, ProjectionRowsBatch, read_output_authorities,
+    read_projection_rows_batch, resolve_output_projection, verify_projection_rows,
+    verify_projection_rows_from_records,
 };
