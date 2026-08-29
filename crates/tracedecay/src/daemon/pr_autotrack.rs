@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
@@ -2104,7 +2104,7 @@ async fn activate_linked_worktree(
             None,
             graph_runtime.code_graph_seat_port(),
             project_database,
-            crate::daemon::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
+            tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,
             ),
         )

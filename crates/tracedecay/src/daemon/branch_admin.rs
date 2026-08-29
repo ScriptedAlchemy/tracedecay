@@ -14,7 +14,7 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
-use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use super::profile_host_admission_replay::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
@@ -1401,7 +1401,7 @@ impl StoreAdministration {
     #[hotpath::measure(label = "daemon.branch_admin.handshake", future = true)]
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
-        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
         action: crate::branch::BranchAdminAction,
     ) -> Result<crate::branch::BranchAdminReport> {
@@ -1461,7 +1461,7 @@ impl StoreAdministration {
     #[hotpath::measure(label = "daemon.branch_admin.execute", future = true)]
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
-        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
         action: crate::branch::BranchAdminAction,
@@ -1583,7 +1583,7 @@ fn acquire_manual_branch_retirement_leases(
 async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
-    schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     retirements: &[crate::branch::SingleStoreBranchRetirementV1],
     lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {

@@ -89,7 +89,7 @@ use crate::application_surface::{
     GitReadSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
-use crate::daemon::git_transactions::{
+use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
@@ -276,7 +276,7 @@ fn retained_request_admission_problem(admission: RequestAdmission) -> Option<App
 
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
-    code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     lsp_admission_open: Arc<Mutex<bool>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
@@ -318,14 +318,14 @@ pub(crate) struct DaemonInvocationService {
 impl Default for DaemonInvocationService {
     fn default() -> Self {
         Self::with_code_index_schedulers(
-            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
         )
     }
 }
 
 impl DaemonInvocationService {
     pub(crate) fn with_code_index_schedulers(
-        code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+        code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     ) -> Self {
         Self {
             code_index_schedulers,

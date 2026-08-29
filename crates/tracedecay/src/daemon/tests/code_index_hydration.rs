@@ -14,7 +14,7 @@ use tracedecay_domain::{
     VectorWatermark, WorktreeId,
 };
 
-use super::super::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
+use tracedecay_code_index_runtime::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 use tracedecay_query::retrieval::hydrate::{
@@ -401,7 +401,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
     };
 
     let display_paths =
-        super::super::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)
+        tracedecay_code_index_runtime::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)
             .expect("display path index for the sealed generation");
     let (display, provenance) =
         code_index_search_display_binding(generation, &display_paths, &request, &candidate)

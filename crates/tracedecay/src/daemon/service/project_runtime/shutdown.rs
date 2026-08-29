@@ -305,7 +305,7 @@ async fn shut_down_semantic(
         }
         if let Some(configuration) = runtime.configuration.as_ref() {
             let receipt =
-                crate::daemon::shutdown_orchestration::collect_semantic_evaluation_shutdown(
+                tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
                     configuration.semantic_evaluation_workers().as_ref(),
                     deadline,
                 )

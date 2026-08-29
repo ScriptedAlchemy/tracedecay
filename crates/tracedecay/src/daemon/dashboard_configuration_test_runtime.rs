@@ -15,7 +15,7 @@ use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
-use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use super::service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
 };

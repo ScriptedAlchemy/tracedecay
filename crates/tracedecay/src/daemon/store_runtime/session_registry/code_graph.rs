@@ -32,7 +32,7 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
-use crate::daemon::store_runtime::{
+use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
 
@@ -45,6 +45,8 @@ pub(super) mod graph_attachment;
 mod sealed_publication_tests;
 mod seals;
 mod semantic_vector;
+mod semantic_vector_runtime;
+use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
@@ -1974,6 +1976,49 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::load_sealed_read_bundle_catalog(self, request_cancelled)
+    }
+
+    fn semantic_vector_identity(
+        &self,
+    ) -> std::result::Result<
+        (
+            tracedecay_domain::ProjectId,
+            RepositoryId,
+            WorktreeId,
+            CodeGenerationId,
+            GraphGenerationDependency,
+        ),
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::semantic_vector_identity(self)
+    }
+
+    fn semantic_vector_staging_binding(
+        &self,
+    ) -> (
+        tracedecay_store::StoreShardIdV1,
+        tracedecay_store::StoreRuntimeBindingV1,
+    ) {
+        let (scope, binding) = Self::semantic_vector_staging_binding(self);
+        (scope.clone(), binding.clone())
+    }
+
+    fn into_semantic_vector_runtime(
+        self: Box<Self>,
+        scope: tracedecay_usecases::semantic_runtime::SemanticVectorGraphScopeV1,
+    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::VerifiedSemanticVectorGraphRuntimeV1>
+    {
+        let (source_scope, binding) = {
+            let (scope, binding) =
+                RetainedCodeGraphRuntimeV1::semantic_vector_staging_binding(self.as_ref());
+            (scope.clone(), binding.clone())
+        };
+        Arc::new(DaemonVerifiedSemanticVectorGraphRuntimeV1::new(
+            Arc::from(self),
+            scope,
+            source_scope,
+            binding,
+        ))
     }
 }
 

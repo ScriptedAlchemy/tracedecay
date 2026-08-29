@@ -5,6 +5,7 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler;
 
 mod code_index_activation;
 mod runtime;
@@ -463,11 +464,13 @@ async fn production_project_server_inner(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider.clone(),
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let code_index_branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
         read_admission_provider,
+        project_open_owners::DaemonCodeIndexScopeResolverV1,
     );
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());

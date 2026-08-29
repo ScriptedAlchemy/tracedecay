@@ -990,7 +990,7 @@ mod tests {
         validate_sealed_generation_metadata, verify_checked_seal,
         verify_sealed_generation_source_from_roots,
     };
-    use crate::daemon::code_index_scheduler::{
+    use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
 

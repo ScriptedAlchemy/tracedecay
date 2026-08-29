@@ -10,6 +10,7 @@
 
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
+use tracedecay_code_index_runtime::git_transactions;
 #[cfg(any(not(unix), test))]
 use crate::daemon_contract::DaemonInvocationProblem;
 use service::invocation::semantic_evaluation::SemanticInvocationControlV1;

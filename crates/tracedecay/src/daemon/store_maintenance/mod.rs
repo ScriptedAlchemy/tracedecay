@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::branch::BranchAdminAction;
 use crate::config::RetentionConfig;
-use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;
 use crate::tracedecay::TraceDecay;
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
@@ -195,7 +195,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
         };
     };
     let after = observations.semantic_vector_retention_cursor(root);
-    match crate::daemon::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
+    match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
         schedulers,
         root,
         &configuration,
@@ -203,7 +203,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
     )
     .await
     {
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Ready(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Ready(
             census,
         ) => {
             let convergence_pending = census.continuation.is_some()
@@ -240,28 +240,28 @@ pub(super) async fn run_semantic_vector_generation_retention(
                 crate::daemon::maintenance::MaintenanceTickOutcome::Complete
             }
         }
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::ResetRequired(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::ResetRequired(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("reset_required:{reason}"));
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Corrupt(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Corrupt(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("corrupt:{reason}"));
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Unavailable(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Unavailable(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
             log_semantic_vector_retention_degraded(&format!("unavailable:{reason}"));
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Denied(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Denied(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
@@ -365,7 +365,7 @@ pub(super) async fn resolve_vector_retention_inventory(
         };
     };
     let project_root = graph.hook_store_layout().project_root.clone();
-    let sources = crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+    let sources = tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
         schedulers,
         &project_root,
         &configuration,
@@ -379,12 +379,12 @@ pub(super) async fn resolve_vector_retention_inventory(
 /// unavailable degrades to the offline protection set, while reset, corrupt,
 /// and denied stay fail-closed and refuse the sweep.
 fn classify_vector_readable_sources(
-    sources: crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
+    sources: tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
     configuration: tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
 ) -> VectorRetentionInventoryV1 {
     match sources {
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
             sources,
             ..
         } => VectorRetentionInventoryV1::Online {
@@ -392,22 +392,22 @@ fn classify_vector_readable_sources(
             configuration,
             expected_vector_revision,
         },
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
             reason,
         ) => VectorRetentionInventoryV1::Offline {
             reason: format!("vector_graph_unavailable:{reason}"),
         },
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
             reason,
         ) => VectorRetentionInventoryV1::Refused {
             reason: format!("vector_graph_reset_required:{reason}"),
         },
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
             reason,
         ) => VectorRetentionInventoryV1::Refused {
             reason: format!("vector_graph_corrupt:{reason}"),
         },
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
             reason,
         ) => VectorRetentionInventoryV1::Refused {
             reason: format!("vector_graph_denied:{reason}"),
@@ -600,7 +600,7 @@ async fn apply_code_generation_retention(
         };
         let vector_writer_freeze = vector_runtime.freeze_vector_mutations().await;
         let pinned_vector_sources =
-            match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+            match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
                 schedulers,
                 &layout.project_root,
                 configuration,
@@ -608,11 +608,11 @@ async fn apply_code_generation_retention(
             )
             .await
             {
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
                     sources,
                     ..
                 } => sources,
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -620,7 +620,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -628,7 +628,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -636,7 +636,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -654,7 +654,7 @@ async fn apply_code_generation_retention(
             &pinned_vector_sources,
         );
         for generation in &plan.collectable_generations {
-            match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_source_generation_is_live(
+            match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_source_generation_is_live(
                 schedulers,
                 &layout.project_root,
                 &generation.generation_id,
@@ -662,7 +662,7 @@ async fn apply_code_generation_retention(
             )
             .await
             {
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
                     true,
                 ) => {
                     // A pending, ready, published, or base-linked vector stage still
@@ -671,10 +671,10 @@ async fn apply_code_generation_retention(
                     // make the next maintenance tick eligible.
                     return true;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
                     false,
                 ) => {}
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -682,7 +682,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -690,7 +690,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -698,7 +698,7 @@ async fn apply_code_generation_retention(
                     ));
                     return false;
                 }
-                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
+                tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
                     reason,
                 ) => {
                     log_code_generation_retention_degraded(&format!(
@@ -947,7 +947,7 @@ async fn collect_scope_root_proof_inputs(
         vector_sources,
         configuration_receipt,
         configured_root_receipt,
-    ) = match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+    ) = match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
         schedulers,
         graph.project_root(),
         &configuration,
@@ -955,21 +955,21 @@ async fn collect_scope_root_proof_inputs(
     )
     .await
     {
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
             sources,
             configuration_receipt,
             configured_root_receipt,
         } => (sources, configuration_receipt, configured_root_receipt),
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
             _,
         ) => return Err("scope_vector_inventory_reset_required"),
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
             _,
         ) => return Err("scope_vector_inventory_corrupt"),
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
             _,
         ) => return Err("scope_vector_inventory_unavailable"),
-        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
             _,
         ) => return Err("scope_vector_inventory_denied"),
     };
@@ -1105,7 +1105,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                     return false;
                 }
             };
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
+        match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
             schedulers,
             graph.project_root(),
             &replay.scope_hash,
@@ -1113,7 +1113,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
         )
         .await
         {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
                 source_scope,
                 live: false,
             } => {
@@ -1140,7 +1140,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                     );
                     return false;
                 }
-                match crate::daemon::code_index_scheduler::semantic_vector_graph::remove_project_vector_code_scope_binding(
+                match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::remove_project_vector_code_scope_binding(
                     schedulers,
                     graph.project_root(),
                     &replay.scope_hash,
@@ -1149,32 +1149,32 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 )
                 .await
                 {
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(true) => {}
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(false) => {
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(true) => {}
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(false) => {
                         log_code_index_scope_reconciliation_degraded(
                             "vector_scope_binding_not_removed",
                         );
                         return false;
                     }
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(reason) => {
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(reason) => {
                         log_code_index_scope_reconciliation_degraded(&format!(
                             "vector_scope_binding_unavailable:{reason}"
                         ));
                         return false;
                     }
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(reason) => {
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(reason) => {
                         log_code_index_scope_reconciliation_degraded(&format!(
                             "vector_scope_binding_denied:{reason}"
                         ));
                         return false;
                     }
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(reason) => {
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(reason) => {
                         log_code_index_scope_reconciliation_degraded(&format!(
                             "vector_scope_binding_reset_required:{reason}"
                         ));
                         return false;
                     }
-                    crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(reason) => {
+                    tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(reason) => {
                         log_code_index_scope_reconciliation_degraded(&format!(
                             "vector_scope_binding_corrupt:{reason}"
                         ));
@@ -1182,15 +1182,15 @@ pub(super) async fn run_code_index_scope_reconciliation(
                     }
                 }
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Missing => {}
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Missing => {}
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
                 live: true,
                 ..
             } => {
                 log_code_index_scope_reconciliation_degraded("vector_scope_binding_still_live");
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Unavailable(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Unavailable(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1198,7 +1198,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Denied(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Denied(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1206,7 +1206,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::ResetRequired(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::ResetRequired(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1214,7 +1214,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Corrupt(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Corrupt(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1311,7 +1311,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
     const MAX_SCOPE_LIVENESS_CHECKS_PER_PASS: usize = 32;
     for offset in 0..candidates.len().min(MAX_SCOPE_LIVENESS_CHECKS_PER_PASS) {
         let candidate = &candidates[(start + offset) % candidates.len()];
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
+        match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
             schedulers,
             graph.project_root(),
             &candidate.scope_hash,
@@ -1319,22 +1319,22 @@ pub(super) async fn run_code_index_scope_reconciliation(
         )
         .await
         {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
                 source_scope,
                 live: false,
             } => {
                 selected = Some((candidate.clone(), source_scope));
                 break;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
                 live: true,
                 ..
             } => {}
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Missing => {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Missing => {
                 log_code_index_scope_reconciliation_degraded("vector_scope_binding_missing");
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Unavailable(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Unavailable(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1342,7 +1342,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Denied(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Denied(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1350,7 +1350,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::ResetRequired(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::ResetRequired(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1358,7 +1358,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
                 ));
                 return false;
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Corrupt(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Corrupt(
                 reason,
             ) => {
                 log_code_index_scope_reconciliation_degraded(&format!(
@@ -1417,7 +1417,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
             }
         };
     let revalidated_source_scope =
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
+        match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_code_scope_is_live(
             schedulers,
             graph.project_root(),
             &candidate.scope_hash,
@@ -1425,7 +1425,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
         )
         .await
         {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorCodeScopeLiveness::Ready {
                 source_scope,
                 live: false,
             } => source_scope,
@@ -2060,6 +2060,124 @@ mod observability_retention_tests {
         assert!(
             rows.is_empty(),
             "maintenance must invoke analytics retention"
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_index_root_alignment_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::{
+        code_index_scope_store_root, code_index_store_root, resolve_live_code_index_roots,
+    };
+
+    #[test]
+    fn code_generation_retention_sweeps_the_scheduler_store_root() {
+        let data_root = PathBuf::from("/profile/projects/alpha");
+        let project_root = PathBuf::from("/work/alpha");
+
+        let swept = code_index_store_root(&data_root, &project_root);
+        let published =
+            tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+                &data_root.join("code-index-v1"),
+                &project_root,
+            );
+
+        assert_eq!(
+            swept, published,
+            "retention cadence must sweep the scheduler's scoped generation root"
+        );
+        assert!(
+            swept.starts_with(data_root.join("code-index-v1")),
+            "generation sweep must stay inside the project's code-index store"
+        );
+        assert_ne!(
+            swept,
+            data_root.join("code-index-v1"),
+            "sweep root must be the per-project scoped subdirectory, not the shared parent"
+        );
+    }
+
+    #[test]
+    fn scope_reconciliation_operates_on_the_shared_code_index_parent() {
+        let data_root = PathBuf::from("/profile/projects/alpha");
+        let project_root = PathBuf::from("/work/alpha");
+
+        let parent = code_index_scope_store_root(&data_root);
+        let scoped = code_index_store_root(&data_root, &project_root);
+
+        assert_eq!(parent, data_root.join("code-index-v1"));
+        assert_eq!(
+            scoped.parent(),
+            Some(parent.as_path()),
+            "the scoped sweep root must be a direct child of the reconciled parent"
+        );
+    }
+
+    fn scope_fixture_git(root: &Path, args: &[&str]) {
+        let status = Command::new(tracedecay_runtime_core::git::git_program())
+            .current_dir(root)
+            .args(args)
+            .status()
+            .expect("run git fixture command");
+        assert!(status.success(), "git fixture command failed: {args:?}");
+    }
+
+    #[test]
+    fn live_code_index_roots_cover_every_linked_worktree() {
+        use tracedecay_usecases::retention::code_index_generations::code_index_scope_hash;
+
+        let tmp = tempfile::TempDir::new().expect("repository root");
+        let primary = tmp.path().join("primary");
+        let linked = tmp.path().join("linked");
+        std::fs::create_dir_all(&primary).expect("create primary checkout");
+        scope_fixture_git(&primary, &["init", "-q", "-b", "main"]);
+        scope_fixture_git(&primary, &["config", "user.name", "TraceDecay Test"]);
+        scope_fixture_git(
+            &primary,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::write(primary.join("README.md"), b"fixture").expect("seed repository file");
+        scope_fixture_git(&primary, &["add", "."]);
+        scope_fixture_git(&primary, &["commit", "-qm", "fixture"]);
+        scope_fixture_git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().expect("worktree path"),
+            ],
+        );
+
+        let roots = resolve_live_code_index_roots(&primary)
+            .expect("git's own worktree registry is readable");
+
+        let hashes = roots
+            .iter()
+            .map(|root| code_index_scope_hash(root))
+            .collect::<std::collections::BTreeSet<_>>();
+        for root in [&primary, &linked] {
+            let canonical = std::fs::canonicalize(root).expect("canonical worktree root");
+            assert!(
+                hashes.contains(&code_index_scope_hash(&canonical)),
+                "every live worktree root must be represented in the live scope set: {}",
+                canonical.display()
+            );
+        }
+    }
+
+    #[test]
+    fn live_code_index_roots_fail_closed_outside_a_repository() {
+        let tmp = tempfile::TempDir::new().expect("non-repository root");
+
+        assert!(
+            resolve_live_code_index_roots(tmp.path()).is_err(),
+            "an unresolvable repository must never produce a smaller live set"
         );
     }
 }

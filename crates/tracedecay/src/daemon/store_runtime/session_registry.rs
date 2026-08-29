@@ -54,7 +54,6 @@ mod terminal_tasks;
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;
 
-pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 pub(crate) use profile_memory::open_user_memory_db;
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound

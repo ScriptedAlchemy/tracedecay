@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use super::code_index_scheduler::{
+use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerRegistryV1, ServingGenerationInstallationOutcomeV1,
     ServingGenerationRollbackOutcomeV1,
 };
@@ -638,7 +638,7 @@ fn capture_exact_branch_source_inner<'a>(
             )
         },
     )?;
-        let snapshot = super::git_transactions::capture_exact_snapshot(
+        let snapshot = tracedecay_code_index_runtime::git_transactions::capture_exact_snapshot(
             canonical_worktree_root,
             project_identity.clone(),
             scope.repository_id.clone(),

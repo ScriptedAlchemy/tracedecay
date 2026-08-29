@@ -136,16 +136,16 @@ mod branch_admin;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
-mod code_index_branch_diff;
-use code_index_branch_diff::code_index_branch_diff_executor;
-mod code_index_executor;
-use code_index_executor::code_index_search_executor;
-pub(crate) mod code_index_task_support;
+use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
+use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 #[cfg(test)]
-use code_index_executor::{code_index_search_display_binding, mcp_search_request_termination};
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_search_display_binding, mcp_search_request_termination,
+};
 #[cfg(test)]
-use code_index_task_support::{code_index_scope_unavailable, code_index_search_hydration_budget};
-pub(crate) mod code_index_scheduler;
+use tracedecay_code_index_runtime::code_index_task_support::{
+    code_index_scope_unavailable, code_index_search_hydration_budget,
+};
 mod connection_serving;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
@@ -196,9 +196,6 @@ pub(crate) use dashboard_configuration_test_runtime::{
 pub(crate) mod query_authority_provider;
 #[cfg(test)]
 pub(crate) mod retained_test_support;
-mod semantic_activation_reconciler;
-mod semantic_evaluation;
-mod semantic_evaluation_shutdown;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod store_shutdown;
@@ -211,9 +208,6 @@ pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
 pub(crate) use shutdown_coordination::ShutdownStatus;
-mod git_transactions;
-#[cfg(unix)]
-mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
 pub(crate) mod native_integration;
@@ -406,6 +400,20 @@ pub(crate) use service::{installed_service_state, unavailable_daemon_socket_advi
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/ignored_dependencies_tests.rs"]
+#[allow(clippy::expect_used)]
+mod code_index_ignored_dependencies_tests;
+
+#[cfg(test)]
+#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/registry/runtime_generation_census_tests.rs"]
+#[allow(clippy::expect_used)]
+mod code_index_runtime_generation_census_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod code_index_runtime_graph_activation_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

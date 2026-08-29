@@ -149,8 +149,8 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     let canonical = phrase
         .clone()
         .into_application_request(
-            crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
-            crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(),
+            tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+            tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(),
             page.clone(),
         )
         .expect("canonical phrase request");

@@ -24,7 +24,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
-    let registry = crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let registry = tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
     registry
         .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
         .await
@@ -87,7 +87,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         )
         .expect("prepare delayed semantic activation");
     let semantic_authority = Arc::new(
-            crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
             )
             .expect("prepare semantic route"),
@@ -129,8 +129,16 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .install_committed_query_authorities(
             project.path(),
             &scope,
-            &provider,
-            prepared,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
             Some(semantic_authority),
             None,
             None,
@@ -251,8 +259,16 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .install_committed_query_authorities(
             project.path(),
             &scope,
-            &provider,
-            prepared,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
             None,
             None,
             Some(&semantic_pins().vector_generation_id),
@@ -361,7 +377,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     );
 
     let delayed_semantic_authority = Arc::new(
-            crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
             )
             .expect("prepare delayed semantic route"),
@@ -371,8 +387,16 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
             .install_committed_query_authorities(
                 project.path(),
                 &scope,
-                &provider,
-                delayed_semantic,
+                || {
+                    provider
+                        .commit_prepared_activation(&delayed_semantic)
+                        .map_err(|error| error.to_string())
+                },
+                tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                    scope: delayed_semantic.scope().clone(),
+                    configuration_revision: delayed_semantic.configuration_revision().clone(),
+                    query_authority: std::sync::Arc::clone(delayed_semantic.query_authority()),
+                },
                 Some(delayed_semantic_authority),
                 None,
                 None,
@@ -454,8 +478,16 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .install_committed_query_authorities(
             project.path(),
             &scope,
-            &provider,
-            retry,
+            || {
+                provider
+                    .commit_prepared_activation(&retry)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: retry.scope().clone(),
+                configuration_revision: retry.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(retry.query_authority()),
+            },
             None,
             None,
             Some(&semantic_pins().vector_generation_id),
@@ -504,7 +536,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
             .expect("resolved scope");
     let store = TempDir::new().expect("store root");
-    let registry = crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let registry = tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
     registry
         .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
         .await
@@ -589,7 +621,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     // semantic restore is deferred: the revision-bound committed fallback
     // seats them without abandoning the reserved fence, while the plain
     // standalone mount stays refused by that fence.
-    crate::daemon::code_index_scheduler::query_runtime::
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
         mount_core_query_authority_for_committed_fallback_on_project_open(
             &registry,
             project.path(),
@@ -604,7 +636,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         "exact/lexical/graph must stay callable while semantic restore is deferred"
     );
     assert!(
-        crate::daemon::code_index_scheduler::query_runtime::
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
             mount_core_query_authority_on_project_open(
                 &registry,
                 project.path(),
@@ -618,7 +650,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
 
     // Semantic restoration stays deferred: no standalone semantic mount.
     let standalone_semantic = Arc::new(
-        crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
         )
         .expect("prepare standalone semantic route"),
@@ -654,7 +686,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         )
         .expect("prepare committed restore retry");
     let retry_semantic_authority = Arc::new(
-        crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
         )
         .expect("prepare committed semantic route"),
@@ -664,8 +696,16 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         .install_committed_query_authorities(
             project.path(),
             &scope,
-            &provider,
-            prepared,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
             Some(retry_semantic_authority),
             None,
             None,
@@ -808,7 +848,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
             cursor_keys,
         )
         .expect("install first production authority");
-    let authority = crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+    let authority = tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
         &scope,
         &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
         &provider,
@@ -885,7 +925,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
         )
         .expect("install reopened production authority");
     let reopened_authority =
-        crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
             &scope,
             &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
             &reopened_provider,
@@ -942,7 +982,7 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
         )
         .expect("install mismatched production authority");
     let mismatched_authority =
-        crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
             &scope,
             &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
             &mismatched_provider,

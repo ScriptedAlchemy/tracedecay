@@ -248,7 +248,7 @@ impl DaemonInvocationService {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
+                            let candidate = tracedecay_code_index_runtime::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
                                 &canonical_root,
                                 &scope,
                                 &scheduler,
@@ -256,7 +256,7 @@ impl DaemonInvocationService {
                                 Arc::clone(&control),
                             )
                             .await?;
-                            let authority = crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                            let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
                                 canonical_root.clone(),
                                 scope,
                                 scheduler,
@@ -327,7 +327,7 @@ impl DaemonInvocationService {
                 workers
                     .execute(worker_deadline, request_cancellation, move |control| {
                         async move {
-                            let candidate = crate::daemon::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
+                            let candidate = tracedecay_code_index_runtime::semantic_evaluation::build_daemon_semantic_evaluation_candidate(
                                 &canonical_root,
                                 &scope,
                                 &scheduler,
@@ -336,14 +336,14 @@ impl DaemonInvocationService {
                             )
                             .await?;
                             let snapshot =
-                                crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
+                                tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
                                 canonical_root.clone(),
                                 scope,
                                 scheduler,
                                 candidate.clone(),
                                 control,
                             );
-                            let authority = crate::daemon::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
+                            let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
                             operation
                                 .evaluate_and_publish_profile(&authority, &canonical_root, candidate)
                                 .await
@@ -432,7 +432,7 @@ fn semantic_execution_response(
     request_id: String,
     execution: Result<
         SemanticExecutionOutcomeV1,
-        crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
+        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
     >,
 ) -> DaemonInvocationResponse {
     match execution {
@@ -453,10 +453,10 @@ fn semantic_evaluation_response(
     request_id: String,
     evaluation: Result<
         tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1,
-        crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
+        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
     >,
 ) -> DaemonInvocationResponse {
-    use crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1;
+    use tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1;
 
     match evaluation {
         Ok(publication) => DaemonInvocationResponse::with_outcome(
@@ -589,7 +589,7 @@ mod tests {
         let response = semantic_evaluation_response(
             "req-semantic-eval".to_owned(),
             Err(
-                crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+                tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
                     SemanticActivationCoordinationErrorV1::RejectedDetail(
                         "exact eligible chunks current expected 2170, measured 2184".to_owned(),
                     ),
@@ -628,7 +628,7 @@ mod tests {
         };
 
         assert_eq!(
-            crate::daemon::semantic_evaluation::semantic_publication_generation(&state),
+            tracedecay_code_index_runtime::semantic_evaluation::semantic_publication_generation(&state),
             Err(SemanticActivationCoordinationErrorV1::Unavailable)
         );
     }
@@ -638,7 +638,7 @@ mod tests {
         let response = semantic_evaluation_response(
             "req-semantic-conflict".to_owned(),
             Err(
-                crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
+                tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1::Coordination(
                     SemanticActivationCoordinationErrorV1::Conflict,
                 ),
             ),

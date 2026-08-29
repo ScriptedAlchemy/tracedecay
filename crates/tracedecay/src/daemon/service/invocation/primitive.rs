@@ -243,8 +243,8 @@ pub(super) async fn execute_callable_code(
         }
         crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(request) => {
             let Ok(request) = request.into_application_request(
-                crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
-                crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+                tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(
                 ),
                 page,
             ) else {

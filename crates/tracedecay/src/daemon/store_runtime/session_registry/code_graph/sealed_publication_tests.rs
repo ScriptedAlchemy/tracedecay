@@ -34,9 +34,9 @@ use super::{
     AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
     sealed_projection_requires_stage_boundary,
 };
-use crate::daemon::code_index_scheduler::{
-    CodeGraphReplayBindingV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
-    scoped_code_index_store_root,
+use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use crate::daemon::profile_identity;
 

@@ -78,7 +78,6 @@ pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
 pub mod display;
 pub mod doctor;
 pub mod external_tools;
-mod git_index_transactions;
 pub use tracedecay_usecases::git_query;
 pub mod graph;
 mod hooks;

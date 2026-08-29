@@ -418,7 +418,7 @@ impl AdvisoryFeedbackDoctorPort for AdvisoryFeedbackDoctorAdapterV1 {
 /// request path.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
 pub(in crate::daemon) async fn code_index_read_from_registry(
-    registry: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeIndexMountReadV1 {
     if !registry.is_worktree_mounted(project_root).await {
@@ -1010,7 +1010,7 @@ pub async fn collect_retention_backlog_findings(
 /// small enough to be called cheap.
 #[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
 pub(super) async fn collect_code_generation_retention_findings(
-    schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
     configuration: Option<
         &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
@@ -1047,7 +1047,7 @@ pub(super) async fn collect_code_generation_retention_findings(
     // protection set cannot be proven and the census reads as Unknown rather
     // than "nothing is pinned".
     let vector_readable_sources =
-        match super::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+        match tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
             schedulers,
             project_root,
             configuration,
@@ -1055,7 +1055,7 @@ pub(super) async fn collect_code_generation_retention_findings(
         )
         .await
         {
-            super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
                 sources,
                 configured_root_receipt,
                 ..
@@ -1064,16 +1064,16 @@ pub(super) async fn collect_code_generation_retention_findings(
             // reason the authority reported. Collapsing them into `Unknown`
             // would claim the state could not be determined when it was in fact
             // determined and explained, so each keeps its name and its reason.
-            super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
                 detail,
             ) => return DoctorStorageFamilyReadV1::Unavailable { detail },
-            super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
                 detail,
             ) => return DoctorStorageFamilyReadV1::ResetRequired { detail },
-            super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
                 detail,
             ) => return DoctorStorageFamilyReadV1::Corrupt { detail },
-            super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
                 _,
             ) => return DoctorStorageFamilyReadV1::Denied,
         };
@@ -1321,7 +1321,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     host_home: Option<PathBuf>,
     remote_operational: RemoteOperationalReadProviderV1,
     retention: crate::config::RetentionConfig,
-    schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
@@ -1415,7 +1415,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 );
                 (registered_census.ok(), unregistered)
             };
-            let code_index_store_root = super::code_index_scheduler::scoped_code_index_store_root(
+            let code_index_store_root = tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
                 &layout.data_root.join("code-index-v1"),
                 &project_root,
             );

@@ -13,7 +13,7 @@ use tracedecay_usecases::{
     context::application_observed_at,
 };
 
-use crate::daemon::code_index_scheduler::{
+use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
     CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
 };

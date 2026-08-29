@@ -637,9 +637,9 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let request = match request.into_primitive(
-                    crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(
+                    tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),
-                    crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                    tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(
                     ),
                     page,
                 ) {

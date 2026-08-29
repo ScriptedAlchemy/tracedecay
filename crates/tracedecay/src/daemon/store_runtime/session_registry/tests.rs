@@ -1145,7 +1145,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .await
         .expect("mount project authority");
     let repository_id = tracedecay_domain::RepositoryId::new("repo:shared").expect("repository id");
-    let replay_binding = || crate::daemon::code_index_scheduler::CodeGraphReplayBindingV1 {
+    let replay_binding = || tracedecay_code_index_runtime::CodeGraphReplayBindingV1 {
         generations_root: project_database
             .database_path()
             .with_extension("generations"),

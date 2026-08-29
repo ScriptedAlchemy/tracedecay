@@ -474,7 +474,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             return Err(NativeIntegrationPortError::Unavailable);
         }
         let repository_root =
-            crate::daemon::git_transactions::canonicalize_repository_root(&repository_root)
+            tracedecay_code_index_runtime::git_transactions::canonicalize_repository_root(&repository_root)
                 .map_err(|_| NativeIntegrationPortError::Unavailable)?;
         if let Some(owner) = self
             .existing(&database_path, &repository_root, &project_id)
@@ -632,7 +632,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             return Err(NativeIntegrationPortError::Unavailable);
         }
         let repository_root =
-            crate::daemon::git_transactions::canonicalize_repository_root(repository_root)
+            tracedecay_code_index_runtime::git_transactions::canonicalize_repository_root(repository_root)
                 .map_err(|_| NativeIntegrationPortError::Unavailable)?;
         let owners = self.owners.lock().await;
         let mut matches = owners

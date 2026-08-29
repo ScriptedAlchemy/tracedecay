@@ -5916,6 +5916,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-code-index-runtime",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6180,6 +6181,50 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
+]
+
+[[package]]
+name = "tracedecay-code-index-runtime"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "filetime",
+ "futures-util",
+ "gix",
+ "hex",
+ "hotpath",
+ "notify",
+ "rayon",
+ "rusqlite",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracedecay-application",
+ "tracedecay-code-extraction",
+ "tracedecay-code-index",
+ "tracedecay-dashboard-api",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-lsp",
+ "tracedecay-policy",
+ "tracedecay-private-fs",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-search-eval",
+ "tracedecay-semantic",
+ "tracedecay-store",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
+ "url",
+ "walkdir",
 ]
 
 [[package]]

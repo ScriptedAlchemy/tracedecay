@@ -156,7 +156,7 @@ fn prepared_vector(source: &CodeGenerationId) -> PreparedVectorGenerationV1 {
 }
 
 async fn publish_vector_generation(
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     source: &CodeGenerationId,
 ) -> tracedecay_domain::VectorGenerationIdV1 {
@@ -210,7 +210,7 @@ async fn publish_vector_generation(
 }
 
 async fn wait_for_changed_generation(
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     prior: &CodeGenerationId,
 ) -> CodeGenerationId {
@@ -229,7 +229,7 @@ async fn wait_for_changed_generation(
 }
 
 async fn publish_code_edit(
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     prior: &CodeGenerationId,
     revision: usize,
@@ -300,7 +300,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let newer_vector_generation =
         publish_vector_generation(schedulers, &canonical_root, &latest).await;
     assert_ne!(newer_vector_generation, vector_generation);
-    let code_store_root = crate::daemon::code_index_scheduler::scoped_code_index_store_root(
+    let code_store_root = tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
         &graph.store_layout().data_root.join("code-index-v1"),
         &canonical_root,
     );
@@ -562,7 +562,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
 
 #[cfg(feature = "semantic-fastembed")]
 async fn vector_generation_exists(
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     generation: &tracedecay_domain::VectorGenerationIdV1,
 ) -> bool {
@@ -796,9 +796,9 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .expect("linked configuration inventory");
     let mut cursor = None;
     let linked_census = loop {
-        let crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Ready(
+        let tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Ready(
             census,
-        ) = crate::daemon::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
+        ) = tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
             released_schedulers,
             &linked,
             &linked_configuration,
@@ -823,14 +823,14 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     };
     for _ in 0..2 {
         assert!(matches!(
-            crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
                 released_schedulers,
                 &linked,
                 &linked_configuration,
                 linked_census.revision,
             )
             .await,
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
                 ..
             }
         ));

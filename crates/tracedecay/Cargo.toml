@@ -101,6 +101,7 @@ hotpath = [
     "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-runtime/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
@@ -134,6 +135,7 @@ hotpath-alloc = [
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-runtime/hotpath-alloc",
     "tracedecay-dashboard-api/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
@@ -167,6 +169,7 @@ hotpath-cpu = [
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-runtime/hotpath-cpu",
     "tracedecay-dashboard-api/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
@@ -228,10 +231,10 @@ token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard
 # has it, and a build that indexes code but not its docs is not a shippable
 # tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
 # that bundle — the compile-weight cost of making docs unconditional.
-lite = ["tracedecay-code-index/lite"]
+lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 
 medium = ["tracedecay-code-index/medium"]
-full = ["tracedecay-code-index/full"]
+full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]
 
 # These aliases are intentionally repeated at the binary boundary: Cargo
 # cannot expose a dependency feature as a caller-selectable local feature.
@@ -282,6 +285,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 test-helpers = [
     "tracedecay-maintenance/test-helpers",
     "tracedecay-automation-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
 ]
 
 test-transport = [
@@ -300,6 +304,8 @@ test-transport = [
     # (`dashboard::graph_projection_fixture`) publishes the hermetic code-graph
     # generation dashboard neighbor reads take their adjacency from.
     "tracedecay-code-index/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-transport",
 ]
 
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
@@ -310,6 +316,7 @@ test-transport = [
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-code-index-runtime/semantic-fastembed",
 ]
 # Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
 # request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
@@ -392,6 +399,7 @@ tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", ver
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
@@ -497,6 +505,7 @@ tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features =
 # Keep this edge grammar-free so tests do not also pull `medium` (code-index
 # defaults) and so the test graph matches the CLI lane plus `test-helpers`.
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers", "test-transport"] }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.

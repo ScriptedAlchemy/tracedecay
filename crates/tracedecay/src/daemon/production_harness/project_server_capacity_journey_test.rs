@@ -2,7 +2,7 @@ use tempfile::TempDir;
 
 use super::journey_test_support::git;
 use super::*;
-use crate::daemon::code_index_scheduler::LatestCompleteCodeIndexV1;
+use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
 use crate::daemon::project_composition::ProductionProjectComposition;
 
 async fn open_project_composition(

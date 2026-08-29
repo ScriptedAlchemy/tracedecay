@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-use crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use crate::daemon::maintenance::{
     SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
     StoreTelemetrySamplingRegistry,
