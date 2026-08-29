@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracedecay_agent_hosts::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
+use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
 use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
@@ -27,15 +27,15 @@ use super::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
+use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
 use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1,
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
-use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
-use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
@@ -711,7 +711,10 @@ impl MemoryStoreOwnerV1 {
 
     fn reserve_database_retirement(
         &self,
-    ) -> std::result::Result<tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1, String> {
+    ) -> std::result::Result<
+        tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1,
+        String,
+    > {
         let state = self
             .graph
             .lock()

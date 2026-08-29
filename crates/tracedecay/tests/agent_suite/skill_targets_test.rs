@@ -1,11 +1,11 @@
 use tracedecay::agents::codex::export_codex_plugin_artifact;
 use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_skills_to_agents};
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill, default_managed_skill_targets, disable_managed_skill, load_managed_skill,
     managed_skill_dir,
 };
-use tracedecay_agent_hosts::automation::skill_targets::{
+use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };

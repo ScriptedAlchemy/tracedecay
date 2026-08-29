@@ -260,8 +260,8 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
     let store_administration = test_store_administration_for_profile(profile.path());
     let lifecycle = DaemonLifecycle::default();
     let server_lifecycle = lifecycle.clone();
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -281,11 +281,11 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         .expect("serve shutdown client");
     });
 
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect shutdown client");
     let (reader, mut writer) = stream.into_split();
-    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");
     writer
@@ -508,8 +508,8 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
         super::super::DaemonClientAdmissionOutcome::Saturated(_)
     ));
 
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -532,11 +532,11 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
         .expect("serve Doctor client");
     });
 
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect Doctor client");
     let (reader, mut writer) = stream.into_split();
-    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");
     writer
@@ -624,8 +624,8 @@ async fn tools_list_answers_under_general_saturation() {
         super::super::DaemonClientAdmissionClass::ReservedControl
     );
 
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -648,11 +648,11 @@ async fn tools_list_answers_under_general_saturation() {
         .expect("serve discovery client");
     });
 
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect discovery client");
     let (reader, mut writer) = stream.into_split();
-    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");
     writer
@@ -717,7 +717,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
-            super::super::transport::BrokerStream::Unix(stream),
+            tracedecay_daemon_protocol::BrokerStream::Unix(stream),
             super::super::DaemonClientSaturationResponse {
                 kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,
@@ -784,9 +784,12 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     gix::init(&project).expect("initialize project repository");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "portable-owner-cache-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "portable-owner-cache-test",
+    )
+    .expect("daemon database scope");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -823,8 +826,8 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     ));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -864,11 +867,11 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         let endpoint = endpoint.clone();
         let handshake = handshake.clone();
         async move {
-            let stream = super::super::transport::BrokerStream::connect(&endpoint)
+            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
                 .await
                 .expect("connect client");
             let (reader, mut writer) = stream.into_split();
-            let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
                 .to_line()
                 .expect("auth preface");
             writer.write_all(preface.as_bytes()).await.expect("preface");

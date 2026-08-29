@@ -76,7 +76,7 @@ impl AgentIntegration for ClaudeIntegration {
         super::install_managed_skill_prompt_index(
             &ctx.home,
             &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
         )
     }
 
@@ -99,7 +99,7 @@ impl AgentIntegration for ClaudeIntegration {
         super::remove_managed_skill_prompt_index(
             &ctx.home,
             &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
         uninstall_claude_md_rules(&claude_md_path)
     }
@@ -203,15 +203,16 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let claude_md_path = home.join(".claude").join("CLAUDE.md");
         if !self.has_tracedecay(home) || !claude_md_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Claude,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
                 &claude_md_path,
             )?,
         ])
@@ -221,7 +222,8 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let claude_md_path = project_root.join(".claude").join("CLAUDE.md");
         // Only refresh a project that is actually tracedecay-managed. A project
         // qualifies when its local `.mcp.json` declares the tracedecay server
@@ -238,9 +240,9 @@ impl AgentIntegration for ClaudeIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Claude,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
                 &claude_md_path,
             )?,
         ])

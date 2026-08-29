@@ -33,7 +33,10 @@ mod status_cmd;
 mod tool_command;
 mod update_cmd;
 mod upgrade;
+mod remote_command;
+mod work_cli;
 mod work_command;
+mod workflow_cli;
 mod workflow_command;
 
 pub use tracedecay::serve;
@@ -245,7 +248,9 @@ fn is_daemon_run(command: Option<&Commands>) -> bool {
     )
 }
 
-fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay_runtime_core::errors::Result<()> {
+fn install_daemon_cpu_pool(
+    command: Option<&Commands>,
+) -> tracedecay_runtime_core::errors::Result<()> {
     if !is_daemon_run(command) {
         return Ok(());
     }
@@ -269,9 +274,11 @@ fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay_runtime_cor
         .num_threads(threads)
         .thread_name(|index| format!("tracedecay-cpu-{index}"))
         .build_global()
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("failed to start daemon CPU pool: {error}"),
-        })
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("failed to start daemon CPU pool: {error}"),
+            },
+        )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -516,9 +523,11 @@ fn async_main() -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
             .max_blocking_threads(blocking_threads)
             .thread_stack_size(ASYNC_STACK_BYTES)
             .build()
-            .map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: format!("failed to start async runtime: {e}"),
-            })
+            .map_err(
+                |e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!("failed to start async runtime: {e}"),
+                },
+            )
     })?;
     #[cfg(feature = "hotpath")]
     {
@@ -704,9 +713,11 @@ async fn resolve_registered_project_root(
         .get("project")
         .and_then(|project| project.get("display_root"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "registered project not found for selector".to_string(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "registered project not found for selector".to_string(),
+            },
+        )?;
     Ok(Some(PathBuf::from(display_root)))
 }
 
@@ -1023,7 +1034,9 @@ async fn dispatch_project_command(
 }
 
 #[hotpath::measure(label = "cli.memory.status", future = true)]
-async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_memory_command(
+    action: MemoryAction,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         MemoryAction::Status {
             json,
@@ -1053,7 +1066,9 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_runtime_cor
     Ok(())
 }
 
-async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_runtime_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Tool {
             project,
@@ -1067,7 +1082,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core:
         Commands::Remote { action } => {
             hotpath::measure_block!(
                 "cli.remote.run",
-                tracedecay::remote_command::run(action.into())
+                crate::remote_command::run(action.into())
             )?;
         }
         Commands::Lsp { action } => {
@@ -1097,9 +1112,11 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core:
             let url = result
                 .get("url")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "daemon dashboard response omitted URL".to_string(),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: "daemon dashboard response omitted URL".to_string(),
+                    },
+                )?;
             // The daemon keys hosted dashboards by canonicalized project
             // root, so any response reached here always serves this
             // project; only the requested host/port may differ from what is
@@ -1171,7 +1188,9 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_runtime_core:
     Ok(())
 }
 
-async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_daemon_command(
+    action: DaemonAction,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         DaemonAction::Run {
             socket,
@@ -1232,10 +1251,12 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_runtime_cor
             if cfg!(windows) {
                 let profile_root = tracedecay::daemon::installed_service_socket_path()?
                     .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-                    .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                        message: "installed Windows daemon task has no absolute profile root"
-                            .to_string(),
-                    })?;
+                    .ok_or_else(
+                        || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                            message: "installed Windows daemon task has no absolute profile root"
+                                .to_string(),
+                        },
+                    )?;
                 eprintln!("Daemon profile root: {}", profile_root.display());
                 eprintln!("Daemon endpoint: authenticated loopback (authority-discovered)");
             } else {
@@ -1450,7 +1471,9 @@ async fn dispatch_agent_command(
     Ok(())
 }
 
-async fn dispatch_hook_command(command: Commands) -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
+async fn dispatch_hook_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<CommandOutcome> {
     let code = match command {
         hook_command @ (Commands::HookPreToolUse
         | Commands::HookPromptSubmit
@@ -1540,7 +1563,9 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_runtime_core::
     Ok(())
 }
 
-async fn dispatch_configuration_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_configuration_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
@@ -1556,9 +1581,11 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay_runtime
             let value = result
                 .get("counter")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "daemon counter response omitted counter".to_string(),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: "daemon counter response omitted counter".to_string(),
+                    },
+                )?;
             println!("{value}");
         }
         Commands::ResetCounter { path } => {
@@ -1572,9 +1599,11 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay_runtime
             let prev = result
                 .get("counter")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "daemon counter response omitted counter".to_string(),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: "daemon counter response omitted counter".to_string(),
+                    },
+                )?;
             hotpath::future!(
                 commands::daemon_tool_json(
                     Some(&project_path),
@@ -1600,7 +1629,9 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay_runtime
     Ok(())
 }
 
-async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_diagnostics_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Doctor => {
             hotpath::future!(tracedecay::doctor::run_doctor(), label = "cli.doctor.run").await?;
@@ -1637,7 +1668,9 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_runtime_c
     Ok(())
 }
 
-async fn dispatch_knowledge_command(command: Commands) -> tracedecay_runtime_core::errors::Result<()> {
+async fn dispatch_knowledge_command(
+    command: Commands,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match command {
         Commands::Git { action } => {
             git_cmd::handle_git_action(action).await?;

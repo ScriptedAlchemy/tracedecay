@@ -26,13 +26,13 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
     ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -1839,8 +1839,8 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
     if let Some(root) = discover_project_root(start) {
         return Some(root);
     }
-    let candidate =
-        tracedecay_runtime_core::worktree::git_worktree_root(start).unwrap_or_else(|| start.to_path_buf());
+    let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
+        .unwrap_or_else(|| start.to_path_buf());
     if crate::tracedecay::TraceDecay::has_initialized_store(&candidate).await {
         Some(candidate)
     } else {

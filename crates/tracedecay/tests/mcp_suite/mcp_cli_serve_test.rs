@@ -38,11 +38,11 @@ use tracedecay::storage::{PrivateStoreIo, pin_fixture_repository_identity};
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
@@ -84,8 +84,9 @@ fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
-        ),
+        targets:
+            tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
+            ),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![
             ManagedSupportFile::new(
@@ -387,7 +388,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
-            task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+            task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_string()),
             backend: "codex_app_server".to_string(),
             backend_identity: None,

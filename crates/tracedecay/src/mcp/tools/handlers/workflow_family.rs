@@ -13,9 +13,9 @@ use tracedecay_application::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
-use crate::daemon_client::{DaemonInvocationExecutor, invocation_now_micros};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, invocation_now_micros};
 use crate::mcp::tools::ToolResult;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::tool_call_support::json_result;
@@ -187,7 +187,7 @@ mod tests {
     async fn missing_executor_returns_the_registered_workflow_problem_envelope() {
         let request_id = RequestId::new("request.workflow-missing-executor").expect("request id");
         let deadline = Deadline::new(UtcMicros(
-            crate::daemon_client::invocation_now_micros().0 + 30_000_000,
+            tracedecay_daemon_protocol::invocation_now_micros().0 + 30_000_000,
         ))
         .expect("deadline");
         let cancellation = CancellationSignal::active("cancellation.workflow-missing-executor")

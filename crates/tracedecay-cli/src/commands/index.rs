@@ -86,7 +86,7 @@ pub(crate) async fn handle_init(
         return Err(tracedecay_runtime_core::errors::TraceDecayError::Config { message });
     }
     let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
-    let mut handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let mut handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_path.clone()),
         None,
         false,
@@ -170,24 +170,26 @@ async fn handle_init_with_daemon_availability(
     project_path: PathBuf,
     skip_folders: Vec<String>,
     include_folders: Vec<String>,
-    handshake: tracedecay::daemon::DaemonHandshake,
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     if daemon_available {
         return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
     }
-    Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-        "code_index_scheduler_unavailable",
-        true,
-        "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
-    ))
+    Err(
+        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
+        ),
+    )
 }
 
 async fn brokered_init(
     project_path: &Path,
     skip_folders: &[String],
     include_folders: &[String],
-    handshake: &tracedecay::daemon::DaemonHandshake,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     if !skip_folders.is_empty() || !include_folders.is_empty() {
         return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -269,14 +271,14 @@ mod init_bootstrap_tests {
     fn test_handshake(
         project_path: &Path,
         profile_root: &Path,
-    ) -> tracedecay::daemon::DaemonHandshake {
-        tracedecay::daemon::DaemonHandshake {
+    ) -> tracedecay_daemon_protocol::DaemonHandshake {
+        tracedecay_daemon_protocol::DaemonHandshake {
             project_path: Some(project_path.to_path_buf()),
             scope_prefix: None,
             timings: false,
             allow_init: true,
             allow_initialize_root_routing: false,
-            client_identity: tracedecay::client_identity::DaemonClientIdentity {
+            client_identity: tracedecay_daemon_protocol::DaemonClientIdentity {
                 profile_root: profile_root.to_path_buf(),
                 global_db_path: profile_root.join("global.db"),
             },
@@ -497,7 +499,7 @@ pub(crate) async fn handle_sync(
     let resolved =
         super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(path))
             .await?;
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(resolved.project_path.clone()),
         None,
         false,

@@ -52,7 +52,7 @@ impl McpServer {
             }
             None => None,
         };
-        if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name)
+        if tracedecay_automation::analytics::is_skill_view_tool(tool_name)
             && let Some(request_id) = json_rpc_request_id_string(id)
             && let Some(map) = handler_arguments.as_object_mut()
         {
@@ -218,7 +218,7 @@ impl McpServer {
         resolved_project_route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
         server_stats: Option<Value>,
         application_invocation_executor: Option<
-            &dyn crate::daemon_client::DaemonInvocationExecutor,
+            &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
         >,
         application_invocation_target: tracedecay_application::InvocationTarget,
         application_request_id: Option<tracedecay_application::RequestId>,

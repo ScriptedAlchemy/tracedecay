@@ -89,9 +89,11 @@ fn unregistered_admission(
 
 fn register_agent_host_ports() {
     use tracedecay_agent_hosts::ports;
+    use tracedecay_automation_runtime::ports as automation_ports;
 
-    ports::codex_app_server::register(run_codex_app_server_prompt);
-    ports::session_store::register_canonical_project_key(
+    tracedecay_agent_hosts::register_automation_host_io();
+    automation_ports::codex_app_server::register(run_codex_app_server_prompt);
+    automation_ports::session_store::register_canonical_project_key(
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
     );
     ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
@@ -114,9 +116,9 @@ fn register_agent_host_ports() {
 #[hotpath::measure(label = "runtime_ports.codex_app_server")]
 fn run_codex_app_server_prompt(
     prompt: &str,
-    config: &tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig,
+    config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
     thread_source: &str,
-) -> std::result::Result<tracedecay_agent_hosts::ports::codex_app_server::Summary, String> {
+) -> std::result::Result<tracedecay_automation_runtime::ports::codex_app_server::Summary, String> {
     let config = tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig {
         codex_bin: config.codex_bin.clone(),
         model: config.model.clone(),
@@ -128,7 +130,7 @@ fn run_codex_app_server_prompt(
         thread_source,
     )
     .map(
-        |summary| tracedecay_agent_hosts::ports::codex_app_server::Summary {
+        |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
             text: summary.text,
             model: summary.model,
         },
@@ -148,7 +150,7 @@ fn daemon_tool_json<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
     Box::pin(hotpath::future!(
         async move {
-            let handshake = crate::daemon::DaemonHandshake::for_current_client(
+            let handshake = crate::daemon::handshake_for_current_client(
                 project_root.map(Path::to_path_buf),
                 None,
                 false,

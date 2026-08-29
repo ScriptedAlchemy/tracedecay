@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_agent_hosts::automation::config::{
+use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
 };
 
@@ -23,16 +23,20 @@ pub(super) fn validate_codex_automation_flags(
     Ok(())
 }
 
-pub(super) fn validate_codex_automation_project_path() -> tracedecay_runtime_core::errors::Result<PathBuf> {
-    let project_path =
-        std::env::current_dir().map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
+pub(super) fn validate_codex_automation_project_path()
+-> tracedecay_runtime_core::errors::Result<PathBuf> {
+    let project_path = std::env::current_dir().map_err(|e| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("could not determine current project directory: {e}"),
-        })?;
-    std::fs::canonicalize(&project_path).map_err(|e| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!(
-            "could not canonicalize project directory {}: {e}",
-            project_path.display()
-        ),
+        }
+    })?;
+    std::fs::canonicalize(&project_path).map_err(|e| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: format!(
+                "could not canonicalize project directory {}: {e}",
+                project_path.display()
+            ),
+        }
     })
 }
 
@@ -94,11 +98,11 @@ pub(super) async fn broker_codex_daemon_automation_project<I, IFut, R, T>(
     complete: R,
 ) -> tracedecay_runtime_core::errors::Result<T>
 where
-    I: FnOnce(tracedecay::daemon::DaemonHandshake) -> IFut,
+    I: FnOnce(tracedecay_daemon_protocol::DaemonHandshake) -> IFut,
     IFut: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>,
     R: FnOnce(&Path) -> tracedecay_runtime_core::errors::Result<T>,
 {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,

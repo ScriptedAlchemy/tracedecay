@@ -20,18 +20,18 @@ use super::service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
 };
 use crate::application_surface::ApplicationSurfaceOperation;
-use crate::daemon_client::invocation_now_micros;
-use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_daemon_protocol::invocation_now_micros;
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use crate::dashboard::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
 };
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
@@ -174,28 +174,28 @@ impl ApplicationInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
     }
 }
 
-impl crate::daemon_client::DaemonInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
     fn invoke_controlled(
         &self,
         request: DaemonInvocationRequest,
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationSignal,
-        _policy: crate::daemon_client::InvocationCancellationPolicy,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            crate::daemon_contract::DaemonInvocationResponse,
-            crate::daemon_client::DaemonInvocationError,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
         Box::pin(async move {
             if cancellation.is_cancelled() {
-                return Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+                return Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled {
                     stage: tracedecay_application::CancellationStage::BeforeAdmission,
                 });
             }
-            if crate::daemon_client::deadline_remaining(&deadline).is_none() {
-                return Err(crate::daemon_client::DaemonInvocationError::TimedOut {
+            if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
+                return Err(tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
                     stage: tracedecay_application::CancellationStage::BeforeAdmission,
                 });
             }
@@ -219,7 +219,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for DashboardConfigurationRu
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
         _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
+    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

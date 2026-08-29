@@ -17,7 +17,6 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use crate::client_identity::DaemonClientIdentity;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
@@ -37,12 +36,23 @@ use scheduler::{
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
     run_automation_scheduler_tick, scheduler_task_log_fields,
 };
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
+pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+#[allow(unused_imports)]
+pub(crate) use tracedecay_daemon_protocol::{
+    BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
+    DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
+    DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
+};
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub(crate) use tracedecay_daemon_protocol::{
+    ensure_private_socket_parent, unix_socket_path_within_limit,
+};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
-pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
+pub use tracedecay_daemon_protocol::SOCKET_ENV;
 pub(crate) const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
@@ -198,6 +208,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
+mod semantic_evaluation_shutdown;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod store_shutdown;
@@ -215,10 +226,9 @@ mod git_transactions;
 mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
-pub(crate) mod native_integration;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
-pub(crate) use http_application::live_remote_operational_status;
+pub use http_application::live_remote_operational_status;
 mod http_application_router;
 pub(crate) mod remote_protocol;
 mod remote_query;
@@ -261,7 +271,6 @@ pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
 mod production_harness;
-#[path = "daemon/git_watch/store_maintenance.rs"]
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;
@@ -369,17 +378,6 @@ use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
 
-pub(crate) mod transport;
-#[cfg(all(unix, test))]
-pub(crate) use crate::daemon_contract::{DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION};
-/// The wire contract now lives in `crate::daemon_contract`, outside this module
-/// tree. Daemon-internal call sites keep naming it through `crate::daemon::` so
-/// the move stayed mechanical; new callers should depend on the contract module
-/// directly rather than widening this re-export.
-pub(crate) use crate::daemon_contract::{
-    DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
-    parse_daemon_invocation_request,
-};
 pub use bootstrap::{RemoteBrainTlsConfig, run_foreground};
 pub(crate) use service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,

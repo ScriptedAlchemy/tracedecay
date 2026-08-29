@@ -49,7 +49,7 @@ fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
 ///
 /// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
 /// so operators can raise or lower the authority without rebuilding. Otherwise
-/// TraceDecay retains one quarter of physical RAM outside its modeled
+/// `TraceDecay` retains one quarter of physical RAM outside its modeled
 /// concurrent allocations for the OS, agent hosts, and allocations that do
 /// not yet participate in this authority. The remaining authority throttles
 /// simultaneous scratch ownership; it never limits repository bytes on disk.
@@ -72,7 +72,7 @@ pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
 /// Fraction of the configured limit, in permille, at or above which *measured*
 /// process RSS is treated as over budget.
 ///
-/// Reservations model what TraceDecay knows it is about to allocate. They do
+/// Reservations model what `TraceDecay` knows it is about to allocate. They do
 /// not see the embedding runtime, grafeo stores, decoded generations, or
 /// publish transients, so a process can sit far inside its reservation ceiling
 /// while real RSS runs several times past the configured limit. This watermark

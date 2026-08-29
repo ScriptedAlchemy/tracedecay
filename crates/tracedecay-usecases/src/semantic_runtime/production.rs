@@ -335,7 +335,7 @@ pub struct PreparedProductionSemanticCacheCommitV1 {
 enum PreparedProductionSemanticCacheActionV1 {
     Observation(PreparedSemanticRuntimeObservationV1),
     Restore {
-        prepared: PreparedSemanticRuntimeRestoreV1,
+        prepared: Box<PreparedSemanticRuntimeRestoreV1>,
         cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
         vectors: CachedPublishedVectorsV1,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
@@ -358,7 +358,7 @@ impl PreparedProductionSemanticCacheCommitV1 {
                     return false;
                 };
                 let previous = cached.replace(vectors);
-                let committed = self.handle.commit_restore(prepared);
+                let committed = self.handle.commit_restore(*prepared);
                 if !committed {
                     *cached = previous;
                     return false;
@@ -522,7 +522,7 @@ impl ProductionSemanticRuntimeV1 {
         Ok(Some(PreparedProductionSemanticCacheCommitV1 {
             handle,
             prepared: PreparedProductionSemanticCacheActionV1::Restore {
-                prepared,
+                prepared: Box::new(prepared),
                 cache: Arc::clone(&self.vector_read_cache),
                 vectors,
                 lifecycle: Arc::clone(&self.lifecycle),
@@ -1302,7 +1302,7 @@ impl ProductionSemanticRuntimeV1 {
             label = "semantic.evaluation.snapshot.executable_generation"
         )
         .await
-        .map_err(|error| {
+        .inspect_err(|error| {
             tracing::warn!(
                 event = "semantic_evaluation_target_snapshot",
                 stage = "executable_generation",
@@ -1312,7 +1312,6 @@ impl ProductionSemanticRuntimeV1 {
                     SemanticRuntimeBackendErrorV1::Conflict => "conflict",
                 },
             );
-            error
         })?;
         // Publication identity stays i64 on the wire; the graph adapter's
         // monotonic u64 revision maps 1:1 into it and can only overflow after
@@ -3666,32 +3665,40 @@ pub(crate) fn project_semantic_generation_pointer(
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
+///
+/// The durable activation receipt and the scheduler status projection are
+/// read under one acquisition of the project activation gate. A concurrent
+/// activation mutates the receipt and the installed authorities under that
+/// same gate, so status can never pair a stale receipt with a newer scheduler
+/// generation (reporting `Current` while semantic is unavailable) or the
+/// inverse (reporting degraded after a coherent install).
 pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
-    let activation_receipt = super::project_semantic_activation_receipt(project_root);
-    if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        let lifecycle = runtime.lifecycle_status();
-        let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
-        if let Some(configuration) = configuration {
-            backend.bind_configuration(configuration);
+    super::with_project_semantic_activation_receipt(project_root, |activation_receipt| {
+        if let Some(runtime) = project_semantic_production_runtime(project_root) {
+            let lifecycle = runtime.lifecycle_status();
+            let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
+            if let Some(configuration) = configuration {
+                backend.bind_configuration(configuration);
+            }
+            return Some(prefer_lifecycle_over_generic_unavailable(
+                backend.application_status_with_receipt(activation_receipt),
+                &lifecycle,
+            ));
         }
-        return Some(prefer_lifecycle_over_generic_unavailable(
-            backend.application_status_with_receipt(activation_receipt),
-            &lifecycle,
-        ));
-    }
-    let handle = project_semantic_handles()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .cloned()?;
-    Some(application_status_from_projection(
-        &handle.status_projection(),
-        configuration,
-        activation_receipt,
-    ))
+        let handle = project_semantic_handles()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned()?;
+        Some(application_status_from_projection(
+            &handle.status_projection(),
+            configuration,
+            activation_receipt,
+        ))
+    })
 }
 
 /// Hook invoked after a code generation publishes; must not block search.
@@ -4231,16 +4238,6 @@ mod tests {
         assert!(RerankExecutionControlV1::is_cancelled(&control));
     }
 
-    fn projection_key() -> ProjectionKeyV1 {
-        // Derive the projection key from the same admitted authority the query
-        // runtime binds against so `profile_digest` is the canonical digest the
-        // embedding projection produces, rather than a non-canonical placeholder.
-        tracedecay_semantic::session_pool::test_support::authority()
-            .projection()
-            .projection_key()
-            .clone()
-    }
-
     #[test]
     fn published_semantic_candidates_use_the_seated_score_domain() {
         let domain = published_semantic_candidate_score_domain().expect("score domain");
@@ -4249,6 +4246,16 @@ mod tests {
             tracedecay_query::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1
         );
         assert_ne!(domain.as_str(), "score.semantic-distance.daemon.v1");
+    }
+
+    fn projection_key() -> ProjectionKeyV1 {
+        // Derive the projection key from the same admitted authority the query
+        // runtime binds against so `profile_digest` is the canonical digest the
+        // embedding projection produces, rather than a non-canonical placeholder.
+        tracedecay_semantic::session_pool::test_support::authority()
+            .projection()
+            .projection_key()
+            .clone()
     }
 
     fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
@@ -4988,6 +4995,7 @@ mod tests {
             },
             "restart remount must reattach the durable Ready receipt"
         );
+        remounted.validate().expect("ready runtime status");
         assert_eq!(
             remounted.route(),
             crate::semantic_runtime::SemanticRuntimeRouteV1::Semantic {

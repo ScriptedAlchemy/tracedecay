@@ -8,7 +8,9 @@ use tracedecay_application::ApplicationResult;
 use crate::cli::WorkInvocationArgs;
 
 #[hotpath::measure(label = "cli.work.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn run(
+    invocation: WorkInvocationArgs,
+) -> tracedecay_runtime_core::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
@@ -18,7 +20,7 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_runtime_co
     // latency is separable from request parsing, render, and delivery
     // settlement.
     let mut response = hotpath::future!(
-        tracedecay::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
+        crate::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
         label = "cli.work.request"
     )
     .await?;
@@ -99,11 +101,13 @@ fn read_request(path: &std::path::Path) -> tracedecay_runtime_core::errors::Resu
     } else {
         std::fs::read_to_string(path)?
     };
-    serde_json::from_str(&payload).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!(
-            "Work request file {} is not valid JSON: {error}",
-            path.display()
-        ),
+    serde_json::from_str(&payload).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: format!(
+                "Work request file {} is not valid JSON: {error}",
+                path.display()
+            ),
+        }
     })
 }
 

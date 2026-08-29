@@ -351,6 +351,25 @@ impl DaemonInvocationState {
         .await
     }
 
+    pub(super) async fn mount_core_query_authority_for_committed_fallback(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::
+            mount_core_query_authority_for_committed_fallback_on_project_open(
+                &self.code_index_schedulers,
+                project_root,
+                scope,
+                expected_revision,
+                cursor_keys,
+            )
+            .await
+    }
+
     pub(super) fn work_federated_query_authority(
         &self,
     ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {
@@ -475,7 +494,7 @@ impl DaemonInvocationState {
                 project_root,
                 store_root,
                 semantic_schedule,
-                graph_runtime,
+                graph_runtime.code_graph_seat_port(),
                 graph_publication_database,
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
@@ -915,7 +934,7 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = crate::daemon_client::DaemonInvocationExecutor::invoke_controlled(
+                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
                     &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
@@ -926,7 +945,7 @@ impl DaemonInvocationState {
                     ),
                     deadline,
                     control_cancellation,
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
                 )
                 .await
                 .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;

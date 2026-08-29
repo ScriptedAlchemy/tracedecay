@@ -11,12 +11,12 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, ComponentRevision, DiversityPolicy,
-    ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, FusionProfileId, PrincipalId,
-    PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
-    RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    TemporalModeV1, VectorWatermark,
+    AuthorizationRevision, CodeGenerationId, ComponentRevision, ConfigurationRevisionId,
+    DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile,
+    FusionProfileId, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1,
+    RetrievalAnchorId, RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
+    SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -118,6 +118,42 @@ pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
     scope: &ResolvedScope,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
+    let authority =
+        prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
+    registry
+        .mount_query_authority(project_root, scope, authority)
+        .await
+        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+}
+
+/// Mount the core fallback without abandoning an in-progress committed
+/// semantic activation. The registry repeats the exact revision check under
+/// the same activation gate used by the final authority-pair publication.
+pub(in crate::daemon) async fn mount_core_query_authority_for_committed_fallback_on_project_open(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    scope: &ResolvedScope,
+    expected_revision: &ConfigurationRevisionId,
+    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+) -> Result<(), QueryRuntimeMountErrorV1> {
+    let authority =
+        prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
+    registry
+        .mount_query_authority_for_committed_fallback(
+            project_root,
+            scope,
+            expected_revision,
+            authority,
+        )
+        .await
+        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+}
+
+async fn prepare_core_query_authority_on_project_open(
+    registry: &CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
     let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
         text.metadata().manifest().privacy_domain.clone()
     } else {
@@ -167,10 +203,7 @@ pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
         ranking_revision,
         keyring,
     )?);
-    registry
-        .mount_query_authority(project_root, scope, authority)
-        .await
-        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
+    Ok(authority)
 }
 
 /// Resolve and validate one exact accepted authority without mounting it.

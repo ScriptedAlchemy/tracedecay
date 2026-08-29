@@ -8,8 +8,8 @@ use std::sync::{
 
 use serde_json::json;
 
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -471,7 +471,7 @@ pub(super) struct StoreAdministration {
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services:
-        Arc<crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry>,
+        Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar>,
     remote_recovery_project_lifecycles:
         remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
@@ -525,7 +525,7 @@ impl Default for StoreAdministration {
                 DaemonGitIndexTransactionServiceRegistry::default(),
             ),
             native_integration_services: Arc::new(
-                crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry::default(
+                crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar::default(
                 ),
             ),
             remote_recovery_project_lifecycles: Arc::default(),
@@ -1046,7 +1046,7 @@ impl StoreAdministration {
 
     pub(super) fn native_integration_services(
         &self,
-    ) -> &Arc<crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry> {
+    ) -> &Arc<crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar> {
         &self.native_integration_services
     }
 
@@ -1944,7 +1944,7 @@ mod tests {
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
 
-        let client_identity = crate::client_identity::DaemonClientIdentity {
+        let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
             profile_root: temp.path().to_path_buf(),
             global_db_path: temp.path().join("global.db"),
         };

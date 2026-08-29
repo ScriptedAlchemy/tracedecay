@@ -57,7 +57,7 @@ fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
         loop {
             match lines.next() {
                 Some(line) if line == *command => break,
-                Some(_) => continue,
+                Some(_) => {}
                 None => return false,
             }
         }
@@ -329,7 +329,7 @@ fn serve_probe_response(
         let mut line = String::new();
         if let Some(expected_auth_token) = expected_auth_token {
             reader.read_line(&mut line).expect("read auth preface");
-            let preface = super::super::transport::DaemonAuthPreface::from_line(line.trim())
+            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
                 .expect("parse auth preface");
             assert!(preface.authenticate(&expected_auth_token));
             line.clear();
@@ -392,7 +392,7 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
     let socket_path = profile.path().join("daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
-    let endpoint = super::super::transport::DaemonEndpoint::Unix(socket_path.clone());
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
     let authority = super::super::authority::DaemonAuthority::acquire(
         profile.path(),
         &endpoint,
@@ -1588,7 +1588,7 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
         first
     };
     assert!(
-        crate::daemon::transport::unix_socket_path_within_limit(&first),
+        tracedecay_daemon_protocol::unix_socket_path_within_limit(&first),
         "fallback endpoint must satisfy the platform socket path limit: {}",
         first.display()
     );
@@ -1622,7 +1622,7 @@ fn short_socket_derivation_uses_the_installed_profile_not_the_shell_profile() {
     let shell_socket = super::default_socket_path().expect("shell socket path");
 
     assert!(
-        crate::daemon::transport::unix_socket_path_within_limit(&installed_socket),
+        tracedecay_daemon_protocol::unix_socket_path_within_limit(&installed_socket),
         "installed profile endpoint must satisfy the platform limit"
     );
     assert_ne!(installed_socket, shell_socket);

@@ -159,8 +159,6 @@ use super::binding::{
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
@@ -175,6 +173,8 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use work::handle_work;
 use workflow_family::handle_workflow;
 
@@ -234,8 +234,10 @@ pub struct ToolCallRegistryOptions<'a> {
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     pub(crate) accounting_db: Option<&'a tracedecay_global_db::RegisteredGlobalDb>,
-    pub(crate) registered_project_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    pub(crate) registered_profile_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_project_session_db:
+        Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_profile_session_db:
+        Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
@@ -262,9 +264,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
-        Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
+        Option<&'a dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     pub dashboard_application_invocation_executor:
-        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+        Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<&'a crate::daemon::DaemonInvocationService>,
     pub(crate) dashboard_delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,

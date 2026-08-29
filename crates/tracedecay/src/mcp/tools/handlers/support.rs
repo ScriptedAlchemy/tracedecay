@@ -15,8 +15,8 @@ use tokio::sync::Semaphore;
 
 use super::super::ToolResult;
 use super::super::render;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -145,7 +145,7 @@ fn search_budget(
     deadline: Option<&tracedecay_application::Deadline>,
 ) -> Result<Duration> {
     match deadline {
-        Some(deadline) => crate::daemon_client::deadline_remaining(deadline)
+        Some(deadline) => tracedecay_daemon_protocol::deadline_remaining(deadline)
             .map(|remaining| remaining.min(SEARCH_SCAN_CEILING))
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| {
@@ -359,7 +359,9 @@ where
 {
     items
         .into_iter()
-        .filter(|item| tracedecay_runtime_core::path_scope::path_matches_scope(get_path(item), scope_prefix))
+        .filter(|item| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(get_path(item), scope_prefix)
+        })
         .collect()
 }
 

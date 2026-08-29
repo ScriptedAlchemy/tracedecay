@@ -686,6 +686,13 @@ fn paginate_semantic_composition(
     }) {
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
+    if composition.ranked_candidates.is_empty() {
+        return if authorized_query.request_cursor.is_none() {
+            Ok(None)
+        } else {
+            Err(SemanticQueryServiceError::InvalidCursor)
+        };
+    }
     let semantic_start = match supplied_semantic {
         Some(cursor)
             if cursor.profile_id == composition.profile_id
@@ -1109,6 +1116,65 @@ mod tests {
         }
 
         assert_eq!(seen, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn empty_first_semantic_page_completes_without_a_cursor() {
+        let request = request();
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "empty semantic page",
+            id::<SanitizerRevision>("sanitizer.pagination.v1"),
+            id::<QueryNormalizationRevision>("normalization.pagination.v1"),
+        )
+        .expect("query view");
+        let authority = query_authority(&request);
+        let mut semantic_composition = composition(
+            id("profile.semantic.pagination.v1"),
+            &[
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Graph,
+                RetrieverKind::Semantic,
+            ],
+        );
+        semantic_composition.ranked_candidates.clear();
+        let authorized = AuthorizedQueryFallbackV1 {
+            query_digest: authority
+                .authenticate_query(&request, &query_view)
+                .expect("query digest"),
+            fallback: fallback(),
+            composition: composition(
+                query_profile().profile_id,
+                &RetrieverKind::QUERY_FALLBACK_LANES,
+            ),
+            fallback_lanes: Vec::new(),
+            page_size: 10,
+            request_cursor: None,
+        };
+
+        let cursor = paginate_semantic_composition(
+            &authority,
+            &request,
+            &query_view,
+            &authorized,
+            &digest::<ManifestDigest>('c'),
+            &id::<CodeGenerationId>("code-generation.pagination.v1"),
+            &VectorGenerationIdV1::new(digest::<ManifestDigest>('a')),
+            &ProjectionKeyV1 {
+                kind: ProjectionKindV1::Embedding,
+                schema_revision: "projection.pagination.v1".to_owned(),
+                profile_digest: digest('b'),
+            },
+            &search_index_key(),
+            &id::<ComponentRevision>("ranking.semantic.pagination.v1"),
+            &semantic_budget(2),
+            &OptionalStagePublicStatus::NotRequested,
+            &mut semantic_composition,
+        )
+        .expect("an empty first page is a completed result");
+
+        assert!(cursor.is_none());
+        assert!(semantic_composition.ranked_candidates.is_empty());
     }
 
     #[test]

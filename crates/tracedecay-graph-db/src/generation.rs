@@ -220,10 +220,10 @@ impl DependencyClosureDigestMemo {
     /// already-computed digest forward only when it still binds.
     fn propagated(&self, dependencies: &[GraphGenerationDependency]) -> Self {
         let memo = Self::default();
-        if let Some((memoized_for, digest)) = self.slot.get() {
-            if memoized_for.as_slice() == dependencies {
-                let _ = memo.slot.set((memoized_for.clone(), digest.clone()));
-            }
+        if let Some((memoized_for, digest)) = self.slot.get()
+            && memoized_for.as_slice() == dependencies
+        {
+            let _ = memo.slot.set((memoized_for.clone(), digest.clone()));
         }
         memo
     }
@@ -312,7 +312,7 @@ impl RecoveredGenerationDigestMemo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphReplayCollectionOutcome {
-    Retired(GraphGenerationReplaySource),
+    Retired(Box<GraphGenerationReplaySource>),
     Retained,
     Absent,
 }
@@ -395,7 +395,7 @@ impl GraphGenerationManifest {
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
         let manifest = match source {
-            GraphGenerationReplaySource::InlineManifest(manifest) => manifest,
+            GraphGenerationReplaySource::InlineManifest(manifest) => *manifest,
             GraphGenerationReplaySource::MetadataOnlyManifest(_)
             | GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
                 return Err(GraphDbError::unavailable(

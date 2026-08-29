@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 
 use super::super::{DaemonEngine, DaemonHandshake, log_daemon_event};
 use super::{
@@ -11,19 +11,19 @@ use super::{
     settle_scheduler_retained_automation,
 };
 use crate::daemon::automation_effect::AutomationEffectAdmission;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     problem: &tracedecay_application::ApplicationProblemEnvelope,
 ) {
     let mut fields = vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
         ),
         ("request_id", problem.request_id.as_str().to_owned()),
         ("problem_kind", format!("{:?}", problem.problem.kind())),
@@ -38,7 +38,7 @@ pub(super) fn log_scheduler_pre_admission_problem(
 
 pub(super) fn log_scheduler_admission_conflict(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
 ) {
     log_daemon_event(
         "scheduler_task_automation_admission_conflict",
@@ -46,7 +46,7 @@ pub(super) fn log_scheduler_admission_conflict(
             ("project", project_path.display().to_string()),
             (
                 "task",
-                tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
             ),
             ("outcome", "skipped".to_owned()),
             ("reason", "durable_admission_conflict".to_owned()),
@@ -64,7 +64,7 @@ fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason:
             ("project", project_path.display().to_string()),
             (
                 "task",
-                tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
             ),
             ("outcome", "skipped".to_owned()),
             ("reason", reason.to_owned()),
@@ -74,19 +74,20 @@ fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason:
 
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     task: AgentTaskKind,
-    activity: tracedecay_agent_hosts::automation::scheduler::SessionActivity,
+    activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     now_secs: i64,
-) -> Result<tracedecay_agent_hosts::automation::scheduler::AutomationScheduleDecision> {
-    let summary = tracedecay_agent_hosts::automation::run_ledger::load_run_ledger_task_summary(
-        dashboard_root,
-        task,
-        tracedecay_agent_hosts::automation::backend::task_key(task),
-    )
-    .await?;
+) -> Result<tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision> {
+    let summary =
+        tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
+            dashboard_root,
+            task,
+            tracedecay_automation_runtime::automation::backend::task_key(task),
+        )
+        .await?;
     Ok(
-        tracedecay_agent_hosts::automation::scheduler::schedule_decision(
+        tracedecay_automation_runtime::automation::scheduler::schedule_decision(
             config,
             task,
             summary.records(),
@@ -253,8 +254,8 @@ pub(super) async fn abandon_reused_scheduler_skip(
     task: AgentTaskKind,
     run_control: &AutomationRunControl,
     effect: crate::daemon::automation_effect::AutomationEffectAuthority,
-    reused: tracedecay_agent_hosts::automation::runner::ReusedSchedulerSkip,
-    settlement_guard: tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
+    reused: tracedecay_automation_runtime::automation::runner::ReusedSchedulerSkip,
+    settlement_guard: tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
 ) -> Option<TraceDecayError> {
     synchronize_scheduler_effect_control(run_control);
     let settlement = match effect.start_reused_scheduler_skip_abandonment_observed(
@@ -285,9 +286,9 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
 ) -> Result<()> {
-    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+    use tracedecay_automation_runtime::automation::runner::{
         CombinedReviewAutomationOptions, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
         registered_project_automation_retrieval,
@@ -296,7 +297,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
         run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
     };
 
-    let control = tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(
+    let control = tracedecay_automation_runtime::automation::scheduler::load_scheduler_control(
         &cg.store_layout().dashboard_root,
     )
     .await?;
@@ -355,10 +356,11 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
         .store_administration
         .registered_project_session_database(project_path, cg.store_layout())
         .await?;
-    let schedule_activity = tracedecay_agent_hosts::automation::scheduler::load_session_activity(
-        session_database.as_ref(),
-    )
-    .await;
+    let schedule_activity =
+        tracedecay_automation_runtime::automation::scheduler::load_session_activity(
+            session_database.as_ref(),
+        )
+        .await;
     let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
     let memory_curator_decision = fixed_task_schedule_decision(
         &cg.store_layout().dashboard_root,
@@ -733,8 +735,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
     use tracedecay_application::{CancellationSignal, Deadline};
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_domain::UtcMicros;
 
     use super::{
@@ -745,7 +747,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_fixed_task_preflight_creates_no_effect_journal() {
         let dashboard = tempfile::tempdir().expect("dashboard root");
-        let config = tracedecay_agent_hosts::automation::config::AutomationConfig {
+        let config = tracedecay_automation_runtime::automation::config::AutomationConfig {
             enabled: false,
             ..Default::default()
         };
@@ -753,8 +755,8 @@ mod tests {
         let decision = fixed_task_schedule_decision(
             dashboard.path(),
             &config,
-            tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
-            tracedecay_agent_hosts::automation::scheduler::SessionActivity::none(),
+            tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
+            tracedecay_automation_runtime::automation::scheduler::SessionActivity::none(),
             1,
         )
         .await

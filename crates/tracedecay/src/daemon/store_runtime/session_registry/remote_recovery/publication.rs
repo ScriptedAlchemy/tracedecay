@@ -16,8 +16,8 @@ use crate::daemon::store_runtime::session_registry::{
     ProjectSessionReplacementReservationV1, ProjectSessionReplacementVacancyV1,
     RegisteredSessionOwnerV1, SessionGraphOwnerV1,
 };
-use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
 
 mod quarantine;
 

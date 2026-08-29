@@ -3,12 +3,12 @@ use super::{
 };
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 struct FreshnessRuntime {
     registry: DaemonSessionRuntimeRegistryV1,

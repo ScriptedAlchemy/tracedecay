@@ -25,10 +25,10 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
 
@@ -70,13 +70,17 @@ pub fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
 }
 
-pub async fn initialize_test_database(path: &Path) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
+pub async fn initialize_test_database(
+    path: &Path,
+) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
 }
 
-pub async fn open_test_database(path: &Path) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
+pub async fn open_test_database(
+    path: &Path,
+) -> tracedecay_runtime_core::errors::Result<(Database, bool)> {
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await

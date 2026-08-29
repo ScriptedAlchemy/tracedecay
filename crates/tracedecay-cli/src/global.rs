@@ -202,9 +202,11 @@ fn registry_project_roots(
     let projects = payload
         .get("projects")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "daemon registry list response omitted projects array".to_string(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "daemon registry list response omitted projects array".to_string(),
+            },
+        )?;
 
     projects
         .iter()
@@ -227,7 +229,7 @@ async fn call_admin_cli(
     project_root: Option<&Path>,
     arguments: serde_json::Value,
 ) -> tracedecay_runtime_core::errors::Result<serde_json::Value> {
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let handshake = tracedecay::daemon::handshake_for_current_client(
         project_root.map(Path::to_path_buf),
         None,
         false,

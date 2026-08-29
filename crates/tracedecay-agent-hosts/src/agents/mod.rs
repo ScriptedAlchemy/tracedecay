@@ -46,10 +46,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
+use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
@@ -75,12 +75,19 @@ pub use zed::ZedIntegration;
 pub(crate) fn install_managed_skill_prompt_index(
     profile_home: &Path,
     prompt_path: &Path,
-    target: crate::automation::skill_targets::SkillInstallTarget,
+    target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+            profile_home,
+        );
     retired_memory_digest::remove_state(&profile_root)?;
     retired_memory_digest::remove_prompt_block(prompt_path)?;
-    crate::automation::skill_targets::install_managed_skills(&profile_root, target, prompt_path)?;
+    tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &profile_root,
+        target,
+        prompt_path,
+    )?;
     Ok(())
 }
 
@@ -88,11 +95,17 @@ pub(crate) fn install_managed_skill_prompt_index(
 pub(crate) fn remove_managed_skill_prompt_index(
     profile_home: &Path,
     prompt_path: &Path,
-    target: crate::automation::skill_targets::SkillInstallTarget,
+    target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+            profile_home,
+        );
     retired_memory_digest::remove_state(&profile_root)?;
-    crate::automation::skill_targets::remove_prompt_skill_index_for_target(prompt_path, target)?;
+    tracedecay_automation_runtime::automation::skill_targets::remove_prompt_skill_index_for_target(
+        prompt_path,
+        target,
+    )?;
     retired_memory_digest::remove_prompt_block(prompt_path)
 }
 
@@ -1242,14 +1255,15 @@ struct TestHostConfigWritePause {
 }
 
 #[cfg(test)]
+type TestHostConfigWritePauseEntry = (
+    PathBuf,
+    TestHostConfigWriteBoundary,
+    std::sync::Weak<TestHostConfigWritePause>,
+);
+
+#[cfg(test)]
 static TEST_HOST_CONFIG_WRITE_PAUSES: std::sync::LazyLock<
-    std::sync::Mutex<
-        Vec<(
-            PathBuf,
-            TestHostConfigWriteBoundary,
-            std::sync::Weak<TestHostConfigWritePause>,
-        )>,
-    >,
+    std::sync::Mutex<Vec<TestHostConfigWritePauseEntry>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 #[cfg(test)]

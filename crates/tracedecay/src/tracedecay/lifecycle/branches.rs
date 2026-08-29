@@ -4,16 +4,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::branch;
-use tracedecay_runtime_core::branch_meta;
 use crate::config::{
     db_filename, install_usecase_runtime_configuration_authority,
     materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::storage::StoreLayout;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use crate::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
 
@@ -246,9 +246,10 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        let internal_detached_scope = tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
-            .as_deref()
-            == Some(branch_name);
+        let internal_detached_scope =
+            tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
+                .as_deref()
+                == Some(branch_name);
         Ok(Self {
             db,
             profile_database,

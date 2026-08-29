@@ -14,7 +14,7 @@ use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, ca
 use tracedecay_runtime_core::work_topology::WorkTopologyError;
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
     WorkApplicationOutcomeV1,
 };

@@ -32,10 +32,10 @@ fn active_lsp_control(
 
 #[cfg(unix)]
 fn lsp_test_invocation(
-    endpoint: super::super::transport::DaemonEndpoint,
+    endpoint: tracedecay_daemon_protocol::DaemonEndpoint,
     profile: &TempDir,
     client_instance_id: &str,
-) -> crate::daemon_client::DaemonInvocationClient {
+) -> tracedecay_daemon_protocol::DaemonInvocationClient {
     let handshake = DaemonHandshake {
         project_path: Some(profile.path().to_path_buf()),
         scope_prefix: None,
@@ -49,12 +49,13 @@ fn lsp_test_invocation(
         catalog_version: String::new(),
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
-    crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+    tracedecay_daemon_protocol::DaemonInvocationClient::new(
         super::super::DaemonConnection {
             endpoint,
             auth_token: None,
             authority_record: None,
-        },
+        }
+        .into_protocol(),
         handshake,
     )
 }
@@ -140,8 +141,8 @@ fn closed_feedback_list_request(
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -164,8 +165,8 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
         .expect("open json");
         assert_eq!(open["operation"], "lsp_open");
         let response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": "lsp.1",
             "status": "lsp_opened",
             "session": {
@@ -193,7 +194,7 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
     let profile = TempDir::new().expect("profile");
     let invocation = lsp_test_invocation(endpoint, &profile, "client.drop-test");
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.drop-test");
-    let session = crate::daemon_client::DaemonLspSessionClient::open(
+    let session = tracedecay_daemon_protocol::DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
         None,
@@ -211,8 +212,8 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -248,7 +249,7 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        crate::daemon_client::DaemonLspSessionClient::open(
+        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
             invocation,
             env!("CARGO_PKG_VERSION"),
             None,
@@ -270,8 +271,8 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lsp_gateway_open_returns_typed_cancellation() {
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -303,7 +304,7 @@ async fn lsp_gateway_open_returns_typed_cancellation() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        crate::daemon_client::DaemonLspSessionClient::open(
+        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
             invocation,
             env!("CARGO_PKG_VERSION"),
             None,
@@ -326,8 +327,8 @@ async fn lsp_gateway_open_returns_typed_cancellation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -352,7 +353,7 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        crate::daemon_client::DaemonLspSessionClient::open(
+        tracedecay_daemon_protocol::DaemonLspSessionClient::open(
             invocation,
             env!("CARGO_PKG_VERSION"),
             None,
@@ -374,8 +375,8 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
 #[cfg(unix)]
 #[tokio::test]
 async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() {
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -398,8 +399,8 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         .expect("open json");
         assert_eq!(open["operation"], "lsp_open");
         let open_response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": "lsp.1",
             "status": "lsp_opened",
             "session": {
@@ -449,8 +450,8 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
             "0000000000000000000000000000000000000000000000000000000000000000"
         );
         let reconnect_response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": reconnect["request_id"],
             "status": "lsp_reconnected",
             "session": {
@@ -483,8 +484,8 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         let poll_response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": resumed_poll["request_id"],
             "status": "lsp_frame",
             "frame": "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\",\"params\":{\"type\":3,\"message\":\"resumed\"}}",
@@ -511,8 +512,8 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         let frame_response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": client_frame["request_id"],
             "status": "lsp_frame_accepted",
             "backpressured": false,
@@ -539,8 +540,8 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         let detach_response = serde_json::json!({
-            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
-            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "protocol": tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL,
+            "revision": tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
             "request_id": detach["request_id"],
             "status": "lsp_detached"
         });
@@ -565,16 +566,17 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         catalog_version: String::new(),
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
-    let invocation = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+    let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
         super::super::DaemonConnection {
             endpoint,
             auth_token: None,
             authority_record: None,
-        },
+        }
+        .into_protocol(),
         handshake,
     );
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");
-    let mut session = crate::daemon_client::DaemonLspSessionClient::open(
+    let mut session = tracedecay_daemon_protocol::DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
         None,
@@ -729,7 +731,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
-    let endpoint = super::super::transport::DaemonEndpoint::Unix(
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(
         client_identity.profile_root.join("daemon.sock"),
     );
     let daemon_authority = super::super::authority::DaemonAuthority::acquire(
@@ -1216,8 +1218,8 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         &client_identity.profile_root,
         "portable-closed-invocation-test",
     );
-    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
-        &super::super::transport::default_loopback_endpoint(),
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
     .await
     .expect("loopback listener");
@@ -1237,11 +1239,11 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         .await
     });
 
-    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
         .expect("connect client");
     let (reader, mut writer) = stream.into_split();
-    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");
     let handshake = DaemonHandshake {
@@ -1332,9 +1334,12 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "linked-worktree-route-test",
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let project_id = crate::storage::read_repository_identity_marker(&primary)
         .expect("read primary repository identity")

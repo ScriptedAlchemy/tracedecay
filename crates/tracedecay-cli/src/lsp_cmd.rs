@@ -5,8 +5,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
-use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
+use tracedecay_daemon_protocol::DaemonLspSessionClient;
 use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
 use tracedecay_lsp::{
@@ -19,7 +18,9 @@ use crate::cli::LspAction;
 static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
     ProcessLocalRequestSequence::starting_at(1);
 
-pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_lsp_action(
+    action: LspAction,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         LspAction::Servers { json } => {
             hotpath::measure_block!("cli.lsp.servers", print_lsp_servers(json))?
@@ -47,7 +48,9 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_runtime_c
 /// `initialize` frame to bind canonical local workspace roots; it never
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
-async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay_runtime_core::errors::Result<()> {
+async fn run_stdio_bridge(
+    project_root: Option<PathBuf>,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {
         Some(read_initialize_binding(&mut stdin).await?)
@@ -61,8 +64,8 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay_runtime_c
                 .map(|binding| binding.project_root.clone())
         })
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
-    let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
-    let invocation = DaemonInvocationClient::for_current(handshake)?;
+    let handshake = tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let invocation = tracedecay::daemon::invocation_client_for_current(handshake)?;
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(
         invocation,
@@ -391,7 +394,9 @@ async fn acknowledge_daemon_frame_with_reconnect(
     }
 }
 
-async fn reconnect_session(session: &mut DaemonLspSessionClient) -> tracedecay_runtime_core::errors::Result<()> {
+async fn reconnect_session(
+    session: &mut DaemonLspSessionClient,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     session
         .reconnect(deadline, cancellation)
@@ -416,7 +421,9 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
     Ok((deadline, cancellation))
 }
 
-fn lsp_invocation_error(error: InvocationError) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn lsp_invocation_error(
+    error: InvocationError,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     let message = match error {
         InvocationError::Cancelled => "LSP gateway request was cancelled".to_owned(),
         InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed".to_owned(),
@@ -434,13 +441,18 @@ fn lsp_invocation_error(error: InvocationError) -> tracedecay_runtime_core::erro
     tracedecay_runtime_core::errors::TraceDecayError::Config { message }
 }
 
-fn bridge_error(phase: &str, error: impl std::fmt::Debug) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn bridge_error(
+    phase: &str,
+    error: impl std::fmt::Debug,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("LSP bridge {phase} failure: {error:?}"),
     }
 }
 
-fn bridge_config_error(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn bridge_config_error(
+    message: impl Into<String>,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.into(),
     }

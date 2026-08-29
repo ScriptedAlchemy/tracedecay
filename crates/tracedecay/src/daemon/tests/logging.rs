@@ -61,7 +61,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         AutomationRunProblemV1::new(&request, scope, envelope, Vec::new(), &request_id).unwrap();
     let fields = super::super::scheduler::scheduler_application_problem_log_fields(
         std::path::Path::new("/projects/log-privacy"),
-        tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+        tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
         &problem,
     );
     let line = super::super::format_daemon_log_line("scheduler_task_application_problem", &fields);
@@ -107,7 +107,7 @@ fn scheduler_task_start_log_uses_task_key_and_project() {
         "scheduler_task",
         &super::super::scheduler_task_log_fields(
             std::path::Path::new("/tmp/project with spaces"),
-            tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+            tracedecay_automation_runtime::automation::backend::AgentTaskKind::SkillWriter,
             "start",
         ),
     );
@@ -121,11 +121,12 @@ fn scheduler_task_start_log_uses_task_key_and_project() {
 #[cfg(unix)]
 #[test]
 fn scheduler_record_log_preserves_skipped_status_and_reason() {
-    let record = tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord {
+    let record = tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord {
         schema_version: 2,
         run_id: "run-123".to_string(),
-        trigger: tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler,
-        task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+        trigger:
+            tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
+        task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "codex_app_server".to_string(),
         backend_identity: None,
@@ -134,7 +135,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         response_schema: None,
         strict_json: None,
         model: None,
-        status: tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped,
+        status: tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped,
         evidence_hash: None,
         input_hash: None,
         output_hash: None,

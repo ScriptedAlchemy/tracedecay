@@ -89,7 +89,8 @@ use crate::{
             LexicalLaneRetriever,
         },
         ports::RetrievalPortError,
-    }};
+    },
+};
 use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_usecases::retention::code_index_generations::{
     DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,
@@ -2330,7 +2331,7 @@ enum CodeTextProjectionSlotV1 {
     HeadOpening,
     /// The resumable staging build; each wake advances one bounded slice
     /// under the slot lock.
-    Building(CodeTextArtifactBuildV1),
+    Building(Box<CodeTextArtifactBuildV1>),
 }
 
 impl CodeTextProjectionStateV1 {
@@ -2370,7 +2371,7 @@ impl<'a> TextHeadOpenClaimV1<'a> {
     /// immediately.
     fn install_build(
         &mut self,
-        build: CodeTextArtifactBuildV1,
+        build: Box<CodeTextArtifactBuildV1>,
     ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
@@ -2402,7 +2403,7 @@ enum TextHeadOpenOutcomeV1 {
     Served,
     /// No published head was servable; the resumable staging build begins
     /// (or resumes) from its durable staging file.
-    Build(CodeTextArtifactBuildV1),
+    Build(Box<CodeTextArtifactBuildV1>),
 }
 
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
@@ -3610,7 +3611,7 @@ impl LatestCodeTextGenerationV1 {
             None,
             true,
         )?;
-        Ok(TextHeadOpenOutcomeV1::Build(initialized))
+        Ok(TextHeadOpenOutcomeV1::Build(Box::new(initialized)))
     }
 
     /// The durable-artifact journey: reopen a published head when one exists,
@@ -3944,7 +3945,7 @@ impl LatestCodeTextGenerationV1 {
             source_receipt: _,
             staging_path,
             _build_reservation: build_reservation,
-        } = finished;
+        } = *finished;
         // Close the builder's SQLite connection before content-addressing the
         // finalized staging file.
         drop(builder);
@@ -4504,9 +4505,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let planned_bytes =
             tracedecay_code_index::parallelism::worker_reservation_bytes(planned_workers);
         let snapshot = self.resident_memory.snapshot();
-        let remaining = snapshot
-            .limit_bytes
-            .saturating_sub(snapshot.used_bytes);
+        let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
         // The process-global worker plan may have been installed against a
         // larger authority (standalone seed, or a host-RAM plan). This
         // scheduler's resident authority can already hold the seated text
@@ -6556,6 +6555,7 @@ pub(crate) mod semantic_vector_graph;
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
+pub(crate) use crate::daemon::store_runtime::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use activation::{
     CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
 };
@@ -6566,7 +6566,6 @@ pub(crate) use cadence::{
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, newly_eligible_percentile,
 };
 pub(in crate::daemon) use graph_activation::CodeGraphActivationPolicyV1;
-pub(crate) use graph_activation::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,

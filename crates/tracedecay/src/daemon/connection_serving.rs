@@ -6,7 +6,11 @@
 
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
-use crate::daemon_contract::DaemonInvocationPayload;
+use tracedecay_daemon_protocol::DaemonInvocationPayload;
+
+type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
+>;
 
 fn report_profile_host_admission_bootstrap_status(
     status: Option<ProfileHostAdmissionBootstrapStatus>,
@@ -190,7 +194,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
         };
         let observed_at = *observed_at;
         let (operation, event_class, kind, attempt_identity) = match work_request.as_ref() {
-            crate::daemon_contract::WorkApplicationInvocationV1::StartAttempt(command) => (
+            tracedecay_daemon_protocol::WorkApplicationInvocationV1::StartAttempt(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
@@ -201,7 +205,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            crate::daemon_contract::WorkApplicationInvocationV1::AttemptStatus(command) => (
+            tracedecay_daemon_protocol::WorkApplicationInvocationV1::AttemptStatus(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
@@ -212,7 +216,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            crate::daemon_contract::WorkApplicationInvocationV1::CancelAttempt(command) => (
+            tracedecay_daemon_protocol::WorkApplicationInvocationV1::CancelAttempt(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
@@ -223,7 +227,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            crate::daemon_contract::WorkApplicationInvocationV1::HydrateArtifacts(_) => (
+            tracedecay_daemon_protocol::WorkApplicationInvocationV1::HydrateArtifacts(_) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::Activity,
                 DaemonWorkDeliveryKindV1::ArtifactPage,
@@ -263,7 +267,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
     }
 
     fn is_successful_delivery(&self, response: &DaemonInvocationResponse) -> bool {
-        use crate::daemon_contract::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
+        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
 
         match (&self.kind, &response.outcome) {
             (
@@ -350,7 +354,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
         &self,
         response: &DaemonInvocationResponse,
     ) -> Vec<tracedecay_domain::WorkAttemptIdentityV1> {
-        use crate::daemon_contract::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
+        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
 
         if let Some(identity) = self.attempt_identity.as_ref() {
             return vec![identity.clone()];
@@ -389,10 +393,10 @@ fn offer_daemon_work_delivery(
     attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
     outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
     drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-) -> std::result::Result<(), crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason> {
+) -> std::result::Result<(), tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason> {
     let (Some(recorder), Some(attempt)) = (recorder, attempt) else {
         return Err(
-            crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
+            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
         );
     };
     let settlement = tracedecay_domain::DeliverySettlementV1 {
@@ -411,13 +415,13 @@ fn offer_daemon_work_delivery(
         Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity) => {
             tracing::warn!("daemon Work delivery receipt was dropped at recorder capacity");
             Err(
-                crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity,
+                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity,
             )
         }
         Err(error) => {
             tracing::warn!(%error, "daemon Work delivery receipt was refused");
             Err(
-                crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
+                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
             )
         }
     }
@@ -434,15 +438,15 @@ fn settle_daemon_work_delivery(
     recorder: Option<&Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
     outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
     drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-) -> std::result::Result<(), crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason> {
+) -> std::result::Result<(), tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason> {
     let Some(attempts) = attempts else {
         return Err(
-            crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
+            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
         );
     };
     if attempts.is_empty() {
         return Err(
-            crate::daemon_contract::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
+            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
         );
     }
     let mut result = Ok(());
@@ -458,7 +462,7 @@ fn settle_daemon_work_delivery(
 
 async fn write_daemon_delivery_ack_response(
     transport: &mut impl McpTransport,
-    response: &crate::daemon_contract::DaemonInvocationDeliveryAckResponse,
+    response: &tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse,
 ) -> Result<()> {
     let payload = hotpath::measure_block!(
         "daemon.engine.transport.serialize",
@@ -528,9 +532,7 @@ pub(super) async fn await_project_owner_or_disconnect<T: Send>(
 fn await_project_owner_or_disconnect_inner<'a, T, O>(
     transport: &'a mut (impl McpTransport + Send),
     open: O,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
->
+) -> ProjectOwnerAwaitFutureV1<'a, T>
 where
     T: Send,
     O: std::future::Future<Output = Result<T>> + Send + 'a,
@@ -713,7 +715,7 @@ fn serve_broker_socket_client_inner(
             initialize_route,
         )) = Box::pin(async move {
         if let Some(cancellation) =
-            crate::daemon_contract::parse_daemon_invocation_cancellation_request(
+            tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
                 &first_request_line,
             )
         {
@@ -924,7 +926,7 @@ fn serve_broker_socket_client_inner(
                             .await;
                         let ack_timeout = ack_deadline
                             .as_ref()
-                            .and_then(crate::daemon_client::deadline_remaining);
+                            .and_then(tracedecay_daemon_protocol::deadline_remaining);
                         let Some(ack_timeout) = ack_timeout else {
                             let _ = settle_daemon_work_delivery(
                                 delivery_attempts.as_deref(),
@@ -972,7 +974,7 @@ fn serve_broker_socket_client_inner(
                         };
                         match ack_line {
                             Some(line) => {
-                                let ack = crate::daemon_contract::parse_daemon_invocation_delivery_ack_request(
+                                let ack = tracedecay_daemon_protocol::parse_daemon_invocation_delivery_ack_request(
                                     &line,
                                 );
                                 if let Some(ack) = ack.filter(|ack| {
@@ -990,12 +992,12 @@ fn serve_broker_socket_client_inner(
                                     );
                                     let ack_response = match &settlement_result {
                                         Ok(()) => {
-                                            crate::daemon_contract::DaemonInvocationDeliveryAckResponse::accepted(
+                                            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::accepted(
                                                 target_request_id.clone(),
                                             )
                                         }
                                         Err(reason) => {
-                                            crate::daemon_contract::DaemonInvocationDeliveryAckResponse::rejected(
+                                            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::rejected(
                                                 target_request_id.clone(),
                                                 *reason,
                                             )
@@ -1377,7 +1379,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         None
     };
     if let Some(cancellation) =
-        crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
+        tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(&first_request_line)
     {
         hotpath::measure_block!("daemon.engine.transport.cancel", {
             crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
@@ -1576,7 +1578,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                         .await;
                     let ack_timeout = ack_deadline
                         .as_ref()
-                        .and_then(crate::daemon_client::deadline_remaining);
+                        .and_then(tracedecay_daemon_protocol::deadline_remaining);
                     let Some(ack_timeout) = ack_timeout else {
                         let _ = settle_daemon_work_delivery(
                             delivery_attempts.as_deref(),
@@ -1624,7 +1626,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                     };
                     match ack_line {
                         Some(line) => {
-                            let ack = crate::daemon_contract::parse_daemon_invocation_delivery_ack_request(
+                            let ack = tracedecay_daemon_protocol::parse_daemon_invocation_delivery_ack_request(
                                 &line,
                             );
                             if let Some(ack) = ack.filter(|ack| {
@@ -1642,12 +1644,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                                 );
                                 let ack_response = match &settlement_result {
                                     Ok(()) => {
-                                        crate::daemon_contract::DaemonInvocationDeliveryAckResponse::accepted(
+                                        tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::accepted(
                                             target_request_id.clone(),
                                         )
                                     }
                                     Err(reason) => {
-                                        crate::daemon_contract::DaemonInvocationDeliveryAckResponse::rejected(
+                                        tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::rejected(
                                             target_request_id.clone(),
                                             *reason,
                                         )

@@ -210,7 +210,8 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
     };
-    let tracedecay_runtime_core::errors::TraceDecayError::Database { message, operation } = error else {
+    let tracedecay_runtime_core::errors::TraceDecayError::Database { message, operation } = error
+    else {
         panic!("incompatible profile store returned the wrong error: {error}");
     };
     assert_eq!(operation, "ensure_schema_current");

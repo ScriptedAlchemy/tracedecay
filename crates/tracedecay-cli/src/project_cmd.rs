@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay::project_registry::{ProjectRegistryView, render_project_registry_view};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
-use tracedecay::project_registry::{ProjectRegistryView, render_project_registry_view};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use crate::cli::ProjectsAction;
 
@@ -156,7 +156,7 @@ async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);
     let handshake =
-        tracedecay::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
     let result =
         tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
             .await?;
@@ -224,11 +224,11 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay::project_registry::PublicProjectRegistryContext;
     use tracedecay_global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
     };
-    use tracedecay::project_registry::PublicProjectRegistryContext;
 
     const CREDENTIAL_REMOTE_URL: &str =
         "https://user:sekret-token@github.com/example/private-repo.git";

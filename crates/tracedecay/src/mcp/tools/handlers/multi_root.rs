@@ -12,15 +12,15 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
-use crate::daemon_client::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
 };
-use crate::daemon_contract::{
+use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 use super::tool_call_support::json_result;
@@ -159,7 +159,7 @@ fn render_response(
     request_id: RequestId,
     response: std::result::Result<
         DaemonInvocationResponse,
-        crate::daemon_client::DaemonInvocationError,
+        tracedecay_daemon_protocol::DaemonInvocationError,
     >,
 ) -> Result<ToolResult> {
     match response {
@@ -321,7 +321,7 @@ fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultCon
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon_contract::DaemonInvocationProblem;
+    use tracedecay_daemon_protocol::DaemonInvocationProblem;
     use serde_json::{Value, json};
     use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective};
 

@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
@@ -33,7 +33,11 @@ pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
 /// stores, application executor, and lifecycle remain one authority.
 pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 pub(crate) type RetainedProjectServerFuture = Pin<
-    Box<dyn Future<Output = tracedecay_runtime_core::errors::Result<Option<Arc<super::McpServer>>>> + Send + 'static>,
+    Box<
+        dyn Future<Output = tracedecay_runtime_core::errors::Result<Option<Arc<super::McpServer>>>>
+            + Send
+            + 'static,
+    >,
 >;
 pub(crate) type RetainedProjectServerResolver =
     Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static>;
@@ -55,11 +59,13 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                         .profile_identity()
                         .is_some_and(|identity| identity.profile_id() == &expected_profile_id);
                     if !profile_matches {
-                        return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                            "project_route_not_authorized",
-                            false,
-                            "retained dashboard project belongs to another profile",
-                        ));
+                        return Err(
+                            tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                                "project_route_not_authorized",
+                                false,
+                                "retained dashboard project belongs to another profile",
+                            ),
+                        );
                     }
                     Some(server.cg_snapshot().await)
                 }
@@ -129,7 +135,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
-        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+        Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
     pub(crate) delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
@@ -491,7 +497,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_application_invocation_executor(
         mut self,
-        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     ) -> Self {
         self.application_invocation_executor = Some(executor);
         self

@@ -33,7 +33,7 @@ struct LcmEffectControl {
 impl LcmEffectControl {
     fn new(deadline: Option<&Deadline>, cancellation: Option<&CancellationSignal>) -> Self {
         let budget = deadline
-            .and_then(crate::daemon_client::deadline_remaining)
+            .and_then(tracedecay_daemon_protocol::deadline_remaining)
             .map_or(LCM_EFFECT_CEILING, |remaining| {
                 remaining.min(LCM_EFFECT_CEILING)
             });
@@ -250,10 +250,10 @@ fn summary_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_global_db::RegisteredGlobalDb;
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use serde_json::Value;
     use tracedecay_domain::SessionId;
+    use tracedecay_global_db::RegisteredGlobalDb;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::lcm::{
         LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode,

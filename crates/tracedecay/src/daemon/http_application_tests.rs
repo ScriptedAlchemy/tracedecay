@@ -271,19 +271,20 @@ async fn service_with_canonical_application(
             drop(stream);
         }
     });
-    let handshake = super::DaemonHandshake::for_current_client(
+    let handshake = crate::daemon::handshake_for_current_client(
         Some(project.path().to_path_buf()),
         None,
         false,
         false,
     )
     .expect("canonical application handshake");
-    let client = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+    let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
         super::DaemonConnection {
             endpoint: broker_endpoint,
             auth_token: None,
             authority_record: None,
-        },
+        }
+        .into_protocol(),
         handshake,
     );
     let canonical =
@@ -994,7 +995,8 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             let resolver_calls = Arc::clone(&observed_resolver_calls);
             async move {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>().await
+                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>()
+                    .await
             }
         })
         .expect("install parked project resolver");
@@ -1067,9 +1069,9 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
     let endpoint =
-        super::transport::DaemonEndpoint::Unix(profile_root.join("remote-provisioning.sock"));
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-provisioning.sock"));
     #[cfg(not(unix))]
-    let endpoint = super::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
@@ -1206,9 +1208,9 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
-    let endpoint = super::transport::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
     #[cfg(not(unix))]
-    let endpoint = super::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");

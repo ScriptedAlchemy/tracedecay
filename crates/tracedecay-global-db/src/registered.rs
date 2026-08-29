@@ -92,7 +92,8 @@ impl RegisteredGlobalDbOwnerV1 {
     )> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
-        super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
+        let convergence =
+            super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         registered.rearm_queued_projection_retries().await?;
         drop(registered);
         Ok((
@@ -100,7 +101,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
             },
-            super::schema_stages::RegisteredSchemaConvergence::for_existing_client(),
+            convergence,
         ))
     }
 

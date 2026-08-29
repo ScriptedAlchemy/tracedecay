@@ -165,7 +165,7 @@ pub fn bound_path_list(
 
 /// Recursively collect files with `ext` under `dir`, enforcing discovery bounds
 /// before retaining each path. Directory symlinks are not followed.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.source.discover_files")]
 pub fn collect_files_with_ext_bounded(
     dir: &Path,
     ext: &str,

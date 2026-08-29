@@ -34,9 +34,9 @@ use super::receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::Database;
 use crate::store::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 macro_rules! execute_scoped_memory {
     (
