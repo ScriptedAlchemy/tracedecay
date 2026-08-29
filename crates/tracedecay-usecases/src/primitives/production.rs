@@ -1367,7 +1367,12 @@ pub(crate) async fn canonical_storage_status(
     let database_path = database.canonical_database_path();
     let store_path = database_path.display().to_string();
     let file_bytes = database_path.metadata().ok().map(|metadata| metadata.len());
-    let page_counts = database.storage_page_counts().await.ok();
+    let page_counts = hotpath::future!(
+        database.storage_page_counts(),
+        label = "usecases.primitives.storage_status.page_counts"
+    )
+    .await
+    .ok();
     let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
     let page_count = page_counts.map(|(_, page_count, _)| page_count);
     let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
@@ -1394,13 +1399,15 @@ pub(crate) async fn canonical_storage_status(
     let (history, history_coverage) = database_bytes.map_or_else(
         || (Vec::new(), "current_sample_unavailable".to_owned()),
         |bytes| {
-            update_storage_status_history(
-                &history_path,
-                project_id.clone(),
-                store_path.clone(),
-                bytes,
-                now_observed().0,
-            )
+            hotpath::measure_block!("usecases.primitives.storage_status.history", {
+                update_storage_status_history(
+                    &history_path,
+                    project_id.clone(),
+                    store_path.clone(),
+                    bytes,
+                    now_observed().0,
+                )
+            })
         },
     );
     StorageStatusPrimitiveResult {
