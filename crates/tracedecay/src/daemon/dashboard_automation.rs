@@ -5,20 +5,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-use tracedecay_agent_hosts::automation::config::{AutomationConfig, from_configuration_snapshot};
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_application::now_micros;
+use tracedecay_automation::managed_skills::validate_skill_id;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+use tracedecay_automation_runtime::automation::config::{
+    AutomationConfig, from_configuration_snapshot,
+};
+use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, apply_managed_skill_update, archive_managed_skill, disable_managed_skill,
     load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
     save_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
-use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project;
-use tracedecay_application::now_micros;
-use tracedecay_automation::managed_skills::validate_skill_id;
+use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
     DashboardAutomationObservationRecorderV1, DashboardAutomationRunOutcomeV1,
@@ -28,9 +30,9 @@ use tracedecay_dashboard_api::{
 };
 use tracedecay_domain::configuration::UserProfileId;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 mod retained_curator;
 pub(crate) use retained_curator::execute_retained_memory_curator;
@@ -385,7 +387,7 @@ async fn execute_dashboard_automation_run(
     let (config, backend) = runtime.execution();
     let run = match request {
         DashboardAutomationRunRequestV1::UserJob { job_id, run_id } => {
-            let job = tracedecay_agent_hosts::automation::jobs::find_job(
+            let job = tracedecay_automation_runtime::automation::jobs::find_job(
                 &cg.store_layout().dashboard_root,
                 &job_id,
             )
@@ -426,13 +428,13 @@ async fn execute_dashboard_automation_run(
                 cg.project_root().to_path_buf(),
                 "dashboard_user_job",
             );
-            let retained_run = tracedecay_agent_hosts::automation::jobs::
+            let retained_run = tracedecay_automation_runtime::automation::jobs::
                 run_user_job_with_backend_for_retained_settlement(
                     &cg.store_layout().dashboard_root,
                     config,
                     backend,
                     &job,
-                    tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
+                    tracedecay_automation_runtime::automation::jobs::UserJobRunOptions {
                         trigger: AutomationTrigger::Dashboard,
                         run_id: Some(run_id),
                         profile_root: Some(profile_root),
@@ -626,7 +628,7 @@ fn automation_problem(
 #[cfg(test)]
 mod tests {
     use super::DashboardAutomationRequestRuntime;
-    use tracedecay_agent_hosts::automation::config::AutomationConfig;
+    use tracedecay_automation_runtime::automation::config::AutomationConfig;
 
     #[test]
     fn dashboard_user_job_caps_backend_calls_for_the_wall_budget() {

@@ -37,14 +37,14 @@ impl Drop for HostFileWriteLock {
         // The lock handle is opened with FILE_SHARE_DELETE on Windows so this
         // unlink can succeed while the exclusive lock is still held. Cleanup
         // is best-effort; a failure is traced rather than swallowed.
-        if let Err(error) = self.directory.remove_file(&self.lock_name) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    lock_name = %self.lock_name,
-                    error = %error,
-                    "host config lock file could not be unlinked while held"
-                );
-            }
+        if let Err(error) = self.directory.remove_file(&self.lock_name)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                lock_name = %self.lock_name,
+                error = %error,
+                "host config lock file could not be unlinked while held"
+            );
         }
         if let Err(error) = FileExt::unlock(self.handle.as_file()) {
             tracing::warn!(

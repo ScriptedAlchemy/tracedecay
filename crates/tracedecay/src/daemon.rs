@@ -36,7 +36,7 @@ use scheduler::{
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
     run_automation_scheduler_tick, scheduler_task_log_fields,
 };
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 #[allow(unused_imports)]
@@ -208,6 +208,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
+mod semantic_evaluation_shutdown;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod store_shutdown;
@@ -271,7 +272,6 @@ pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
 mod production_harness;
-#[path = "daemon/git_watch/store_maintenance.rs"]
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;

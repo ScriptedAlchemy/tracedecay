@@ -35,7 +35,8 @@ impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookRe
 }
 
 #[hotpath::measure(label = "hints.hook_install")]
-pub(crate) fn install_dashboard_hook_readiness_projection() -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) fn install_dashboard_hook_readiness_projection()
+-> tracedecay_runtime_core::errors::Result<()> {
     static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
         std::sync::LazyLock::new(|| {
             tracedecay_dashboard_api::hooks::install_hook_readiness_projection(std::sync::Arc::new(
@@ -45,9 +46,11 @@ pub(crate) fn install_dashboard_hook_readiness_projection() -> tracedecay_runtim
         });
     INSTALLATION
         .as_ref()
-        .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: message.clone(),
-        })
+        .map_err(
+            |message| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: message.clone(),
+            },
+        )
         .copied()
 }
 

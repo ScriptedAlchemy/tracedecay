@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
-use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
     VerifiedGraphRuntimeWeakProxyV1,
 };
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
     CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS,

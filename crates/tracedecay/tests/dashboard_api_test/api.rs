@@ -49,7 +49,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        use tracedecay_agent_hosts::automation::managed_skills::{
+        use tracedecay_automation_runtime::automation::managed_skills::{
             ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
             default_managed_skill_targets,
         };

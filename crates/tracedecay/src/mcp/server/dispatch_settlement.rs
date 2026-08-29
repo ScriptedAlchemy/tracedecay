@@ -818,7 +818,9 @@ mod tests {
                 .run_retained(&runner_registry, async move {
                     started.notify_one();
                     release.notified().await;
-                    Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>("effect state is the daemon's to say")
+                    Ok::<_, tracedecay_runtime_core::errors::TraceDecayError>(
+                        "effect state is the daemon's to say",
+                    )
                 })
                 .await
         });

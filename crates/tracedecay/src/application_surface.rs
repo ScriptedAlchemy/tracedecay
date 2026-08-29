@@ -66,16 +66,17 @@ use crate::catalog_composition::{
 use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
+    InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 pub use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
-    CodeCalleesSurfaceRequest,
-    CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeImplementationsSurfaceRequest,
-    CodeNavigationSurfaceRequest, CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
 };
+pub use tracedecay_mcp::{RequestedOutputFormat, requested_output_format};
 use tracedecay_usecases::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
     FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
@@ -139,15 +140,6 @@ const SURFACE_TRANSPORT_ARGUMENT_KEYS: [&str; 2] = ["format", "__mcp_request_id"
 pub struct NormalizedApplicationToolArgs {
     pub request: Value,
     pub requested_format: RequestedOutputFormat,
-}
-
-/// The single authority for reading the presentation format out of a tool
-/// argument object. CLI, MCP, and rendering all resolve `format` through here.
-pub fn requested_output_format(args: &Value) -> RequestedOutputFormat {
-    match args.get("format").and_then(Value::as_str) {
-        Some(format) if format.eq_ignore_ascii_case("json") => RequestedOutputFormat::Json,
-        _ => RequestedOutputFormat::Markdown,
-    }
 }
 
 /// Normalizes compatibility tool arguments before every CLI/MCP transport

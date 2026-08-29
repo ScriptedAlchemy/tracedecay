@@ -3,8 +3,8 @@ use std::path::Path;
 
 use tracedecay_lsp::percent_hex_nibble;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Returns the first plausible unexpanded `${...}` template variable in a
 /// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value

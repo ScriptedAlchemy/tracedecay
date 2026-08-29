@@ -27,7 +27,10 @@ fn semantic_invocation_interruption_response(
         })
 }
 
-fn record_project_open_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
+fn record_project_open_refusal(
+    operation: &str,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
+) {
     hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -39,7 +42,10 @@ fn record_project_open_refusal(operation: &str, error: &tracedecay_runtime_core:
     );
 }
 
-fn record_project_route_refusal(operation: &str, error: &tracedecay_runtime_core::errors::TraceDecayError) {
+fn record_project_route_refusal(
+    operation: &str,
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
+) {
     hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
@@ -897,8 +903,10 @@ mod workflow_reset_tests {
 
     #[test]
     fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
-        let error =
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        let error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            "workflow",
+            "partial workflow schema",
+        );
         assert_eq!(
             project_open_problem(&error, true, false),
             service::invocation::DaemonInvocationProblem::ResetRequired

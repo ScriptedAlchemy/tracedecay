@@ -1,11 +1,11 @@
 //! Canonical automation request projection.
 
-use tracedecay_agent_hosts::automation::runner::{
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-};
 use tracedecay_application::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1,
     MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
+};
+use tracedecay_automation_runtime::automation::runner::{
+    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
 };
 use tracedecay_domain::{RunId, UtcMicros};
 
@@ -63,7 +63,7 @@ pub(crate) fn user_job_run_request(run_id: &str, job_id: &str) -> Result<Automat
 fn project_reflector_input(
     options: &SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorRunInputV1> {
-    use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
+    use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
 
     Ok(SessionReflectorRunInputV1 {
         provider: options.provider.clone(),

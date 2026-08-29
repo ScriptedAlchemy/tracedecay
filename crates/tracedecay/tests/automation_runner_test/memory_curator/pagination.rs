@@ -63,7 +63,7 @@ async fn memory_curator_resumes_from_the_durable_next_page_cursor() {
     };
 
     for _ in 0..2 {
-        tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+        tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
             &cg,
             &config,
             &test_configuration_revision(),

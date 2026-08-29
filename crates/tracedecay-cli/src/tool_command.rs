@@ -55,7 +55,6 @@ use tracedecay::application_surface::{
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
@@ -63,6 +62,7 @@ use tracedecay::mcp::tools::{
 };
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::BindingSurface;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 

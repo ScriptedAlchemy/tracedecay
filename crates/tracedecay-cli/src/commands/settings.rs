@@ -22,7 +22,9 @@ use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_re
 
 use super::daemon::daemon_tool_json;
 
-fn configuration_error(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn configuration_error(
+    message: impl Into<String>,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: message.into(),
     }
@@ -328,7 +330,9 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
 }
 
 #[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
-pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_upload_counter(
+    enable: bool,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let resolved =
         super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
             .await?;
@@ -376,7 +380,11 @@ fn handle_gitignore_inner(
     path: Option<String>,
     action: Option<String>,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
+    Box<
+        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+            + Send
+            + 'static,
+    >,
 > {
     // Erase the deeply nested gitignore-settings future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -463,9 +471,11 @@ fn handle_gitignore_inner(
                 let enabled = response
                     .get("git_ignore")
                     .and_then(serde_json::Value::as_bool)
-                    .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                        message: "daemon gitignore status omitted git_ignore".to_string(),
-                    })?;
+                    .ok_or_else(
+                        || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                            message: "daemon gitignore status omitted git_ignore".to_string(),
+                        },
+                    )?;
                 let status = if enabled { "on" } else { "off" };
                 eprintln!("gitignore: {status}");
             }

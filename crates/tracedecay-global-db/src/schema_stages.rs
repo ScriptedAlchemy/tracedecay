@@ -407,18 +407,6 @@ pub struct RegisteredSchemaConvergence {
     is_fresh: bool,
 }
 
-impl RegisteredSchemaConvergence {
-    /// A client attaches only after the sealed installer has completed. Its
-    /// convergence therefore treats the store as existing and conservatively
-    /// requires an exhaustive audit rather than recreating admission evidence.
-    pub(crate) const fn for_existing_client() -> Self {
-        Self {
-            force_exhaustive: true,
-            is_fresh: false,
-        }
-    }
-}
-
 /// Typed schema states an admissible store was classified into, carried from
 /// the read-only classification pass to the installation stages that consume
 /// them.
@@ -830,7 +818,7 @@ pub async fn converge_attached_registered_schema(
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub async fn ensure_attached_registered_schema(
     database: &Database,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     let read_connection = database.read_connection();
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -875,7 +863,10 @@ pub async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_authority_schema_contract(&read_connection).await?;
-    Ok(())
+    Ok(RegisteredSchemaConvergence {
+        force_exhaustive,
+        is_fresh: configuration_fresh.is_some(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

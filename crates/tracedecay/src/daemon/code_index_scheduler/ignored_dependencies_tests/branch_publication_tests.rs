@@ -280,9 +280,12 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
         .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 92, "ignored-dependency-race")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        92,
+        "ignored-dependency-race",
+    )
+    .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
@@ -301,7 +304,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            Arc::clone(&graph_runtime),
+            graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             super::super::CodeGraphActivationPolicyV1::Enabled,
         )

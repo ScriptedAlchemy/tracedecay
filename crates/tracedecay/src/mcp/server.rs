@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -19,6 +17,8 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -598,8 +598,10 @@ impl McpServer {
                 )
             })
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: format!("test server host-admission task failed: {error}"),
+            .map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!("test server host-admission task failed: {error}"),
+                }
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
@@ -629,9 +631,12 @@ impl McpServer {
         context
             .host_admission_test_runtime
             .as_ref()
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "registered test context is missing its host-admission runtime".to_owned(),
-            })?;
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "registered test context is missing its host-admission runtime"
+                        .to_owned(),
+                },
+            )?;
         let retained_root = context.cg.project_root().to_path_buf();
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
@@ -643,16 +648,19 @@ impl McpServer {
         let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
         let resolver_slot = Arc::clone(&active_server_slot);
-        let active_root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
+        let active_root =
+            tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&retained_root);
         let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
             let retained_servers = retained_servers.clone();
             let resolver_slot = Arc::clone(&resolver_slot);
             let active_root = active_root.clone();
             Box::pin(async move {
-                let requested =
-                    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&request.requested_worktree_root);
-                let registered =
-                    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&request.registered_root);
+                let requested = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                    &request.requested_worktree_root,
+                );
+                let registered = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                    &request.registered_root,
+                );
                 let project_id = request
                     .owner
                     .as_ref()
@@ -660,7 +668,9 @@ impl McpServer {
                 let mut matches = Vec::new();
                 for server in &retained_servers {
                     let graph = server.cg_snapshot().await;
-                    let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(graph.project_root());
+                    let root = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
+                        graph.project_root(),
+                    );
                     let identity_matches = project_id.is_none_or(|project_id| {
                         graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                     });
@@ -672,11 +682,13 @@ impl McpServer {
                     return Ok(matches.pop());
                 }
                 if !matches.is_empty() {
-                    return Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                        "project_route_ambiguous",
-                        false,
-                        "multiple retained test servers match one registered project route",
-                    ));
+                    return Err(
+                        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                            "project_route_ambiguous",
+                            false,
+                            "multiple retained test servers match one registered project route",
+                        ),
+                    );
                 }
                 let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
                 let Some(active) = active else {

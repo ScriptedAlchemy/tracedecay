@@ -784,9 +784,12 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     gix::init(&project).expect("initialize project repository");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "portable-owner-cache-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "portable-owner-cache-test",
+    )
+    .expect("daemon database scope");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,

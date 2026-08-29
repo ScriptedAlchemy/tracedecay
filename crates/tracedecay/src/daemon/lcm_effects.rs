@@ -250,10 +250,10 @@ fn summary_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_global_db::RegisteredGlobalDb;
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use serde_json::Value;
     use tracedecay_domain::SessionId;
+    use tracedecay_global_db::RegisteredGlobalDb;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::lcm::{
         LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode,

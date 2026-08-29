@@ -45,7 +45,6 @@ pub(super) const GENERATION_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
 pub(super) fn transaction_path(store_root: &Path) -> PathBuf {
     journal_path(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
-
 pub(super) fn transaction_stage_root(
     store_root: &Path,
     receipt: &CodeGenerationRetentionReceiptV1,

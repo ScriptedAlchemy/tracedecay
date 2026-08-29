@@ -185,14 +185,45 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             expected_revision,
         )
         .await
-        .map_err(|error| match error {
-            crate::configuration::ConfigurationError::RevisionConflict => {
-                SemanticConfigurationBackendErrorV1::Conflict
+        .map_err(|error| {
+            let outcome = match &error {
+                crate::configuration::ConfigurationError::TargetUnavailable => "target_unavailable",
+                crate::configuration::ConfigurationError::AuthorizedTargetAmbiguous => {
+                    "target_ambiguous"
+                }
+                crate::configuration::ConfigurationError::RevisionConflict => "revision_conflict",
+                crate::configuration::ConfigurationError::PlanExpired => "plan_expired",
+                crate::configuration::ConfigurationError::PlanStale => "plan_stale",
+                crate::configuration::ConfigurationError::PolicyWideningForbidden => {
+                    "policy_widening_forbidden"
+                }
+                crate::configuration::ConfigurationError::ProjectlessProfileRequired => {
+                    "projectless_profile_required"
+                }
+                crate::configuration::ConfigurationError::IdempotencyConflict => {
+                    "idempotency_conflict"
+                }
+                crate::configuration::ConfigurationError::MutationAuthorityRejected => {
+                    "mutation_authority_rejected"
+                }
+                crate::configuration::ConfigurationError::Validation(_) => "validation",
+                crate::configuration::ConfigurationError::ResetRequired { .. } => "reset_required",
+                crate::configuration::ConfigurationError::Unavailable => "unavailable",
+            };
+            tracing::warn!(
+                event = "semantic_configuration_preview_failure",
+                outcome,
+                "semantic configuration preview did not produce a commit"
+            );
+            match error {
+                crate::configuration::ConfigurationError::RevisionConflict => {
+                    SemanticConfigurationBackendErrorV1::Conflict
+                }
+                crate::configuration::ConfigurationError::Unavailable => {
+                    SemanticConfigurationBackendErrorV1::Unavailable
+                }
+                _ => SemanticConfigurationBackendErrorV1::Rejected,
             }
-            crate::configuration::ConfigurationError::Unavailable => {
-                SemanticConfigurationBackendErrorV1::Unavailable
-            }
-            _ => SemanticConfigurationBackendErrorV1::Rejected,
         })?;
         drop(transaction);
         Ok(preview)

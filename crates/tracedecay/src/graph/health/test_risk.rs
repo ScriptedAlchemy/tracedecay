@@ -4,9 +4,9 @@ use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const ATTRIBUTION_DEPTH: usize = 3;
 const MAX_TEST_RISK_SYMBOLS: usize = 500_000;

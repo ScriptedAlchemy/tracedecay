@@ -8,8 +8,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::types::AstGrepResult;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::TraceDecay;
 use super::file_authority::SourceEditFileAuthority;

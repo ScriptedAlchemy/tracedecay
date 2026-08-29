@@ -9,14 +9,14 @@ use std::time::Duration;
 use serde_json::json;
 use tempfile::TempDir;
 
-use tracedecay_agent_hosts::automation::backend::{
+use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     BackendRetryPolicy, CodexAppServerBackend, agent_task_failure_disposition,
     backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
     run_agent_task_with_retry,
 };
-use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
-use tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
+use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };

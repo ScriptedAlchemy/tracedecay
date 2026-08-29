@@ -1096,8 +1096,10 @@ mod semantic_runtime_payload_tests {
     #[test]
     fn semantic_runtime_accepts_an_explicitly_disabled_selected_model() {
         let registry = ConfigurationRegistry::core().expect("registry");
-        let mut config = SemanticConfig::default();
-        config.selected_model = None;
+        let config = SemanticConfig {
+            selected_model: None,
+            ..SemanticConfig::default()
+        };
         let payload = serde_json::to_string(&config).expect("disabled semantic runtime JSON");
         registry
             .validate_value(

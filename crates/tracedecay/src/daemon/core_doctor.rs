@@ -7,8 +7,8 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::errors::Result;
-use tracedecay_jsonrpc::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
@@ -571,7 +571,7 @@ mod doctor_runtime_route_tests {
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-    use tracedecay_jsonrpc::McpTransport;
+    use tracedecay_mcp::McpTransport;
     use tracedecay_usecases::semantic_runtime::{
         SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
         SemanticRuntimeStatusV1,
@@ -1242,7 +1242,10 @@ mod doctor_runtime_route_tests {
         let branch_graph = layout.data_root.join(branch_relpath);
         std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
         std::fs::copy(&default_graph, &branch_graph).unwrap();
-        let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
+        let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new_for_dir(
+            &layout.data_root,
+            "main",
+        );
         meta.add_branch("feature/doctor", branch_relpath, "main");
         tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
         assert!(

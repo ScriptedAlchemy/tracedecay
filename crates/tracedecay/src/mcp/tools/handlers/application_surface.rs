@@ -6,18 +6,18 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::application_output::view::CanonicalHumanView;
+use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) fn request_id() -> Result<RequestId> {
@@ -275,9 +275,12 @@ fn render_result_parts(
         }
     };
     let text =
-        super::super::render::finalize_with_format(project_root, requested_format, &value, || {
-            markdown.unwrap_or_default()
-        });
+        super::super::render::finalize_with_format(
+            project_root,
+            requested_format,
+            &value,
+            || markdown.unwrap_or_default(),
+        );
     let mut rendered = super::text_tool_result(&text);
     if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation
@@ -330,7 +333,7 @@ fn render_canonical_markdown(
     result: &ApplicationResult<Value>,
 ) -> serde_json::Result<String> {
     let view = CanonicalHumanView::from_application_result(operation, binding_id, result)?;
-    Ok(crate::application_output::markdown::render(view)
+    Ok(tracedecay_mcp::application_output::markdown::render(view)
         .as_str()
         .to_owned())
 }

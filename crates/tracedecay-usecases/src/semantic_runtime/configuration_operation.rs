@@ -423,9 +423,15 @@ impl ProductionSemanticConfigurationOperationV1 {
             .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
         let state = coordinator
             .current_profile_state()
-            .await?
+            .await
+            .map_err(|error| log_semantic_activation_failure("current_profile_state", error))?
             .into_state()
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                log_semantic_activation_failure(
+                    "decode_profile_state",
+                    SemanticActivationCoordinationErrorV1::Rejected,
+                )
+            })?;
         let expected = RetrievalProfileCasV1 {
             expected_configuration_revision: state.configuration_revision().clone(),
             expected_active_digest: state.active().profile_digest().clone(),
@@ -439,12 +445,14 @@ impl ProductionSemanticConfigurationOperationV1 {
                 &expected.expected_configuration_revision,
                 request.now,
             )
-            .await?;
+            .await
+            .map_err(|error| log_semantic_activation_failure("authorize", error))?;
         let candidate = self
             .accepted_profiles
             .resolve(&request.selected_profile.accepted_profile_digest)
             .await
-            .map_err(map_authority_error)?;
+            .map_err(map_authority_error)
+            .map_err(|error| log_semantic_activation_failure("resolve_candidate", error))?;
         if candidate.accepted_profile.profile_digest()
             != &request.selected_profile.accepted_profile_digest
             || candidate
@@ -459,7 +467,10 @@ impl ProductionSemanticConfigurationOperationV1 {
                 })
                 != Some(request.selected_profile.artifact_digest.as_str())
         {
-            return Err(SemanticActivationCoordinationErrorV1::Rejected);
+            return Err(log_semantic_activation_failure(
+                "match_candidate_selection",
+                SemanticActivationCoordinationErrorV1::Rejected,
+            ));
         }
         if expected.expected_rollback_digest.as_ref()
             == Some(&request.selected_profile.accepted_profile_digest)
@@ -495,17 +506,26 @@ impl ProductionSemanticConfigurationOperationV1 {
             .accepted_profiles
             .resolve(&expected.expected_active_digest)
             .await
-            .map_err(map_authority_error)?;
-        let base_configuration = current_configuration_state(&self.configuration).await?;
+            .map_err(map_authority_error)
+            .map_err(|error| log_semantic_activation_failure("resolve_current", error))?;
+        let base_configuration = current_configuration_state(&self.configuration)
+            .await
+            .map_err(|error| log_semantic_activation_failure("current_configuration", error))?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                log_semantic_activation_failure(
+                    "pin_current_configuration",
+                    SemanticActivationCoordinationErrorV1::Rejected,
+                )
+            })?;
         let preview = coordinator
             .preview_central_mutation(
                 &request.authority,
                 &request.central_mutation,
                 &expected.expected_configuration_revision,
             )
-            .await?;
+            .await
+            .map_err(|error| log_semantic_activation_failure("preview_configuration", error))?;
         self.configuration
             .stage_and_activate_semantic(
                 base_pin,
@@ -519,7 +539,8 @@ impl ProductionSemanticConfigurationOperationV1 {
                 candidate.freshness_vector_digest,
                 request.now,
             )
-            .await?;
+            .await
+            .map_err(|error| log_semantic_activation_failure("linked_activation", error))?;
         Ok(SemanticAppliedActivationV1 {
             configuration_receipt: preview.receipt,
         })
@@ -603,6 +624,26 @@ impl ProductionSemanticConfigurationOperationV1 {
             configuration_receipt: preview.receipt,
         })
     }
+}
+
+fn log_semantic_activation_failure(
+    stage: &'static str,
+    error: SemanticActivationCoordinationErrorV1,
+) -> SemanticActivationCoordinationErrorV1 {
+    let outcome = match &error {
+        SemanticActivationCoordinationErrorV1::Unavailable => "unavailable",
+        SemanticActivationCoordinationErrorV1::Rejected
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => "rejected",
+        SemanticActivationCoordinationErrorV1::Conflict => "conflict",
+        SemanticActivationCoordinationErrorV1::Runtime(_) => "runtime_failure",
+    };
+    tracing::warn!(
+        event = "semantic_activation_failure",
+        stage,
+        outcome,
+        "semantic profile activation did not advance"
+    );
+    error
 }
 
 fn candidate_rebound_to_snapshot_runtime(

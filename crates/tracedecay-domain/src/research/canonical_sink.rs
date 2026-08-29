@@ -42,11 +42,6 @@ impl<S: CanonicalSink> BufferedSink<S> {
         }
     }
 
-    /// Flush every buffered byte and return the wrapped sink.
-    pub(super) fn finish(self) -> S {
-        self.finish_reuse().0
-    }
-
     /// Flush every buffered byte and recover the reusable buffer.
     pub(super) fn finish_reuse(mut self) -> (S, String) {
         self.flush();

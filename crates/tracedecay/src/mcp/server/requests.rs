@@ -5,8 +5,8 @@ use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
 };
 use super::*;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::ToolResult;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 mod tool_dispatch;
 
@@ -88,7 +88,7 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
         "memory_min_trust",
     ];
 
-    if tracedecay_agent_hosts::analytics::is_skill_view_tool(tool_name) {
+    if tracedecay_automation::analytics::is_skill_view_tool(tool_name) {
         return arguments.clone();
     }
     let Some(map) = arguments.as_object() else {
@@ -766,26 +766,27 @@ impl McpServer {
         let tracedecay_dir = &cg.store_layout().data_root;
         let current = cg.active_branch();
 
-        let branches: Vec<Value> = match tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir) {
-            Some(meta) => meta
-                .branches
-                .iter()
-                .map(|(name, entry)| {
-                    let db_path = tracedecay_dir.join(&entry.db_file);
-                    let size_bytes = db_path.metadata().map_or(0, |m| m.len());
-                    json!({
-                        "name": name,
-                        "db_file": entry.db_file,
-                        "parent": entry.parent,
-                        "size_bytes": size_bytes,
-                        "last_synced_at": entry.last_synced_at,
-                        "is_current": current == Some(name.as_str()),
-                        "is_default": name == &meta.default_branch,
+        let branches: Vec<Value> =
+            match tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir) {
+                Some(meta) => meta
+                    .branches
+                    .iter()
+                    .map(|(name, entry)| {
+                        let db_path = tracedecay_dir.join(&entry.db_file);
+                        let size_bytes = db_path.metadata().map_or(0, |m| m.len());
+                        json!({
+                            "name": name,
+                            "db_file": entry.db_file,
+                            "parent": entry.parent,
+                            "size_bytes": size_bytes,
+                            "last_synced_at": entry.last_synced_at,
+                            "is_current": current == Some(name.as_str()),
+                            "is_default": name == &meta.default_branch,
+                        })
                     })
-                })
-                .collect(),
-            None => vec![],
-        };
+                    .collect(),
+                None => vec![],
+            };
 
         let output = json!({
             "branch_count": branches.len(),
