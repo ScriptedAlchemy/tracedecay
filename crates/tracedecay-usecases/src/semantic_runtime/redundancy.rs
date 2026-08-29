@@ -13,8 +13,8 @@ use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 use super::{
-    CommittedRetrievalProfileStateV1, SemanticRetainedVectorGenerationsV1,
-    project_semantic_production_runtime,
+    CommittedRetrievalProfileStateV1, SemanticActivationReceiptV1,
+    SemanticRetainedVectorGenerationsV1, project_semantic_production_runtime,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
@@ -100,6 +100,11 @@ pub struct PreparedSemanticRedundancyAuthorityV1 {
     revision: ConfigurationRevisionId,
     roots: SemanticRetainedVectorGenerationsV1,
     authority: Option<SemanticRedundancyAuthorityV1>,
+    /// Durable Ready receipt from the committed linked activation. Present
+    /// only when [`authority`] validated that exact receipt; remount must
+    /// reattach it onto the public Ready projection instead of synthesizing
+    /// one from the scheduler pointer.
+    activation_receipt: Option<SemanticActivationReceiptV1>,
 }
 
 impl PreparedSemanticRedundancyAuthorityV1 {
@@ -133,6 +138,7 @@ struct SemanticProjectRedundancyStateV1 {
     revision: ConfigurationRevisionId,
     roots: SemanticRetainedVectorGenerationsV1,
     authority: Option<SemanticRedundancyAuthorityV1>,
+    activation_receipt: Option<SemanticActivationReceiptV1>,
 }
 
 fn retained_generations() -> &'static Mutex<BTreeMap<PathBuf, RetainedProjectGenerationsV1>> {
@@ -176,6 +182,25 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
         .get(project_root)
         .and_then(|state| state.authority.as_ref())
         .map(|authority| authority.pins.clone())
+}
+
+/// Durable Ready receipt last installed for this project, if any.
+///
+/// Process-local only: unmount drops it. Restart remount must recommit the
+/// exact receipt from the configuration store; a scheduler `Current`
+/// pointer alone is not Ready.
+pub fn project_semantic_activation_receipt(
+    project_root: &Path,
+) -> Option<SemanticActivationReceiptV1> {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .and_then(|state| state.activation_receipt.clone())
 }
 
 pub fn project_semantic_retained_vector_generations(
@@ -265,10 +290,18 @@ pub fn project_semantic_retained_code_generation(
 pub fn prepare_project_semantic_redundancy_authority(
     committed: &CommittedRetrievalProfileStateV1,
 ) -> PreparedSemanticRedundancyAuthorityV1 {
+    let authority = redundancy_authority_from_committed(committed);
+    let activation_receipt = authority.as_ref().and_then(|_| {
+        committed
+            .current_activation
+            .as_ref()
+            .map(|activation| activation.receipt.clone())
+    });
     PreparedSemanticRedundancyAuthorityV1 {
         revision: committed.state.configuration_revision().clone(),
         roots: SemanticRetainedVectorGenerationsV1::from_profile_state(&committed.state),
-        authority: redundancy_authority_from_committed(committed),
+        authority,
+        activation_receipt,
     }
 }
 
@@ -283,6 +316,7 @@ pub fn commit_project_initial_semantic_roots(
         revision: state.configuration_revision().clone(),
         roots: SemanticRetainedVectorGenerationsV1::from_profile_state(state),
         authority: None,
+        activation_receipt: None,
     };
     commit_project_semantic_redundancy_authority(project_root, &prepared, false);
     true
@@ -314,6 +348,10 @@ pub fn commit_project_semantic_redundancy_authority_under_gate(
         revision: prepared.revision.clone(),
         roots: prepared.roots.clone(),
         authority: prepared.authority.clone().filter(|_| install_authority),
+        activation_receipt: prepared
+            .activation_receipt
+            .clone()
+            .filter(|_| install_authority),
     };
     redundancy_states()
         .lock()
@@ -576,6 +614,7 @@ mod tests {
                 .expect("revision"),
             roots: SemanticRetainedVectorGenerationsV1::default(),
             authority: None,
+            activation_receipt: None,
         };
         commit_project_semantic_redundancy_authority(project_root.to_path_buf(), &prepared, false);
         assert!(

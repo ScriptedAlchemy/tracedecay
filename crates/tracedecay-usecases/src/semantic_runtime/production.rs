@@ -3511,12 +3511,23 @@ impl DaemonSemanticRuntimeBackendV1 {
     }
 
     pub fn application_status(&self) -> SemanticRuntimeStatusV1 {
+        self.application_status_with_receipt(None)
+    }
+
+    fn application_status_with_receipt(
+        &self,
+        activation_receipt: Option<SemanticActivationReceiptV1>,
+    ) -> SemanticRuntimeStatusV1 {
         let configuration = self
             .configuration
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        application_status_from_projection(&self.handle.status_projection(), configuration)
+        application_status_from_projection(
+            &self.handle.status_projection(),
+            configuration,
+            activation_receipt,
+        )
     }
 }
 
@@ -3659,6 +3670,7 @@ pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
+    let activation_receipt = super::project_semantic_activation_receipt(project_root);
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
         let lifecycle = runtime.lifecycle_status();
         let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
@@ -3666,7 +3678,7 @@ pub fn project_semantic_application_status(
             backend.bind_configuration(configuration);
         }
         return Some(prefer_lifecycle_over_generic_unavailable(
-            backend.application_status(),
+            backend.application_status_with_receipt(activation_receipt),
             &lifecycle,
         ));
     }
@@ -3678,6 +3690,7 @@ pub fn project_semantic_application_status(
     Some(application_status_from_projection(
         &handle.status_projection(),
         configuration,
+        activation_receipt,
     ))
 }
 
@@ -4620,7 +4633,7 @@ mod tests {
         ));
         started_rx.await.expect("indexing started");
         let projection = handle.status_projection();
-        let status = application_status_from_projection(&projection, None);
+        let status = application_status_from_projection(&projection, None, None);
         match status.state {
             SemanticRuntimeStateV1::Indexing {
                 completed_units,
@@ -4682,7 +4695,7 @@ mod tests {
             Some(SemanticFallbackReasonV1::ArtifactUnavailable)
         );
         assert_eq!(projection.prior_generation.as_ref(), Some(&prior));
-        let status = application_status_from_projection(&projection, None);
+        let status = application_status_from_projection(&projection, None, None);
         match status.state {
             SemanticRuntimeStateV1::Degraded {
                 active_generation,
@@ -4908,11 +4921,13 @@ mod tests {
         let status = application_status_from_projection(
             &handle.status_projection(),
             Some(configuration_pin()),
+            None,
         );
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         let restarted_status = application_status_from_projection(
             &handle.status_projection(),
             Some(configuration_pin()),
+            None,
         );
         assert_eq!(
             status.state,
@@ -4924,6 +4939,87 @@ mod tests {
         assert_eq!(
             restarted_status, status,
             "status must not synthesize a time-varying activation receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn remounted_scheduler_current_reattaches_the_durable_ready_receipt() {
+        let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
+        let published = pointer('s', 's');
+        let generation = published.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('s'),
+            1,
+            move |_progress| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(published)
+                }))
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.current().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current generation published");
+
+        let pin = configuration_pin();
+        let receipt = SemanticActivationReceiptV1::issue(
+            &SemanticActivationCommandV1::new(
+                pin.clone(),
+                SemanticActivationRequestV1::new(generation.clone(), None, None)
+                    .expect("activation request"),
+            )
+            .expect("activation command"),
+            UtcMicros(10),
+        )
+        .expect("durable activation receipt");
+
+        let remounted = application_status_from_projection(
+            &handle.status_projection(),
+            Some(pin.clone()),
+            Some(receipt.clone()),
+        );
+        assert_eq!(
+            remounted.state,
+            SemanticRuntimeStateV1::Current {
+                receipt: receipt.clone()
+            },
+            "restart remount must reattach the durable Ready receipt"
+        );
+        assert_eq!(
+            remounted.route(),
+            crate::semantic_runtime::SemanticRuntimeRouteV1::Semantic {
+                generation,
+                activation_receipt_digest: receipt.receipt_digest,
+            }
+        );
+
+        let foreign = pointer('t', 't').generation;
+        let mismatched = SemanticActivationReceiptV1::issue(
+            &SemanticActivationCommandV1::new(
+                pin.clone(),
+                SemanticActivationRequestV1::new(foreign, None, None).expect("foreign request"),
+            )
+            .expect("foreign command"),
+            UtcMicros(11),
+        )
+        .expect("foreign receipt");
+        let refused = application_status_from_projection(
+            &handle.status_projection(),
+            Some(pin),
+            Some(mismatched),
+        );
+        assert!(
+            matches!(
+                refused.state,
+                SemanticRuntimeStateV1::Degraded {
+                    reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+                    ..
+                }
+            ),
+            "a receipt for a different generation must stay a typed missing-Ready state"
         );
     }
 

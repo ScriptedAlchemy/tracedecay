@@ -1,3 +1,4 @@
+use tracedecay_domain::VectorGenerationIdV1;
 use tracedecay_semantic::{
     SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
     SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
@@ -5,64 +6,100 @@ use tracedecay_semantic::{
 };
 
 use super::super::ports::{
-    SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticFallbackReasonV1,
+    SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 
 /// Map daemon schedule projection into the application/Doctor status shape.
 ///
 /// Indexing never blocks exact/lexical/graph; the route remains lexical until
-/// [`SemanticRuntimeStateV1::Current`].
+/// [`SemanticRuntimeStateV1::Current`]. A scheduler `Current` pointer is not
+/// Ready by itself: Ready requires the durable activation receipt remount
+/// reattached from the configuration store. A missing or mismatched receipt
+/// stays [`SemanticFallbackReasonV1::InvalidRuntimeStatus`] — never a
+/// synthesized receipt or empty success.
 pub fn application_status_from_projection(
     projection: &SemanticRuntimeStatusProjectionV1,
     configuration: Option<SemanticConfigurationPinV1>,
+    activation_receipt: Option<SemanticActivationReceiptV1>,
 ) -> SemanticRuntimeStatusV1 {
-    let state = match &projection.status {
-        SemanticRuntimeScheduleStatusV1::Unavailable => SemanticRuntimeStateV1::Unavailable {
-            reason: projection
-                .degraded_reason
-                .unwrap_or(SemanticFallbackReasonV1::RuntimeUnavailable),
-        },
+    match &projection.status {
+        SemanticRuntimeScheduleStatusV1::Unavailable => SemanticRuntimeStatusV1::new(
+            configuration,
+            SemanticRuntimeStateV1::Unavailable {
+                reason: projection
+                    .degraded_reason
+                    .unwrap_or(SemanticFallbackReasonV1::RuntimeUnavailable),
+            },
+        ),
         SemanticRuntimeScheduleStatusV1::Indexing {
             completed_units,
             total_units,
             ..
-        } => SemanticRuntimeStateV1::Indexing {
-            completed_units: *completed_units,
-            total_units: *total_units,
-        },
+        } => SemanticRuntimeStatusV1::new(
+            configuration,
+            SemanticRuntimeStateV1::Indexing {
+                completed_units: *completed_units,
+                total_units: *total_units,
+            },
+        ),
         SemanticRuntimeScheduleStatusV1::Failed {
             reason,
             prior_generation,
-        } => SemanticRuntimeStateV1::Degraded {
-            active_generation: prior_generation
-                .clone()
-                .or_else(|| projection.prior_generation.clone()),
-            reason: match reason {
-                SemanticRuntimeScheduleFailureV1::Artifact => {
-                    SemanticFallbackReasonV1::ArtifactUnavailable
-                }
-                SemanticRuntimeScheduleFailureV1::Cancelled
-                | SemanticRuntimeScheduleFailureV1::DeadlineExceeded => {
-                    SemanticFallbackReasonV1::RuntimeUnavailable
-                }
-                SemanticRuntimeScheduleFailureV1::Runtime
-                | SemanticRuntimeScheduleFailureV1::Projection
-                | SemanticRuntimeScheduleFailureV1::ProjectionDetail(_)
-                | SemanticRuntimeScheduleFailureV1::Publication
-                | SemanticRuntimeScheduleFailureV1::PublicationDetail(_) => {
-                    SemanticFallbackReasonV1::RuntimeFailure
-                }
-            },
-        },
-        SemanticRuntimeScheduleStatusV1::Current { generation } => {
+        } => SemanticRuntimeStatusV1::new(
+            configuration,
             SemanticRuntimeStateV1::Degraded {
-                active_generation: Some(generation.clone()),
-                reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
-            }
+                active_generation: prior_generation
+                    .clone()
+                    .or_else(|| projection.prior_generation.clone()),
+                reason: match reason {
+                    SemanticRuntimeScheduleFailureV1::Artifact => {
+                        SemanticFallbackReasonV1::ArtifactUnavailable
+                    }
+                    SemanticRuntimeScheduleFailureV1::Cancelled
+                    | SemanticRuntimeScheduleFailureV1::DeadlineExceeded => {
+                        SemanticFallbackReasonV1::RuntimeUnavailable
+                    }
+                    SemanticRuntimeScheduleFailureV1::Runtime
+                    | SemanticRuntimeScheduleFailureV1::Projection
+                    | SemanticRuntimeScheduleFailureV1::ProjectionDetail(_)
+                    | SemanticRuntimeScheduleFailureV1::Publication
+                    | SemanticRuntimeScheduleFailureV1::PublicationDetail(_) => {
+                        SemanticFallbackReasonV1::RuntimeFailure
+                    }
+                },
+            },
+        ),
+        SemanticRuntimeScheduleStatusV1::Current { generation } => {
+            ready_or_typed_missing_receipt(generation, configuration, activation_receipt)
         }
-    };
-    SemanticRuntimeStatusV1::new(configuration, state)
+    }
+}
+
+fn ready_or_typed_missing_receipt(
+    generation: &VectorGenerationIdV1,
+    configuration: Option<SemanticConfigurationPinV1>,
+    activation_receipt: Option<SemanticActivationReceiptV1>,
+) -> SemanticRuntimeStatusV1 {
+    if let Some(receipt) = activation_receipt
+        && receipt.validate().is_ok()
+        && receipt.activated_generation == *generation
+        && configuration
+            .as_ref()
+            .is_none_or(|pin| receipt.configuration == *pin)
+    {
+        return SemanticRuntimeStatusV1::new(
+            configuration.or_else(|| Some(receipt.configuration.clone())),
+            SemanticRuntimeStateV1::Current { receipt },
+        );
+    }
+    SemanticRuntimeStatusV1::new(
+        configuration,
+        SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(generation.clone()),
+            reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+        },
+    )
 }
 
 /// Map lifecycle state into the Doctor/status semantic runtime state surface.
