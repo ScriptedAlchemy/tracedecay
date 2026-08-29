@@ -21,9 +21,9 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::tracedecay::{TraceDecay, is_test_file};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::diagnose::{Severity, parse_cargo_output};
 use tracedecay_usecases::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_usecases::diagnostics_query::DiagnosticsQuery;

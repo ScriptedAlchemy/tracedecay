@@ -26,9 +26,11 @@ impl ProjectServerCapacityRetirementCompletion {
                     ),
                 })
             }
-            ProjectServerRetirementStatus::Pending => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "project server retirement returned a non-terminal receipt".to_owned(),
-            }),
+            ProjectServerRetirementStatus::Pending => {
+                Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: "project server retirement returned a non-terminal receipt".to_owned(),
+                })
+            }
         }
     }
 }
@@ -84,7 +86,9 @@ impl ProjectServerRetirementAdmission<'_> {
         retirement: Task,
     ) -> ProjectServerCapacityRetirementCompletion
     where
-        Task: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static,
+        Task: std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+            + Send
+            + 'static,
     {
         self.retirements.retain(|retirement| {
             !matches!(

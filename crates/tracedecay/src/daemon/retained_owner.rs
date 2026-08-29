@@ -11,8 +11,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 mod automation;
 mod lcm;

@@ -51,7 +51,7 @@ const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Effectively-unbounded budget for background graph work (sealed projection
 /// and generation publication); cancellation is the governing mechanism.
-const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_hours(168);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 /// The size-scaled projection model no longer bounds the projection (see
 /// [`sealed_projection_deadline`]); it survives only as the heuristic that
@@ -348,7 +348,10 @@ impl RetainedVerifiedGraphRuntimeV1 {
 
     pub(crate) fn reserve_database_retirement(
         &self,
-    ) -> std::result::Result<tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1, GraphDbError> {
+    ) -> std::result::Result<
+        tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1,
+        GraphDbError,
+    > {
         self.database.reserve_retirement().map_err(|error| {
             GraphDbError::unavailable(format!(
                 "memory database owner cannot reserve retirement: {error:?}"
@@ -1841,7 +1844,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 GraphReplayCollectionOutcome::Retired(source) => {
                     let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
                         source,
-                    ) = source
+                    ) = *source
                     else {
                         return Err(GraphDbError::Corrupt {
                             message: "code generation retirement selected an inline graph replay"
@@ -2027,6 +2030,6 @@ mod sealed_projection_deadline_tests {
                 GRAPH_BACKGROUND_OPERATION_BUDGET
             );
         }
-        assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_secs(24 * 60 * 60));
+        assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_hours(24));
     }
 }

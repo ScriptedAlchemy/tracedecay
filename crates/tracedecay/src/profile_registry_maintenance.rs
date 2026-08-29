@@ -5,12 +5,12 @@
 //! semantics live with the registry store in `tracedecay-global-db`; this
 //! wrapper owns only profile/runtime composition.
 
+use std::path::{Path, PathBuf};
 use tracedecay_global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, registry_maintenance::RegistryGcReport,
     registry_maintenance::RegistryOrphanRelinkApplyReport,
     registry_maintenance::RegistryOrphanRelinkReport,
 };
-use std::path::{Path, PathBuf};
 
 pub struct ProfileRegistryMaintenanceRuntime {
     profile_database: RegisteredGlobalDbLeaseV1,
@@ -18,14 +18,15 @@ pub struct ProfileRegistryMaintenanceRuntime {
 
 impl ProfileRegistryMaintenanceRuntime {
     /// Opens an existing exact-final profile registry without creating one.
-    pub async fn try_open_existing(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<Option<Self>> {
-        if !profile_root
-            .try_exists()
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+    pub async fn try_open_existing(
+        profile_root: &Path,
+    ) -> tracedecay_runtime_core::errors::Result<Option<Self>> {
+        if !profile_root.try_exists().map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "inspect existing profile root".to_string(),
                 message: error.to_string(),
-            })?
-        {
+            }
+        })? {
             return Ok(None);
         }
         let profile_root = profile_root.canonicalize().map_err(|error| {
@@ -37,10 +38,12 @@ impl ProfileRegistryMaintenanceRuntime {
         if !profile_root
             .join("global.db")
             .try_exists()
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "inspect existing profile registry".to_string(),
-                message: error.to_string(),
-            })?
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "inspect existing profile registry".to_string(),
+                    message: error.to_string(),
+                },
+            )?
         {
             return Ok(None);
         }
@@ -58,7 +61,9 @@ impl ProfileRegistryMaintenanceRuntime {
         Ok(Self { profile_database })
     }
 
-    pub async fn registered_project_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn registered_project_paths(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         self.profile_database
             .try_list_code_project_paths(usize::MAX)
             .await

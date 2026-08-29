@@ -8,8 +8,8 @@ use tracedecay_store::{
     TranscriptWriteBatch, TranscriptWriteKind,
 };
 
-use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use crate::store::{GlobalDbGitCorrelationStore, TranscriptIngestStore};
+use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 
 /// Transcript-store adapter over an already-open authoritative

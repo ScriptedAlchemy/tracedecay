@@ -202,7 +202,7 @@ fn record_execution_plan(
     hotpath::gauge!("semantic_embedding_sessions_requested").set(requested_sessions);
     hotpath::gauge!("semantic_embedding_sessions_effective").set(plan.sessions);
     hotpath::gauge!("semantic_embedding_sessions_cpu_safe")
-        .set((shared_cpu_budget / plan.intra_threads.min(BASELINE_INTRA_THREADS).max(1)).max(1));
+        .set((shared_cpu_budget / plan.intra_threads.clamp(1, BASELINE_INTRA_THREADS)).max(1));
     hotpath::gauge!("semantic_embedding_sessions_resident_safe").set(resident_session_limit.max(1));
     hotpath::gauge!("semantic_embedding_intra_threads").set(plan.intra_threads);
     hotpath::gauge!("semantic_embedding_sessions_limiting_reason").set(

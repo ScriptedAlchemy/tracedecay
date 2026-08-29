@@ -80,6 +80,7 @@ tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 libc = "0.2"
 
 [dev-dependencies]
+filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }

@@ -465,8 +465,9 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
     let profile_root = directory.path().join("profile");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
-        .expect("database scope");
+    let _scope_guard =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
+            .expect("database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
@@ -542,9 +543,12 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         let profile_root = directory.path().join("retiring-profile");
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("retiring profile identity");
-        let _scope_guard =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-profile-retirement-a")
-                .expect("retiring database scope");
+        let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "query-profile-retirement-a",
+        )
+        .expect("retiring database scope");
         let session_registry =
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                 identity,
@@ -568,9 +572,12 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
         let profile_root = directory.path().join("surviving-profile");
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("surviving profile identity");
-        let _scope_guard =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 2, "query-profile-retirement-b")
-                .expect("surviving database scope");
+        let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            2,
+            "query-profile-retirement-b",
+        )
+        .expect("surviving database scope");
         let session_registry =
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                 identity,

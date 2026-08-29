@@ -994,7 +994,8 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             let resolver_calls = Arc::clone(&observed_resolver_calls);
             async move {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
-                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>().await
+                std::future::pending::<tracedecay_runtime_core::errors::Result<Option<Router>>>()
+                    .await
             }
         })
         .expect("install parked project resolver");

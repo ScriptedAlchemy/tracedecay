@@ -8,7 +8,9 @@ use tracedecay_application::ApplicationResult;
 use crate::cli::WorkflowInvocationArgs;
 
 #[hotpath::measure(label = "cli.workflow.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn run(
+    invocation: WorkflowInvocationArgs,
+) -> tracedecay_runtime_core::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
@@ -20,8 +22,10 @@ pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay_runtim
     if invocation.json {
         print!("{}", workflow_json_line(&outcome)?);
     } else {
-        let outcome = outcome.map_err(|problem| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("{}: {}", problem.problem.code, problem.problem.message),
+        let outcome = outcome.map_err(|problem| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("{}: {}", problem.problem.code, problem.problem.message),
+            }
         })?;
         println!("Workflow {}", operation.route_segment().replace('-', " "));
         println!("Project: {}", project_root.display());
@@ -42,11 +46,13 @@ fn read_request(path: &std::path::Path) -> tracedecay_runtime_core::errors::Resu
     } else {
         std::fs::read_to_string(path)?
     };
-    serde_json::from_str(&payload).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!(
-            "Workflow request file {} is not valid JSON: {error}",
-            path.display()
-        ),
+    serde_json::from_str(&payload).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: format!(
+                "Workflow request file {} is not valid JSON: {error}",
+                path.display()
+            ),
+        }
     })
 }
 

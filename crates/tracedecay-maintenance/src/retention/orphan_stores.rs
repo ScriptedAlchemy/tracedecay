@@ -984,7 +984,10 @@ pub(crate) async fn execute_registered_collection_controlled(
                 "SELECT store_relpath, created_at, last_write_at
                  FROM store_instances
                  WHERE project_id = ?1 AND store_id = ?2",
-                tracedecay_runtime_core::db::engine::params![finding.project_id.as_str(), finding.store_id.as_str()],
+                tracedecay_runtime_core::db::engine::params![
+                    finding.project_id.as_str(),
+                    finding.store_id.as_str()
+                ],
             ))
             .await
         {
@@ -1323,13 +1326,14 @@ fn durable_database_inventory(
     let Some(bytes) = manifest_bytes else {
         return DurableDatabaseInventoryV1::Unverifiable;
     };
-    let manifest = match serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes) {
-        Ok(manifest) => manifest,
-        Err(_) if control.completion().is_some() => {
-            return DurableDatabaseInventoryV1::Interrupted;
-        }
-        Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
-    };
+    let manifest =
+        match serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes) {
+            Ok(manifest) => manifest,
+            Err(_) if control.completion().is_some() => {
+                return DurableDatabaseInventoryV1::Interrupted;
+            }
+            Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
+        };
     if control.completion().is_some() {
         return DurableDatabaseInventoryV1::Interrupted;
     }
@@ -1746,9 +1750,11 @@ pub async fn build_store_census(
     let projects = db.list_code_projects(usize::MAX).await?;
     build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "unbounded store census was unexpectedly interrupted".to_owned(),
-        })
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "unbounded store census was unexpectedly interrupted".to_owned(),
+            },
+        )
 }
 
 #[derive(Debug, Clone)]
@@ -1775,9 +1781,11 @@ pub async fn build_store_census_page(
         .flatten();
     let entries = build_store_census_for_projects(db, profile_root, &projects, None)
         .await?
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "unbounded store census page was unexpectedly interrupted".to_owned(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "unbounded store census page was unexpectedly interrupted".to_owned(),
+            },
+        )?;
     Ok(StoreCensusPageV1 {
         entries,
         next_cursor,
@@ -1902,9 +1910,9 @@ fn inspect_store_leaf_cheap_sync(profile_root: &Path, data_root: &Path) -> Cheap
         RegularFileSnapshot::Bytes(bytes) => Some(bytes),
         RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
     };
-    let parsed_manifest = expected_manifest_bytes
-        .as_deref()
-        .map(|bytes| serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok());
+    let parsed_manifest = expected_manifest_bytes.as_deref().map(|bytes| {
+        serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok()
+    });
     let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
     let manifest_root = parsed_manifest
         .flatten()
@@ -1931,14 +1939,15 @@ async fn inspect_store_leaf_cheap(
         if control.completion().is_some() {
             return Ok(None);
         }
-        let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path =
+            data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let expected_manifest_bytes = match read_regular_file(&manifest_path) {
             RegularFileSnapshot::Bytes(bytes) => Some(bytes),
             RegularFileSnapshot::Missing | RegularFileSnapshot::Unverifiable => None,
         };
-        let parsed_manifest = expected_manifest_bytes
-            .as_deref()
-            .map(|bytes| serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok());
+        let parsed_manifest = expected_manifest_bytes.as_deref().map(|bytes| {
+            serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(bytes).ok()
+        });
         let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
         let manifest_root = parsed_manifest
             .flatten()
@@ -1963,9 +1972,11 @@ async fn inspect_store_leaf_cheap(
     tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
         .await
         .map(Some)
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("store census inspect join failed: {error}"),
-        })
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("store census inspect join failed: {error}"),
+            },
+        )
 }
 
 async fn attach_lazy_content_fences(
@@ -2207,7 +2218,10 @@ pub(crate) async fn execute_unregistered_collection(
     .await
 }
 
-#[hotpath::measure(label = "maintenance.orphan_stores.collect_unregistered", future = true)]
+#[hotpath::measure(
+    label = "maintenance.orphan_stores.collect_unregistered",
+    future = true
+)]
 pub(crate) async fn execute_unregistered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
@@ -2234,7 +2248,8 @@ pub(crate) async fn execute_unregistered_collection_controlled(
             .join("projects")
             .join(&finding.project_dir_name);
         if expected != finding.data_root
-            || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name).is_err()
+            || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name)
+                .is_err()
         {
             outcome.errors.push(CollectionFailure {
                 store_id: finding.project_dir_name.clone(),

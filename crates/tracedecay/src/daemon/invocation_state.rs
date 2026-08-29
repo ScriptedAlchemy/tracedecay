@@ -351,6 +351,25 @@ impl DaemonInvocationState {
         .await
     }
 
+    pub(super) async fn mount_core_query_authority_for_committed_fallback(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        expected_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::
+            mount_core_query_authority_for_committed_fallback_on_project_open(
+                &self.code_index_schedulers,
+                project_root,
+                scope,
+                expected_revision,
+                cursor_keys,
+            )
+            .await
+    }
+
     pub(super) fn work_federated_query_authority(
         &self,
     ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {

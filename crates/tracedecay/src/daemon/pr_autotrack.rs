@@ -56,10 +56,12 @@ fn scheduler_unavailable(detail: &str) -> String {
 
 async fn git_authority_available(repo_root: &Path) -> bool {
     let repo = repo_root.to_path_buf();
-    tokio::task::spawn_blocking(move || tracedecay_runtime_core::worktree::git_worktree_root(&repo).is_some())
-        .await
-        .ok()
-        .unwrap_or(false)
+    tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::worktree::git_worktree_root(&repo).is_some()
+    })
+    .await
+    .ok()
+    .unwrap_or(false)
 }
 
 /// Outcome of a successful manual branch-head activation.

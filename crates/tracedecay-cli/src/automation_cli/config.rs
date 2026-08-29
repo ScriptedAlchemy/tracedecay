@@ -145,7 +145,9 @@ pub(super) async fn handle_automation_config_command(
 
 pub(crate) async fn load_canonical_automation_config(
     project_path: &std::path::Path,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_agent_hosts::automation::config::AutomationConfig> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_agent_hosts::automation::config::AutomationConfig,
+> {
     match crate::commands::current_project_setting(
         project_path,
         tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
@@ -165,7 +167,9 @@ pub(crate) async fn load_canonical_automation_config(
 pub(crate) async fn apply_project_automation_patch(
     project_path: &std::path::Path,
     patch: tracedecay_agent_hosts::automation::config::AutomationConfigPatch,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_agent_hosts::automation::config::AutomationConfig> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_agent_hosts::automation::config::AutomationConfig,
+> {
     let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;
     let effective =
@@ -201,7 +205,9 @@ fn automation_task_patch(
     min_idle_secs: Option<String>,
     stale_lock_secs: Option<String>,
     task: &str,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_agent_hosts::automation::config::AutomationTaskPatch> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_agent_hosts::automation::config::AutomationTaskPatch,
+> {
     Ok(
         tracedecay_agent_hosts::automation::config::AutomationTaskPatch {
             enabled,
@@ -304,7 +310,9 @@ fn print_automation_config(
 
 fn parse_automation_backend(
     value: &str,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_agent_hosts::automation::config::AutomationBackend> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_agent_hosts::automation::config::AutomationBackend,
+> {
     use tracedecay_agent_hosts::automation::config::AutomationBackend;
     match value {
         "disabled" => Ok(AutomationBackend::Disabled),
@@ -317,7 +325,9 @@ fn parse_automation_backend(
 
 fn parse_automation_host_mode(
     value: &str,
-) -> tracedecay_runtime_core::errors::Result<tracedecay_agent_hosts::automation::config::AutomationHostMode> {
+) -> tracedecay_runtime_core::errors::Result<
+    tracedecay_agent_hosts::automation::config::AutomationHostMode,
+> {
     use tracedecay_agent_hosts::automation::config::AutomationHostMode;
     match value {
         "standalone" => Ok(AutomationHostMode::Standalone),

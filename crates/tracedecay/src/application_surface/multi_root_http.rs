@@ -275,8 +275,10 @@ mod tests {
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: tracedecay_domain::UtcMicros,
             _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
-        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>>
-        {
+        ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_runtime_core::errors::Result<()>,
+        > {
             Box::pin(async { Ok(()) })
         }
     }

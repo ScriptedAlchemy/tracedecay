@@ -47,10 +47,7 @@ fn main() {
             first_publish_ms = elapsed;
         }
         last_publish_ms = elapsed;
-        println!(
-            "{shard},{},{elapsed:.1}",
-            (shard + 1) * ENTITIES_PER_SHARD
-        );
+        println!("{shard},{},{elapsed:.1}", (shard + 1) * ENTITIES_PER_SHARD);
     }
     // Incremental update: replace one shard's generation while the full
     // corpus is resident, mirroring a steady-state watch-mode publication.
