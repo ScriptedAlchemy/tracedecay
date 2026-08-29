@@ -40,7 +40,7 @@ struct SummarySeed {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "session_temporal.query.freeze")]
+    #[hotpath::measure(future = true, label = "session_temporal.snapshot.freeze")]
     pub async fn freeze_session_temporal_snapshot_result(
         &self,
         request: SessionTemporalSnapshotRequestV1,
