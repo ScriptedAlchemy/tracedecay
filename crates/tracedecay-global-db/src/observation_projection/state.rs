@@ -686,7 +686,7 @@ async fn message_projection(
         .ok_or(ProjectionStoreError::ProvenanceCollision)
 }
 
-async fn verify_rows(
+pub(in super::super) async fn verify_projection_rows(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
@@ -747,7 +747,7 @@ pub(super) async fn verify_output_state(
     )
     .await?;
     verify_provenance(conn, &owner_projection).await?;
-    verify_rows(conn, &owner_projection).await
+    verify_projection_rows(conn, &owner_projection).await
 }
 
 /// Requested `(output_provider, output_message_id)` keys carried by one
@@ -891,12 +891,12 @@ pub(in super::super) async fn read_output_authorities(
     feature = "hotpath",
     hotpath::measure(label = "global_db.observation_state.verify.resolved_authority")
 )]
-pub(in super::super) async fn verify_resolved_output_authority(
+pub(in super::super) async fn resolve_output_projection(
     conn: &impl QueryExecutor,
     authority: &ProjectionOutputAuthority,
     derived: Option<(&str, &ObservationProjection)>,
     projection: &SessionMessageProjection,
-) -> ProjectionStoreResult<()> {
+) -> ProjectionStoreResult<SessionMessageProjection> {
     let message = projection.message();
     let owner_projection = match derived {
         Some((observation_id, effect)) if observation_id == authority.canonical_observation_id => {
@@ -919,8 +919,7 @@ pub(in super::super) async fn verify_resolved_output_authority(
             .await?
         }
     };
-    verify_provenance(conn, &owner_projection).await?;
-    verify_rows(conn, &owner_projection).await
+    Ok(owner_projection)
 }
 
 pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &SessionRecord) -> bool {
