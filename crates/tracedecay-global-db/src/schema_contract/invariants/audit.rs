@@ -495,10 +495,10 @@ impl ProjectionProvenanceRow {
                             provenance.retrieval_anchor_id, provenance.receipt_id,
                             provenance.output_provider, provenance.output_message_id,
                             provenance.output_digest, provenance.message_created
-                     FROM observation_projection_provenance AS provenance
-                     JOIN json_each(?2) AS requested
-                       ON provenance.observation_id = requested.value
-                     WHERE provenance.projector_version = ?1",
+                     FROM json_each(?2) AS requested
+                     CROSS JOIN observation_projection_provenance AS provenance
+                     WHERE provenance.projector_version = ?1
+                       AND provenance.observation_id = requested.value",
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
@@ -2489,6 +2489,35 @@ mod tests {
                     && detail.ends_with("(projector_version=?)")
             }),
             "authority lookup regressed to a projector-wide provenance scan: {plan:?}"
+        );
+
+        let provenance_sql = counting
+            .statement_containing("SELECT provenance.observation_id, provenance.output_ordinal");
+        let requested = serde_json::to_string(&["observation.audit-batch-0"]).unwrap();
+        let mut rows = snapshot
+            .query(
+                &format!("EXPLAIN QUERY PLAN {provenance_sql}"),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains("observation_projection_provenance")
+                    && detail.contains("projector_version=? AND observation_id=?")
+            }),
+            "provenance lookup must seek each requested observation: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| {
+                detail.contains("observation_projection_provenance")
+                    && detail.ends_with("(projector_version=?)")
+            }),
+            "provenance lookup regressed to a projector-wide scan: {plan:?}"
         );
         // The per-row baseline this replaced spent fifteen reads on every
         // projected message; the batched path must stay comfortably under ten.
