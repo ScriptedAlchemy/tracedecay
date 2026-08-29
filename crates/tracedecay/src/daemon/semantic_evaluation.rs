@@ -864,7 +864,7 @@ fn semantic_projection_pin_mismatch(
 }
 
 impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.semantic.evaluation.with_query_inputs")]
     fn with_query_inputs(
         &self,
         context: ProductionCandidateNativeQueryContextV1<'_>,
@@ -952,7 +952,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         result
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "daemon.semantic.evaluation.measure_resources")]
     fn measure_resources(
         &self,
         context: ProductionCandidateNativeResourceContextV1<'_>,
