@@ -658,7 +658,7 @@ pub(super) fn coordinated_background_refresh_writer(
                 .project_root
                 .canonicalize()
                 .unwrap_or_else(|_| request.project_root.clone());
-            let active_branch = crate::branch::current_branch(&canonical_root);
+            let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
             let graph = administration
                 .mounted_project_graphs()
                 .await

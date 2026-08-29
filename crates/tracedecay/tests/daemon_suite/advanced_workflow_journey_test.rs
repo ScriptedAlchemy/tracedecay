@@ -545,7 +545,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             repository_id: repository_id.clone(),
         }]))
         .expect("repository Work selection");
-    let reference = tracedecay::branch::current_branch(&project)
+    let reference = tracedecay_runtime_core::branch::current_branch(&project)
         .map(|branch| id::<RefId>(&format!("refs/heads/{branch}")));
     let scope = tracedecay_application::ResolvedScope::new(
         project_id.clone(),

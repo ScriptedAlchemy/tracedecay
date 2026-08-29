@@ -1,11 +1,26 @@
-//! Shared branch-add lock and current-branch read used by `branch_meta` and
-//! `worktree`.
-//!
-//! Admin mutations, snapshots, and GC stay in the root `branch` module.
+//! Git branch resolution, tracking, snapshots, and admin mutations for
+//! multi-branch indexing, plus the shared branch-add lock and current-branch
+//! read used by `branch_meta` and `worktree`.
 
 use std::path::Path;
 
 use crate::errors::{Result, TraceDecayError};
+
+mod admin;
+mod tracking;
+
+pub use admin::{
+    BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
+    SingleStoreBranchRetirementV1, prepare_branch_admin_mutation,
+    remove_tracked_branch_store_checked,
+};
+pub use tracking::{
+    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
+    PreparedBranchTracking, finalize_prepared_branch_tracking, find_nearest_tracked_ancestor,
+    is_branch_ref_present, local_branch_exists, prepare_branch_tracking_in_layout,
+    rollback_prepared_branch_tracking,
+};
+pub(crate) use tracking::{now_unix_secs, parse_unix_secs};
 
 /// Bounded-retry policy for a briefly-contended branch-add lock: a concurrent
 /// branch add only holds the lock for the duration of a DB clone, so a short

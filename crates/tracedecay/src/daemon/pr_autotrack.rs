@@ -72,7 +72,7 @@ pub struct ManualBranchActivation {
     /// Linked worktree checked out for the code-index scheduler.
     pub worktree: PathBuf,
     /// CLI/MCP outcome for the activation.
-    pub outcome: crate::branch::BranchAddOutcome,
+    pub outcome: tracedecay_runtime_core::branch::BranchAddOutcome,
 }
 
 /// The exact Git and filesystem artifacts owned by one manually activated
@@ -931,7 +931,7 @@ async fn activate_manual_branch_with_administration(
             branch: branch.to_string(),
             head_sha,
             worktree,
-            outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
+            outcome: tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked,
         });
     }
 
@@ -1026,7 +1026,7 @@ async fn activate_manual_branch_with_administration(
             branch: branch.to_string(),
             head_sha,
             worktree,
-            outcome: crate::branch::BranchAddOutcome::Added,
+            outcome: tracedecay_runtime_core::branch::BranchAddOutcome::Added,
         }),
         Err(reason) => {
             cleanup_failed_manual_track(

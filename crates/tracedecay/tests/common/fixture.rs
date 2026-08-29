@@ -224,7 +224,7 @@ impl TestProfile {
                 &project_root,
                 tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
                 None,
-                tracedecay::branch::current_branch(&project_root).as_deref(),
+                tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
             )
             .await
             .unwrap_or_else(|error| {

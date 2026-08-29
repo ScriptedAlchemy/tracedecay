@@ -37,7 +37,7 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
     let BranchTrackingPreparation::Added(prepared) = prepared else {
         panic!("new branch must prepare as Added");
     };
-    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&td).unwrap();
+    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
     let entry = meta.branches.get("feature/topic").unwrap();
     assert_eq!(
         entry.db_file,
@@ -55,7 +55,7 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
         rollback_prepared_branch_tracking(&td, &prepared).unwrap(),
         PreparedBranchRollbackOutcome::RolledBack
     );
-    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&td).unwrap();
+    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
     assert!(!meta.is_tracked("feature/topic"));
     assert!(
         td.join("tracedecay.db").exists(),
@@ -74,13 +74,13 @@ async fn rollback_prepared_tracking_preserves_a_newer_metadata_entry() {
     let BranchTrackingPreparation::Added(prepared) = prepared else {
         panic!("new branch must prepare as Added");
     };
-    let mut advanced = tracedecay_runtime_core::branch_meta::load_branch_meta(&td).unwrap();
+    let mut advanced = crate::branch_meta::load_branch_meta(&td).unwrap();
     advanced
         .branches
         .get_mut("feature/topic")
         .unwrap()
         .last_synced_at = "999".to_owned();
-    tracedecay_runtime_core::branch_meta::save_branch_meta(&td, &advanced).unwrap();
+    crate::branch_meta::save_branch_meta(&td, &advanced).unwrap();
 
     assert_eq!(
         rollback_prepared_branch_tracking(&td, &prepared).unwrap(),
@@ -88,7 +88,7 @@ async fn rollback_prepared_tracking_preserves_a_newer_metadata_entry() {
         "a failed older attempt must not retire newer branch metadata"
     );
     assert_eq!(
-        tracedecay_runtime_core::branch_meta::load_branch_meta(&td)
+        crate::branch_meta::load_branch_meta(&td)
             .unwrap()
             .branches
             .get("feature/topic")
@@ -181,7 +181,7 @@ fn setup_repo_with_meta() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let tracedecay_dir = project_root.join(".tracedecay");
     std::fs::create_dir_all(&tracedecay_dir).unwrap();
     std::fs::write(tracedecay_dir.join("tracedecay.db"), b"maindb").unwrap();
-    let meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
-    tracedecay_runtime_core::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    let meta = crate::branch_meta::BranchMeta::new("main");
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
     (base, project_root, tracedecay_dir)
 }

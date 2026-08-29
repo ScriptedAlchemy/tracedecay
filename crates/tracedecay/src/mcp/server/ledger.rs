@@ -496,7 +496,7 @@ impl McpServer {
                         .ok()?;
                 let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
                 let branch =
-                    bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
+                    bounded_identifier(tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref());
                 Some((worktree, branch))
             })
             .await;

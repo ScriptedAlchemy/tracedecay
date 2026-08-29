@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
-use crate::branch;
+use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use crate::config::{
     install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,

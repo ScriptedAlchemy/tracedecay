@@ -59,7 +59,7 @@ pub mod application_surface;
 pub mod host_admission;
 pub use tracedecay_code_index::ast_grep_search;
 pub mod bench;
-pub mod branch;
+pub mod branch_snapshots;
 pub mod catalog_composition;
 pub mod client_identity;
 pub mod cloud;

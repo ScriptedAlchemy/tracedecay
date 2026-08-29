@@ -29,7 +29,7 @@ fn handle_branch_action_inner(
     // Erase the deeply nested branch-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        use tracedecay::branch;
+        use tracedecay_runtime_core::branch;
         use tracedecay_runtime_core::branch_meta;
 
         match action {
@@ -324,7 +324,7 @@ fn handle_branch_action_inner(
 
 fn parse_daemon_branch_admin_report(
     response: &serde_json::Value,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::branch::BranchAdminReport> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::branch::BranchAdminReport> {
     serde_json::from_value(response.clone()).map_err(|error| {
         tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("invalid daemon branch administration response: {error}"),
@@ -334,12 +334,12 @@ fn parse_daemon_branch_admin_report(
 
 fn parse_daemon_branch_add_outcome(
     response: &serde_json::Value,
-) -> tracedecay_runtime_core::errors::Result<tracedecay::branch::BranchAddOutcome> {
+) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
     match response.get("outcome").and_then(serde_json::Value::as_str) {
-        Some("not_indexed") => Ok(tracedecay::branch::BranchAddOutcome::NotIndexed),
-        Some("already_tracked") => Ok(tracedecay::branch::BranchAddOutcome::AlreadyTracked),
-        Some("added") => Ok(tracedecay::branch::BranchAddOutcome::Added),
-        Some("deferred") => Ok(tracedecay::branch::BranchAddOutcome::Deferred),
+        Some("not_indexed") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::NotIndexed),
+        Some("already_tracked") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked),
+        Some("added") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added),
+        Some("deferred") => Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Deferred),
         Some(outcome) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: format!("daemon branch add returned unknown outcome: {outcome}"),
         }),
@@ -550,14 +550,14 @@ mod tests {
         for (name, expected) in [
             (
                 "not_indexed",
-                tracedecay::branch::BranchAddOutcome::NotIndexed,
+                tracedecay_runtime_core::branch::BranchAddOutcome::NotIndexed,
             ),
             (
                 "already_tracked",
-                tracedecay::branch::BranchAddOutcome::AlreadyTracked,
+                tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked,
             ),
-            ("added", tracedecay::branch::BranchAddOutcome::Added),
-            ("deferred", tracedecay::branch::BranchAddOutcome::Deferred),
+            ("added", tracedecay_runtime_core::branch::BranchAddOutcome::Added),
+            ("deferred", tracedecay_runtime_core::branch::BranchAddOutcome::Deferred),
         ] {
             assert_eq!(
                 parse_daemon_branch_add_outcome(&serde_json::json!({ "outcome": name }))
@@ -589,7 +589,7 @@ mod tests {
         .expect("valid branch admin response");
         assert_eq!(
             report.outcome,
-            tracedecay::branch::BranchAdminOutcome::Removed
+            tracedecay_runtime_core::branch::BranchAdminOutcome::Removed
         );
         assert_eq!(report.removed_branches, vec!["feature/a"]);
         assert_eq!(

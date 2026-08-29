@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::branch::BranchAdminAction;
+use tracedecay_runtime_core::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::maintenance::now_secs_i64;

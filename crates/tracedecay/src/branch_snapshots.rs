@@ -134,6 +134,7 @@ fn local_branch_revision_in_repository(
 }
 
 /// Lists one stable lexical page from a bounded complete local-ref snapshot.
+#[hotpath::measure(label = "daemon.branch_snapshots.list")]
 pub fn local_branch_snapshots_controlled(
     project_root: &std::path::Path,
     control: &LocalBranchReadControlV1,

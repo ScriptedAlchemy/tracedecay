@@ -1403,8 +1403,8 @@ impl StoreAdministration {
         &self,
         schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
-    ) -> Result<crate::branch::BranchAdminReport> {
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
         let project_root =
             handshake
                 .project_path
@@ -1464,11 +1464,11 @@ impl StoreAdministration {
         schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
-        action: crate::branch::BranchAdminAction,
+        action: tracedecay_runtime_core::branch::BranchAdminAction,
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
-    ) -> Result<crate::branch::BranchAdminReport> {
-        let prepared = crate::branch::prepare_branch_admin_mutation(
+    ) -> Result<tracedecay_runtime_core::branch::BranchAdminReport> {
+        let prepared = tracedecay_runtime_core::branch::prepare_branch_admin_mutation(
             project_root,
             data_root,
             action,
@@ -1563,7 +1563,7 @@ impl StoreAdministration {
 #[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     retirements
         .iter()
@@ -1584,7 +1584,7 @@ async fn cleanup_manual_branch_retirements(
     project_root: &Path,
     data_root: &Path,
     schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
     lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
 ) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
@@ -1617,7 +1617,7 @@ async fn cleanup_manual_branch_retirements(
 
 pub(super) struct BranchAdminRequest {
     pub(super) id: serde_json::Value,
-    pub(super) action: std::result::Result<crate::branch::BranchAdminAction, String>,
+    pub(super) action: std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
 pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
@@ -1700,7 +1700,7 @@ fn destructive_reservation_error(
 }
 
 fn branch_admin_tool_result(
-    report: &crate::branch::BranchAdminReport,
+    report: &tracedecay_runtime_core::branch::BranchAdminReport,
 ) -> Result<serde_json::Value> {
     Ok(json!({
         "content": [{
@@ -1731,7 +1731,7 @@ fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,
-    result: Result<crate::branch::BranchAdminReport>,
+    result: Result<tracedecay_runtime_core::branch::BranchAdminReport>,
 ) -> Result<()> {
     let response = match (request.action, result) {
         (Err(message), _) => JsonRpcResponse::error(request.id, ErrorCode::InvalidParams, message),
@@ -2153,7 +2153,7 @@ mod tests {
         assert_eq!(request.id, json!(7));
         assert_eq!(
             request.action.expect("valid action"),
-            crate::branch::BranchAdminAction::Remove {
+            tracedecay_runtime_core::branch::BranchAdminAction::Remove {
                 branch: "feature/a".to_string()
             }
         );

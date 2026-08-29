@@ -1,4 +1,4 @@
-use crate::branch::BranchAddOutcome;
+use tracedecay_runtime_core::branch::BranchAddOutcome;
 use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -378,7 +378,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
             )
         })?;
         let source_branch =
-            crate::branch::current_branch(&canonical_worktree_root).ok_or_else(|| {
+            tracedecay_runtime_core::branch::current_branch(&canonical_worktree_root).ok_or_else(|| {
                 TraceDecayError::project_route(
                     GIT_SNAPSHOT_UNAVAILABLE,
                     false,
@@ -397,7 +397,7 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
         )
         .await?;
         let data_root = graph.store_layout().data_root.clone();
-        let prepared = match crate::branch::prepare_branch_tracking_in_layout(
+        let prepared = match tracedecay_runtime_core::branch::prepare_branch_tracking_in_layout(
             &canonical_worktree_root,
             branch,
             &data_root,
@@ -410,9 +410,9 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                 format!("failed to prepare branch tracking for '{branch}': {error}"),
             )
         })? {
-            crate::branch::BranchTrackingPreparation::Added(prepared) => Some(prepared),
-            crate::branch::BranchTrackingPreparation::AlreadyTracked => None,
-            crate::branch::BranchTrackingPreparation::Deferred => {
+            tracedecay_runtime_core::branch::BranchTrackingPreparation::Added(prepared) => Some(prepared),
+            tracedecay_runtime_core::branch::BranchTrackingPreparation::AlreadyTracked => None,
+            tracedecay_runtime_core::branch::BranchTrackingPreparation::Deferred => {
                 return Ok(BranchAddOutcome::Deferred);
             }
         };
@@ -836,7 +836,7 @@ fn generation_matches_branch_source(
 #[hotpath::measure(label = "daemon.branch_add.rollback", future = true)]
 async fn rollback_failed_branch_tracking(
     data_root: &Path,
-    prepared: Option<&crate::branch::PreparedBranchTracking>,
+    prepared: Option<&tracedecay_runtime_core::branch::PreparedBranchTracking>,
     publication: Option<&tracedecay_runtime_core::branch_meta::BranchGraphSourcePublicationV1>,
     cause: &TraceDecayError,
 ) -> Result<(), TraceDecayError> {
@@ -862,7 +862,7 @@ async fn rollback_failed_branch_tracking(
         return Ok(());
     }
     if let Some(prepared) = prepared {
-        match crate::branch::rollback_prepared_branch_tracking(data_root, prepared).map_err(
+        match tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(data_root, prepared).map_err(
             |error| {
                 TraceDecayError::project_route(
                     BRANCH_TRACKING_FAILED,
@@ -871,8 +871,8 @@ async fn rollback_failed_branch_tracking(
                 )
             },
         )? {
-            crate::branch::PreparedBranchRollbackOutcome::RolledBack
-            | crate::branch::PreparedBranchRollbackOutcome::NoMatch => {}
+            tracedecay_runtime_core::branch::PreparedBranchRollbackOutcome::RolledBack
+            | tracedecay_runtime_core::branch::PreparedBranchRollbackOutcome::NoMatch => {}
         }
     }
     Ok(())

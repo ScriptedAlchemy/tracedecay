@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::branch_meta::BranchMeta;
+use crate::branch_meta::BranchMeta;
 
 /// Destructive branch-store operation accepted by the daemon-owned
 /// administrative path. The tagged representation is also the wire contract
@@ -40,9 +40,9 @@ pub struct BranchAdminReport {
 /// removal. Older or legacy branch entries without sealed graph provenance are
 /// deliberately absent: destructive Git/worktree cleanup must never guess.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SingleStoreBranchRetirementV1 {
-    pub(crate) branch: String,
-    pub(crate) source: tracedecay_runtime_core::branch_meta::BranchGraphSourceV1,
+pub struct SingleStoreBranchRetirementV1 {
+    pub branch: String,
+    pub source: crate::branch_meta::BranchGraphSourceV1,
 }
 
 /// A branch metadata mutation selected while holding the shared branch lock.
@@ -69,23 +69,23 @@ impl PreparedBranchAdminMutation {
         &self.report
     }
 
-    pub(crate) fn single_store_retirements(&self) -> &[SingleStoreBranchRetirementV1] {
+    pub fn single_store_retirements(&self) -> &[SingleStoreBranchRetirementV1] {
         &self.single_store_retirements
     }
 
     #[cfg(test)]
-    fn commit(self) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
+    fn commit(self) -> crate::errors::Result<BranchAdminReport> {
         self.commit_with_hook(|_| Ok(()))
     }
 
     /// CAS-publishes the prepared metadata mutation when no database file was
     /// selected for deletion. Branches served by the single project store
     /// retire this way: the metadata entry is the only state to remove.
-    pub(crate) fn finish_without_database_deletion(
+    pub fn finish_without_database_deletion(
         self,
-    ) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
+    ) -> crate::errors::Result<BranchAdminReport> {
         if !self.database_paths.is_empty() {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(crate::errors::TraceDecayError::Config {
                 message: "branch database deletion requires daemon store administration"
                     .to_string(),
             });
@@ -96,20 +96,20 @@ impl PreparedBranchAdminMutation {
     /// CAS-publishes the exact prepared branch metadata, then unlinks every
     /// selected DB/WAL/SHM family. The caller must hold the canonical runtime
     /// destructive reservation until this returns.
-    pub(crate) fn commit_destructive(self) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
+    pub fn commit_destructive(self) -> crate::errors::Result<BranchAdminReport> {
         self.commit_with_hook(|_| Ok(()))
     }
 
-    fn commit_with_hook<H>(self, mut hook: H) -> tracedecay_runtime_core::errors::Result<BranchAdminReport>
+    fn commit_with_hook<H>(self, mut hook: H) -> crate::errors::Result<BranchAdminReport>
     where
-        H: FnMut(BranchAdminCommitBoundary) -> tracedecay_runtime_core::errors::Result<()>,
+        H: FnMut(BranchAdminCommitBoundary) -> crate::errors::Result<()>,
     {
         if self.report.outcome != BranchAdminOutcome::Removed {
             return Ok(self.report);
         }
         let (_, current_metadata) = load_branch_meta_exact(&self.tracedecay_dir)?;
         if current_metadata != self.metadata_before {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(crate::errors::TraceDecayError::Config {
                 message:
                     "branch metadata changed after deletion selection; destructive CAS refused"
                         .to_owned(),
@@ -117,7 +117,7 @@ impl PreparedBranchAdminMutation {
         }
         for branch in &self.gc_branches {
             if super::is_branch_ref_present(&self.project_root, branch) {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(crate::errors::TraceDecayError::Config {
                     message: format!(
                         "branch ref '{branch}' reappeared before GC metadata publication; deletion refused"
                     ),
@@ -127,17 +127,17 @@ impl PreparedBranchAdminMutation {
         hook(BranchAdminCommitBoundary::BeforeMetadataCas)?;
         if self.metadata_before != self.metadata_after {
             let after = self.metadata_after.as_deref().ok_or_else(|| {
-                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                crate::errors::TraceDecayError::Config {
                     message: "tracked branch deletion cannot remove branch metadata entirely"
                         .to_owned(),
                 }
             })?;
-            tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(&self.tracedecay_dir, after).map_err(
-                |error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            crate::branch_meta::save_branch_meta_serialized(&self.tracedecay_dir, after).map_err(
+                |error| crate::errors::TraceDecayError::Config {
                     message: format!(
                         "cannot publish branch metadata '{}': {error}",
                         self.tracedecay_dir
-                            .join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME)
+                            .join(crate::storage::BRANCH_META_FILENAME)
                             .display()
                     ),
                 },
@@ -159,13 +159,14 @@ enum BranchAdminCommitBoundary {
 
 /// Selects a destructive branch mutation while holding the same lock used by
 /// branch add. This function does not mutate metadata or unlink any file.
+#[hotpath::measure(label = "runtime_core.branch.prepare_admin_mutation")]
 pub fn prepare_branch_admin_mutation(
     project_root: &Path,
     tracedecay_dir: &Path,
     action: BranchAdminAction,
     branch_gc_days: u64,
     orphan_db_gc_days: u64,
-) -> tracedecay_runtime_core::errors::Result<PreparedBranchAdminMutation> {
+) -> crate::errors::Result<PreparedBranchAdminMutation> {
     let branch_lock = acquire_branch_add_lock_blocking(tracedecay_dir)?;
     let (mut meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
     let default_branch = meta.as_ref().map(|meta| meta.default_branch.clone());
@@ -198,7 +199,7 @@ pub fn prepare_branch_admin_mutation(
                 });
             };
             if branch == branch_meta.default_branch {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(crate::errors::TraceDecayError::Config {
                     message: format!("cannot remove default branch '{branch}'"),
                 });
             }
@@ -318,9 +319,9 @@ pub fn prepare_branch_admin_mutation(
     let metadata_after = if removed_branches.is_empty() {
         metadata_before.clone()
     } else {
-        Some(tracedecay_runtime_core::branch_meta::serialize_branch_meta(
+        Some(crate::branch_meta::serialize_branch_meta(
             meta.as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
                     message: "tracked branch deletion lost branch metadata before commit"
                         .to_string(),
                 })?,
@@ -353,10 +354,10 @@ pub(super) fn rollback_published_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,
     db_file: &str,
-) -> tracedecay_runtime_core::errors::Result<()> {
+) -> crate::errors::Result<()> {
     let _branch_lock = acquire_branch_add_lock_blocking(tracedecay_dir)?;
     let (meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
-    let mut meta = meta.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let mut meta = meta.ok_or_else(|| crate::errors::TraceDecayError::Config {
         message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),
     })?;
     if meta
@@ -364,25 +365,25 @@ pub(super) fn rollback_published_branch_tracking(
         .get(branch_name)
         .is_none_or(|entry| entry.db_file != db_file)
     {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(crate::errors::TraceDecayError::Config {
             message: format!(
                 "cannot roll back branch '{branch_name}': published database path changed"
             ),
         });
     }
     meta.remove_branch(branch_name);
-    let metadata_after = Some(tracedecay_runtime_core::branch_meta::serialize_branch_meta(&meta)?);
+    let metadata_after = Some(crate::branch_meta::serialize_branch_meta(&meta)?);
     let (_, current_metadata) = load_branch_meta_exact(tracedecay_dir)?;
     if current_metadata != metadata_before {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(crate::errors::TraceDecayError::Config {
             message: format!("cannot roll back branch '{branch_name}': branch metadata changed"),
         });
     }
-    let after = metadata_after.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let after = metadata_after.ok_or_else(|| crate::errors::TraceDecayError::Config {
         message: format!("cannot roll back branch '{branch_name}': metadata disappeared"),
     })?;
-    tracedecay_runtime_core::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+    crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, &after).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
             message: format!("cannot retire failed branch '{branch_name}': {error}"),
         }
     })
@@ -392,8 +393,8 @@ pub(super) fn rollback_published_branch_tracking(
 pub fn remove_tracked_branch_store_checked(
     _tracedecay_dir: &Path,
     _branch: &str,
-) -> tracedecay_runtime_core::errors::Result<BranchAdminReport> {
-    Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+) -> crate::errors::Result<BranchAdminReport> {
+    Err(crate::errors::TraceDecayError::Config {
         message: "branch database deletion requires daemon store administration; use tracedecay_admin_branch through the managed daemon"
             .to_string(),
     })
@@ -401,13 +402,13 @@ pub fn remove_tracked_branch_store_checked(
 
 fn load_branch_meta_exact(
     tracedecay_dir: &Path,
-) -> tracedecay_runtime_core::errors::Result<(Option<BranchMeta>, Option<String>)> {
-    let path = tracedecay_dir.join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME);
+) -> crate::errors::Result<(Option<BranchMeta>, Option<String>)> {
+    let path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
         Err(error) => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+            return Err(crate::errors::TraceDecayError::Config {
                 message: format!(
                     "cannot inspect branch metadata at '{}': {error}",
                     path.display()
@@ -416,7 +417,7 @@ fn load_branch_meta_exact(
         }
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+        return Err(crate::errors::TraceDecayError::Config {
             message: format!(
                 "cannot administer branch stores with ambiguous metadata path '{}'",
                 path.display()
@@ -424,14 +425,14 @@ fn load_branch_meta_exact(
         });
     }
     let serialized =
-        std::fs::read_to_string(&path).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
+        std::fs::read_to_string(&path).map_err(|error| crate::errors::TraceDecayError::Config {
             message: format!(
                 "cannot read branch metadata at '{}': {error}",
                 path.display()
             ),
         })?;
-    let meta = tracedecay_runtime_core::branch_meta::parse(&serialized).map_err(|error| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
+    let meta = crate::branch_meta::parse(&serialized).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
             message: format!(
                 "cannot administer branch stores with corrupt or unreadable metadata at '{}': {error}",
                 path.display()
@@ -451,13 +452,13 @@ fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     [db_path.to_path_buf(), wal, shm]
 }
 
-pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> tracedecay_runtime_core::errors::Result<()> {
+pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> crate::errors::Result<()> {
     for path in branch_db_family_paths(db_path) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                return Err(crate::errors::TraceDecayError::Config {
                     message: format!(
                         "failed to delete branch store file '{}': {error}",
                         path.display()

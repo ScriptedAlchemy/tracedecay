@@ -55,7 +55,7 @@ pub(crate) async fn execute_background_refresh_direct(
                     request.project_root.display()
                 ),
             })?;
-    let active_branch = crate::branch::current_branch(&canonical_root);
+    let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
     if request.graph.project_root() != canonical_root
         || request.graph.active_branch() != active_branch.as_deref()
     {

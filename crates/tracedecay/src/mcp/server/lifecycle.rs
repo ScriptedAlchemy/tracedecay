@@ -413,7 +413,7 @@ impl McpServer {
     /// repository. The memo is request-scoped and never retained.
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
-    ) -> (Arc<TraceDecay>, crate::branch::BranchMemo) {
+    ) -> (Arc<TraceDecay>, tracedecay_runtime_core::branch::BranchMemo) {
         let current = self.cg_snapshot().await;
         // One resolution serves the fast-path check and every later
         // live-branch read in this request.
@@ -653,7 +653,7 @@ impl McpServer {
     pub(crate) fn maybe_spawn_read_refresh(
         &self,
         cg: &Arc<TraceDecay>,
-        live_branch: &crate::branch::BranchMemo,
+        live_branch: &tracedecay_runtime_core::branch::BranchMemo,
     ) {
         if !self.sync_config.read_refresh {
             return;

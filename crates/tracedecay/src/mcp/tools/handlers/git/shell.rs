@@ -279,7 +279,7 @@ fn git_diff_file_changes_controlled(
 }
 
 pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
-    crate::branch::detect_default_branch(project_root).unwrap_or_else(|| "main".to_string())
+    tracedecay_runtime_core::branch::detect_default_branch(project_root).unwrap_or_else(|| "main".to_string())
 }
 
 /// Returns file paths changed in the working tree (unstaged + staged, or staged-only).
