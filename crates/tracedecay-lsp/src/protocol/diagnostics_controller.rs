@@ -242,10 +242,7 @@ where
             self.diagnostics.native_upstream.remove(&uri);
         }
     }
-    #[hotpath::measure(
-        label = "lsp.diagnostics.pull",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[hotpath::measure(label = "lsp.diagnostics.pull", impl_type = "DaemonLspProtocolSession")]
     pub(crate) fn pull_diagnostics(
         &mut self,
         uri: &str,

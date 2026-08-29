@@ -50,8 +50,7 @@ fn text_artifact_for_bytes(
     DurableCodeTextArtifactDescriptorV1 {
         generation_id: generation_id.clone(),
         artifact_file: format!("text-artifact-{digest}.bin"),
-        artifact_digest: ManifestDigest::from_sha256_bytes(&digest_bytes)
-            .expect("artifact digest"),
+        artifact_digest: ManifestDigest::from_sha256_bytes(&digest_bytes).expect("artifact digest"),
         artifact_size_bytes: u64::try_from(bytes.len()).expect("artifact byte count"),
     }
 }
@@ -138,8 +137,8 @@ fn durable_index_counts_text_bytes_and_never_evicts_the_active_text_head() {
     let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 2;
     let active = indexed_generation(99, now, 32, true);
     let mut text_head = indexed_generation(1, now - 3, 32, true);
-    let text_head_id = CodeGenerationId::new(text_head.generation_id.clone())
-        .expect("text-head generation id");
+    let text_head_id =
+        CodeGenerationId::new(text_head.generation_id.clone()).expect("text-head generation id");
     text_head.text_artifact = Some(text_artifact(
         &text_head_id,
         1,
@@ -177,9 +176,8 @@ fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
     let mut generations = Vec::with_capacity(count);
 
     for sequence in 0..count {
-        let generation_id =
-            CodeGenerationId::new(format!("generation.v1.fixture.{sequence:08}"))
-                .expect("valid generation id");
+        let generation_id = CodeGenerationId::new(format!("generation.v1.fixture.{sequence:08}"))
+            .expect("valid generation id");
         let sealed_at = i64::try_from(sequence).expect("fixture sequence fits i64");
         let bytes = serde_json::to_vec(&serde_json::json!({
             "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -287,8 +285,7 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
     let prior = &generations[0];
     let active = &generations[1];
     let mut pointer = read_active_pointer(store.path()).expect("active pointer");
-    let prior_artifact =
-        text_artifact(&prior.id, 31, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2);
+    let prior_artifact = text_artifact(&prior.id, 31, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2);
     pointer.generation_index.insert(
         0,
         DurableGenerationIndexEntryV1 {
@@ -408,8 +405,7 @@ fn text_artifact_attachment_refuses_a_stale_pointer_without_mutation() {
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Conflict(_)));
     assert_eq!(
-        std::fs::read(store.path().join(ACTIVE_POINTER_FILE))
-            .expect("unchanged durable pointer"),
+        std::fs::read(store.path().join(ACTIVE_POINTER_FILE)).expect("unchanged durable pointer"),
         durable_before
     );
 }
@@ -591,8 +587,7 @@ fn text_artifact_retention_uses_bounded_restartable_batches() {
     let artifacts_root = code_text_artifacts_root(store.path());
     std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
     for sequence in 0..(MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 + 2) {
-        let path =
-            artifacts_root.join(format!("text-artifact-{sequence:064x}.corrupt-restart"));
+        let path = artifacts_root.join(format!("text-artifact-{sequence:064x}.corrupt-restart"));
         std::fs::write(path, [u8::try_from(sequence).expect("small sequence")])
             .expect("write corrupt backup");
     }
@@ -645,8 +640,7 @@ fn text_artifact_inventory_honors_cancellation_before_marking_or_mutation() {
     let (store, _generations) = fixture_store(1);
     let artifacts_root = code_text_artifacts_root(store.path());
     std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
-    let orphan =
-        artifacts_root.join(format!("text-artifact-{}.corrupt-cancel", "c".repeat(64)));
+    let orphan = artifacts_root.join(format!("text-artifact-{}.corrupt-cancel", "c".repeat(64)));
     std::fs::write(&orphan, b"uncollected").expect("write artifact debris");
     let pointer = read_active_pointer(store.path()).expect("pointer");
     let checks = std::sync::atomic::AtomicUsize::new(0);
@@ -669,8 +663,7 @@ fn text_artifact_retention_refuses_tamper_and_publish_cas_movement() {
     let (store, generations) = fixture_store(1);
     let active = generations.last().expect("active generation");
     let descriptor = attach_fixture_text_artifact(&store, active, b"expected artifact bytes");
-    let artifact_path =
-        code_text_artifact_path(store.path(), &descriptor).expect("artifact path");
+    let artifact_path = code_text_artifact_path(store.path(), &descriptor).expect("artifact path");
     std::fs::write(&artifact_path, b"tampered artifact bytes").expect("tamper artifact");
     let error = plan_code_generation_retention(
         store.path(),
@@ -781,8 +774,7 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
         .expect("journal second transaction");
     stage_collectable_text_artifacts(store.path(), &transaction)
         .expect("quarantine second artifact");
-    write_text_artifact_receipt(store.path(), &receipt)
-        .expect("durably commit artifact receipt");
+    write_text_artifact_receipt(store.path(), &receipt).expect("durably commit artifact receipt");
     recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
         .expect("finish a committed artifact transaction");
     assert!(
@@ -1005,9 +997,8 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
 #[test]
 fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
     let (store, _generations) = fixture_store(5);
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
     let active_file = plan.active_generation_file().to_owned();
@@ -1053,12 +1044,9 @@ fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
 fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
     let (store, _generations) = fixture_store(5);
     let vector_readable_sources = BTreeSet::new();
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &vector_readable_sources,
-        TEST_ROLLBACK_FLOOR,
-    )
-    .expect("plan retention");
+    let plan =
+        plan_code_generation_retention(store.path(), &vector_readable_sources, TEST_ROLLBACK_FLOOR)
+            .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(101))
         .expect("build retention receipt");
@@ -1091,9 +1079,8 @@ fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
 fn apply_retires_collectable_generations_into_the_graph_replay_pool() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1130,9 +1117,8 @@ fn apply_retires_collectable_generations_into_the_graph_replay_pool() {
 fn failed_receipt_commit_withdraws_the_graph_replay_pool_exposure() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
 
@@ -1176,9 +1162,8 @@ fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
@@ -1227,9 +1212,8 @@ fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
 fn retention_refuses_a_directory_graph_replay_pool_entry() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
@@ -1274,9 +1258,8 @@ fn retention_refuses_a_symlink_graph_replay_pool_entry() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
@@ -1328,9 +1311,8 @@ fn retention_accepts_an_identical_existing_graph_replay_pool_entry() {
     let (store, _generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
@@ -1367,12 +1349,9 @@ fn plan_keeps_active_vector_pinned_and_rollback_generations() {
     let (store, generations) = fixture_store(7);
     let vector_readable_sources = [generations[0].id.clone()].into_iter().collect();
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &vector_readable_sources,
-        TEST_ROLLBACK_FLOOR,
-    )
-    .expect("plan retention");
+    let plan =
+        plan_code_generation_retention(store.path(), &vector_readable_sources, TEST_ROLLBACK_FLOOR)
+            .expect("plan retention");
 
     assert_eq!(plan.active_generation_id, generations[6].id);
     assert!(
@@ -1443,8 +1422,7 @@ fn fixture_scope_liveness_proof(
 ) -> ScopeRootLivenessProofV1 {
     let source_scope = tracedecay_store::StoreShardIdV1::project(
         tracedecay_domain::BrainId::new("brain.scope-retention").expect("fixture brain"),
-        tracedecay_domain::UserProfileId::new("profile.scope-retention")
-            .expect("fixture profile"),
+        tracedecay_domain::UserProfileId::new("profile.scope-retention").expect("fixture profile"),
         tracedecay_domain::ProjectId::new("project.scope-retention").expect("fixture project"),
     );
     ScopeRootLivenessProofV1::new(
@@ -1736,8 +1714,7 @@ fn scope_binding_cleanup_intent_replays_after_filesystem_collection_restart() {
     complete_scope_root_binding_cleanup(store.path(), &replay)
         .expect("complete exact binding cleanup intent");
     assert_eq!(
-        recover_scope_root_binding_cleanup(store.path())
-            .expect("completed cleanup stays complete"),
+        recover_scope_root_binding_cleanup(store.path()).expect("completed cleanup stays complete"),
         None
     );
 }
@@ -1823,9 +1800,8 @@ fn metadata_only_census_matches_full_verification() {
         .join(format!(".text-artifact-{}.staging", "e".repeat(64)));
     std::fs::write(&stale_staging, b"metadata parity staging").expect("write stale staging");
 
-    let full =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-            .expect("full census");
+    let full = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("full census");
     let metadata_only = plan_code_generation_retention_with_verification(
         store.path(),
         &BTreeSet::new(),

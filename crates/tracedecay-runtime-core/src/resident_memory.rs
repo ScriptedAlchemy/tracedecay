@@ -262,8 +262,9 @@ impl ResidentMemoryPressureV1 {
         } else if observed_bytes <= self.low_watermark_bytes {
             self.over_budget.store(false, Ordering::Release);
         }
-        hotpath::gauge!("daemon.memory.over_budget")
-            .set(f64::from(u8::from(self.over_budget.load(Ordering::Acquire))));
+        hotpath::gauge!("daemon.memory.over_budget").set(f64::from(u8::from(
+            self.over_budget.load(Ordering::Acquire),
+        )));
         self.state()
     }
 
@@ -592,10 +593,7 @@ impl ProcessResidentMemoryV1 {
     /// Production always uses [`Self::new`], whose cell is fed by the daemon's
     /// `/proc/self/status` sampler. Tests use this to inject a fake RSS series
     /// without a `/proc` read and without leaking pressure between cases.
-    pub fn with_pressure(
-        limit_bytes: NonZeroU64,
-        pressure: Arc<ResidentMemoryPressureV1>,
-    ) -> Self {
+    pub fn with_pressure(limit_bytes: NonZeroU64, pressure: Arc<ResidentMemoryPressureV1>) -> Self {
         Self {
             limit_bytes,
             state: hotpath::mutex!(

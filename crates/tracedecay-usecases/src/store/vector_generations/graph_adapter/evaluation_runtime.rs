@@ -16,8 +16,7 @@ use tracedecay_code_index::{
     production::CodeIndexPublishedGenerationV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ProjectId, RepositoryId, VectorGenerationIdV1, WorktreeId,
-    canonical_sha256,
+    CodeGenerationId, ProjectId, RepositoryId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,

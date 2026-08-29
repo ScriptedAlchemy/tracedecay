@@ -130,7 +130,10 @@ fn shard() -> StoreShardIdV1 {
     )
 }
 
-fn rows(identity: &GraphProjectionIdentity, count: usize) -> (Vec<GraphEntity>, Vec<GraphGenerationRelation>) {
+fn rows(
+    identity: &GraphProjectionIdentity,
+    count: usize,
+) -> (Vec<GraphEntity>, Vec<GraphGenerationRelation>) {
     let entities = (0..count).map(entity).collect::<Vec<_>>();
     let relations = (0..count / RELATION_DIVISOR)
         .map(|index| relation(identity, index))
@@ -267,7 +270,10 @@ fn replay_hydrate_probe() {
         recovered, memoized,
         "a memoized digest re-read must equal the computed one"
     );
-    assert_eq!(hydrated, inline, "inline replay did not hydrate an equal manifest");
+    assert_eq!(
+        hydrated, inline,
+        "inline replay did not hydrate an equal manifest"
+    );
     assert_eq!(
         hydrated.expected_recovered_digest(&|| Ok(())).unwrap(),
         inline_digest,

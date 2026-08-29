@@ -26,11 +26,8 @@ fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Re
         .ok_or_else(|| "sealed generation filename is invalid".to_owned())?;
     let sealed = tracedecay_graph_db::SealedGraphStateDigest::try_from(format!("sha256:{digest}"))
         .map_err(|error| error.to_string())?;
-    tracedecay_graph_db::retire_sealed_read_bundle(
-        &store_root.join("code-generations-v1"),
-        &sealed,
-    )
-    .map_err(|error| error.to_string())
+    tracedecay_graph_db::retire_sealed_read_bundle(&store_root.join("code-generations-v1"), &sealed)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn log_code_generation_retention_degraded(failure: &str) {

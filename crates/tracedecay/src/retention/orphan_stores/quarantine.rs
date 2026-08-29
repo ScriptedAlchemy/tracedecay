@@ -320,7 +320,14 @@ fn recover_original_name(
     journal_name: Option<String>,
 ) -> QuarantineStoreOutcome {
     drop(root);
-    if rename_noreplace(&parent, OsStr::new(&quarantine_name), &parent, &original_name).is_ok() {
+    if rename_noreplace(
+        &parent,
+        OsStr::new(&quarantine_name),
+        &parent,
+        &original_name,
+    )
+    .is_ok()
+    {
         // A directory sync failure occurs after the atomic rename. Preserve
         // any journal and return the true, restored path for that state.
         let journal_pending = sync_directory(&parent).is_err()
