@@ -213,6 +213,25 @@ pub(crate) fn remove_prompt_rules_with(
     Ok(())
 }
 
+/// Remove the standard marker-gated rules block from `path`, deleting the
+/// file when nothing else remains. Shared by every host whose uninstall is
+/// exactly "strip the [`PROMPT_RULE_MARKER`] block" (Kimi, `OpenCode`).
+pub(crate) fn remove_standard_prompt_rules(path: &Path) -> Result<()> {
+    remove_prompt_rules_with(path, |contents| {
+        if !contents.contains("tracedecay") {
+            return Ok(PromptRulesRemoval::Unchanged);
+        }
+        let Some(new_contents) = strip_heading_block(contents, PROMPT_RULE_MARKER) else {
+            return Ok(PromptRulesRemoval::Unchanged);
+        };
+        if new_contents.is_empty() {
+            Ok(PromptRulesRemoval::Remove)
+        } else {
+            Ok(PromptRulesRemoval::Rewrite(format!("{new_contents}\n")))
+        }
+    })
+}
+
 /// Install or refresh the managed rules block in `path`.
 pub(crate) fn reconcile_prompt_rules(path: &Path, marker: &str, block: &str) -> Result<()> {
     reconcile_prompt_rules_with(path, |existing| {

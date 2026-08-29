@@ -973,23 +973,7 @@ fn opencode_original_config_path(config_path: &Path) -> PathBuf {
 }
 
 fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
-    super::prompt_rules::remove_prompt_rules_with(prompt_path, |contents| {
-        if !contents.contains("tracedecay") {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        }
-        let Some(new_contents) =
-            super::prompt_rules::strip_heading_block(contents, PROMPT_RULE_MARKER)
-        else {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        };
-        if new_contents.is_empty() {
-            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
-        } else {
-            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
-                "{new_contents}\n"
-            )))
-        }
-    })
+    super::prompt_rules::remove_standard_prompt_rules(prompt_path)
 }
 
 // ---------------------------------------------------------------------------
