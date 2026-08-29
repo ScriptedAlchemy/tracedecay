@@ -10,12 +10,12 @@ use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
-use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};

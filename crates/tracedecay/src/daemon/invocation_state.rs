@@ -934,21 +934,22 @@ impl DaemonInvocationState {
                     project_admission,
                     request_cancellation,
                 );
-                let response = tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
-                    &executor,
-                    DaemonInvocationRequest::work_application(
-                        format!("request.multi-root.work.{ordinal}"),
-                        request.as_ref().clone(),
-                        observed_at,
-                        deadline.clone(),
-                        cancellation,
-                    ),
-                    deadline,
-                    control_cancellation,
-                    tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
-                )
-                .await
-                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+                let response =
+                    tracedecay_daemon_protocol::DaemonInvocationExecutor::invoke_controlled(
+                        &executor,
+                        DaemonInvocationRequest::work_application(
+                            format!("request.multi-root.work.{ordinal}"),
+                            request.as_ref().clone(),
+                            observed_at,
+                            deadline.clone(),
+                            cancellation,
+                        ),
+                        deadline,
+                        control_cancellation,
+                        tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly,
+                    )
+                    .await
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
                 let service::invocation::DaemonInvocationOutcome::WorkApplication {
                     scope: actual_scope,
                     outcome,

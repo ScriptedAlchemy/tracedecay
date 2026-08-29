@@ -507,13 +507,14 @@ async fn production_project_server_inner(
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
-    let application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> =
-        Arc::new(InProcessDaemonInvocationExecutor::new(
-            invocation.clone(),
-            store_administration.clone(),
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-        ));
+    let application_invocation_executor: Arc<
+        dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    > = Arc::new(InProcessDaemonInvocationExecutor::new(
+        invocation.clone(),
+        store_administration.clone(),
+        canonical_project_path.to_path_buf(),
+        code_search_scope.clone(),
+    ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_server_resolver = retained_project_server_resolver(store_administration.clone());
     let mut core_context = crate::mcp::server::McpServerConstructionContext::daemon_owned_core(

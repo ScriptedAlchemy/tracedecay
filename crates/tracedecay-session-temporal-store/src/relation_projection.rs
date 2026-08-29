@@ -69,10 +69,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok((generation, relations))
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.relation_projection"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.persist.relation_projection")]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
@@ -123,7 +120,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     session_id,
                     generation,
                 )
-                    .await?
+                .await?
             {
                 return Err(error);
             }
@@ -137,10 +134,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }))
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.recover_relations"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.persist.recover_relations")]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -267,10 +261,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.seed_relation"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.seed_relation")]
 pub async fn seed_session_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -987,9 +978,7 @@ mod tests {
         ordinal: u32,
     ) -> CanonicalOccurrence {
         CanonicalOccurrence {
-            occurrence_id: crate::relations::test_support::occurrence_id_for_test(
-                occurrence_id,
-            ),
+            occurrence_id: crate::relations::test_support::occurrence_id_for_test(occurrence_id),
             retrieval_anchor_id: RetrievalAnchorId::new(anchor_id).unwrap(),
             copied_from_anchor_ids: Vec::new(),
             thread_id: Some(ThreadId::new(thread_id).unwrap()),

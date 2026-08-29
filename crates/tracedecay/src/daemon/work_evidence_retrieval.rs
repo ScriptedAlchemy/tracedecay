@@ -25,13 +25,13 @@ use tracedecay_domain::{
     HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalCursor, RetrievalGrainV1,
     RetrievalRequest, RetrievalScope, SanitizerRevision, SingleRootScopeV1, VectorWatermark,
 };
-use tracedecay_session_temporal_store::execution::{
-    TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
-    TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
-};
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionBindingV1, TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1,
+};
+use tracedecay_session_temporal_store::execution::{
+    TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
+    TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionLimits;

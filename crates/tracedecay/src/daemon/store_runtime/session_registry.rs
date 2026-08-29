@@ -35,10 +35,10 @@ use tracedecay_runtime_core::db::{
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
 mod code_graph;
 mod code_graph_manifest;

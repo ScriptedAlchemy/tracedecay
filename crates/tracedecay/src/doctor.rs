@@ -16,9 +16,9 @@ use crate::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
     resolve_application_surface_dispatch,
 };
-use tracedecay_daemon_protocol::RequestedOutputFormat;
 use crate::display::format_token_count;
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other

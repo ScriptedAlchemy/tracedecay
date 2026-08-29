@@ -117,10 +117,7 @@ pub(super) async fn freeze_participants(
     collect_participant_rows(read, rows, request, None).await
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.freeze.prepared_candidates"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.freeze.prepared_candidates")]
 pub(super) async fn freeze_prepared_candidate_participants(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
@@ -473,9 +470,9 @@ struct FrozenWatermarksWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tempfile::tempdir;
     use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
+    use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::context::ContextBudget;

@@ -10,10 +10,7 @@ use tracedecay_query::retrieval::QUERY_CURSOR_TTL_MICROS_V1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
-use tracedecay_runtime_core::db::{
-    DatabaseEngineReadSnapshot,
-    engine::params,
-};
+use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
 use tracedecay_temporal_query::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
 use tracedecay_temporal_query::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,

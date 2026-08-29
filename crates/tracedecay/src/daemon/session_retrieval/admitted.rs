@@ -8,9 +8,9 @@ use tracedecay_application::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
-use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
 use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_usecases::context::{
     CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,

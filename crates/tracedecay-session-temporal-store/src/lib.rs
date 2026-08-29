@@ -14,8 +14,8 @@ mod support;
 #[cfg(test)]
 mod test_registered_impls;
 pub use handle::{
-    SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery,
-    SessionTemporalRegisteredDb, SessionTemporalWriteTxn,
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
 };
 pub use schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -257,7 +257,9 @@ pub enum SessionPageReconstruction {
     },
 }
 
-impl<'db, D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTemporalExecution<'db, D> {
+impl<'db, D: SessionTemporalRegisteredDb + Sync>
+    RegisteredGlobalDbSessionTemporalExecution<'db, D>
+{
     fn access(&self) -> SessionTemporalAccess<'_, D> {
         SessionTemporalAccess::new(self.db)
     }
@@ -953,7 +955,9 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTempor
     }
 }
 
-impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution<'_, D> {
+impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalExecutionPort
+    for RegisteredGlobalDbSessionTemporalExecution<'_, D>
+{
     fn execute<'a, E>(
         &'a self,
         request: AuthorizedTemporalExecutionRequest,
@@ -966,7 +970,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalExecutionPort for Reg
     }
 }
 
-impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExecution<'_, D> {
+impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
+    for RegisteredGlobalDbSessionTemporalExecution<'_, D>
+{
     fn execute_task_session<'a, E>(
         &'a self,
         request: AuthorizedTaskSessionExecutionRequestV1,

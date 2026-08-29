@@ -14,8 +14,8 @@ use crate::mcp::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliveryS
 use tracedecay_mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
-use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 use super::*;
+use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 
 pub(super) struct BrokerStreamTransport {
     // Every daemon read of this transport races something else in a

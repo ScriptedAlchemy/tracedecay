@@ -143,6 +143,12 @@ use tracedecay_usecases::semantic_runtime::{
 };
 // Re-exported so daemon-internal call sites can keep naming the contract
 // through `service::invocation::`.
+use crate::production_semantic_authorities;
+#[cfg(test)]
+use tracedecay_application::{
+    CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
+    ProblemTerminality,
+};
 #[cfg(test)]
 pub(crate) use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, parse_daemon_invocation_request,
@@ -153,12 +159,6 @@ pub(crate) use tracedecay_daemon_protocol::{
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
     HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
-};
-use crate::production_semantic_authorities;
-#[cfg(test)]
-use tracedecay_application::{
-    CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
-    ProblemTerminality,
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 use tracedecay_runtime_core::db::Database;

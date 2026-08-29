@@ -9,10 +9,6 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
-use crate::handle::{
-    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
-    SessionTemporalWriteTxn,
-};
 use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
 use super::query::{
     ACTIVATE_OPERATION, BEGIN_OPERATION, encode_watermarks, generation_i64, now_micros,
@@ -22,6 +18,10 @@ use super::relation_projection::reconstruct_session_relation_projection;
 use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
+use crate::handle::{
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
+};
 
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
@@ -101,10 +101,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         SessionGenerationRebuildReceiptV1::new(&request, disposition, recorded_at)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.txn.activate_generation"
-    )]
+    #[hotpath::measure(future = true, label = "session_temporal.txn.activate_generation")]
     pub async fn activate_session_temporal_generation_result(
         &self,
         request: SessionGenerationActivationRequestV1,
@@ -403,10 +400,7 @@ async fn bootstrap_first_active_generation(
     Ok(())
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.validate_frontier"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.validate_frontier")]
 pub(super) async fn validate_candidate_frontier(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &str,

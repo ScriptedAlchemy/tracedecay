@@ -33,8 +33,8 @@ mod branches;
 mod identity;
 mod registry;
 
-pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 pub(crate) use registry::git_remote_url;
+pub use tracedecay_daemon_protocol::MovedStoreAdoption;
 
 #[cfg(not(any(test, feature = "test-transport")))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<

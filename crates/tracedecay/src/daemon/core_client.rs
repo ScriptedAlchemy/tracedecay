@@ -113,7 +113,8 @@ impl DaemonLivenessProbe for AuthorityLivenessProbe {
                 ),
             });
         };
-        if current.epoch != self.record.epoch || current.process_run_id != self.record.process_run_id
+        if current.epoch != self.record.epoch
+            || current.process_run_id != self.record.process_run_id
         {
             return Err(TraceDecayError::Config {
                 message: format!(
