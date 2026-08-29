@@ -1174,6 +1174,17 @@ pub enum CodeIndexProductionErrorV1 {
     Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
 }
 
+/// Slot lookup for one publish attempt.
+///
+/// `reusable` is the generation increment planning may adopt. `cas_incumbent`
+/// is the compare-and-swap expected token: the same id when reuse is legal,
+/// or the prior-label incumbent after a same-checkout label move that must
+/// rebuild while still replacing the worktree slot atomically.
+struct ActiveGenerationLookupV1 {
+    reusable: Option<CodeIndexPublishedGenerationV1>,
+    cas_incumbent: Option<CodeGenerationId>,
+}
+
 /// Production owner for one repository and one atomic publication authority.
 pub struct CodeIndexProductionOwnerV1<P, S> {
     config: CodeIndexProductionConfigV1,
@@ -1220,71 +1231,92 @@ where
         self.retained_parses.stats()
     }
 
-    /// Load the currently active immutable generation. A restart therefore
+    /// Load the currently reusable immutable generation. A restart therefore
     /// resumes from the publication authority rather than mutable worker state.
     ///
-    /// Dispatch is full-scope exact: the loaded generation must have been
-    /// sealed under the requested repository, reference, and worktree. A
-    /// publication authority that answers a scope with a generation sealed
-    /// for any other scope has broken its slot partition — or the caller's
-    /// checkout identity resolution regressed, e.g. a repository misclassified
-    /// as not-a-git-path. Both are the terminal
+    /// Reuse is full-scope exact: the loaded generation must have been sealed
+    /// under the requested repository, reference, and worktree. A same-checkout
+    /// reference label move is a rebuild (`Ok(None)`), not reuse — the
+    /// worktree-scoped slot still holds the prior label's incumbent, which
+    /// [`Self::build_and_publish`] keeps as the compare-and-swap expected
+    /// token. A publication authority that answers a scope with a generation
+    /// sealed for a *foreign checkout* has broken its slot partition — or the
+    /// caller's checkout identity resolution regressed, e.g. a repository
+    /// misclassified as not-a-git-path. That is the terminal
     /// [`CodeIndexPublicationStoreErrorV1::CorruptionResetRequired`] state:
     /// the foreign generation is never adopted, never config-checked, and the
     /// refusal is a reset journey, not a transient error to retry on a
     /// cadence.
-    #[hotpath::measure(label = "code_index.build.active_generation")]
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+        Ok(self.lookup_active_generation(scope)?.reusable)
+    }
+
+    #[hotpath::measure(label = "code_index.build.active_generation")]
+    fn lookup_active_generation(
+        &self,
+        scope: &CodeIndexGenerationScopeV1,
+    ) -> Result<ActiveGenerationLookupV1, CodeIndexProductionErrorV1> {
         scope.validate()?;
         if scope.repository != self.config.repository {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "generation scope is foreign to the production owner's repository store".to_owned(),
             ));
         }
-        let active = self.publication.load_active(scope)?;
-        if let Some(active) = &active {
-            let sealed_scope = active.sealed_scope();
-            if sealed_scope != *scope {
-                // A reference label moving under the same checkout is a
-                // rebuild, not corruption: the worktree-scoped active slot
-                // legitimately still points at the generation sealed for the
-                // previous label. Only a foreign checkout in the slot is a
-                // reset-worthy identity violation.
-                if sealed_scope.identifies_same_checkout(scope) {
-                    return Ok(None);
-                }
-                return Err(CodeIndexProductionErrorV1::Publication(
-                    CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(format!(
-                        "the active-generation slot for {} returned a generation sealed for {}",
-                        describe_scope(scope),
-                        describe_scope(&sealed_scope),
-                    )),
-                ));
+        let Some(active) = self.publication.load_active(scope)? else {
+            return Ok(ActiveGenerationLookupV1 {
+                reusable: None,
+                cas_incumbent: None,
+            });
+        };
+        let sealed_scope = active.sealed_scope();
+        if sealed_scope != *scope {
+            // A reference label moving under the same checkout is a
+            // rebuild, not corruption: the worktree-scoped active slot
+            // legitimately still points at the generation sealed for the
+            // previous label. Publish must still CAS against that
+            // incumbent. Only a foreign checkout in the slot is a
+            // reset-worthy identity violation.
+            if sealed_scope.identifies_same_checkout(scope) {
+                return Ok(ActiveGenerationLookupV1 {
+                    reusable: None,
+                    cas_incumbent: Some(active.manifest.generation_id.clone()),
+                });
             }
-            active.validate()?;
-            if active.manifest.project_id != self.config.project_id
-                || active.manifest.sanitizer_revision != self.config.sanitizer_revision
-                || active.manifest.chunker_revision != self.config.chunker_revision
-                || active.manifest.privacy_domain != self.config.privacy_domain
-                || active.manifest.privacy_key_epoch != self.config.privacy_key_epoch
-                || match active.chunk_policy_summary() {
-                    ChunkPolicyRevisionSummaryV1::Empty => false,
-                    ChunkPolicyRevisionSummaryV1::Uniform(revision) => {
-                        *revision != self.config.policy_revision
-                    }
-                    ChunkPolicyRevisionSummaryV1::Mixed => true,
-                }
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "active generation is incompatible with the production owner configuration"
-                        .to_owned(),
-                ));
-            }
+            return Err(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(format!(
+                    "the active-generation slot for {} returned a generation sealed for {}",
+                    describe_scope(scope),
+                    describe_scope(&sealed_scope),
+                )),
+            ));
         }
-        Ok(active)
+        active.validate()?;
+        if active.manifest.project_id != self.config.project_id
+            || active.manifest.sanitizer_revision != self.config.sanitizer_revision
+            || active.manifest.chunker_revision != self.config.chunker_revision
+            || active.manifest.privacy_domain != self.config.privacy_domain
+            || active.manifest.privacy_key_epoch != self.config.privacy_key_epoch
+            || match active.chunk_policy_summary() {
+                ChunkPolicyRevisionSummaryV1::Empty => false,
+                ChunkPolicyRevisionSummaryV1::Uniform(revision) => {
+                    *revision != self.config.policy_revision
+                }
+                ChunkPolicyRevisionSummaryV1::Mixed => true,
+            }
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "active generation is incompatible with the production owner configuration"
+                    .to_owned(),
+            ));
+        }
+        let cas_incumbent = Some(active.manifest.generation_id.clone());
+        Ok(ActiveGenerationLookupV1 {
+            reusable: Some(active),
+            cas_incumbent,
+        })
     }
 
     /// Build one complete generation and atomically publish it only after
@@ -1306,7 +1338,8 @@ where
             &request.ignored_source_admissions,
         )?;
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
-        let active = self.active_generation(&scope)?;
+        let lookup = self.lookup_active_generation(&scope)?;
+        let active = lookup.reusable;
         Self::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
@@ -1489,9 +1522,7 @@ where
             crate::hotpath_observe::record_files(candidate.files.len());
         }
 
-        let expected = active
-            .as_ref()
-            .map(|generation| generation.manifest.generation_id.clone());
+        let expected = lookup.cas_incumbent;
         // Shared rather than cloned: the publication store caches the same
         // immutable generation the caller receives.
         let candidate = Arc::new(candidate);
