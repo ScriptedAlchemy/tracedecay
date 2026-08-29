@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use tracedecay_runtime_core::errors::Result;
-use tracedecay_jsonrpc::{JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 #[path = "core_doctor_schema.rs"]
@@ -571,7 +571,7 @@ mod doctor_runtime_route_tests {
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-    use tracedecay_jsonrpc::McpTransport;
+    use tracedecay_mcp::McpTransport;
     use tracedecay_usecases::semantic_runtime::{
         SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
         SemanticRuntimeStatusV1,

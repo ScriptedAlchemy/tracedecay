@@ -816,6 +816,7 @@ pub(crate) fn mcp_dispatch_contract(
 }
 
 /// Tools whose schema advertises a registered-project selector.
+#[cfg(test)]
 pub(super) fn registered_project_reader_tool_names() -> Vec<&'static str> {
     MCP_TOOL_BINDINGS
         .iter()
@@ -842,6 +843,18 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "a tool name is bound twice");
+    }
+
+    #[test]
+    fn portable_reader_tool_names_match_binding_table() {
+        let mut from_table = registered_project_reader_tool_names();
+        let mut from_mcp = tracedecay_mcp::registered_project_reader_tool_names();
+        from_table.sort_unstable();
+        from_mcp.sort_unstable();
+        assert_eq!(
+            from_table, from_mcp,
+            "tracedecay-mcp reader catalog must match RegisteredProjectAccess::Reader rows"
+        );
     }
 
     #[test]

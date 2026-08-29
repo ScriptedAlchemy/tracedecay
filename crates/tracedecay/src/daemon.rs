@@ -37,7 +37,7 @@ use scheduler::{
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
     run_automation_scheduler_tick, scheduler_task_log_fields,
 };
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 

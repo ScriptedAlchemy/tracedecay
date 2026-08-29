@@ -1,6 +1,6 @@
 use crate::branch::BranchAddOutcome;
 use tracedecay_runtime_core::errors::TraceDecayError;
-use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 use std::path::Path;
 use std::sync::Arc;

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use tracedecay_jsonrpc::JsonRpcResponse;
+use tracedecay_mcp::JsonRpcResponse;
 
 pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
     let output = std::process::Command::new("git")

@@ -11,7 +11,7 @@ use crate::context::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::path_tree::format_compact_path_list;
+use tracedecay_mcp::path_tree::format_compact_path_list;
 use crate::tracedecay::queries::graph::VerifiedGraphQuery;
 use crate::types::{EdgeKind, NodeKind};
 
