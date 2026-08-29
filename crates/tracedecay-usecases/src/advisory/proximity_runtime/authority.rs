@@ -298,9 +298,8 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     let record = reader.file_by_logical_path(path, Arc::clone(&cancellation));
                     match (source, record) {
                         (Ok(source), Ok(Some(record)))
-                            if normalized_content_digest(
-                                &tracedecay_runtime_core::sync::content_hash(&source),
-                            ) == Some(record.content_digest.clone()) =>
+                            if ContentDigest::of_bytes(source.as_bytes())
+                                == record.content_digest =>
                         {
                             verified_graph_paths.insert(
                                 path.clone(),
@@ -859,14 +858,6 @@ fn resolve_edit_range_symbol<'a>(
         return None;
     }
     Some(candidate)
-}
-
-fn normalized_content_digest(value: &str) -> Option<ContentDigest> {
-    if value.starts_with("sha256:") {
-        ContentDigest::new(value.to_owned()).ok()
-    } else {
-        ContentDigest::new(format!("sha256:{value}")).ok()
-    }
 }
 
 const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {

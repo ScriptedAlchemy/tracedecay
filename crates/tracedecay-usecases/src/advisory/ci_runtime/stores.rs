@@ -649,12 +649,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             let Ok(source) = std::fs::read_to_string(self.project_root.join(&path)) else {
                 return Some(partial_code_evidence());
             };
-            let Some(source_digest) =
-                normalized_content_digest(&tracedecay_runtime_core::sync::content_hash(&source))
-            else {
-                return Some(partial_code_evidence());
-            };
-            if source_digest != file_record.content_digest {
+            if ContentDigest::of_bytes(source.as_bytes()) != file_record.content_digest {
                 return Some(partial_code_evidence());
             }
             let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
@@ -811,14 +806,6 @@ fn partial_code_evidence() -> CiExactCodeEvidenceV1 {
         symbol: None,
         callers: Vec::new(),
         tests: Vec::new(),
-    }
-}
-
-fn normalized_content_digest(value: &str) -> Option<ContentDigest> {
-    if value.starts_with("sha256:") {
-        ContentDigest::new(value.to_owned()).ok()
-    } else {
-        ContentDigest::new(format!("sha256:{value}")).ok()
     }
 }
 
