@@ -43,7 +43,7 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 #[derive(Clone, Copy)]
-pub(super) enum PersistedCursorUpdate {
+pub(in crate::runtime) enum PersistedCursorUpdate {
     Replace,
     Monotonic,
 }
@@ -74,7 +74,7 @@ struct FlushPolicy<'policy> {
     persisted_cursor_update: PersistedCursorUpdate,
 }
 
-pub(super) struct JsonlObservationAdmissionRequest<'request> {
+pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     provider: &'static str,
     path: &'request Path,
     admission: &'request dyn HostAdmission,
@@ -88,7 +88,7 @@ pub(super) struct JsonlObservationAdmissionRequest<'request> {
 }
 
 impl<'request> JsonlObservationAdmissionRequest<'request> {
-    pub(super) fn new(
+    pub(in crate::runtime) fn new(
         provider: &'static str,
         path: &'request Path,
         admission: &'request dyn HostAdmission,
@@ -110,12 +110,12 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         }
     }
 
-    pub(super) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
+    pub(in crate::runtime) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
         self.max_new_bytes = max_new_bytes;
         self
     }
 
-    pub(super) fn with_persisted_cursor_update(
+    pub(in crate::runtime) fn with_persisted_cursor_update(
         mut self,
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> Self {
@@ -123,18 +123,18 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         self
     }
 
-    pub(super) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
+    pub(in crate::runtime) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
         self.cancellation = cancellation;
         self
     }
 
-    pub(super) fn with_lazy_shared_frame_preparation(mut self) -> Self {
+    pub(in crate::runtime) fn with_lazy_shared_frame_preparation(mut self) -> Self {
         self.shared_frame_preparation = SharedJsonlFramePreparation::Lazy;
         self
     }
 }
 
-pub(super) enum JsonlFrameAdmission {
+pub(in crate::runtime) enum JsonlFrameAdmission {
     Durable {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
@@ -150,7 +150,7 @@ pub(super) enum JsonlFrameAdmission {
 }
 
 impl JsonlFrameAdmission {
-    pub(super) fn durable(
+    pub(in crate::runtime) fn durable(
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     ) -> Self {
@@ -160,7 +160,7 @@ impl JsonlFrameAdmission {
         }
     }
 
-    pub(super) fn non_durable(reason: ObservationCoverageReason) -> Self {
+    pub(in crate::runtime) fn non_durable(reason: ObservationCoverageReason) -> Self {
         Self::NonDurable {
             reason,
             before_decode: false,
@@ -182,20 +182,20 @@ impl JsonlFrameAdmission {
     /// not own is not this pass's to report structural health on — and it is
     /// what makes the skipped decode observable in production state rather
     /// than only in a counter.
-    pub(super) fn non_durable_before_decode(reason: ObservationCoverageReason) -> Self {
+    pub(in crate::runtime) fn non_durable_before_decode(reason: ObservationCoverageReason) -> Self {
         Self::NonDurable {
             reason,
             before_decode: true,
         }
     }
 
-    pub(super) const fn needs_preparation() -> Self {
+    pub(in crate::runtime) const fn needs_preparation() -> Self {
         Self::NeedsPreparation
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct JsonlObservationAdmissionProgress {
+pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
     pub bytes_consumed: u64,
     pub source_deferred: bool,
     pub frames_decoded: u64,
@@ -211,7 +211,7 @@ pub(super) struct JsonlObservationAdmissionProgress {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct JsonlObservationScan {
+pub(in crate::runtime) struct JsonlObservationScan {
     pub resumed: bool,
     /// True when a prior cursor existed but the scan restarted at offset 0
     /// (truncate/rename replacement). Callers use this to keep projected
@@ -337,14 +337,14 @@ const fn shared_jsonl_speculative_capacity_from(total_capacity: usize) -> usize 
     total_capacity.saturating_sub(1)
 }
 
-pub(super) fn shared_jsonl_background_cpu() -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
+pub(in crate::runtime) fn shared_jsonl_background_cpu() -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
     process_background_cpu().ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
         provider: "codex",
         resource: "process background CPU authority",
     })
 }
 
-pub(super) fn reserve_shared_jsonl_page()
+pub(in crate::runtime) fn reserve_shared_jsonl_page()
 -> TranscriptIngestResult<Option<ProcessSharedMemoryReservationV1>> {
     reserve_shared_jsonl_bytes(
         SHARED_JSONL_WORKER_RESERVATION_BYTES,
@@ -378,7 +378,7 @@ pub(crate) fn reserve_shared_jsonl_bytes(
 }
 
 #[cfg(test)]
-pub(super) fn install_test_shared_jsonl_preparation_authority() {
+pub(in crate::runtime) fn install_test_shared_jsonl_preparation_authority() {
     use std::num::NonZeroU64;
     use std::num::NonZeroUsize;
     use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
@@ -404,7 +404,7 @@ struct SharedJsonlPageKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct SharedJsonlFileIdentity {
+pub(in crate::runtime) struct SharedJsonlFileIdentity {
     len: u64,
     modified_nanos: u128,
     #[cfg(unix)]
@@ -418,7 +418,7 @@ pub(super) struct SharedJsonlFileIdentity {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct JsonlFrameHints {
+pub(in crate::runtime) struct JsonlFrameHints {
     pub may_change_codex_context: bool,
 }
 
@@ -800,7 +800,7 @@ fn shared_jsonl_path_is_pinned(path: &Path) -> bool {
         .contains_key(path)
 }
 
-pub(super) fn shared_jsonl_file_identity(
+pub(in crate::runtime) fn shared_jsonl_file_identity(
     path: &Path,
 ) -> TranscriptIngestResult<SharedJsonlFileIdentity> {
     let metadata = std::fs::metadata(path).map_err(|source| TranscriptIngestError::ScanIo {
@@ -1867,7 +1867,7 @@ impl ActiveAdmission<'_> {
 }
 
 #[hotpath::measure]
-pub(super) async fn admit_jsonl_observations<State: Clone>(
+pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
     mut normalize: impl FnMut(
@@ -2416,7 +2416,7 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     }
 }
 
-pub(super) fn namespace_replacement_message_ids(
+pub(in crate::runtime) fn namespace_replacement_message_ids(
     messages: &mut [SessionMessageRecord],
     generation: u64,
 ) {
@@ -2425,7 +2425,7 @@ pub(super) fn namespace_replacement_message_ids(
     }
 }
 
-pub(super) fn preflight_and_parse_new(
+pub(in crate::runtime) fn preflight_and_parse_new(
     provider: &'static str,
     path: &Path,
     prev: StoredCursor,

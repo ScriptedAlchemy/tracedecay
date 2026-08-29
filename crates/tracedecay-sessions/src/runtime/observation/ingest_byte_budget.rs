@@ -4,7 +4,7 @@
 /// treats exhaustion as deferral even for an empty charge; snapshot adapters
 /// retain their historical behavior through [`Self::bounded_allowing_empty`].
 #[derive(Debug)]
-pub(super) struct IngestByteBudget {
+pub(in crate::runtime) struct IngestByteBudget {
     remaining: Option<u64>,
     consumed: u64,
     deferred: bool,
@@ -12,7 +12,7 @@ pub(super) struct IngestByteBudget {
 }
 
 impl IngestByteBudget {
-    pub(super) const fn bounded(limit: u64) -> Self {
+    pub(in crate::runtime) const fn bounded(limit: u64) -> Self {
         Self {
             remaining: Some(limit),
             consumed: 0,
@@ -21,7 +21,7 @@ impl IngestByteBudget {
         }
     }
 
-    pub(super) const fn bounded_allowing_empty(limit: u64) -> Self {
+    pub(in crate::runtime) const fn bounded_allowing_empty(limit: u64) -> Self {
         Self {
             remaining: Some(limit),
             consumed: 0,
@@ -30,7 +30,7 @@ impl IngestByteBudget {
         }
     }
 
-    pub(super) const fn unbounded() -> Self {
+    pub(in crate::runtime) const fn unbounded() -> Self {
         Self {
             remaining: None,
             consumed: 0,
@@ -39,23 +39,23 @@ impl IngestByteBudget {
         }
     }
 
-    pub(super) const fn exhausted(&self) -> bool {
+    pub(in crate::runtime) const fn exhausted(&self) -> bool {
         matches!(self.remaining, Some(0))
     }
 
-    pub(super) const fn remaining(&self) -> Option<u64> {
+    pub(in crate::runtime) const fn remaining(&self) -> Option<u64> {
         self.remaining
     }
 
-    pub(super) const fn consumed(&self) -> u64 {
+    pub(in crate::runtime) const fn consumed(&self) -> u64 {
         self.consumed
     }
 
-    pub(super) const fn deferred(&self) -> bool {
+    pub(in crate::runtime) const fn deferred(&self) -> bool {
         self.deferred
     }
 
-    pub(super) const fn defer(&mut self) {
+    pub(in crate::runtime) const fn defer(&mut self) {
         self.deferred = true;
     }
 
@@ -64,7 +64,7 @@ impl IngestByteBudget {
     /// Readers receive [`Self::remaining`] as their cap, then report actual
     /// progress. Saturating subtraction preserves accounting if a reader
     /// reports beyond that cap, while unbounded budgets retain `None`.
-    pub(super) fn record_progress(&mut self, bytes: u64, deferred: bool) {
+    pub(in crate::runtime) fn record_progress(&mut self, bytes: u64, deferred: bool) {
         if let Some(remaining) = &mut self.remaining {
             *remaining = remaining.saturating_sub(bytes);
         }
@@ -72,7 +72,7 @@ impl IngestByteBudget {
         self.deferred |= deferred;
     }
 
-    pub(super) fn try_consume(&mut self, bytes: u64) -> bool {
+    pub(in crate::runtime) fn try_consume(&mut self, bytes: u64) -> bool {
         let Some(remaining) = self.remaining else {
             self.consumed = self.consumed.saturating_add(bytes);
             return true;

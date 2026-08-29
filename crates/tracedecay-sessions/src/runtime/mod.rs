@@ -13,17 +13,16 @@ pub(in crate::runtime) use hosts::{opencode_frontier, opencode_part_scan, openco
 pub mod git_correlation;
 mod host_scan;
 pub mod ingest;
-mod ingest_byte_budget;
-mod jsonl_observation_admission;
 pub mod lcm;
+mod observation;
+pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
+pub use observation::snapshot_observation;
 mod pipeline_metrics;
 pub mod shared;
-pub mod snapshot_observation;
 pub mod source;
 pub mod store_port;
-pub mod workflow_index;
-pub mod workflow_ingest;
-pub mod workflow_state;
+mod workflow;
+pub use workflow::{workflow_index, workflow_ingest, workflow_state};
 
 pub use crate::{ProviderScope, SessionProvider};
 pub use ingest::{
