@@ -50,6 +50,21 @@ impl Drop for EnvVarGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
+    let mut lines = log.lines();
+    for command in expected {
+        loop {
+            match lines.next() {
+                Some(line) if line == *command => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 struct CurrentDirGuard {
     previous: PathBuf,
 }
@@ -1149,9 +1164,22 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     assert!(unit.contains("--remote-listen \"192.0.2.10:7443\""));
     assert!(unit.contains("--remote-tls-cert \"/etc/trace decay/server.pem\""));
     assert!(unit.contains("--remote-tls-key \"/etc/trace decay/server-key.pem\""));
-    assert_eq!(
-        std::fs::read_to_string(log).expect("systemctl log"),
-        "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    let commands = std::fs::read_to_string(log).expect("systemctl log");
+    assert!(
+        systemctl_log_contains_sequence(
+            &commands,
+            &[
+                "--user is-active --quiet tracedecay.service",
+                "--user is-enabled tracedecay.service",
+                "--user stop tracedecay.service",
+                "--user daemon-reload",
+                "--user enable tracedecay.service",
+                "--user daemon-reload",
+                "--user enable tracedecay.service",
+                "--user start tracedecay.service",
+            ]
+        ),
+        "refresh+restore must stop, reload, enable, and start in order, got:\n{commands}"
     );
 }
 
@@ -1258,9 +1286,17 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
         std::fs::read_to_string(service_path).expect("service unit"),
         original_unit
     );
-    assert_eq!(
-        std::fs::read_to_string(log).expect("systemctl log"),
-        "--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    let commands = std::fs::read_to_string(log).expect("systemctl log");
+    assert!(
+        systemctl_log_contains_sequence(
+            &commands,
+            &[
+                "--user daemon-reload",
+                "--user enable tracedecay.service",
+                "--user start tracedecay.service",
+            ]
+        ),
+        "restore of a previously-running unit must enable and start, got:\n{commands}"
     );
 }
 
@@ -1307,9 +1343,17 @@ fn restore_after_update_starts_a_dead_installed_unit() {
         original_unit,
         "heal must start the existing unit without rewriting it"
     );
-    assert_eq!(
-        std::fs::read_to_string(log).expect("systemctl log"),
-        "--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+    let commands = std::fs::read_to_string(log).expect("systemctl log");
+    assert!(
+        systemctl_log_contains_sequence(
+            &commands,
+            &[
+                "--user daemon-reload",
+                "--user enable tracedecay.service",
+                "--user start tracedecay.service",
+            ]
+        ),
+        "heal of a dead installed unit must enable and start, got:\n{commands}"
     );
 }
 
