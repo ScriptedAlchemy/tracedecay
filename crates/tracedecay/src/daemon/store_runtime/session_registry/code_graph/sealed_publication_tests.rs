@@ -598,10 +598,6 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     let next_generation = next_snapshot.generation().clone();
     let next_head = next_snapshot.verified_head().clone();
     drop(next_snapshot);
-    registry
-        .close_retained_graph_runtimes_for_shutdown()
-        .await
-        .expect("close publishing graph runtime before cold recovery");
     let manifest_provider: Arc<dyn tracedecay_graph_db::GraphGenerationManifestProvider> =
         next_runtime.graph_manifest_provider.clone();
     let cold_graph_registry = tracedecay_graph_db::GraphDbRegistry::new_with_manifest_provider(
@@ -609,7 +605,18 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         manifest_provider,
     )
     .expect("cold graph registry");
-    next_runtime.graph_registry = cold_graph_registry.clone();
+    // This test retains graph runtimes directly outside the daemon owner maps.
+    // Model the real process boundary by dropping every old-daemon runtime and
+    // registry owner, then seat the retained publication inputs in a fresh
+    // lifecycle and GraphDB registry. The old registry's final drop releases
+    // its staging and sealed Grafeo handles without bypassing lease checks.
+    drop(runtime);
+    drop(registry);
+    next_runtime.lifecycle_cancelled = Arc::new(AtomicBool::new(false));
+    drop(std::mem::replace(
+        &mut next_runtime.graph_registry,
+        cold_graph_registry.clone(),
+    ));
     assert!(
         !cold_graph_registry
             .shard_is_registered(&next_runtime.authority.binding().shard_id)
