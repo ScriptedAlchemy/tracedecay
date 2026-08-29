@@ -245,13 +245,22 @@ impl Database {
     }
 
     pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
-        self.client
-            .runtime()
-            .storage_page_counts(std::time::Duration::from_secs(5))
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to sample SQLite-store pages: {error:?}"),
-                operation: "sample SQLite-store pages".to_owned(),
-            })
+        // The registry sampler blocks on reserved-health reader acquisition
+        // and a worker rendezvous (each bounded below); run it on the blocking
+        // pool so a busy store cannot capture an async executor thread.
+        let runtime = self.client.runtime().clone();
+        tokio::task::spawn_blocking(move || {
+            runtime.storage_page_counts(std::time::Duration::from_secs(5))
+        })
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("store-size sampling task failed: {error}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })?
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to sample SQLite-store pages: {error:?}"),
+            operation: "sample SQLite-store pages".to_owned(),
+        })
     }
 
     /// Runs bounded incremental vacuum through the canonical writer lane.
