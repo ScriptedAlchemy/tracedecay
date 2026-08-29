@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::UtcMicros;
 
-use crate::daemon_contract::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::super::super::current_micros;
 use super::super::workflow_run_control::workflow_run_storage_problem;
@@ -267,7 +267,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         observability_producer: Option<
             Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
         >,
-        holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+        holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
     ) -> Result<Self, DaemonInvocationProblem> {
         let holder_root = project_root
             .canonicalize()

@@ -5,7 +5,7 @@ use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{
     ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
-pub use tracedecay_global_db::session_temporal::execution::SessionDataFreshness;
+pub use tracedecay_session_temporal_store::execution::SessionDataFreshness;
 pub use tracedecay_sessions::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionRetrievalScope,
 };

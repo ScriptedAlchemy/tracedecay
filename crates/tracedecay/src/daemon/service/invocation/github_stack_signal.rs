@@ -9,7 +9,7 @@ use tracedecay_application::git::{
     GitHubStackSignalExpandSurfaceRequest, git_surface_operation,
 };
 
-use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 
 /// Expands one opaque stack-signal handle through the project-bound runtime.
 /// The transport never carries an actor, recipient, queue state, or stack

@@ -235,9 +235,9 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
     let endpoint =
-        crate::daemon::transport::DaemonEndpoint::Unix(profile_root.join("session-runtime.sock"));
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("session-runtime.sock"));
     #[cfg(not(unix))]
-    let endpoint = crate::daemon::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
 
     let first_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
@@ -471,9 +471,9 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
     let endpoint =
-        crate::daemon::transport::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
     #[cfg(not(unix))]
-    let endpoint = crate::daemon::transport::default_loopback_endpoint();
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
     let daemon_authority =
         crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");

@@ -135,7 +135,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
-        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+        Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
     pub(crate) delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
@@ -497,7 +497,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_application_invocation_executor(
         mut self,
-        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     ) -> Self {
         self.application_invocation_executor = Some(executor);
         self

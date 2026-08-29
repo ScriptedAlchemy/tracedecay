@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use crate::client_identity::DaemonClientIdentity;
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::errors::Result;
 

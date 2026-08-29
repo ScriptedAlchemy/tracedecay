@@ -89,6 +89,7 @@ pub mod workflow_runtime;
 pub mod workflow_synthesis;
 
 mod error;
+pub mod surface_contracts;
 mod surface_binding;
 
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
@@ -111,7 +112,7 @@ pub use configuration::{
     SettingSummary, configuration_executable_binding_registry,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation, configuration_surface_request_schema,
-    configuration_surface_result_schema,
+    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
 pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
@@ -133,25 +134,30 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use doctor::{
-    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
-    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
-    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
-    ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1,
-    DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
-    DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
-    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorReportComposerV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
-    DoctorStorageFindingV1, HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1,
-    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerDoctorPort,
-    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
-    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-    ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding,
-    doctor_finding_family_label, host_integration_finding, ingest_refusal_finding,
-    language_server_finding, observability_finding, operational_audit_findings,
-    runtime_health_finding,
+    AdvisoryFeedbackDoctorAdapterV1, AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1,
+    AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorAdapterV1,
+    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
+    ConfigurationAuthorityDoctorAdapterV1, ConfigurationAuthorityDoctorPort,
+    ConfigurationAuthorityReadV1, ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES,
+    DaemonRuntimeHealthSignalV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
+    DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
+    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
+    DoctorFindingFamilyV1, DoctorFindingV1, DoctorKernelInputsV1, DoctorReportComposerV1,
+    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
+    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
+    HostConformanceV1, HostIntegrationDoctorAdapterV1, HostIntegrationDoctorPort,
+    HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
+    LanguageServerDoctorAdapterV1, LanguageServerDoctorPort, LanguageServerReadV1,
+    LanguageServerStateV1, ObservabilityDoctorAdapterV1, ObservabilityDoctorPort,
+    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorAdapterV1,
+    OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
+    RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
+    RuntimeHealthDoctorAdapterV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorAdapterV1, StorageDoctorPort, advisory_feedback_findings,
+    advisory_feedback_read_from_publication, code_index_finding, compose_doctor_report,
+    configuration_finding, doctor_finding_family_label, host_integration_finding,
+    ingest_refusal_finding, language_server_finding, merge_storage_reads, observability_finding,
+    operational_audit_findings, runtime_health_finding, runtime_health_read, storage_family_read,
 };
 pub use error::ApplicationContractError;
 pub use execution_topology_metrics::*;
@@ -310,6 +316,14 @@ pub use source_edit::{
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
+pub use surface_contracts::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
+    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,

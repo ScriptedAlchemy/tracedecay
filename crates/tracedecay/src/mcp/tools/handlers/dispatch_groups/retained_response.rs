@@ -3,7 +3,7 @@ use tracedecay_application::{
     RetryDirective,
 };
 
-use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationProblem};
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationProblem};
 use tracedecay_runtime_core::errors::Result;
 
 use super::{retained_problem_envelope, retained_safe_diagnostic};

@@ -10,7 +10,7 @@ use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
-use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,

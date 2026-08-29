@@ -716,7 +716,7 @@ pub fn default_socket_path() -> Result<PathBuf> {
 fn default_socket_path_for_profile(profile_root: &Path) -> PathBuf {
     let profile_scoped = profile_root.join("daemon.sock");
     #[cfg(unix)]
-    if !super::transport::unix_socket_path_within_limit(&profile_scoped) {
+    if !tracedecay_daemon_protocol::unix_socket_path_within_limit(&profile_scoped) {
         return short_profile_socket_path(profile_root);
     }
     profile_scoped
@@ -894,7 +894,7 @@ fn refresh_installed_service_with_state(
                 .map_or_else(tracedecay_data_dir, Ok)?;
             let legacy_generated_socket = profile_root.join("daemon.sock");
             if socket_path != legacy_generated_socket
-                || super::transport::unix_socket_path_within_limit(&socket_path)
+                || tracedecay_daemon_protocol::unix_socket_path_within_limit(&socket_path)
             {
                 refreshed_spec.socket_path = socket_path;
             } else {

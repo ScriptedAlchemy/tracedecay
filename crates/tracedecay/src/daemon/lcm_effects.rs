@@ -33,7 +33,7 @@ struct LcmEffectControl {
 impl LcmEffectControl {
     fn new(deadline: Option<&Deadline>, cancellation: Option<&CancellationSignal>) -> Self {
         let budget = deadline
-            .and_then(crate::daemon_client::deadline_remaining)
+            .and_then(tracedecay_daemon_protocol::deadline_remaining)
             .map_or(LCM_EFFECT_CEILING, |remaining| {
                 remaining.min(LCM_EFFECT_CEILING)
             });
@@ -438,7 +438,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(
             db.recover_pending_session_relation_projections(
                 1,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -470,7 +470,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &restart_control,
                 ),
             )

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::daemon::DaemonHandshake;
+use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
 
@@ -212,7 +212,7 @@ fn map_cost_payloads(
 fn global_cost_handshake() -> Result<DaemonHandshake> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::config::discover_project_root(&cwd);
-    DaemonHandshake::for_current_client(project_root, None, false, false)
+    crate::daemon::handshake_for_current_client(project_root, None, false, false)
 }
 
 async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<serde_json::Value> {
