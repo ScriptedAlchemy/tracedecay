@@ -1933,6 +1933,36 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Returns the pass's service time so the caller can attach the same
     /// measurement to the canonical index-lifecycle observation.
+    /// Project one terminal source-reconcile outcome onto the installed
+    /// index lane. Graph seating is optional follow-up: a published generation
+    /// must leave this observation even when native-graph activation later
+    /// refuses, retries, or is cancelled by shutdown.
+    fn record_source_reconcile_observation(
+        observability: Option<&super::observability::CodeIndexObservabilityV1>,
+        pending_wake: &PendingWakeV1,
+        outcome: &CodeIndexReconcileOutcomeV1,
+        started_micros: i64,
+    ) {
+        let Some(observability) = observability else {
+            return;
+        };
+        let service_micros = now_micros().0.saturating_sub(started_micros).max(0) as u64;
+        // The pending slot coalesces at most one waiting wake, so the queue
+        // behind this pass is empty or singular.
+        let queue_depth_bucket = {
+            let state = pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.micros == 0 {
+                tracedecay_domain::QueueDepthBucketV1::Zero
+            } else {
+                tracedecay_domain::QueueDepthBucketV1::OneToEight
+            }
+        };
+        observability.record_reconcile_outcome(outcome, service_micros, queue_depth_bucket);
+    }
+
     fn record_reconcile_receipt(
         telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
         project_root: PathBuf,
@@ -2720,6 +2750,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 // reports a just-published current generation as refreshing,
                 // and every reader in that window serves it as stale.
                 drop(_reconcile_pass);
+                if let Ok(Ok(outcome)) = &source_result {
+                    Self::record_source_reconcile_observation(
+                        worker_index_observability.get(),
+                        &worker_pending_wake,
+                        outcome,
+                        started_micros,
+                    );
+                }
                 // A publication must first reopen and finish its own
                 // lightweight text owner: publication moved the durable
                 // pointer, so the prior owner is no longer authoritative even
@@ -3162,7 +3200,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             evidence,
                         );
                     }
-                    let service_micros = Self::record_reconcile_receipt(
+                    let _service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
                         arrival,
@@ -3170,26 +3208,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                         outcome,
                     );
-                    if let Some(observability) = worker_index_observability.get() {
-                        // The pending slot coalesces at most one waiting wake,
-                        // so the queue behind this pass is empty or singular.
-                        let queue_depth_bucket = {
-                            let state = worker_pending_wake
-                                .state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if state.micros == 0 {
-                                tracedecay_domain::QueueDepthBucketV1::Zero
-                            } else {
-                                tracedecay_domain::QueueDepthBucketV1::OneToEight
-                            }
-                        };
-                        observability.record_reconcile_outcome(
-                            outcome,
-                            service_micros,
-                            queue_depth_bucket,
-                        );
-                    }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
                     match &result {
@@ -3390,7 +3408,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<super::observability::CodeIndexObservabilityV1> {
-        let mounted = self.mounted.try_lock().ok()?;
+        let mounted = self.mounted.lock().await;
         unique_mounted_for_scope(&mounted, scope)
             .unique()
             .and_then(|(_, worktree)| worktree.index_observability.get().cloned())
@@ -4507,6 +4525,28 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()?;
         (text_matches_scope_identity(&latest, scope) && latest.text_serving_is_ready())
             .then_some(latest)
+    }
+
+    /// The queryable exact/lexical owner for one mounted root, if the
+    /// lightweight text slot has finished seating. Distinct from
+    /// [`Self::latest_generation_id`], which prefers the graph-bearing serving
+    /// slot and therefore stays on the previous generation until optional
+    /// graph activation finishes.
+    #[cfg(test)]
+    pub(in crate::daemon) async fn latest_text_serving_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCodeTextGenerationV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let text_generation = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&project_root)?.text_generation)
+        };
+        text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(LatestCodeTextGenerationV1::text_serving_is_ready)
     }
 
     /// Resolve graph-independent exact/lexical serving through the same cheap
