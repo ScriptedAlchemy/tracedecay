@@ -7,6 +7,7 @@ use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
 
+mod cursor_agent;
 mod provider_capabilities;
 
 use provider_capabilities::{

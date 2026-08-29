@@ -19,6 +19,7 @@ use crate::db::{
 };
 use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
 
+use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
 use super::{AuthoritativeSummary, SummaryResolutionError};
 
 /// One `session_messages` row offered to the recognizers.
@@ -259,6 +260,34 @@ pub(super) trait AuthoritativeSummarizerV1: Sync {
     ) -> AuthoritativeSummaryFuture;
 }
 
+struct CursorAgentSummarizerV1;
+
+impl AuthoritativeSummarizerV1 for CursorAgentSummarizerV1 {
+    fn summarize(
+        &self,
+        request: LcmSummaryRequest,
+        timeout: Duration,
+    ) -> AuthoritativeSummaryFuture {
+        Box::pin(cursor_agent_summary(request, timeout))
+    }
+}
+
+async fn cursor_agent_summary(
+    request: LcmSummaryRequest,
+    timeout: Duration,
+) -> Result<AuthoritativeSummary, SummaryResolutionError> {
+    let mut config = CursorAgentSummaryConfig::from_env();
+    config.timeout = config.timeout.min(timeout);
+    let text = tokio::task::spawn_blocking(move || summarize_with_cursor_agent(&request, &config))
+        .await
+        .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
+        .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?;
+    Ok(AuthoritativeSummary {
+        text,
+        route: "cursor_agent".to_string(),
+    })
+}
+
 struct CodexAppServerSummarizerV1;
 
 impl AuthoritativeSummarizerV1 for CodexAppServerSummarizerV1 {
@@ -298,8 +327,10 @@ async fn codex_app_server_summary(
 /// The on-demand summarizer registry. A provider absent from this table has no
 /// authoritative summarizer, which is what keeps its frontier pending instead
 /// of admitting a summary this daemon invented.
-const AUTHORITATIVE_SUMMARIZERS: &[(&str, &dyn AuthoritativeSummarizerV1)] =
-    &[("codex", &CodexAppServerSummarizerV1)];
+const AUTHORITATIVE_SUMMARIZERS: &[(&str, &dyn AuthoritativeSummarizerV1)] = &[
+    ("codex", &CodexAppServerSummarizerV1),
+    ("cursor", &CursorAgentSummarizerV1),
+];
 
 /// The summarizer registered for one provider, if any.
 pub(super) fn authoritative_summarizer(
