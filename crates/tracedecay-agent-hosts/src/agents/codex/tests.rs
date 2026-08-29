@@ -663,11 +663,12 @@ fn skill_tree_files(root: &Path) -> Vec<String> {
 }
 
 /// The composed Codex deploy set (sourced from the shared `plugin/` tree
-/// via `codex_files`) must cover every shared model-invocable skill and the
-/// 13 canonical `tracedecay-*` workflow dispatchers, plus Codex's manifest,
-/// `.mcp.json`, hooks, and README. Codex has no slash-command or
-/// `disable-model-invocation` surface, so it ships all skills in their
-/// canonical (model-invocable) form.
+/// via `codex_files`) must cover every file under `plugin/skills/` plus
+/// Codex's manifest, `.mcp.json`, hooks, and README. Codex has no
+/// slash-command or `disable-model-invocation` surface, so it ships all
+/// skills in their canonical (model-invocable) form. Workflow dispatch lives
+/// in native slash commands on other hosts; Codex does not ship those
+/// commands or retired `tracedecay-*` dispatcher skills.
 #[test]
 fn codex_embedded_file_list_covers_the_whole_source_bundle() {
     let deploy: std::collections::BTreeSet<String> = codex_embedded_plugin_files()
