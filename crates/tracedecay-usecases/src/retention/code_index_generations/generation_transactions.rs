@@ -457,9 +457,9 @@ pub(super) fn path_still_names_open_file(
             Err(error) => return Err(storage(error)),
         };
         let named_identity =
-            tracedecay_runtime_core::windows_file::information(&named).map_err(storage)?;
+            tracedecay_private_fs::windows_file::information(&named).map_err(storage)?;
         let opened_identity =
-            tracedecay_runtime_core::windows_file::information(opened).map_err(storage)?;
+            tracedecay_private_fs::windows_file::information(opened).map_err(storage)?;
         if named_identity.volume_serial_number != opened_identity.volume_serial_number
             || named_identity.file_index != opened_identity.file_index
             || named_identity.number_of_links != opened_identity.number_of_links

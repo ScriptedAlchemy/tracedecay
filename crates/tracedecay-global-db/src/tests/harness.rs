@@ -565,7 +565,7 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         use std::num::NonZeroUsize;
-        use tracedecay_runtime_core::background_cpu::{
+        use tracedecay_private_fs::background_cpu::{
             install_process_background_cpu, process_background_cpu,
         };
         use tracedecay_runtime_core::resident_memory::{

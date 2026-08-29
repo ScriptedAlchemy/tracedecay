@@ -3,7 +3,7 @@ name = "tracedecay-private-fs"
 version = "0.1.0"
 publish = false
 edition.workspace = true
-description = "Cross-platform owner-private filesystem authority for TraceDecay stores"
+description = "Cross-platform owner-private filesystem authority and process OS primitives for TraceDecay stores"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
@@ -13,9 +13,14 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces (isolated background CPU authorities) to dependent crates' test
+# builds. Never gates production code.
+test-helpers = []
 
 [dependencies]
 hotpath.workspace = true
+thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -235,4 +235,40 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn default_selects_catalog_model_and_enables_auto_download() {
+        let config = SemanticConfig::default();
+        config.validate().expect("default semantic config");
+        assert_eq!(
+            config.selected_model.as_deref(),
+            Some(DEFAULT_FASTEMBED_MODEL_ID)
+        );
+        assert!(config.auto_download);
+        assert!(config.active_profile.is_none());
+    }
+
+    #[test]
+    fn omitted_selected_model_defaults_to_the_catalog_id() {
+        let config: SemanticConfig = serde_json::from_str(
+            r#"{"auto_download":true,"active_profile":null,"rollback_profile":null}"#,
+        )
+        .expect("omitted selected_model");
+        config.validate().expect("omitted selected_model");
+        assert_eq!(
+            config.selected_model.as_deref(),
+            Some(DEFAULT_FASTEMBED_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn explicit_null_selected_model_disables_the_semantic_lane() {
+        let config: SemanticConfig = serde_json::from_str(
+            r#"{"selected_model":null,"auto_download":true,"active_profile":null,"rollback_profile":null}"#,
+        )
+        .expect("null selected_model");
+        config.validate().expect("disabled semantic lane");
+        assert!(config.selected_model.is_none());
+        assert!(config.auto_download);
+    }
 }

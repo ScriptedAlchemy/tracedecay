@@ -83,6 +83,7 @@ test-transport = ["tracedecay-runtime-core/test-transport"]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 fs2 = "0.4"
+same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true

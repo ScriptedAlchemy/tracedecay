@@ -473,13 +473,30 @@ fn schedule_decision_for_trigger(
             );
             // Identity-stand first: a deterministic failure stamped under the
             // current backend stays suppressed until that identity changes.
-            match deterministic_backend_failure_stands(record, config) {
-                Ok(true) => {
+            match deterministic_backend_failure_standing(record, config) {
+                Ok(BackendFailureStanding::Stands) => {
                     return Ok(AutomationScheduleDecision::skipped(
                         BACKEND_IDENTITY_SUPPRESSED,
                     ));
                 }
-                Ok(false) => {}
+                Ok(BackendFailureStanding::IdentityChanged) => {
+                    // The stamped backend/configuration is gone; the failure
+                    // is not evidence about the identity now in force, so the
+                    // task re-admits through the ordinary cooldown below.
+                }
+                Ok(BackendFailureStanding::NotSettled) => {
+                    // Denied is configuration/policy state and uses the
+                    // ordinary cooldown so a changed grant can recover without
+                    // a backend identity stamp. Other non-retryable failures
+                    // remain suppressed.
+                    if failure.is_non_retryable()
+                        && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
+                    {
+                        return Ok(AutomationScheduleDecision::skipped(
+                            "scheduler_non_retryable_failure",
+                        ));
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
@@ -487,16 +504,6 @@ fn schedule_decision_for_trigger(
                     );
                     return Err(error);
                 }
-            }
-            // Denied is configuration/policy state and uses the ordinary
-            // cooldown so a changed grant can recover without a backend identity
-            // stamp. Other non-retryable failures remain suppressed.
-            if failure.is_non_retryable()
-                && !matches!(failure.classification, Some(AgentTaskFailureClass::Denied))
-            {
-                return Ok(AutomationScheduleDecision::skipped(
-                    "scheduler_non_retryable_failure",
-                ));
             }
         }
         if retryable_cadence_terminal {
@@ -570,11 +577,26 @@ fn schedule_decision_for_trigger(
     Ok(AutomationScheduleDecision::due())
 }
 
-/// Whether `record` is a settled deterministic backend failure that still
-/// stands under the backend and configuration now in force.
+/// How a deterministic backend failure relates to the identity now in force.
+enum BackendFailureStanding {
+    /// Settled under the current backend identity: stays suppressed until
+    /// that identity changes.
+    Stands,
+    /// Stamped under a different backend identity: the failure is not
+    /// evidence about the identity now in force, so the task re-admits
+    /// through the ordinary failure cooldown.
+    IdentityChanged,
+    /// Not identity-scoped evidence at all: unstamped, not a deterministic
+    /// class, or the ladder did not reproduce a single class. The ordinary
+    /// retry policy for the failure class applies.
+    NotSettled,
+}
+
+/// Classify whether `record` is a settled deterministic backend failure that
+/// still stands under the backend and configuration now in force.
 ///
-/// Three facts must hold together, and each rules out a different kind of
-/// false positive:
+/// Three facts must hold together for [`BackendFailureStanding::Stands`], and
+/// each rules out a different kind of false positive:
 ///
 /// 1. The failure class is deterministic under a fixed backend and
 ///    configuration — typed Permanent only. Unavailable, Denied,
@@ -589,30 +611,34 @@ fn schedule_decision_for_trigger(
 ///    protocol, and the task is re-admitted on the next tick.
 ///
 /// A record with no stamped identity (written before the field existed) never
-/// suppresses: a failure that cannot be attributed to the current identity is
-/// not evidence about it. Hasher errors stay `Err` so callers cannot treat
-/// them as unstamped-legacy and silently re-admit.
-fn deterministic_backend_failure_stands(
+/// suppresses and never re-admits early: a failure that cannot be attributed
+/// to any identity is judged by its class alone. Hasher errors stay `Err` so
+/// callers cannot treat them as unstamped-legacy and silently re-admit.
+fn deterministic_backend_failure_standing(
     record: &AutomationRunLedgerRecord,
     config: &AutomationConfig,
-) -> Result<bool> {
+) -> Result<BackendFailureStanding> {
     let Some(classification) = record.error_classification else {
-        return Ok(false);
+        return Ok(BackendFailureStanding::NotSettled);
     };
     if !is_deterministic_failure_class(classification) {
-        return Ok(false);
+        return Ok(BackendFailureStanding::NotSettled);
+    }
+    let Some(recorded_identity) = record.backend_identity.as_deref() else {
+        return Ok(BackendFailureStanding::NotSettled);
+    };
+    if backend_identity(config)? != recorded_identity {
+        return Ok(BackendFailureStanding::IdentityChanged);
     }
     let ladder_reproduced_the_class = !record.backend_attempts.is_empty()
         && record.backend_attempts.iter().all(|attempt| {
             !attempt.succeeded && attempt.failure_classification == Some(classification)
         });
-    if !ladder_reproduced_the_class {
-        return Ok(false);
-    }
-    let Some(recorded_identity) = record.backend_identity.as_deref() else {
-        return Ok(false);
-    };
-    Ok(backend_identity(config)? == recorded_identity)
+    Ok(if ladder_reproduced_the_class {
+        BackendFailureStanding::Stands
+    } else {
+        BackendFailureStanding::NotSettled
+    })
 }
 
 /// The standing session-evidence budget-exhausted state for `task`, if any.

@@ -9,12 +9,12 @@ use tracedecay_domain::{
     CodeSearchChunkId, CompactCandidate, ComponentRevision, DiversityPolicy,
     EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
     EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, EvidenceRole,
-    ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusionProfile, LogicalEvidenceId,
-    ManifestDigest, PrincipalId, ProjectionKeyV1, PublicRetrieverStatus, QueryDigest,
-    QueryFallbackSubpayload, QueryMac, QueryNormalizationRevision, RetrievalAnchorId,
-    RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
+    ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, FusionProfile,
+    LogicalEvidenceId, ManifestDigest, PrincipalId, ProjectionKeyV1, PublicRetrieverStatus,
+    QueryDigest, QueryFallbackSubpayload, QueryMac, QueryNormalizationRevision, RankedCandidate,
+    RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
     SemanticSearchIndexKeyV1, SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness,
     SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1,
     VectorWatermark,
@@ -1111,20 +1111,42 @@ fn cancellation_and_deadline_are_rechecked_before_completion() {
 }
 
 fn fallback() -> Arc<QueryFallbackSubpayload> {
-    let mut fallback = QueryFallbackSubpayload {
-        profile_id: id("profile.query.fixture"),
-        ordered_candidates: Vec::new(),
-        public_fallback_lane_coverage: BTreeMap::from([
-            (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
-            (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
-            (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
-        ]),
-        freshness: Vec::new(),
-        cursor: None,
-        digest: digest('0'),
-    };
-    fallback.digest = fallback.compute_digest().expect("fallback digest");
-    Arc::new(fallback)
+    fallback_payload(Vec::new())
+}
+
+/// Query fallback that already carries exact/lexical/graph hits. Weak
+/// semantic confidence must return this payload, not an empty success.
+fn fallback_serving_nonempty_results() -> Arc<QueryFallbackSubpayload> {
+    fallback_payload(vec![RankedCandidate {
+        candidate: FusedCandidate {
+            anchor_id: id("anchor.exact-hit"),
+            logical_evidence_id: id("logical.exact-hit"),
+            occurrences: Vec::new(),
+            exact_class: ExactClass::Approximate,
+            utility_micros: 1,
+            contributions: Vec::new(),
+            freshness: Vec::new(),
+            decisions: Vec::new(),
+        },
+        final_ordinal: 0,
+    }])
+}
+
+fn fallback_payload(ordered_candidates: Vec<RankedCandidate>) -> Arc<QueryFallbackSubpayload> {
+    Arc::new(
+        QueryFallbackSubpayload::new(
+            id("profile.query.fixture"),
+            ordered_candidates,
+            BTreeMap::from([
+                (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+                (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+                (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
+            ]),
+            Vec::new(),
+            None,
+        )
+        .expect("valid query fallback"),
+    )
 }
 
 fn calibration(
@@ -1683,6 +1705,128 @@ fn calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores()
             ..
         }
     ));
+}
+
+#[test]
+fn below_acceptance_threshold_abstains_and_keeps_fallback_results() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    // Query embedding is [1, 0]; this hit is orthogonal (cosine 0, distance 1e9).
+    let vectors = FakeVectorReadPort::new(
+        &request,
+        vec![record(&request, "orthogonal", vec![0.0, 1.0])],
+    );
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let generation = complete_generation(&request);
+    // Tight measured bound: any non-identical hit is below acceptance.
+    let calibration = calibration(&request, 100_000_000, 0);
+    let fallback = fallback_serving_nonempty_results();
+    let fallback_identity = Arc::as_ptr(&fallback);
+    let served_anchors = fallback
+        .ordered_candidates
+        .iter()
+        .map(|ranked| ranked.candidate.anchor_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(served_anchors, vec!["anchor.exact-hit"]);
+
+    let outcome = CalibratedSemanticQueryService::new(&lane)
+        .execute(
+            SemanticLaneReadinessV1::Ready {
+                request: &request,
+                generation: &generation,
+                calibration: Some(&calibration),
+            },
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
+            Arc::clone(&fallback),
+        )
+        .expect("weak semantic confidence uses the declared fallback");
+
+    let SemanticQueryServiceOutcomeV1::Fallback {
+        abstention,
+        fallback: returned,
+    } = outcome
+    else {
+        panic!("below-threshold semantic must abstain, not augment");
+    };
+    assert_eq!(abstention, SemanticAbstentionV1::BelowAcceptanceThreshold);
+    assert_eq!(
+        Arc::as_ptr(&returned),
+        fallback_identity,
+        "fallback is the exact same owned payload"
+    );
+    assert_eq!(
+        returned
+            .ordered_candidates
+            .iter()
+            .map(|ranked| ranked.candidate.anchor_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["anchor.exact-hit"],
+        "exact/lexical/graph hits must still be returned"
+    );
+    returned.validate().expect("fallback remains byte-valid");
+}
+
+#[test]
+fn foreign_projection_or_capability_calibration_is_shifted() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, vec![record(&request, "one", vec![1.0, 0.0])]);
+    let control = FixedExecutionControl::default();
+    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let generation = complete_generation(&request);
+    let fallback = fallback_serving_nonempty_results();
+
+    let mut foreign_projection = calibration(&request, 100_000_000, 0);
+    foreign_projection.projection_key.profile_digest = digest('6');
+    let mut foreign_capability = calibration(&request, 100_000_000, 0);
+    foreign_capability.capability_manifest_digest = digest('5');
+
+    for (label, shifted) in [
+        ("projection_key", foreign_projection),
+        ("capability_manifest_digest", foreign_capability),
+    ] {
+        let outcome = CalibratedSemanticQueryService::new(&lane)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&shifted),
+                },
+                SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
+                Arc::clone(&fallback),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{label} mismatch must be a typed abstention: {error:?}")
+            });
+        let SemanticQueryServiceOutcomeV1::Fallback {
+            abstention,
+            fallback: returned,
+        } = outcome
+        else {
+            panic!("{label} mismatch must not silently reuse the seated calibration");
+        };
+        assert_eq!(
+            abstention,
+            SemanticAbstentionV1::CalibrationShifted,
+            "{label}"
+        );
+        assert_eq!(
+            returned
+                .ordered_candidates
+                .iter()
+                .map(|ranked| ranked.candidate.anchor_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anchor.exact-hit"],
+            "{label} must still serve exact/lexical/graph results"
+        );
+        assert_eq!(embedder.calls.get(), 0, "{label} must not embed");
+        assert_eq!(vectors.scans.get(), 0, "{label} must not scan");
+    }
 }
 
 #[test]

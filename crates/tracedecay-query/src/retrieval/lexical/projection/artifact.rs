@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn builder_sorter_statements_hold_their_weighted_cpu_width() {
         let worker_width = tracedecay_code_index::parallelism::indexing_workers();
-        let authority = tracedecay_runtime_core::background_cpu::install_process_background_cpu(
+        let authority = tracedecay_private_fs::background_cpu::install_process_background_cpu(
             NonZeroUsize::new(worker_width).expect("nonzero code-index worker width"),
         )
         .expect("install matching process background CPU authority");

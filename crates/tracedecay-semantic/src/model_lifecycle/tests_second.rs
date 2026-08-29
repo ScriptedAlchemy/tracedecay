@@ -855,9 +855,61 @@
     fn disabling_semantics_skips_startup_queue() {
         let root = tempfile::tempdir().unwrap();
         let owner = SemanticModelLifecycleOwnerV1::open_default(root.path()).unwrap();
-        owner.select_model(None, false).unwrap();
+        // Product default is auto_download: true; None still disables the lane.
+        owner.select_model(None, true).unwrap();
+        let status = owner.status();
         assert!(!owner.enqueue_startup_acquisition_if_needed());
-        assert!(owner.status().selected_model.is_none());
+        assert!(status.selected_model.is_none());
+        assert!(status.state.is_none());
+        assert!(status.semantics_omitted);
+        assert!(status.auto_download);
+    }
+
+    #[test]
+    fn hermetic_download_failure_reports_failed_not_warming() {
+        struct RefusedNetworkSource;
+
+        impl ModelMemberSourceV1 for RefusedNetworkSource {
+            fn fetch_member(
+                &self,
+                _model: &CatalogedFastEmbedModelV1,
+                _upstream_path: &str,
+                _destination: &Path,
+            ) -> Result<(), ModelLifecycleErrorV1> {
+                Err(ModelLifecycleErrorV1::DownloadFailedWithReason(
+                    "connection refused to unroutable endpoint 192.0.2.1".to_owned(),
+                ))
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(RefusedNetworkSource),
+        )
+        .unwrap();
+        owner.select_model(Some(&model_id), true).unwrap();
+        assert!(owner.enqueue_startup_acquisition_if_needed());
+        assert_eq!(
+            join_background_acquisition(&owner),
+            Err(ModelLifecycleErrorV1::DownloadFailed)
+        );
+
+        let status = owner.status();
+        let Some(SemanticModelLifecycleStateV1::Failed {
+            detail,
+            retryable,
+            ..
+        }) = &status.state
+        else {
+            panic!("failed download must be Failed, not warming: {status:?}");
+        };
+        assert!(*retryable);
+        assert!(detail.contains("unroutable"));
+        assert!(status.semantics_omitted);
     }
 
     #[test]

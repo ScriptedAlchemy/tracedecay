@@ -686,7 +686,7 @@ fn hash_file_identity(
     // is unchanged.
     let file =
         std::fs::File::open(path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    let information = tracedecay_runtime_core::windows_file::information(&file)
+    let information = tracedecay_private_fs::windows_file::information(&file)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     hasher.update(information.volume_serial_number.to_le_bytes());
     hasher.update(information.file_index.to_le_bytes());
