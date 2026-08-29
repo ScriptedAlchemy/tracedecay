@@ -397,9 +397,39 @@ pub(crate) enum TextFileMutation {
     Remove,
 }
 
+/// Whether a mutating transaction leaves a `.bak` of the observed bytes.
+#[derive(Clone, Copy)]
+enum MutationBackup {
+    /// Prompt/rule files: publish without a recovery copy.
+    None,
+    /// Structured host configs: every rewrite or removal of an existing file
+    /// leaves a `.bak` the operator can restore (issue #63).
+    BackupExisting,
+}
+
 /// Run a strict UTF-8 read-transform-mutate while holding the host-file lock.
 pub(crate) fn update_text_file_transactionally<T>(
     path: &Path,
+    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
+) -> Result<T> {
+    update_file_transactionally(path, MutationBackup::None, update)
+}
+
+/// [`update_text_file_transactionally`] for structured host configs
+/// (JSON/JSONC/TOML): identical read-under-lock → transform →
+/// publish-from-snapshot shape, except that rewriting or removing an existing
+/// file first leaves a `.bak` recovery copy whose path is threaded into the
+/// publish error hint.
+pub(crate) fn update_config_file_transactionally<T>(
+    path: &Path,
+    update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
+) -> Result<T> {
+    update_file_transactionally(path, MutationBackup::BackupExisting, update)
+}
+
+fn update_file_transactionally<T>(
+    path: &Path,
+    backup: MutationBackup,
     update: impl FnOnce(&str) -> Result<(T, TextFileMutation)>,
 ) -> Result<T> {
     let _lock = lock_host_file_write(path)?;
@@ -415,13 +445,21 @@ pub(crate) fn update_text_file_transactionally<T>(
         None => "",
     };
     let (output, mutation) = update(existing)?;
+    let backup = match (&mutation, backup, &observed) {
+        (TextFileMutation::Unchanged, _, _)
+        | (_, MutationBackup::None, _)
+        | (_, MutationBackup::BackupExisting, HostFileSnapshot::Missing) => None,
+        (_, MutationBackup::BackupExisting, HostFileSnapshot::Present { .. }) => {
+            super::backup_config_file(path)?
+        }
+    };
     match mutation {
         TextFileMutation::Unchanged => {}
         TextFileMutation::Write(replacement) => {
             safe_write_bytes_file_from_snapshot(
                 path,
                 replacement.as_bytes(),
-                None,
+                backup.as_deref(),
                 None,
                 &observed,
             )?;
