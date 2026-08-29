@@ -591,9 +591,8 @@ fn removal_store_error(error: NativeIntegrationStoreError) -> WorktreeCleanupRem
         NativeIntegrationStoreError::DurabilityUncertain => {
             WorktreeCleanupRemovalV1::DurabilityUncertain
         }
-        NativeIntegrationStoreError::Unavailable | NativeIntegrationStoreError::ResetRequired => {
-            WorktreeCleanupRemovalV1::Unavailable
-        }
+        NativeIntegrationStoreError::Unavailable(_)
+        | NativeIntegrationStoreError::ResetRequired => WorktreeCleanupRemovalV1::Unavailable,
     }
 }
 

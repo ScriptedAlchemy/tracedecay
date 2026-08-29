@@ -10,7 +10,8 @@ use tracedecay_store::{
 };
 
 use super::GlobalDbNativeIntegrationStore;
-use super::store::{commit_outcome, decode, encode, invalid, invalid_domain, text, unavailable};
+use super::store::{decode, encode, invalid, invalid_domain, text, unavailable};
+use crate::sqlite_persist::{commit_outcome, replay_if_equal, require_single_cas_row};
 
 impl GlobalDbNativeIntegrationStore<'_> {
     #[hotpath::measure(
@@ -79,7 +80,12 @@ impl GlobalDbNativeIntegrationStore<'_> {
             )))
         }
         .await;
-        commit_outcome(transaction, outcome).await
+        commit_outcome(
+            transaction,
+            outcome,
+            NativeIntegrationStoreError::Unavailable,
+        )
+        .await
     }
 
     pub async fn read_worktree_cleanup(
@@ -103,7 +109,9 @@ impl GlobalDbNativeIntegrationStore<'_> {
         limit: u32,
     ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
         if limit == 0 {
-            return Err(NativeIntegrationStoreError::Unavailable);
+            return Err(NativeIntegrationStoreError::unavailable(
+                "pending worktree cleanup limit must be non-zero",
+            ));
         }
         let snapshot = self.read_snapshot().await?;
         let query_limit = i64::from(limit).saturating_add(1);
@@ -126,9 +134,11 @@ impl GlobalDbNativeIntegrationStore<'_> {
         hotpath::gauge!("global_db.native_integration.cleanup.pending_rows")
             .inc(pending.len() as u64);
         if pending.len()
-            > usize::try_from(limit).map_err(|_| NativeIntegrationStoreError::Unavailable)?
+            > usize::try_from(limit).map_err(NativeIntegrationStoreError::unavailable)?
         {
-            return Err(NativeIntegrationStoreError::Unavailable);
+            return Err(NativeIntegrationStoreError::unavailable(
+                "pending worktree cleanup page exceeded the requested limit",
+            ));
         }
         Ok(pending)
     }
@@ -163,13 +173,16 @@ impl GlobalDbNativeIntegrationStore<'_> {
             }
             let changed =
                 update_cleanup(&transaction, &replacement, expected_phase_revision).await?;
-            if changed != 1 {
-                return Err(NativeIntegrationStoreError::StatusConflict);
-            }
+            require_single_cas_row(changed, NativeIntegrationStoreError::StatusConflict)?;
             Ok(replacement)
         }
         .await;
-        commit_outcome(transaction, outcome).await
+        commit_outcome(
+            transaction,
+            outcome,
+            NativeIntegrationStoreError::Unavailable,
+        )
+        .await
     }
 
     #[hotpath::measure(
@@ -194,11 +207,11 @@ impl GlobalDbNativeIntegrationStore<'_> {
                     .await?
                     .ok_or(NativeIntegrationStoreError::CleanupReceiptConflict)?;
             if let Some(existing) = existing_receipt {
-                return if existing == receipt {
-                    Ok(existing)
-                } else {
-                    Err(NativeIntegrationStoreError::CleanupReceiptConflict)
-                };
+                return replay_if_equal(
+                    existing,
+                    &receipt,
+                    NativeIntegrationStoreError::CleanupReceiptConflict,
+                );
             }
             if !cleanup_transition_matches(&current, expected_phase_revision, &receipt.transaction)
                 || receipt.transaction.phase != NativeWorktreeCleanupPhaseV1::Terminal
@@ -207,9 +220,7 @@ impl GlobalDbNativeIntegrationStore<'_> {
             }
             let changed =
                 update_cleanup(&transaction, &receipt.transaction, expected_phase_revision).await?;
-            if changed != 1 {
-                return Err(NativeIntegrationStoreError::StatusConflict);
-            }
+            require_single_cas_row(changed, NativeIntegrationStoreError::StatusConflict)?;
             transaction
                 .execute(
                     "INSERT INTO native_worktree_cleanup_receipts
@@ -233,7 +244,12 @@ impl GlobalDbNativeIntegrationStore<'_> {
             Ok(receipt)
         }
         .await;
-        commit_outcome(transaction, outcome).await
+        commit_outcome(
+            transaction,
+            outcome,
+            NativeIntegrationStoreError::Unavailable,
+        )
+        .await
     }
 }
 

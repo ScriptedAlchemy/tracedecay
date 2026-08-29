@@ -32,10 +32,16 @@ pub enum GitIndexTransactionStoreError {
     ReceiptConflict,
     #[error("git index transaction repository is quarantined pending inspection")]
     RepositoryQuarantined,
-    #[error("git index transaction store is unavailable")]
-    Unavailable,
+    #[error("git index transaction store is unavailable: {0}")]
+    Unavailable(String),
     #[error("git index transaction store data is invalid: {0}")]
     InvalidData(String),
+}
+
+impl GitIndexTransactionStoreError {
+    pub fn unavailable(source: impl std::fmt::Display) -> Self {
+        Self::Unavailable(source.to_string())
+    }
 }
 
 impl From<DomainError> for GitIndexTransactionStoreError {

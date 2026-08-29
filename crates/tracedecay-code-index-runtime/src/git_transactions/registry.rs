@@ -46,7 +46,9 @@ impl GitIndexTransactionStoreRegistry {
         database: RegisteredGlobalDbLeaseV1,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(GitIndexTransactionStoreError::Unavailable);
+            return Err(GitIndexTransactionStoreError::unavailable(
+                "git index transaction store registry is shut down",
+            ));
         }
         // The registered runtime authority already supplies the canonical
         // database identity. Avoid a second filesystem lookup because a fresh
@@ -55,9 +57,11 @@ impl GitIndexTransactionStoreRegistry {
         let mut stores = self
             .stores
             .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+            .map_err(GitIndexTransactionStoreError::unavailable)?;
         if self.closed.load(Ordering::SeqCst) {
-            return Err(GitIndexTransactionStoreError::Unavailable);
+            return Err(GitIndexTransactionStoreError::unavailable(
+                "git index transaction store registry is shut down",
+            ));
         }
         if let Some(existing) = stores.get(&path) {
             return Ok(existing.clone());
@@ -75,7 +79,7 @@ impl GitIndexTransactionStoreRegistry {
         let mut stores = self
             .stores
             .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+            .map_err(GitIndexTransactionStoreError::unavailable)?;
         stores.remove(path);
         Ok(())
     }
@@ -87,7 +91,7 @@ impl GitIndexTransactionStoreRegistry {
             let mut retained = self
                 .stores
                 .lock()
-                .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+                .map_err(GitIndexTransactionStoreError::unavailable)?;
             retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
         };
         tokio::task::spawn_blocking(move || {
@@ -98,6 +102,6 @@ impl GitIndexTransactionStoreRegistry {
             Ok(joined)
         })
         .await
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+        .map_err(GitIndexTransactionStoreError::unavailable)?
     }
 }

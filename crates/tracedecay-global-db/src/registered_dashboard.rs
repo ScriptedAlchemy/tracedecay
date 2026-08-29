@@ -31,20 +31,17 @@ fn profile_store_path_is_contained(
     {
         return false;
     }
-    let Ok(canonical_profile) = profile_root.canonicalize() else {
+    let Some(canonical_profile) =
+        tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(profile_root)
+    else {
         return false;
     };
     let target_exists = data_root.exists();
-    let mut existing = data_root;
-    while !existing.exists() {
-        let Some(parent) = existing.parent() else {
-            return false;
-        };
-        existing = parent;
-    }
-    existing.canonicalize().is_ok_and(|path| {
-        path.starts_with(&canonical_profile) && (!target_exists || path != canonical_profile)
-    })
+    let Some(path) = tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(data_root)
+    else {
+        return false;
+    };
+    path.starts_with(&canonical_profile) && (!target_exists || path != canonical_profile)
 }
 
 impl RegisteredGlobalDb {

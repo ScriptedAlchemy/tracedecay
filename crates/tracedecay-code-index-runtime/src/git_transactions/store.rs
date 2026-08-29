@@ -125,7 +125,9 @@ impl ActorDatabase {
                 .fail_purge
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
-                return Err(GitIndexTransactionStoreError::Unavailable);
+                return Err(GitIndexTransactionStoreError::unavailable(
+                    "injected preview-input purge failure",
+                ));
             }
         }
         self.git_index_transaction_store()
@@ -172,12 +174,16 @@ impl DaemonGitIndexTransactionStore {
                     .enable_all()
                     .build();
                 let Ok(runtime) = runtime else {
-                    let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
+                    let _ = ready.send(Err(GitIndexTransactionStoreError::unavailable(
+                        "failed to start git index store runtime",
+                    )));
                     return;
                 };
                 let next_expiry = runtime.block_on(database.next_live_preview_input_expiry());
                 let Ok(next_expiry) = next_expiry else {
-                    let _ = ready.send(Err(GitIndexTransactionStoreError::Unavailable));
+                    let _ = ready.send(Err(GitIndexTransactionStoreError::unavailable(
+                        "failed to read next live preview input expiry",
+                    )));
                     return;
                 };
                 if ready.send(Ok(())).is_err() {
@@ -185,10 +191,10 @@ impl DaemonGitIndexTransactionStore {
                 }
                 run_store_actor(&runtime, &database, &receiver, next_expiry);
             })
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+            .map_err(GitIndexTransactionStoreError::unavailable)?;
         let startup = started
             .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)
+            .map_err(GitIndexTransactionStoreError::unavailable)
             .and_then(|result| result);
         if let Err(error) = startup {
             drop(commands);
@@ -210,13 +216,15 @@ impl DaemonGitIndexTransactionStore {
     fn submit(&self, command: StoreCommand) -> GitIndexTransactionStoreResult<()> {
         self.commands
             .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .map_err(GitIndexTransactionStoreError::unavailable)?
             .as_ref()
-            .ok_or(GitIndexTransactionStoreError::Unavailable)?
+            .ok_or_else(|| {
+                GitIndexTransactionStoreError::unavailable("git index store actor is shut down")
+            })?
             .try_send(command)
             .map_err(|error| match error {
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    GitIndexTransactionStoreError::Unavailable
+                    GitIndexTransactionStoreError::unavailable(error)
                 }
             })
     }
@@ -228,7 +236,7 @@ impl DaemonGitIndexTransactionStore {
             .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
             .map_err(|error| match error {
                 RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected => {
-                    GitIndexTransactionStoreError::Unavailable
+                    GitIndexTransactionStoreError::unavailable(error)
                 }
             })?
     }
@@ -245,19 +253,19 @@ impl DaemonGitIndexTransactionStore {
     pub fn shutdown(&self) -> GitIndexTransactionStoreResult<bool> {
         self.commands
             .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .map_err(GitIndexTransactionStoreError::unavailable)?
             .take();
         let worker = self
             .worker
             .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .map_err(GitIndexTransactionStoreError::unavailable)?
             .take();
         let Some(worker) = worker else {
             return Ok(false);
         };
-        worker
-            .join()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        worker.join().map_err(|_| {
+            GitIndexTransactionStoreError::unavailable("git index store worker panicked")
+        })?;
         Ok(true)
     }
 }
@@ -318,7 +326,9 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
         match self.execute_code_read(CodeReadOperationV1::Preview(preview_id.clone()))? {
             CodeReadResultV1::Preview(preview) => Ok(*preview),
-            _ => Err(GitIndexTransactionStoreError::Unavailable),
+            _ => Err(GitIndexTransactionStoreError::unavailable(
+                "git index store returned an unexpected read result",
+            )),
         }
     }
 
@@ -330,7 +340,9 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             idempotency_key.clone(),
         ))? {
             CodeReadResultV1::TransactionRecord(record) => Ok(*record),
-            _ => Err(GitIndexTransactionStoreError::Unavailable),
+            _ => Err(GitIndexTransactionStoreError::unavailable(
+                "git index store returned an unexpected read result",
+            )),
         }
     }
 
@@ -380,7 +392,9 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             },
         ))? {
             CodeReadResultV1::RecoveryCandidates(page) => Ok(page.records),
-            _ => Err(GitIndexTransactionStoreError::Unavailable),
+            _ => Err(GitIndexTransactionStoreError::unavailable(
+                "git index store returned an unexpected read result",
+            )),
         }
     }
 
@@ -392,7 +406,9 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
             },
         ))? {
             CodeReadResultV1::RecoveryRepositories(page) => Ok(page.repositories),
-            _ => Err(GitIndexTransactionStoreError::Unavailable),
+            _ => Err(GitIndexTransactionStoreError::unavailable(
+                "git index store returned an unexpected read result",
+            )),
         }
     }
 
@@ -596,7 +612,8 @@ fn duration_until(expires_at: UtcMicros, observed_at: UtcMicros) -> Duration {
 }
 
 fn reject_store_command(command: StoreCommand) {
-    let error = || GitIndexTransactionStoreError::Unavailable;
+    let error =
+        || GitIndexTransactionStoreError::unavailable("git index store actor rejected the command");
     match command {
         StoreCommand::SavePreviewInput(_, reply) => {
             let _ = reply.send(Err(error()));
@@ -634,9 +651,9 @@ fn reject_store_command(command: StoreCommand) {
 fn current_utc_micros() -> GitIndexTransactionStoreResult<UtcMicros> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-    let micros = i64::try_from(elapsed.as_micros())
-        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        .map_err(GitIndexTransactionStoreError::unavailable)?;
+    let micros =
+        i64::try_from(elapsed.as_micros()).map_err(GitIndexTransactionStoreError::unavailable)?;
     Ok(UtcMicros(micros))
 }
 
@@ -946,10 +963,11 @@ mod gc_tests {
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
 
-        assert_eq!(
+        assert!(matches!(
             store.read_preview_input(&preview_id, current_utc_micros().expect("clock")),
-            Err(GitIndexTransactionStoreError::Unavailable)
-        );
+            Err(GitIndexTransactionStoreError::Unavailable(reason))
+                if reason.contains("injected preview-input purge failure")
+        ));
         assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 2);
 
         observer.fail_purge.store(false, Ordering::SeqCst);
