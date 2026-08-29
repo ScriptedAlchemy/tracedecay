@@ -189,32 +189,33 @@ fn classify_project_root(
     project_id: &str,
     reject_ephemeral_root: bool,
 ) -> (RegistryOrphanRelinkStatus, Option<String>, PathBuf) {
-    let canonical_root = match project_root.canonicalize() {
-        Ok(root) if root.is_dir() => root,
-        Ok(root) => {
-            return (
-                RegistryOrphanRelinkStatus::Blocked,
-                Some(format!(
-                    "project root '{}' is not a directory",
-                    root.display()
-                )),
-                root,
-            );
-        }
-        Err(error) => {
-            return (
-                RegistryOrphanRelinkStatus::Stale,
-                Some(format!(
-                    "project root '{}' is unavailable: {error}",
-                    project_root.display()
-                )),
-                project_root.to_path_buf(),
-            );
-        }
-    };
-    let temp_root = std::env::temp_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::temp_dir());
+    let canonical_root =
+        match tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(project_root) {
+            Some(root) if root.is_dir() => root,
+            Some(root) if root.exists() => {
+                return (
+                    RegistryOrphanRelinkStatus::Blocked,
+                    Some(format!(
+                        "project root '{}' is not a directory",
+                        root.display()
+                    )),
+                    root,
+                );
+            }
+            _ => {
+                return (
+                    RegistryOrphanRelinkStatus::Stale,
+                    Some(format!(
+                        "project root '{}' is unavailable",
+                        project_root.display()
+                    )),
+                    project_root.to_path_buf(),
+                );
+            }
+        };
+    let temp_root = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+        &std::env::temp_dir(),
+    );
     if reject_ephemeral_root && canonical_root.starts_with(temp_root) {
         return (
             RegistryOrphanRelinkStatus::Stale,
