@@ -15,7 +15,7 @@ use crate::daemon::project_open_owners::{
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
-use crate::runtime_telemetry::{GenerationCensusSnapshot, GenerationCensusUnavailableReason};
+use tracedecay_usecases::runtime_telemetry::{GenerationCensusSnapshot, GenerationCensusUnavailableReason};
 use crate::tracedecay::TraceDecay;
 
 #[tokio::test]

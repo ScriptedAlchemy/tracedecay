@@ -148,7 +148,7 @@ pub(crate) async fn handle_runtime(
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
-    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
+    generation_census_reader: Option<&tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {
     let authority_audit = args
         .get("authority_audit")

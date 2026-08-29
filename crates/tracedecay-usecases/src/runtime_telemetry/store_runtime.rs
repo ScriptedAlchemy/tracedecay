@@ -99,8 +99,8 @@ pub struct RuntimeRegistryWriterSnapshot {
 }
 
 impl RuntimeRegistrySnapshot {
-    pub(super) fn from_projection(
-        projection: crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection,
+    pub fn from_projection(
+        projection: tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection,
     ) -> Self {
         let aggregate = &projection.aggregate;
         let shards = projection
@@ -164,7 +164,7 @@ impl RuntimeRegistrySnapshot {
 
 impl RuntimeRegistryShardSnapshot {
     fn from_telemetry(
-        telemetry: &crate::daemon::store_runtime::telemetry::ShardRuntimeTelemetry,
+        telemetry: &tracedecay_runtime_core::store_runtime::telemetry::ShardRuntimeTelemetry,
     ) -> Self {
         Self {
             binding: telemetry.binding.clone(),
@@ -226,13 +226,13 @@ fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'
 }
 
 fn runtime_health_label(
-    health: crate::daemon::store_runtime::shard::ShardRuntimeHealth,
+    health: tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth,
 ) -> &'static str {
     match health {
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
+        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
+        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
+        tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
     }
 }
 

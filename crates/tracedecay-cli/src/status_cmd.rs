@@ -166,11 +166,11 @@ async fn handle_status_command_within(
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
-            let snapshot: tracedecay::runtime_telemetry::RuntimeSnapshot =
+            let snapshot: tracedecay_usecases::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
                 "{}",
-                tracedecay::runtime_telemetry::to_text_report(&snapshot)
+                tracedecay_usecases::runtime_telemetry::to_text_report(&snapshot)
             );
         }
         return Ok(());
@@ -191,7 +191,7 @@ async fn handle_status_command_within(
     // the same Rust contracts (`GenerationCensusSnapshot`,
     // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
     // failure rather than a silently defaulted table.
-    let census: tracedecay::runtime_telemetry::GenerationCensusSnapshot =
+    let census: tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot =
         serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
             || tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "daemon status response omitted graph_statistics".to_string(),

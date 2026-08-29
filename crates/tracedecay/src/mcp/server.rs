@@ -333,7 +333,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<crate::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,

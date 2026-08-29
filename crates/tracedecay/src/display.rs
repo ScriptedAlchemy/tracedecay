@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 
 use crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
-use crate::runtime_telemetry::GenerationCensusSnapshot;
+use tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 
 /// Formats a token count as a compact string (e.g. "1.2M", "45.3k").
