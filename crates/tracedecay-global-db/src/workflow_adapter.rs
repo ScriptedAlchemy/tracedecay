@@ -8,7 +8,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
@@ -22,7 +22,7 @@ use tracedecay_sessions::runtime::workflow_state::{WorkflowStateItem, list_unfin
 
 /// Borrowed adapter over an already-open project-sessions database.
 /// The holder `D` is generic so callers that own a
-/// [`tracedecay_global_db::RegisteredGlobalDbLeaseV1`]
+/// [`crate::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked
@@ -35,7 +35,7 @@ impl<D> GlobalDbWorkflowStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    pub(crate) const fn new(db: D) -> Self {
+    pub const fn new(db: D) -> Self {
         Self { db }
     }
 
@@ -43,7 +43,7 @@ where
         self.db.borrow()
     }
 
-    pub(crate) fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
+    pub fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
         matches!(
             &self.db().binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions {
@@ -52,7 +52,7 @@ where
         )
     }
 
-    pub(crate) async fn read_ingest_watermark(&self) -> Option<i64> {
+    pub async fn read_ingest_watermark(&self) -> Option<i64> {
         let Ok(snapshot) = self.db().read_snapshot().await else {
             return None;
         };
@@ -61,8 +61,8 @@ where
         Some(read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await)
     }
 
-    #[hotpath::measure(label = "store.workflow.upsert_run", future = true)]
-    pub(crate) async fn upsert_workflow_run(
+    #[hotpath::measure(label = "global_db.workflow.upsert_run", future = true)]
+    pub async fn upsert_workflow_run(
         &self,
         run: &WorkflowRun,
         agents: &[WorkflowAgent],
@@ -79,7 +79,7 @@ where
         WorkflowIngestWriteTxn::commit(transaction).await
     }
 
-    pub(crate) async fn bump_ingest_watermark(&self, value: i64) {
+    pub async fn bump_ingest_watermark(&self, value: i64) {
         let Ok(transaction) = self.db().begin_write_transaction().await else {
             tracing::debug!("workflow ingest writer unavailable");
             return;
@@ -103,8 +103,8 @@ where
         }
     }
 
-    #[hotpath::measure(label = "store.workflow.index_snapshot", future = true)]
-    pub(crate) async fn open_workflow_index_snapshot(
+    #[hotpath::measure(label = "global_db.workflow.index_snapshot", future = true)]
+    pub async fn open_workflow_index_snapshot(
         &self,
     ) -> Result<RegisteredWorkflowIndexSnapshot, WorkflowIndexError> {
         if !matches!(
@@ -127,7 +127,7 @@ where
     /// that already resolved (or must isolate) that root do not re-derive it
     /// from the operator's real home.
     #[cfg(test)]
-    pub(crate) async fn ingest_workflow_runs_from(
+    pub async fn ingest_workflow_runs_from(
         &self,
         project_id: &ProjectId,
         project_root: &Path,
@@ -137,8 +137,8 @@ where
     }
 
     /// Unfinished-run evidence listing, read at one pinned generation.
-    #[hotpath::measure(label = "store.workflow.list_unfinished", future = true)]
-    pub(crate) async fn list_unfinished_workflows(
+    #[hotpath::measure(label = "global_db.workflow.list_unfinished", future = true)]
+    pub async fn list_unfinished_workflows(
         &self,
         limit: usize,
     ) -> Result<Vec<WorkflowStateItem>, String> {

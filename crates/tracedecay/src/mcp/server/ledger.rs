@@ -527,7 +527,7 @@ impl McpServer {
                 ts,
                 source: SpanSource::HookRoute,
             };
-            if let Err(e) = crate::store::GlobalDbGitCorrelationStore::new(db)
+            if let Err(e) = tracedecay_global_db::GlobalDbGitCorrelationStore::new(db)
                 .record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await
             {

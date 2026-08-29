@@ -8,8 +8,10 @@ use tracedecay_store::{
     TranscriptWriteBatch, TranscriptWriteKind,
 };
 
-use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
-use crate::store::{GlobalDbGitCorrelationStore, TranscriptIngestStore};
+use tracedecay_global_db::{
+    GlobalDbGitCorrelationStore, RegisteredGlobalDb, TranscriptPersistenceError,
+};
+use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 
 /// Transcript-store adapter over an already-open authoritative
@@ -19,7 +21,7 @@ use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObs
 /// authority checks, and all transaction begin/commit/rollback decisions stay
 /// in the registered database implementation.
 /// The holder `D` is generic so callers that own a
-/// [`tracedecay_global_db::RegisteredGlobalDbLeaseV1`]
+/// [`crate::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked
@@ -173,7 +175,7 @@ impl<D> TranscriptStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::measure(label = "store.get_parse_offset", future = true)]
+    #[hotpath::measure(label = "usecases.transcript_store.get_parse_offset", future = true)]
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
@@ -183,7 +185,7 @@ where
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
-    #[hotpath::measure(label = "store.persist_transcript_batch", future = true)]
+    #[hotpath::measure(label = "usecases.transcript_store.persist_transcript_batch", future = true)]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
@@ -213,7 +215,7 @@ where
                     .await
                     .map_err(|error| Self::persistence_error(first.0, error))
             },
-            label = "store.replace_parse_offset_pair"
+            label = "usecases.transcript_store.replace_parse_offset_pair"
         )
     }
 
@@ -229,7 +231,7 @@ where
                     .await
                     .map_err(|error| Self::persistence_error(cursor_path, error))
             },
-            label = "store.advance_parse_offset"
+            label = "usecases.transcript_store.advance_parse_offset"
         )
     }
 
@@ -241,9 +243,9 @@ where
     ) -> impl Future<Output = ()> + Send {
         hotpath::future!(
             async move {
-                tracedecay_usecases::event_lane::publish(
+                crate::event_lane::publish(
                     self.db(),
-                    tracedecay_usecases::event_lane::ActivityFamilyV1::SessionIngest,
+                    crate::event_lane::ActivityFamilyV1::SessionIngest,
                     project_root,
                     None,
                     units,
@@ -251,11 +253,11 @@ where
                 )
                 .await;
             },
-            label = "store.record_session_ingest_activity"
+            label = "usecases.transcript_store.record_session_ingest_activity"
         )
     }
 
-    #[hotpath::measure(label = "store.get_session", future = true)]
+    #[hotpath::measure(label = "usecases.transcript_store.get_session", future = true)]
     async fn get_session(
         &self,
         provider: &str,
@@ -276,7 +278,7 @@ where
             })
     }
 
-    #[hotpath::measure(label = "store.persist_transcript_batch_git", future = true)]
+    #[hotpath::measure(label = "usecases.transcript_store.persist_transcript_batch_git", future = true)]
     async fn persist_transcript_batch_with_git_evidence(
         &self,
         batch: TranscriptWriteBatch,

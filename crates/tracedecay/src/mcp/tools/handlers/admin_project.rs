@@ -9,7 +9,7 @@ use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomat
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use crate::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 

@@ -204,7 +204,7 @@ pub async fn materialize_session_temporal_refresh_for_test(
 ) -> Result<()> {
     let session_id =
         SessionId::new(session_id).map_err(|error| fixture_error("session id", error))?;
-    crate::store::GlobalDbSessionTemporalStore::new(project_database)
+    tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(project_database)
         .materialize_pending_session_refresh_for_test(&session_id)
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;

@@ -101,7 +101,8 @@ pub mod serve;
 #[path = "sessions/ingest_tests.rs"]
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
-pub mod store;
+#[doc(hidden)]
+pub mod vector_generation_test_support;
 pub mod tracedecay;
 pub mod version;
 pub mod work_cli;

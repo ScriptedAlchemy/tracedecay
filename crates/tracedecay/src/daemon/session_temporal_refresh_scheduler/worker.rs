@@ -21,7 +21,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use crate::store::{
+use tracedecay_global_db::session_temporal::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 

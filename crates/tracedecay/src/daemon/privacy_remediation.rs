@@ -127,7 +127,7 @@ mod tests {
     use super::{remediation_read_control, remediation_write_control};
     use crate::daemon::profile_identity;
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-    use crate::store::DatabaseFactStore;
+    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
     fn secret() -> String {
         ["sk", "-test-", "1234567890abcdef"].concat()

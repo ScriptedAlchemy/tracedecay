@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,

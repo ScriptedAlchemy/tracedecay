@@ -404,7 +404,7 @@ pub async fn record_project_span_for_test(
     merge_gap_secs: i64,
 ) -> tracedecay_runtime_core::errors::Result<i64> {
     hotpath::future!(
-        crate::store::GlobalDbGitCorrelationStore::new(project_database)
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(project_database)
             .record_span_observation(observation, merge_gap_secs),
         label = "dashboard.span.persist"
     )

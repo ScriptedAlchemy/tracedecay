@@ -25,6 +25,7 @@ pub mod configuration;
 #[cfg(test)]
 mod delivery_settlement_tests;
 mod discovery_queue;
+mod git_correlation_adapter;
 mod git_index_transactions;
 mod git_topology_anchor;
 mod hotpath_observe;
@@ -33,6 +34,7 @@ mod observability_rollup;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
+mod workflow_adapter;
 mod registered_maintenance;
 pub use registered_maintenance::{
     REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, RegisteredWalCheckpointReceiptV1, RegisteredWalReclaimV1,
@@ -52,7 +54,9 @@ pub use observability_rollup::{
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
     ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
 };
+pub use git_correlation_adapter::GlobalDbGitCorrelationStore;
 pub use observation_adapter::GlobalDbObservationStore;
+pub use workflow_adapter::GlobalDbWorkflowStore;
 pub use observation_projection::{
     converge_projection_predecessor, project_observation, rebuild_projection,
 };

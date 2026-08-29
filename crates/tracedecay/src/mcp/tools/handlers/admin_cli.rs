@@ -816,7 +816,7 @@ fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
 }
 
 async fn sessions_unfinished(db: &RegisteredGlobalDbLeaseV1, limit: usize) -> Result<Value> {
-    let items = crate::store::GlobalDbWorkflowStore::new(db.clone())
+    let items = tracedecay_global_db::GlobalDbWorkflowStore::new(db.clone())
         .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;

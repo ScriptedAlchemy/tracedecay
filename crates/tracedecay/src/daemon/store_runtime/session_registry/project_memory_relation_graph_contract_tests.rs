@@ -23,7 +23,7 @@ use tracedecay_usecases::memory::{
 
 use super::DaemonSessionRuntimeRegistryV1;
 use crate::daemon::profile_identity;
-use crate::store::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 const CORE_RELATIONS_BEFORE_CHORD: usize = 9;
 const CORE_RELATIONS_AFTER_CHORD: usize = 10;

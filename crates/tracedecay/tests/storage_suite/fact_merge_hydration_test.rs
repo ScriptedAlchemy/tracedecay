@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_runtime_core::db::Database;
-use tracedecay::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, CoverageUniverseKnowledgeV1, DomainError,

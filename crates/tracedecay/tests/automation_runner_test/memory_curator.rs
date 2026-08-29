@@ -1071,7 +1071,7 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_usecases::memory::MemoryApplication::new(
         owner.clone(),
-        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let winner_tags_before = memory

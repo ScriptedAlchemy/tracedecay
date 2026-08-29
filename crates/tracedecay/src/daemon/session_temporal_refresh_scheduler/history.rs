@@ -108,7 +108,7 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_usecases::host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
             let pass =
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation_and_codex_state(
                     self.profile_identity.brain_id(),
@@ -215,9 +215,9 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_usecases::host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
             let registry_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
+                tracedecay_usecases::host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
             let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
                 self.profile_identity.brain_id(),
                 self.profile_identity.profile_id(),

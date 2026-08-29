@@ -9,7 +9,7 @@ use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::history::SessionHistoricalIngestOutcome;
-use crate::store::SessionRefreshRecoveryV1;
+use tracedecay_global_db::session_temporal::SessionRefreshRecoveryV1;
 use tracedecay_usecases::session::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,

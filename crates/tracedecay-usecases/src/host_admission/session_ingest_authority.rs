@@ -1,4 +1,4 @@
-//! Root composition adapter for bounded session ingest.
+//! Registered-database composition adapter for bounded session ingest.
 
 use std::borrow::Borrow;
 use std::future::Future;
@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
 
-use tracedecay_global_db::RegisteredGlobalDb;
-use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
-use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_global_db::{GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb};
+
+use crate::store::transcript::GlobalDbTranscriptStore;
+
+use super::{HostAdmissionAuthorities, HostAdmissionFacade};
 
 /// Session-ingest authority over one registered database.
 ///
@@ -24,7 +26,7 @@ use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissio
 /// `tokio::spawn`/boxed-future boundary downstream. A `'static` holder keeps
 /// the obligation first-order. Borrowed holders remain supported for call
 /// sites that never cross such a boundary.
-pub(crate) struct GlobalDbSessionIngestAuthority<D> {
+pub struct GlobalDbSessionIngestAuthority<D> {
     db: D,
 }
 
@@ -32,7 +34,7 @@ impl<D> GlobalDbSessionIngestAuthority<D>
 where
     D: Borrow<RegisteredGlobalDb>,
 {
-    pub(crate) const fn new(db: D) -> Self {
+    pub const fn new(db: D) -> Self {
         Self { db }
     }
 
@@ -124,7 +126,7 @@ where
                 roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
                 Some(roots)
             },
-            label = "store.session_ingest.project_roots"
+            label = "usecases.session_ingest.project_roots"
         )
     }
 }

@@ -18,7 +18,7 @@ use tracedecay_sessions::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use crate::store::GlobalDbGitCorrelationStore;
+use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 use crate::tracedecay::current_timestamp;
 

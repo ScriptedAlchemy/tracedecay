@@ -22,7 +22,7 @@ use tracedecay_usecases::memory::{
 
 use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
 use crate::daemon::profile_identity;
-use crate::store::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
     let root = base.join(project_id.as_str());

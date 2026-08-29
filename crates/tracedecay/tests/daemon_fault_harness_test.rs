@@ -13,7 +13,7 @@ use serde_json::json;
 use tracedecay::client_identity::DaemonClientIdentity;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay::daemon::{DaemonHandshake, call_tool};
-use tracedecay::store::GlobalDbObservationStore;
+use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,

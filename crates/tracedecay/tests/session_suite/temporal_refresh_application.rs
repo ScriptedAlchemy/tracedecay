@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::store::GlobalDbSessionTemporalStore;
+use tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,

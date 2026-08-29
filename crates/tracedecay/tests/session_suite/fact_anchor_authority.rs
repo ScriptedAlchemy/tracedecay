@@ -19,7 +19,7 @@ use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile;
-use tracedecay::store::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,

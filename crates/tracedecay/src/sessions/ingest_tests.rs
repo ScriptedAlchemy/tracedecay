@@ -5,7 +5,7 @@ use tracedecay_domain::{BrainId, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::store::GlobalDbSessionIngestAuthority;
+use tracedecay_usecases::host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::ingest::test_support::{
     IngestPassBounds, USER_INGEST_PROVIDER_FRONTIER_KEY,

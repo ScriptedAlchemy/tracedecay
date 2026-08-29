@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_runtime_core::db::Database;
-use tracedecay::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,

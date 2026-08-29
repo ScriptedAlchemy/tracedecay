@@ -13,7 +13,7 @@ use tracedecay_sessions::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use crate::store::GlobalDbWorkflowStore;
+use tracedecay_global_db::GlobalDbWorkflowStore;
 use tracedecay_sessions::runtime::git_correlation::{GitCorrelationError, GitScopeFilter};
 use tracedecay_sessions::runtime::workflow_index::{
     RegisteredWorkflowIndexSnapshot, WorkflowIndexError,

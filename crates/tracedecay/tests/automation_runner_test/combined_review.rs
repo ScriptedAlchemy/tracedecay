@@ -156,7 +156,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     // Empty combined effects leave no automatic fact receipts behind.
     let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -329,7 +329,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
     );
     let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -815,7 +815,7 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     );
     let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -920,7 +920,7 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(

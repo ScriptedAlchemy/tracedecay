@@ -13,7 +13,7 @@ use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_global_db::{
+use crate::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
     VerifiedGraphRuntimeWeakProxyV1,
 };
@@ -86,7 +86,7 @@ impl<D> GlobalDbGitCorrelationStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    pub(crate) fn new(db: D) -> Self {
+    pub fn new(db: D) -> Self {
         let graph_runtime = db.borrow().project_graph_runtime().cloned();
         let graph_publication_lock = graph_runtime
             .as_ref()
@@ -102,7 +102,7 @@ where
         self.db.borrow()
     }
 
-    pub(crate) fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
+    pub fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
         if matches!(
             &self.db().binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions { .. }
@@ -115,8 +115,8 @@ where
         }
     }
 
-    #[hotpath::measure(label = "store.git_correlation.read_snapshot", future = true)]
-    pub(crate) async fn read_snapshot(
+    #[hotpath::measure(label = "global_db.git_correlation.read_snapshot", future = true)]
+    pub async fn read_snapshot(
         &self,
     ) -> Result<DatabaseEngineReadSnapshot, GitCorrelationError> {
         self.db()
@@ -125,8 +125,8 @@ where
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
 
-    #[hotpath::measure(label = "store.git_correlation.write_txn", future = true)]
-    pub(crate) async fn open_write_transaction(
+    #[hotpath::measure(label = "global_db.git_correlation.write_txn", future = true)]
+    pub async fn open_write_transaction(
         &self,
     ) -> Result<RegisteredGlobalDbWriteTransaction<'_>, GitCorrelationError> {
         self.db()
@@ -135,8 +135,8 @@ where
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
 
-    #[hotpath::measure(label = "store.git_correlation.record_span", future = true)]
-    pub(crate) async fn record_span_observation(
+    #[hotpath::measure(label = "global_db.git_correlation.record_span", future = true)]
+    pub async fn record_span_observation(
         &self,
         observation: &SpanObservation,
         merge_gap_secs: i64,
@@ -155,8 +155,8 @@ where
         })
     }
 
-    #[hotpath::measure(label = "store.git_correlation.publish_evidence")]
-    pub(crate) fn publish_transcript_evidence(
+    #[hotpath::measure(label = "global_db.git_correlation.publish_evidence")]
+    pub fn publish_transcript_evidence(
         &self,
         publication_prefix: &str,
         commit_records: &[CommitSessionRecord],
@@ -177,8 +177,8 @@ where
 
     /// `Ok(None)` means the projection has never published a verified head:
     /// the project has no recorded Git evidence yet.
-    #[hotpath::measure(label = "store.git_correlation.projection")]
-    pub(crate) fn git_evidence_projection(
+    #[hotpath::measure(label = "global_db.git_correlation.projection")]
+    pub fn git_evidence_projection(
         &self,
     ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
         let identity =
@@ -191,8 +191,8 @@ where
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "store.git_correlation.backfill", future = true)]
-    pub(crate) async fn run_backfill<E, G>(
+    #[hotpath::measure(label = "global_db.git_correlation.backfill", future = true)]
+    pub async fn run_backfill<E, G>(
         &self,
         analytics_events: &[E],
         git: &G,
@@ -206,8 +206,8 @@ where
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "store.git_correlation.incremental_backfill", future = true)]
-    pub(crate) async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
+    #[hotpath::measure(label = "global_db.git_correlation.incremental_backfill", future = true)]
+    pub async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
         limit_sessions: usize,
@@ -215,8 +215,8 @@ where
         run_incremental_backfill(self, git, limit_sessions).await
     }
 
-    #[hotpath::measure(label = "store.git_correlation.bounded_history", future = true)]
-    pub(crate) async fn run_bounded_history_index_page(
+    #[hotpath::measure(label = "global_db.git_correlation.bounded_history", future = true)]
+    pub async fn run_bounded_history_index_page(
         &self,
         opts: &BackfillOptions,
         control: &BoundedGitControl,
@@ -224,8 +224,8 @@ where
         run_bounded_history_index_page(self, opts, control).await
     }
 
-    #[hotpath::measure(label = "store.git_correlation.health", future = true)]
-    pub(crate) async fn correlation_index_health(
+    #[hotpath::measure(label = "global_db.git_correlation.health", future = true)]
+    pub async fn correlation_index_health(
         &self,
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
         let snapshot = self.read_snapshot().await?;
@@ -245,8 +245,8 @@ where
         })
     }
 
-    #[hotpath::measure(label = "store.git_correlation.sessions_for", future = true)]
-    pub(crate) async fn sessions_for_with_relation(
+    #[hotpath::measure(label = "global_db.git_correlation.sessions_for", future = true)]
+    pub async fn sessions_for_with_relation(
         &self,
         query: &SessionsForQuery,
         relation: CommitRelationFilter,
@@ -259,8 +259,8 @@ where
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "store.git_correlation.session_ids")]
-    pub(crate) fn session_ids_for_scope(
+    #[hotpath::measure(label = "global_db.git_correlation.session_ids")]
+    pub fn session_ids_for_scope(
         &self,
         filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
     ) -> Result<std::collections::BTreeSet<(String, String)>, GitCorrelationError> {

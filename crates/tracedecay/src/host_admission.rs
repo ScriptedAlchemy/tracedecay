@@ -373,7 +373,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<crate::store::GlobalDbObservationStore, HostAdmissionOutcome> {
+    ) -> std::result::Result<tracedecay_global_db::GlobalDbObservationStore, HostAdmissionOutcome> {
         let database = self
             .registered_database(scope)
             .ok_or_else(registered_authority_unavailable_outcome)?;
@@ -405,8 +405,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> Result<crate::store::GlobalDbSessionTemporalStore<'_>> {
-        Ok(crate::store::GlobalDbSessionTemporalStore::new(
+    ) -> Result<tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore<'_>> {
+        Ok(tracedecay_global_db::session_temporal::GlobalDbSessionTemporalStore::new(
             self.session_database_for_test(scope)?,
         ))
     }
@@ -687,7 +687,7 @@ impl HostAdmissionTestRuntimeV1 {
                 error.to_string(),
             )
         })?;
-        crate::store::GlobalDbGitCorrelationStore::new(database)
+        tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
             .sessions_for_with_relation(query, relation)
             .await
     }

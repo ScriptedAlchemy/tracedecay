@@ -9,7 +9,7 @@ use tracedecay_usecases::memory::MemoryApplication;
 // `tracedecay-dashboard-api::tracedecay::facts` delegate to the same
 // functions instead of keeping independent copies.
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
+use tracedecay_runtime_core::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_usecases::memory::memory_application_error;
 

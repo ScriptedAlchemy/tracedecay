@@ -11,7 +11,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::map_execution_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::db::Database;
-use crate::store::memory::ProjectMemoryDbHandle;
+use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 

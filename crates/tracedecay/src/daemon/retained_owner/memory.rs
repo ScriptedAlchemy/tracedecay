@@ -35,7 +35,7 @@ use super::receipts::{
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::db::Database;
-use crate::store::DatabaseFactStore;
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 
 macro_rules! execute_scoped_memory {
