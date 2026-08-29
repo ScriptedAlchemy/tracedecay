@@ -354,7 +354,9 @@ both for the *historical* half of that sweep.
 Reproduce with `scripts/profile-tokio-worker-balance.sh`, which reads Hotpath's
 metrics server and needs no product code change. The numbers below are one
 60-second window on a 96-core host, `--profile perf`, features
-`production,hotpath,hotpath-mcp`, `--cfg tokio_unstable`, against an isolated
+`production,hotpath,hotpath-mcp`, composed `RUSTFLAGS` from
+`scripts/hotpath-rustflags.sh` (`--cfg tokio_unstable` plus the workspace
+mold and unpacked-split-debuginfo flags), against an isolated
 profile root under `/tmp` with one registered 3,114-file corpus:
 
 ```
