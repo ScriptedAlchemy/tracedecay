@@ -983,7 +983,7 @@ mod tests {
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
         UserProfileId,
     };
-    use tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1;
+    use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 
     use super::{
         DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,

@@ -14,7 +14,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
     schedule_decision, scheduler_control_path,
 };
 use tracedecay_domain::ProjectId;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
 

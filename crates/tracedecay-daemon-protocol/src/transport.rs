@@ -232,9 +232,7 @@ impl BrokerWriteHalf {
     /// Poll the native writable-readiness future once without waiting while a
     /// caller holds the shared writer mutex. A pending readiness registration
     /// is retried by the caller on its next bounded polling interval.
-    pub async fn peer_write_readiness_now(
-        &self,
-    ) -> Option<std::io::Result<tokio::io::Ready>> {
+    pub async fn peer_write_readiness_now(&self) -> Option<std::io::Result<tokio::io::Ready>> {
         let mut readiness = Box::pin(self.peer_write_readiness());
         std::future::poll_fn(|context| match readiness.as_mut().poll(context) {
             std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),

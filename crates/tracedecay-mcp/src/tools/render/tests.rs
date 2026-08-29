@@ -3,9 +3,9 @@ use crate::RequestedOutputFormat;
 use crate::response_handles::{
     ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
 };
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 use serde_json::json;
 use std::ffi::OsString;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Restores one environment variable on drop. Callers must already hold
 /// `lock_response_handle_store` (the user-data-dir test-env lock) so the

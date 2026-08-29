@@ -21,7 +21,7 @@ use tracedecay_sessions::runtime::hermes::{
 use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_sessions::runtime::source::TranscriptIngestStats;
 use tracedecay_sessions::runtime::{SessionProvider, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

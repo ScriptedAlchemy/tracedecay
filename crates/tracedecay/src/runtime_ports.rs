@@ -84,7 +84,10 @@ fn unregistered_admission(
     scope: tracedecay_sessions::host_ports::unregistered_admission::Scope,
 ) -> Box<dyn tracedecay_sessions::admission::HostAdmission> {
     use tracedecay_sessions::host_ports::unregistered_admission::Scope;
-    use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+    use tracedecay_host_admission::{
+    HostAdmissionAuthorities,
+    HostAdmissionFacade,
+};
 
     let authorities = match scope {
         Scope::Project(project_id) => {

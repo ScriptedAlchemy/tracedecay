@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::JsonRpcResponse;
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 fn git(project: &Path, args: &[&str]) {

@@ -401,7 +401,7 @@ async fn payload_metadata_bytes(
 
 /// Read-only payload GC preview. Mutation runs through
 /// [`run_payload_gc_in_transaction`]; this entry point never writes.
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.gc.preview", future = true)]
 pub async fn run_payload_gc(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -534,7 +534,7 @@ pub async fn finalize_gc_report_value(
     Ok(())
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.gc.apply", future = true)]
 pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,

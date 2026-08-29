@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::{TraceDecay, log_daemon_event};
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
 };
 

@@ -12,10 +12,10 @@ use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
 use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
-use crate::support::derive_projection;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
+use crate::support::derive_projection;
 use tracedecay_query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,

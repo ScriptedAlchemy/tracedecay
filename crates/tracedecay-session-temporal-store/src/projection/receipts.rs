@@ -23,10 +23,7 @@ use super::persist::*;
 
 const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.validate_receipt"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.validate_receipt")]
 pub async fn validate_final_projection_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &tracedecay_domain::SessionId,
@@ -324,10 +321,7 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.observation_effect"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.observation_effect")]
 pub async fn record_canonical_observation_effect(
     conn: &impl Executor,
     sequence: u64,
@@ -696,10 +690,7 @@ fn update_ordered_row_digest(digest: &mut Sha256, prior_rows: usize, row: &[u8])
     digest.update(row);
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.coverage"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.projection.coverage")]
 pub(super) async fn projection_coverage(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -843,8 +834,7 @@ fn record_assertion_history_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!("session_temporal.activation.history_rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes")
-            .inc(bytes);
+        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes").inc(bytes);
     }
     #[cfg(not(feature = "hotpath"))]
     let _ = bytes;

@@ -9,8 +9,8 @@ pub mod callable_code;
 pub mod native_integration;
 
 pub use callable_code::{
-    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCallersSurfaceRequest,
-    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
     CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,

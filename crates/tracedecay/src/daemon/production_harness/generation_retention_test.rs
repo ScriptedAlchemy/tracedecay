@@ -19,7 +19,7 @@ use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkV
 
 use super::journey_test_support::git;
 use super::*;
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_usecases::semantic_runtime::project_semantic_retained_vector_generations;
@@ -720,7 +720,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         &primary_graph.hook_store_layout().data_root,
     )
     .join(
-        tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
             linked_graph.project_root(),
         ),
     );
@@ -919,7 +919,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
             .hook_store_layout()
             .data_root,
     )
-    .join(tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(&primary));
+    .join(tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(&primary));
     let _ = run_generation_cadence(&collector, &primary).await;
     assert!(
         !linked_scope.exists(),

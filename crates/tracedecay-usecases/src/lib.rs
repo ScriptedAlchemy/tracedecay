@@ -75,7 +75,6 @@ pub mod diagnose;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
-pub mod edit;
 // Public because the root shim re-exports this crate, and root adapters
 // (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
 pub mod event_lane;
@@ -88,7 +87,6 @@ pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;
 pub mod graph;
-pub mod host_admission;
 mod hotpath_observe;
 pub mod lsp_runtime;
 mod lsp_support;
@@ -102,7 +100,6 @@ pub mod provider_pricing;
 pub mod provider_usage;
 pub mod request_identity;
 pub mod response_handles;
-pub mod retention;
 pub mod semantic_runtime;
 pub mod session;
 pub mod settings_control;

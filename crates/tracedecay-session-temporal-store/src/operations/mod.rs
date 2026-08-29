@@ -198,7 +198,9 @@ pub(super) fn normalize_timestamp(value: i64) -> i64 {
     }
 }
 
-pub(super) async fn unixepoch(conn: &impl crate::handle::SessionTemporalExec) -> Result<i64, LcmError> {
+pub(super) async fn unixepoch(
+    conn: &impl crate::handle::SessionTemporalExec,
+) -> Result<i64, LcmError> {
     let mut rows = conn.query("SELECT unixepoch() * 1000000", ()).await?;
     rows.next()
         .await?

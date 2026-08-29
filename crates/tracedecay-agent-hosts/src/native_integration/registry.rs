@@ -689,7 +689,7 @@ mod tests {
 
     use super::DaemonNativeIntegrationServiceRegistry;
     use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-    use tracedecay_usecases::host_admission::HostAdmissionScope;
+    use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn init_repository(root: &Path) {
         for arguments in [

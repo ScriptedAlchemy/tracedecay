@@ -1,8 +1,6 @@
 //! Crate-local helpers that previously lived as `pub(crate)` global-db internals.
 
-use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, DurableObservationV1, ObservationScopeV1,
-};
+use tracedecay_domain::{CanonicalObservationEnvelopeV1, DurableObservationV1, ObservationScopeV1};
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };

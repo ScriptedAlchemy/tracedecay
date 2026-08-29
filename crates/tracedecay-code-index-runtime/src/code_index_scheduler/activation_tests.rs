@@ -519,7 +519,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     fs::write(&sealed_path, &corrupted).expect("write corrupted generation");
 
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut pointer: tracedecay_usecases::retention::code_index_generations::DurablePublicationPointerV1 =
+    let mut pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&fs::read(&pointer_path).expect("read pointer"))
             .expect("parse pointer");
     let restamped_digest = format!("sha256:{}", super::sha256_hex(corrupted.as_bytes()));
@@ -533,7 +533,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
         }
     }
     pointer.generation_index_digest = Some(
-        tracedecay_usecases::retention::code_index_generations::durable_generation_index_digest(
+        tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest(
             &pointer.generation_index,
             pointer.generation_index_truncated,
         )

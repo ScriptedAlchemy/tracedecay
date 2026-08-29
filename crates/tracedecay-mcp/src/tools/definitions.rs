@@ -347,8 +347,7 @@ pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 /// `tracedecay_outline` remains advertised and reports its runtime
 /// `ast-grep outline` requirement from the handler, because the Cursor
 /// plugin docs/rules intentionally teach agents to start there.
-pub fn get_tool_definitions()
--> Result<Vec<ToolDefinition>, McpCatalogError> {
+pub fn get_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     let mut definitions = get_maximal_tool_definitions()?;
     retain_host_available_tool_definitions(&mut definitions);
     Ok(definitions)
@@ -371,8 +370,7 @@ pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
 /// profile/capability filtering in
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
 /// this returns, after the cache.
-pub fn get_maximal_tool_definitions()
--> Result<Vec<ToolDefinition>, McpCatalogError> {
+pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache
     // retains the rendered message and replays it.
@@ -380,9 +378,7 @@ pub fn get_maximal_tool_definitions()
         LazyLock::new(|| build_maximal_tool_definitions().map_err(|error| error.to_string()));
     match &*MAXIMAL_DEFINITIONS {
         Ok(definitions) => Ok(definitions.clone()),
-        Err(message) => Err(McpCatalogError::Initialization(
-            message.clone(),
-        )),
+        Err(message) => Err(McpCatalogError::Initialization(message.clone())),
     }
 }
 
@@ -390,10 +386,8 @@ pub fn get_maximal_tool_definitions()
 fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     #[cfg(test)]
     MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let application_registry =
-        tracedecay_application::mcp_executable_binding_registry().map_err(|error| {
-            McpCatalogError::Initialization(error.to_string())
-        })?;
+    let application_registry = tracedecay_application::mcp_executable_binding_registry()
+        .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let request_schema = |operation: &'static str| {
         canonical_application_request_schema(&application_registry, operation)
     };
@@ -897,9 +891,7 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
     )
 }
 
-fn add_format_property(
-    definitions: &mut [ToolDefinition],
-) -> Result<(), McpCatalogError> {
+fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
     for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
         let Some(properties) = definition
             .input_schema
@@ -909,9 +901,10 @@ fn add_format_property(
             // Reachable on every tools/list and dispatch admission check, so a
             // malformed definition must surface as the builders' typed error
             // rather than a production panic.
-            return Err(McpCatalogError::Initialization(
-                format!("{} must define object properties", definition.name),
-            ));
+            return Err(McpCatalogError::Initialization(format!(
+                "{} must define object properties",
+                definition.name
+            )));
         };
         properties.insert(
             "format".to_string(),

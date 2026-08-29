@@ -9,10 +9,7 @@ use super::CanonicalPublicationManifest;
 ///
 /// Existing projection rows conflict at the database boundary; they are never
 /// consulted for identity, replay, authorization, or publication decisions.
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.publication.project_summary"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.publication.project_summary")]
 pub(super) async fn project_canonical_summary(
     conn: &impl crate::handle::SessionTemporalExec,
     summary_id: &str,

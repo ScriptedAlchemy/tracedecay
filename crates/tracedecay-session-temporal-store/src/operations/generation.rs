@@ -96,8 +96,7 @@ pub(super) async fn validate_current_predecessor(
         .await?;
     let mut current_for_identity = Vec::new();
     while let Some(row) = matching.next().await? {
-        hotpath::gauge!("session_temporal.publication.predecessor_manifest_rows")
-            .inc(1_u64);
+        hotpath::gauge!("session_temporal.publication.predecessor_manifest_rows").inc(1_u64);
         let candidate_id: String = row.get(0)?;
         let manifest_raw: String = row.get(1)?;
         let manifest = serde_json::from_str::<super::CanonicalPublicationManifest>(&manifest_raw)
@@ -141,10 +140,7 @@ pub(super) async fn validate_current_predecessor(
     }
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.persist.publish_generation"
-)]
+#[hotpath::measure(future = true, label = "session_temporal.persist.publish_generation")]
 pub(super) async fn publish_candidate_generation(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &str,
