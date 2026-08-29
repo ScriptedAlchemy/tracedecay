@@ -653,7 +653,7 @@ pub(super) async fn collect_code_generation_retention_findings(
         CodeGenerationRetentionRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
         StoreKeyV1, code_generation_retention_finding, semantic_vector_retention_finding,
     };
-    use tracedecay_usecases::retention::code_index_generations::{
+    use tracedecay_code_index_retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
         plan_code_generation_retention_with_verification, plan_scope_root_retention,

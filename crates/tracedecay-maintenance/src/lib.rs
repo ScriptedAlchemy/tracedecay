@@ -1,8 +1,8 @@
 //! Offline retention, complete-profile backups, and storage reports.
 //!
 //! This crate owns maintenance that consumes explicit global-db and
-//! runtime-core storage ports. It never names daemon types. The usecases
-//! retention policy kernel (`tracedecay_usecases::retention`) stays there;
+//! runtime-core storage ports. It never names daemon types. The code-index
+//! generation retention kernel lives in `tracedecay-code-index-retention`;
 //! storage reports consume it. Profile-registry open/composition that still
 //! requires `DaemonSessionRuntimeRegistryV1` stays in the root crate.
 

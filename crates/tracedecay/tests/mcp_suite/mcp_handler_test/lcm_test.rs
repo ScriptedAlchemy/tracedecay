@@ -20,7 +20,7 @@ use tracedecay_sessions::runtime::lcm::{
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 #[test]
 fn lcm_mutation_tools_remain_daemon_internal() {

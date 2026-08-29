@@ -5,13 +5,20 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use tracedecay_usecases::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome,
+    HostAdmissionScope,
     HostAdmissionStatus,
 };
+use tracedecay_host_admission::{
+    HostAdmissionAuthorities,
+    HostAdmissionFacade,
+};
 #[cfg(test)]
-use tracedecay_usecases::host_admission::{
-    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
+use tracedecay_host_admission::{
+    HostAdmissionBroker,
+    HostAdmissionRuntime,
+    SharedHostAdmissionBroker,
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;

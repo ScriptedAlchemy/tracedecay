@@ -18,7 +18,7 @@ use tracedecay_runtime_core::privacy::{
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, ObservationStore};
 
-use tracedecay_usecases::host_admission::*;
+use tracedecay_host_admission::*;
 use tracedecay_usecases::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ExternalSourceProjectionStateV1,
     ObservationCancellation,

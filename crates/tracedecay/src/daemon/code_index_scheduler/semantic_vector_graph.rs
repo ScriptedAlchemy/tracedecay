@@ -645,7 +645,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
             worktree,
             source_generation,
             tracedecay_store::SemanticVectorCodeScopeHash::new(
-                tracedecay_usecases::retention::code_index_generations::code_index_scope_hash(
+                tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
                     &self.project_root,
                 ),
             )
