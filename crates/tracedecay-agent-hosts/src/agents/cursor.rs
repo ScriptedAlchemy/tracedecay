@@ -1141,25 +1141,48 @@ fn report_cursor_session_ingest<'a>(
     }
 }
 
-fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPluginRuleDoctorState {
+    Missing,
+    Unreadable,
+    Incomplete,
+    Active,
+}
+
+fn cursor_plugin_rule_doctor_state(rule_path: &Path) -> CursorPluginRuleDoctorState {
     if !rule_path.exists() {
-        dc.warn(&format!(
+        return CursorPluginRuleDoctorState::Missing;
+    }
+    match std::fs::read_to_string(rule_path) {
+        Ok(contents)
+            if contents.contains("alwaysApply: true")
+                && contents.contains("tracedecay MCP tools") =>
+        {
+            CursorPluginRuleDoctorState::Active
+        }
+        Ok(_) => CursorPluginRuleDoctorState::Incomplete,
+        Err(_) => CursorPluginRuleDoctorState::Unreadable,
+    }
+}
+
+fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+    match cursor_plugin_rule_doctor_state(rule_path) {
+        CursorPluginRuleDoctorState::Missing => dc.warn(&format!(
             "{} not found — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
-        return;
-    }
-    let contents = std::fs::read_to_string(rule_path).unwrap_or_default();
-    if contents.contains("alwaysApply: true") && contents.contains("tracedecay MCP tools") {
-        dc.pass(&format!(
+        )),
+        CursorPluginRuleDoctorState::Unreadable => dc.fail(&format!(
+            "Cursor plugin tracedecay rule is unreadable in {} — run `tracedecay install --agent cursor`",
+            rule_path.display()
+        )),
+        CursorPluginRuleDoctorState::Active => dc.pass(&format!(
             "Cursor plugin tracedecay rule active in {}",
             rule_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
+        )),
+        CursorPluginRuleDoctorState::Incomplete => dc.fail(&format!(
             "Cursor plugin tracedecay rule is incomplete in {} — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
+        )),
     }
 }
 
@@ -2417,6 +2440,35 @@ mod tests {
             CursorIntegration.detected_host_surface(home.path()),
             Some(home.path().join(".cursor"))
         );
+    }
+
+    #[test]
+    fn doctor_plugin_rule_distinguishes_unreadable_from_incomplete() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing.mdc");
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&missing),
+            CursorPluginRuleDoctorState::Missing
+        );
+
+        let incomplete = tmp.path().join("incomplete.mdc");
+        std::fs::write(&incomplete, "alwaysApply: false\n").unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&incomplete),
+            CursorPluginRuleDoctorState::Incomplete
+        );
+
+        let unreadable = tmp.path().join("unreadable.mdc");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&unreadable),
+            CursorPluginRuleDoctorState::Unreadable
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_plugin_rule(&mut counters, &unreadable);
+        assert_eq!(counters.issues, 1);
+        assert_eq!(counters.warnings, 0);
     }
 
     /// The cwd-based sweep must never treat the home directory as a project:
