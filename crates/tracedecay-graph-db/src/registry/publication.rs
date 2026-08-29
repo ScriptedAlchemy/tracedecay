@@ -1285,7 +1285,9 @@ mod historical_publication_reuse_tests {
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
-    use tracedecay_domain::{CodeGenerationId, RepositoryId, UtcMicros};
+    use tracedecay_domain::UtcMicros;
+    #[cfg(feature = "graph-sealed-store")]
+    use tracedecay_domain::{CodeGenerationId, RepositoryId};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
         BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -1314,9 +1316,11 @@ mod historical_publication_reuse_tests {
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
         GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
         GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
-        GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-        GraphWatermark, SealedCodeGenerationReplay, SealedGraphStateDigest, SourceGeneration,
+        GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
+        SourceGeneration,
     };
+    #[cfg(feature = "graph-sealed-store")]
+    use crate::{GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest};
 
     #[derive(Debug)]
     struct TestCancellation;
@@ -1722,6 +1726,7 @@ mod historical_publication_reuse_tests {
         }
     }
 
+    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn sealed_snapshot_recovers_without_opening_the_staging_registry() {
         let mut fixture = published_fixture();
