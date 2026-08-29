@@ -116,6 +116,7 @@ pub fn diagnostic_broker(
 /// server, and the directly served dashboard all route through here so the
 /// code-diagnostics surface does not depend on which entry point started the
 /// dashboard.
+#[hotpath::measure(label = "usecases.diagnostics.open_broker", future = true)]
 pub async fn open_diagnostic_broker(
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
@@ -247,6 +248,7 @@ impl DashboardDiagnosticsAuthorityV1 {
     /// lock. Splitting them — reading the settings, editing them, then writing
     /// the result back — is what let a second writer land between the two and
     /// be overwritten while both callers were told they had succeeded.
+    #[hotpath::measure(label = "usecases.diagnostics.settings.update", future = true)]
     pub async fn update_settings(
         &self,
         request: &DashboardDiagnosticsGraphRequestV1,
@@ -275,6 +277,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         self.snapshot(request).await
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.refresh_all", future = true)]
     pub async fn refresh_all(
         &self,
         request: &DashboardDiagnosticsGraphRequestV1,
@@ -291,6 +294,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         self.snapshot_with_graph(&reader, cancellation).await
     }
 
+    #[hotpath::measure(label = "usecases.diagnostics.refresh_language", future = true)]
     pub async fn refresh_language(
         &self,
         request: &DashboardDiagnosticsGraphRequestV1,
