@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tracedecay_application::ObservatoryReadModelV1;
 use tracedecay_domain::CoverageStateV1;
 
-use crate::analytics::{
+use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
@@ -557,13 +557,20 @@ async fn agent_usage_summary(
 }
 
 fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    tracedecay_agent_hosts::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
-        let metadata: Value = serde_json::from_str(metadata_json).ok()?;
-        ["agent_nickname", "agent_role"]
-            .into_iter()
-            .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-            .find_map(tracedecay_agent_hosts::automation::agent_targets::managed_agent_label)
-    })
+    if let Ok(Some(label)) =
+        tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(agent_id)
+    {
+        return Some(label);
+    }
+    let metadata: Value = serde_json::from_str(metadata_json).ok()?;
+    ["agent_nickname", "agent_role"]
+        .into_iter()
+        .filter_map(|key| metadata.get(key).and_then(Value::as_str))
+        .find_map(|id| {
+            tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(id)
+                .ok()
+                .flatten()
+        })
 }
 
 /// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
@@ -1787,7 +1794,9 @@ fn diagnostics_payload_from_parts(
                 mcp_tool_call_count += 1;
                 increment_string_count(&mut by_mcp_tool, tool_name);
             }
-            if crate::analytics::normalize_tool_name(tool_name).starts_with("tracedecay_") {
+            if tracedecay_automation::analytics::normalize_tool_name(tool_name)
+                .starts_with("tracedecay_")
+            {
                 tracedecay_call_count += 1;
             }
         }

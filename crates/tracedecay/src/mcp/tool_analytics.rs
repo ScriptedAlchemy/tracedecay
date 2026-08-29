@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use crate::mcp::hook_events::HookEvent;
+use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 
 pub(super) struct McpToolAnalyticsEvent<'a> {
     pub(super) project_root: &'a std::path::Path,
@@ -93,7 +93,9 @@ fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
                 && value.len() <= LOOKUP_IDENTIFIER_MAX_BYTES
                 && !value.chars().any(char::is_control)
         })
-        .and_then(|value| tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok())
+        .and_then(|value| {
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok()
+        })
 }
 
 /// One durable spool sequence represents one admitted host event. Identical
@@ -127,7 +129,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
                 .map_or_else(|| "tool_dispatch_error".to_string(), bounded_failure_reason)
         );
     }
-    if tracedecay_agent_hosts::analytics::is_skill_view_tool(input.tool_name) {
+    if tracedecay_automation::analytics::is_skill_view_tool(input.tool_name) {
         metadata["arguments"] = input.arguments.clone();
         metadata["function"] = json!({
             "name": input.tool_name,

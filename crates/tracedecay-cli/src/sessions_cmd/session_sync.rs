@@ -51,27 +51,33 @@ pub(super) fn session_sync_poll_state(
     let status = outcome
         .get("status")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: format!("daemon {label} response omitted its typed status"),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: format!("daemon {label} response omitted its typed status"),
+            },
+        )?;
     match status {
         "accepted" | "joined" => {
             let operation_id = outcome
                 .get("operation_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon {label} response reported {status} without an operation id"
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "daemon {label} response reported {status} without an operation id"
+                        ),
+                    },
+                )?;
             let idempotency_key = outcome
                 .get("idempotency_key")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon {label} response reported {status} without an idempotency key"
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "daemon {label} response reported {status} without an idempotency key"
+                        ),
+                    },
+                )?;
             Ok(SessionSyncPollState::Pending {
                 operation_id: operation_id.to_owned(),
                 idempotency_key: idempotency_key.to_owned(),
@@ -81,19 +87,23 @@ pub(super) fn session_sync_poll_state(
             let operation_id = outcome
                 .get("operation_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon {label} response reported complete without an operation id"
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "daemon {label} response reported complete without an operation id"
+                        ),
+                    },
+                )?;
             let termination = outcome
                 .get("termination")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon {label} response reported complete without a termination"
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "daemon {label} response reported complete without a termination"
+                        ),
+                    },
+                )?;
             let remaining_work = session_sync_remaining_work(outcome).ok_or_else(|| {
                 tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
@@ -135,11 +145,13 @@ pub(super) fn session_sync_poll_state(
             let reason = outcome
                 .get("reason_code")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon {label} response reported unavailable without a reason code"
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "daemon {label} response reported unavailable without a reason code"
+                        ),
+                    },
+                )?;
             Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: format!("{label} unavailable ({reason})"),
             })

@@ -1,6 +1,6 @@
 use crate::branch::BranchAddOutcome;
-use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -416,11 +416,12 @@ fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
                 return Ok(BranchAddOutcome::Deferred);
             }
         };
-        let expected_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root).and_then(|meta| {
-            meta.branches
-                .get(branch)
-                .and_then(|entry| entry.graph_source.clone())
-        });
+        let expected_source = tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
+            .and_then(|meta| {
+                meta.branches
+                    .get(branch)
+                    .and_then(|entry| entry.graph_source.clone())
+            });
         let generation = match await_exact_branch_generation(
             schedulers,
             &canonical_worktree_root,
@@ -578,7 +579,10 @@ fn capture_exact_branch_source_inner<'a>(
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Result<tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1, TraceDecayError>,
+                Output = Result<
+                    tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
+                    TraceDecayError,
+                >,
             > + Send
             + 'a,
     >,
@@ -690,14 +694,16 @@ fn capture_exact_branch_source_inner<'a>(
                 ),
             ));
         }
-        Ok(tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
-            project_id: project_id.to_owned(),
-            repository_id: scope.repository_id.as_str().to_owned(),
-            worktree_id: scope.worktree_id.as_str().to_owned(),
-            worktree_root: canonical_worktree_root.to_string_lossy().into_owned(),
-            reference: snapshot_branch,
-            source_oid,
-        })
+        Ok(
+            tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+                project_id: project_id.to_owned(),
+                repository_id: scope.repository_id.as_str().to_owned(),
+                worktree_id: scope.worktree_id.as_str().to_owned(),
+                worktree_root: canonical_worktree_root.to_string_lossy().into_owned(),
+                reference: snapshot_branch,
+                source_oid,
+            },
+        )
     })
 }
 

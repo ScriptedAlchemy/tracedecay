@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay::dashboard;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
@@ -17,6 +16,7 @@ use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_graph_db::NeverCancelled;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::context::RegisteredScopeResolver;
 use tracedecay_usecases::graph::{

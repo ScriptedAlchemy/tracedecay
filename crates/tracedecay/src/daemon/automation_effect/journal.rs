@@ -9,12 +9,12 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_agent_hosts::automation::run_ledger::ExactRunPublication;
 use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, DisclosureClass, EffectReceipt, RequestId,
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
+use tracedecay_automation_runtime::automation::run_ledger::ExactRunPublication;
 use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
@@ -1222,8 +1222,12 @@ pub(super) fn replace_automation_file_atomically(
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
-    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(temporary, destination, record_name)
-        .map_err(std::io::Error::other)?;
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        temporary,
+        destination,
+        record_name,
+    )
+    .map_err(std::io::Error::other)?;
     #[cfg(windows)]
     tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
     Ok(())

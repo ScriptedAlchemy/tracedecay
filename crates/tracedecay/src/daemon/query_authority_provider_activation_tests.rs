@@ -33,9 +33,12 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let profile_root = cursor_store.path().join("profile");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _cursor_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
-            .expect("database scope");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-semantic-activation",
+    )
+    .expect("database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
@@ -102,6 +105,26 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         )
         .await
         .expect("reserve semantic activation");
+    registry
+        .mount_query_authority_for_committed_fallback(
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            Arc::clone(&standalone_query_authority),
+        )
+        .await
+        .expect("mount core fallback under the exact committed fence");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "semantic warm-up must not remove exact, lexical, and graph search"
+    );
     registry
         .install_committed_query_authorities(
             project.path(),
@@ -455,6 +478,225 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     registry.shutdown().await;
 }
 
+/// Cold-open contract: while a committed semantic activation restore is
+/// deferred (fence reserved, then failed as unavailable before install), the
+/// checked-in core exact/lexical/graph authority must stay mountable and the
+/// scope must keep a callable query authority. Semantic remains deferred: a
+/// standalone semantic mount is still refused, and the exact committed retry
+/// later installs the full pair, replacing the interim core authority.
+#[tokio::test]
+async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
+    let project = TempDir::new().expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-deferred-core-restore").expect("project id");
+    let scope =
+        crate::daemon::project_open_owners::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let store = TempDir::new().expect("store root");
+    let registry = crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount code index");
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-deferred-core-restore",
+    )
+    .expect("database scope");
+    let session_registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let latest = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial code generation");
+    let cursor_keys = session_db
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("cursor keys");
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    let semantic = semantic_committed_state(scope.clone());
+
+    // Cold-open restore: the committed activation reserves the fence, then
+    // fails as unavailable (semantic runtime not ready) before any install.
+    let attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve deferred committed restore");
+    assert!(
+        registry
+            .clear_failed_query_activation(
+                project.path(),
+                &scope,
+                None,
+                prepare_project_semantic_redundancy_authority(&semantic),
+                &attempt,
+            )
+            .await
+            .expect("settle deferred restore failure"),
+        "the deferred restore cleanup must adopt its own reservation"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            false,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "the deferred restore leaves the fence reserved with no installed authority"
+    );
+
+    // Core exact/lexical/graph lanes must stay mountable while the committed
+    // semantic restore is deferred: the revision-bound committed fallback
+    // seats them without abandoning the reserved fence, while the plain
+    // standalone mount stays refused by that fence.
+    crate::daemon::code_index_scheduler::query_runtime::
+        mount_core_query_authority_for_committed_fallback_on_project_open(
+            &registry,
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            &cursor_keys,
+        )
+        .await
+        .expect("core fallback mounts while the committed restore is deferred");
+    assert!(
+        registry.has_query_authority_for_scope(&scope).await,
+        "exact/lexical/graph must stay callable while semantic restore is deferred"
+    );
+    assert!(
+        crate::daemon::code_index_scheduler::query_runtime::
+            mount_core_query_authority_on_project_open(
+                &registry,
+                project.path(),
+                &scope,
+                &cursor_keys,
+            )
+            .await
+            .is_err(),
+        "the standalone core mount stays refused by the committed fence"
+    );
+
+    // Semantic restoration stays deferred: no standalone semantic mount.
+    let standalone_semantic = Arc::new(
+        crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            semantic.clone(),
+        )
+        .expect("prepare standalone semantic route"),
+    );
+    assert!(
+        registry
+            .mount_semantic_query_authority(project.path(), &scope, standalone_semantic)
+            .await
+            .is_err(),
+        "semantic must not mount standalone while the committed restore is deferred"
+    );
+
+    // Runtime readiness retries the exact committed activation: the pair
+    // installs atomically and replaces the interim core authority.
+    let retry_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve exact committed restore retry");
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id,
+            scope.clone(),
+            semantic.state.clone(),
+            Arc::new(cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare committed restore retry");
+    let retry_semantic_authority = Arc::new(
+        crate::daemon::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            semantic.clone(),
+        )
+        .expect("prepare committed semantic route"),
+    );
+    let core_query_authority = Arc::clone(prepared.query_authority());
+    registry
+        .install_committed_query_authorities(
+            project.path(),
+            &scope,
+            &provider,
+            prepared,
+            Some(retry_semantic_authority),
+            None,
+            None,
+            prepare_project_semantic_redundancy_authority(&semantic),
+            &retry_attempt,
+        )
+        .await
+        .expect("install committed restore retry");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "the retried committed restore installs both routes in one revision"
+    );
+
+    // With the committed pair installed, the fence refuses standalone mounts.
+    assert!(
+        registry
+            .mount_query_authority(project.path(), &scope, core_query_authority)
+            .await
+            .is_err(),
+        "standalone query installation cannot replace the installed committed pair"
+    );
+    registry.shutdown().await;
+}
+
 fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
     RetrievalRequest {
         principal: PrincipalId::new("principal.query-restart").expect("principal"),
@@ -510,9 +752,12 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
         .expect("production project enrollment");
     let profile_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
-    let _scope_guard =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
-            .expect("daemon database scope");
+    let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "query-cursor-restart",
+    )
+    .expect("daemon database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),

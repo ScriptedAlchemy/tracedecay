@@ -74,7 +74,6 @@ pub struct StrandedCodeIndexScopeV1 {
     /// Newest mtime anywhere in the scope, in unix seconds. Drives the age gate.
     pub newest_mtime_secs: i64,
 }
-
 /// Why a stranded scope was left alone even though nothing live names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrandedScopeRefusalV1 {

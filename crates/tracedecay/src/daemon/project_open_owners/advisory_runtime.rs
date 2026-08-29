@@ -95,9 +95,9 @@ use crate::daemon::service::invocation::{
     unregister_hook_orchestration_runtime,
 };
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 mod deferred;
 mod model;
@@ -498,7 +498,7 @@ fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
 async fn install_project_open_context_scout_configuration(
     owner: &ProjectContextScoutOwnerV1,
     pin: ContextScoutConfigurationPinV1,
-    model_config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
         (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
@@ -709,9 +709,11 @@ async fn run_production_hook_cycle(
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let Ok(model_config) = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
-        &pinned_configuration.snapshot,
-    ) else {
+    let Ok(model_config) =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &pinned_configuration.snapshot,
+        )
+    else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if install_project_open_context_scout_configuration(
@@ -1182,9 +1184,10 @@ async fn register_production_advisory_owner(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
         })?;
-    let model_config = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
-        &configuration.snapshot,
-    )?;
+    let model_config =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &configuration.snapshot,
+        )?;
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration,
@@ -1667,7 +1670,8 @@ async fn resolve_github_stack_observability(
     // Mirrors the native-integration mount condition at project open: the
     // standard pull-request fallback exists exactly when this project is an
     // admitted Git worktree (project open fails earlier otherwise).
-    let native_git_fallback_mounted = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
+    let native_git_fallback_mounted =
+        tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
     let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
         state.scope.clone(),
         topology_policy,

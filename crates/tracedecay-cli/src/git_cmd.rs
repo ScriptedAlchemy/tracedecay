@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use crate::cli::{GitAction, GitDiffScopeArg, GitProjectArgs};
 use crate::{resolve_cli_project_root, tool_command::dispatch_catalogued_cli_operation};
 
-pub(crate) async fn handle_git_action(action: GitAction) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_git_action(
+    action: GitAction,
+) -> tracedecay_runtime_core::errors::Result<()> {
     match action {
         GitAction::Status { project } => {
             hotpath::future!(

@@ -41,6 +41,7 @@ hotpath = [
     "hotpath/ureq-3",
     "tracedecay/hotpath",
     "tracedecay-agent-hosts/hotpath",
+    "tracedecay-automation-runtime/hotpath",
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-global-db/hotpath",
@@ -61,6 +62,7 @@ hotpath-alloc = [
     "hotpath/hotpath-alloc",
     "tracedecay/hotpath-alloc",
     "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
@@ -81,6 +83,7 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
     "tracedecay/hotpath-cpu",
     "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
@@ -168,6 +171,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
 tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false }
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }

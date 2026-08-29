@@ -3,14 +3,14 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
-use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 
 use crate::daemon::automation_effect::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::{
@@ -33,14 +33,14 @@ pub(super) use termination::MaintenanceTaskTermination;
 
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     outcome: &str,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_string(),
+            tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
         ),
         ("outcome", outcome.to_string()),
     ]
@@ -48,7 +48,7 @@ pub(super) fn scheduler_task_log_fields(
 
 fn log_scheduler_task_start(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
 ) {
     log_daemon_event(
         "scheduler_task",
@@ -58,14 +58,14 @@ fn log_scheduler_task_start(
 
 fn scheduler_task_error_log_fields(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     error: &impl std::fmt::Display,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_string(),
+            tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
         ),
         ("error", error.to_string()),
     ]
@@ -73,7 +73,7 @@ fn scheduler_task_error_log_fields(
 
 fn log_scheduler_task_error(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     error: &impl std::fmt::Display,
 ) {
     log_daemon_event(
@@ -84,7 +84,7 @@ fn log_scheduler_task_error(
 
 fn log_scheduler_automation_replay(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     terminal: &crate::daemon::automation_effect::AutomationSettledTerminal,
 ) {
     log_daemon_event(
@@ -93,7 +93,7 @@ fn log_scheduler_automation_replay(
             ("project", project_path.display().to_string()),
             (
                 "task",
-                tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
             ),
             (
                 "terminal",
@@ -112,14 +112,14 @@ fn log_scheduler_automation_replay(
 
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     problem: &crate::daemon::automation_effect::AutomationSettledProblem,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
         ),
         ("request_id", problem.problem.request_id.as_str().to_owned()),
         ("run_id", problem.run_id.as_str().to_owned()),
@@ -140,7 +140,7 @@ fn scheduler_run_observer(
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
 ) -> Box<
-    dyn FnOnce(&tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord)
+    dyn FnOnce(&tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord)
         + Send
         + 'static,
 > {
@@ -159,7 +159,7 @@ async fn settle_scheduler_retained_automation<T, P>(
     task: AgentTaskKind,
     run_control: &AutomationRunControl,
     effect: AutomationEffectAuthority,
-    retained: tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<T>,
+    retained: tracedecay_automation_runtime::automation::runner::RetainedAutomationRun<T>,
     projector: P,
 ) -> Option<TraceDecayError>
 where
@@ -167,8 +167,8 @@ where
     P: FnOnce(
             T,
         ) -> (
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-            Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+            tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
+            Option<tracedecay_automation_runtime::automation::AutomationCommittedReceipt>,
         ) + Send
         + 'static,
 {
@@ -204,9 +204,9 @@ where
 
 fn scheduler_record_log_fields(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> Vec<(&'static str, String)> {
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
 
     let outcome = match record.status {
         AutomationRunStatus::Succeeded => "complete",
@@ -218,7 +218,9 @@ fn scheduler_record_log_fields(
     let task = record
         .task_key
         .as_deref()
-        .unwrap_or_else(|| tracedecay_agent_hosts::automation::backend::task_key(record.task))
+        .unwrap_or_else(|| {
+            tracedecay_automation_runtime::automation::backend::task_key(record.task)
+        })
         .to_string();
     let mut fields = vec![
         ("project", project_path.display().to_string()),
@@ -235,7 +237,7 @@ fn scheduler_record_log_fields(
 #[cfg(test)]
 pub(super) fn daemon_scheduler_record_log_line(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> String {
     super::format_daemon_log_line(
         "scheduler_task",
@@ -245,7 +247,7 @@ pub(super) fn daemon_scheduler_record_log_line(
 
 fn log_daemon_scheduler_record(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
 ) {
     log_daemon_event(
         "scheduler_task",
@@ -1012,7 +1014,7 @@ impl Drop for BackgroundJobGaugeGuard {
 /// Exponential backoff for repeated project-open failures, from one tick.
 fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
     let base = Duration::from_secs(
-        tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+        tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
     );
     let steps = consecutive_failures.saturating_sub(1).min(16);
     base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
@@ -1077,7 +1079,7 @@ async fn run_automation_scheduler_loop(
                 // instead of spinning through the gate locks.
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_secs(
-                        tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+                        tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
                     )) => {}
                     () = wake.notified() => {}
                 }
@@ -1242,7 +1244,7 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(cg: &TraceDecay) 
                     ("error", e.to_string()),
                 ],
             );
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS
+            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS
         }
     }
 }
@@ -1423,7 +1425,12 @@ async fn maybe_run_global_retention(
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
-            tracedecay_maintenance::retention::prune_global_retention(database, &global_config, now_secs).await
+            tracedecay_maintenance::retention::prune_global_retention(
+                database,
+                &global_config,
+                now_secs,
+            )
+            .await
         })
         .await
     else {
@@ -1817,7 +1824,7 @@ mod global_retention_tests {
 struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
-    settings: tracedecay_agent_hosts::automation::config::AutomationConfig,
+    settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
 }
 
 async fn effective_automation_config_for_project(
@@ -1831,7 +1838,7 @@ async fn effective_automation_config_for_project(
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation configuration authority is unavailable: {error}"),
         })?;
-    let settings = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
+    let settings = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
         &configuration.snapshot,
     )?;
     let configuration_digest =
@@ -1848,10 +1855,14 @@ async fn effective_automation_config_for_project(
 }
 
 pub(super) fn automation_scheduler_configured(
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> bool {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
-    use tracedecay_agent_hosts::automation::scheduler::{AutomationSchedule, parse_schedule};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationHostMode,
+    };
+    use tracedecay_automation_runtime::automation::scheduler::{
+        AutomationSchedule, parse_schedule,
+    };
 
     if !config.enabled
         || config.host_mode == AutomationHostMode::DelegatedHost
@@ -1881,9 +1892,11 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 async fn automation_scheduler_has_work(
     cg: &crate::tracedecay::TraceDecay,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackend, AutomationHostMode,
+    };
 
     if automation_scheduler_configured(config) {
         return Ok(true);
@@ -1894,7 +1907,7 @@ async fn automation_scheduler_has_work(
     {
         return Ok(false);
     }
-    tracedecay_agent_hosts::automation::jobs::jobs_configured_for_scheduler(
+    tracedecay_automation_runtime::automation::jobs::jobs_configured_for_scheduler(
         &cg.store_layout().dashboard_root,
     )
     .await
@@ -1910,29 +1923,30 @@ async fn run_user_jobs_scheduler_pass(
     profile_root: &Path,
     cg: &crate::tracedecay::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
-    backend: &tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
+    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
     first_error: &mut Option<TraceDecayError>,
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs = match tracedecay_agent_hosts::automation::jobs::load_jobs(&dashboard_root).await {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            log_daemon_event(
-                "scheduler_user_jobs",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-            first_error.get_or_insert(e);
-            return;
-        }
-    };
+    let jobs =
+        match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_user_jobs",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                first_error.get_or_insert(e);
+                return;
+            }
+        };
     for job in jobs
         .iter()
-        .filter(|job| tracedecay_agent_hosts::automation::jobs::job_is_schedulable(job))
+        .filter(|job| tracedecay_automation_runtime::automation::jobs::job_is_schedulable(job))
     {
         log_scheduler_task_start(project_path, AgentTaskKind::UserJob);
         // One ledger read mints the occurrence identity AND yields the anchor
@@ -1949,7 +1963,7 @@ async fn run_user_jobs_scheduler_pass(
                     continue;
                 }
             };
-        match tracedecay_agent_hosts::automation::jobs::evaluate_and_record_scheduler_skip(
+        match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
             &dashboard_root,
             config,
             job,
@@ -2004,14 +2018,14 @@ async fn run_user_jobs_scheduler_pass(
                 continue;
             }
         };
-        let retained_run = tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend_for_retained_settlement(
+        let retained_run = tracedecay_automation_runtime::automation::jobs::run_user_job_with_backend_for_retained_settlement(
             &dashboard_root,
             config,
             backend,
             job,
-            tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
+            tracedecay_automation_runtime::automation::jobs::UserJobRunOptions {
                 trigger:
-                    tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler,
+                    tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Scheduler,
                 run_id: Some(run_id),
                 profile_root: Some(profile_root.to_path_buf()),
                 project_root: Some(project_path.to_path_buf()),
@@ -2025,7 +2039,7 @@ async fn run_user_jobs_scheduler_pass(
             Some(scheduler_run_observer(engine, project_id, project_path)),
             |run| {
                 if run.ledger_record.status
-                    == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
+                    == tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus::Skipped
                     && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
                 {
                     crate::daemon::automation_effect::RetainedAutomationSettlementProjection::AbandonObserved {
@@ -2079,12 +2093,12 @@ async fn run_user_jobs_scheduler_pass(
 /// `None` means this snapshot held no scheduler-effectful terminal at all.
 async fn scheduled_user_job_run_id(
     dashboard_root: &Path,
-    job: &tracedecay_agent_hosts::automation::jobs::AutomationJob,
+    job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
     configuration_digest: &tracedecay_domain::ManifestDigest,
 ) -> Result<(String, Option<String>)> {
-    let task_key = tracedecay_agent_hosts::automation::jobs::job_task_key(&job.id);
+    let task_key = tracedecay_automation_runtime::automation::jobs::job_task_key(&job.id);
     let latest_scheduler_terminal =
-        tracedecay_agent_hosts::automation::run_ledger::load_latest_scheduler_effectful_for_task_key(
+        tracedecay_automation_runtime::automation::run_ledger::load_latest_scheduler_effectful_for_task_key(
             dashboard_root,
             &task_key,
         )
@@ -2127,7 +2141,7 @@ mod scheduler_project_open_backoff_tests {
     #[test]
     fn backoff_starts_at_one_tick_and_grows() {
         let tick = Duration::from_secs(
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
         );
         assert_eq!(scheduler_project_open_backoff(1), tick);
         assert_eq!(scheduler_project_open_backoff(2), tick * 2);
@@ -2158,7 +2172,7 @@ mod scheduler_project_open_backoff_tests {
             .map(scheduler_project_open_backoff)
             .sum();
         let tick = Duration::from_secs(
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
+            tracedecay_automation_runtime::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
         );
         assert!(
             total > tick,

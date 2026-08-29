@@ -1,10 +1,10 @@
 use super::*;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
-#[cfg(unix)]
-use tracedecay_runtime_core::errors::TraceDecayError;
 use std::process::Command;
 use tracedecay_mcp::JsonRpcResponse;
+#[cfg(unix)]
+use tracedecay_runtime_core::errors::TraceDecayError;
 #[cfg(unix)]
 use tracedecay_usecases::context::CancellationToken;
 
@@ -2167,11 +2167,13 @@ fn transient_authority_failures_stay_immediately_retryable() {
         None
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(&tracedecay_runtime_core::errors::TraceDecayError::Database {
-            message: "invalid committed observation authority JSON: trailing characters"
-                .to_string(),
-            operation: "read observation".to_string(),
-        }),
+        super::super::project_open_retry_backoff(
+            &tracedecay_runtime_core::errors::TraceDecayError::Database {
+                message: "invalid committed observation authority JSON: trailing characters"
+                    .to_string(),
+                operation: "read observation".to_string(),
+            }
+        ),
         None,
         "only the authority-invariant operation classifies these messages"
     );
@@ -2415,16 +2417,16 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let state = tasks
         .start(unrelated.clone(), async move {
-            started_tx
-                .send(())
-                .map_err(|()| tracedecay_runtime_core::errors::TraceDecayError::Config {
+            started_tx.send(()).map_err(|()| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "unrelated open observer dropped".to_owned(),
-                })?;
-            release_rx
-                .await
-                .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                }
+            })?;
+            release_rx.await.map_err(|_| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: "unrelated open release dropped".to_owned(),
-                })?;
+                }
+            })?;
             Ok(())
         })
         .await;
@@ -2593,9 +2595,12 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     std::fs::create_dir_all(&project).expect("project dir");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "portable-bootstrap-cache-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "portable-bootstrap-cache-test",
+    )
+    .expect("daemon database scope");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -3018,9 +3023,12 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "mcp-bootstrap-cache-test",
+    )
+    .expect("daemon database scope");
     engine
         .store_administration
         .registered_profile_database()
@@ -3167,9 +3175,12 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let project = project.canonicalize().expect("canonical project");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "direct-warmup-test",
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -3322,7 +3333,9 @@ async fn production_composition_tool_json(
     serde_json::from_str(content).expect("retrieved payload json")
 }
 
-fn production_composition_probe_candidate(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+fn production_composition_probe_candidate(
+    payload: &serde_json::Value,
+) -> Option<&serde_json::Value> {
     payload["results"].as_array().and_then(|matches| {
         matches
             .iter()
@@ -3331,9 +3344,8 @@ fn production_composition_probe_candidate(payload: &serde_json::Value) -> Option
 }
 
 fn production_composition_probe_node_id(payload: &serde_json::Value) -> Option<&str> {
-    production_composition_probe_candidate(payload).and_then(|candidate| {
-        candidate["node_id"].as_str()
-    })
+    production_composition_probe_candidate(payload)
+        .and_then(|candidate| candidate["node_id"].as_str())
 }
 
 fn commit_production_composition_project(project: &std::path::Path) {
@@ -3389,8 +3401,7 @@ async fn production_composition_mounts_core_query_without_optional_stage_evaluat
                 )
                 .await
                 .expect("production search");
-            let payload =
-                production_composition_tool_json(&harness, &project, &response).await;
+            let payload = production_composition_tool_json(&harness, &project, &response).await;
             // Graph seating is deliberately detached from text freshness, so
             // the code generation publishes before the verified graph read is
             // servable and `node_id` is absent until then. A follow-up that
@@ -3779,9 +3790,12 @@ async fn production_composition_harness_shutdown_allows_immediate_profile_reopen
 
     let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("reload isolated profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 100, "production-composition-reopen")
-            .expect("fresh daemon election");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        100,
+        "production-composition-reopen",
+    )
+    .expect("fresh daemon election");
     let registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             profile_identity,

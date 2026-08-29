@@ -38,17 +38,21 @@ pub(super) fn live_feedback_receipt(
         .iter()
         .find(|manifest| manifest.component == component)
         .cloned()
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "aggregate receipt has no selected feedback manifest".to_string(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "aggregate receipt has no selected feedback manifest".to_string(),
+            },
+        )?;
     let mut receipt = aggregate
         .component_receipts
         .iter()
         .find(|receipt| receipt.component == component)
         .cloned()
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "aggregate receipt has no selected feedback receipt".to_string(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "aggregate receipt has no selected feedback receipt".to_string(),
+            },
+        )?;
     let companion_owned_paths = companion_owned_live_paths(home, aggregate)?;
     manifest
         .artifacts

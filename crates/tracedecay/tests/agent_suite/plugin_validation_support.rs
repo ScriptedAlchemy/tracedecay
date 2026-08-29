@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use jsonschema::Validator;
 use serde_json::Value;
-use tracedecay_agent_hosts::automation::skill_frontmatter::{
+use tracedecay_automation_runtime::automation::skill_frontmatter::{
     SkillFrontmatterValue, parse_skill_frontmatter,
 };
 

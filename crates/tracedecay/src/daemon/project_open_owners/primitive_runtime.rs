@@ -12,8 +12,8 @@ use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::service::invocation::daemon_operation_event_authority;
 use crate::daemon::session_retrieval::DaemonSessionLookupPrimitiveV1;
 use crate::daemon::{DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]
 pub(super) async fn open_and_register_project_primitive_runtime(

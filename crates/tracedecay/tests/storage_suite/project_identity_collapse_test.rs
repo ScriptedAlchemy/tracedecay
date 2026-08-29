@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::project_registry::ReapEntryKind;
 use tracedecay::storage::{default_profile_project_id, repository_identity_path, resolve_layout};
+use tracedecay_global_db::StoreInstanceUpsert;
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")

@@ -97,6 +97,7 @@ hotpath = [
     "tracedecay-api/hotpath",
     "tracedecay-application/hotpath",
     "tracedecay-automation/hotpath",
+    "tracedecay-automation-runtime/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
@@ -130,6 +131,7 @@ hotpath-alloc = [
     "tracedecay-api/hotpath-alloc",
     "tracedecay-application/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
@@ -163,6 +165,7 @@ hotpath-cpu = [
     "tracedecay-api/hotpath-cpu",
     "tracedecay-application/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
@@ -279,13 +282,17 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 # live in the product library rather than a test crate. This feature keeps them
 # out of a default or `production` build: they compile only under `cfg(test)`
 # or when a consumer asks for them explicitly.
-test-helpers = ["tracedecay-maintenance/test-helpers"]
+test-helpers = [
+    "tracedecay-maintenance/test-helpers",
+    "tracedecay-automation-runtime/test-helpers",
+]
 
 test-transport = [
     "test-helpers",
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
     "tracedecay-agent-hosts/test-transport",
+    "tracedecay-automation-runtime/test-transport",
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-usecases/test-transport",
     "tracedecay-mcp/test-transport",
@@ -385,6 +392,7 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }

@@ -486,7 +486,10 @@ fn measured_pressure_holds_between_watermarks_then_clears_at_the_low_watermark()
 
     // Hysteresis: between the watermarks the previous verdict stands, so a
     // sample that merely dips below high does not resume admitting.
-    let between = (pressure.low_watermark_bytes() + pressure.high_watermark_bytes()) / 2;
+    let between = u64::midpoint(
+        pressure.low_watermark_bytes(),
+        pressure.high_watermark_bytes(),
+    );
     assert!(between > pressure.low_watermark_bytes());
     assert!(between < pressure.high_watermark_bytes());
     for _ in 0..4 {

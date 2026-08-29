@@ -142,9 +142,11 @@ mod tests {
     fn missing_record_is_absent_not_corrupt() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join(PROFILE_IDENTITY_FILENAME);
-        assert!(read_existing_profile_identity_record(&path)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_existing_profile_identity_record(&path)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

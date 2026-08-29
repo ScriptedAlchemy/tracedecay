@@ -20,10 +20,10 @@ use super::wake::{
     PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 

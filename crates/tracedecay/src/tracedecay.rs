@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
+use crate::storage::{self, StoreLayout};
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::errors::Result;
-use crate::storage::{self, StoreLayout};
 
 #[cfg(test)]
 mod concrete_runtime_tests;
@@ -60,7 +60,8 @@ pub struct TraceDecay {
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
-    _standalone_maintenance_scope: Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
+    _standalone_maintenance_scope:
+        Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
 }
 
 const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;

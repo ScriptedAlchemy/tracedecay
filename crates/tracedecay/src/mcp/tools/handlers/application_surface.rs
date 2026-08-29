@@ -12,12 +12,12 @@ use crate::application_surface::{
     parse_application_surface_request,
 };
 use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) fn request_id() -> Result<RequestId> {

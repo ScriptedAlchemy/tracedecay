@@ -34,7 +34,6 @@ pub(crate) enum QuarantineKindV1 {
     Registered,
     Unregistered,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct QuarantineRegistryFenceV1 {
     pub(super) store_relpath: String,
@@ -321,7 +320,14 @@ fn recover_original_name(
     journal_name: Option<String>,
 ) -> QuarantineStoreOutcome {
     drop(root);
-    if rename_noreplace(&parent, OsStr::new(&quarantine_name), &parent, &original_name).is_ok() {
+    if rename_noreplace(
+        &parent,
+        OsStr::new(&quarantine_name),
+        &parent,
+        &original_name,
+    )
+    .is_ok()
+    {
         // A directory sync failure occurs after the atomic rename. Preserve
         // any journal and return the true, restored path for that state.
         let journal_pending = sync_directory(&parent).is_err()
@@ -646,4 +652,3 @@ fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf 
         }
     }
 }
-

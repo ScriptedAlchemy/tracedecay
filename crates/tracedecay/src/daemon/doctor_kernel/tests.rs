@@ -441,7 +441,9 @@ fn retained_or_unreported_observation_history_is_not_absent() {
 
 #[test]
 fn refusal_censuses_merge_by_provider_and_reason() {
-    use tracedecay_global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+    use tracedecay_global_db::observation::{
+        ObservationRefusalCensusV1, ObservationRefusalCountV1,
+    };
 
     let merged = ingest_refusal_read_from_censuses(&[
         ObservationRefusalCensusV1::Observed {
@@ -488,7 +490,9 @@ fn refusal_censuses_merge_by_provider_and_reason() {
 
 #[test]
 fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
-    use tracedecay_global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+    use tracedecay_global_db::observation::{
+        ObservationRefusalCensusV1, ObservationRefusalCountV1,
+    };
 
     let merged = ingest_refusal_read_from_censuses(&[
         ObservationRefusalCensusV1::Observed {

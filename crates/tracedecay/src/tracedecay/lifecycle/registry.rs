@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::SystemTime;
 
-use tracedecay_runtime_core::branch_meta;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use crate::storage::{self, StoreLayout};
+use crate::tracedecay::current_timestamp;
 use tracedecay_global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
-use crate::storage::{self, StoreLayout};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::branch_meta;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::TraceDecay;
 
@@ -93,7 +93,8 @@ impl TraceDecay {
                 // by repository identity, so the next first touch from a sibling
                 // checkout mints a fresh store. Detached worktrees are no exception:
                 // they belong to the same repository as every other checkout.
-                let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&self.project_root);
+                let git_common_dir =
+                    tracedecay_runtime_core::worktree::git_common_dir(&self.project_root);
 
                 // A shared project id can be reached from any linked worktree (see
                 // the git-common-dir alias registered below), so registering
@@ -346,7 +347,10 @@ pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
     if !tracedecay_runtime_core::worktree::git_may_resolve_repo(project_root) {
         return None;
     }
-    tracedecay_runtime_core::git::git_capture(project_root, &["config", "--get", "remote.origin.url"])
+    tracedecay_runtime_core::git::git_capture(
+        project_root,
+        &["config", "--get", "remote.origin.url"],
+    )
 }
 
 fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {
