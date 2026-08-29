@@ -501,6 +501,10 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     /// reads this when the scheduler mutex would block.
     pub(super) last_reconciled_at_micros: Arc<AtomicI64>,
     pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    /// Durable id from the last `Published` broadcast. Serving and text can
+    /// lag until graph/text seating; observers of "latest" must not stay on
+    /// the prior seated generation after a new id is published.
+    published_generation_id: Arc<RwLock<Option<CodeGenerationId>>>,
     /// Immutable progress snapshot independently readable while the scheduler
     /// owns a long reconcile or text-artifact transaction.
     pub(super) build_progress: super::CodeIndexBuildProgressSlotV1,
@@ -2188,9 +2192,14 @@ impl CodeIndexSchedulerRegistryV1 {
 
     fn publish_generation(
         sender: &tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
+        published_generation_id: &RwLock<Option<CodeGenerationId>>,
         project_root: PathBuf,
         evidence: &CodeIndexPublishEvidenceV1,
     ) {
+        *published_generation_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(evidence.generation_id.clone());
         let _ = sender.send(CodeIndexGenerationPublishedV1 {
             project_root,
             repository_id: evidence.repository_id.clone(),
@@ -2517,6 +2526,8 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::new(RwLock::new(None));
         let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
             Arc::new(RwLock::new(None));
+        let published_generation_id: Arc<RwLock<Option<CodeGenerationId>>> =
+            Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
@@ -2534,6 +2545,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_text_generation = Arc::clone(&text_generation);
+        let worker_published_generation_id = Arc::clone(&published_generation_id);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
         // The code-index control epoch. It advances exactly when new input is
@@ -2852,6 +2864,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
                     Self::publish_generation(
                         &worker_generation_publications,
+                        &worker_published_generation_id,
                         worker_project_root.clone(),
                         evidence,
                     );
@@ -3461,6 +3474,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation,
             last_reconciled_at_micros,
             text_generation,
+            published_generation_id,
             build_progress,
             serving_generation_epoch,
             serving_generation_installation,
@@ -4075,25 +4089,37 @@ impl CodeIndexSchedulerRegistryV1 {
         // so one warmup/dashboard call during a rebuild parked a runtime worker
         // for the reconcile's whole duration AND serialized every code-index
         // query behind it: a silent, daemon-wide code-index outage.
-        let (serving, text) = {
+        let (serving, text, published) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.text_generation),
+                Arc::clone(&worktree.published_generation_id),
             )
         };
-        let latest = serving
+        // Publication broadcasts before graph/text seating. A later id must
+        // not stay hidden behind a still-serving prior generation.
+        if let Some(generation_id) = published
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(latest) = latest {
-            return Some(latest.generation.manifest().generation_id.clone());
+            .clone()
+        {
+            return Some(generation_id);
         }
-        text.read()
+        let text_id = text
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|latest| latest.metadata().manifest().generation_id.clone())
+            .map(|latest| latest.metadata().manifest().generation_id.clone());
+        if text_id.is_some() {
+            return text_id;
+        }
+        serving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
     /// Exact bounded dashboard projection for one mounted worktree.
