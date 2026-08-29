@@ -18,6 +18,7 @@ pub mod ast_grep_search;
 pub mod capabilities;
 pub mod chunks;
 pub mod diagnostics;
+pub mod external_tools;
 pub mod extract;
 pub mod generations;
 pub mod git_join;

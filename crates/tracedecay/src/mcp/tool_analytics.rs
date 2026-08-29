@@ -107,7 +107,7 @@ fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String
 }
 
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
-    let category = crate::accounting::classifier::classify(&[input.tool_name], &[]);
+    let category = tracedecay_agent_hosts::analytics::classifier::classify(&[input.tool_name], &[]);
     let mut metadata = json!({
         "request_id": input.request_id,
         "transport": "mcp",

@@ -16,7 +16,7 @@ use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthorit
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
-use crate::support::weak_registry::WeakRegistry;
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;

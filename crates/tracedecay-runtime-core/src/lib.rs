@@ -106,6 +106,7 @@ pub mod sync;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
+pub mod weak_registry;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
 pub mod work_topology;

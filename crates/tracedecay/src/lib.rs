@@ -48,7 +48,6 @@
 // across the tree churns far more than the lint is worth here.
 #![allow(clippy::large_futures)]
 
-pub mod accounting;
 pub mod agents;
 pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 pub mod analytics_bridge;
@@ -77,7 +76,6 @@ pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
 pub mod display;
 pub mod doctor;
-pub mod external_tools;
 mod git_index_transactions;
 pub use tracedecay_usecases::git_query;
 pub mod graph;
@@ -107,7 +105,6 @@ pub mod serve;
 mod session_ingest_tests;
 pub mod session_temporal_benchmark;
 pub mod store;
-pub(crate) mod support;
 pub mod tracedecay;
 pub mod version;
 pub mod work_cli;

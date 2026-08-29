@@ -7,6 +7,7 @@ pub fn ast_grep_command() -> Command {
     Command::new(resolve_ast_grep_bin())
 }
 
+#[hotpath::measure(label = "code_index.external_tools.resolve_ast_grep_bin")]
 fn resolve_ast_grep_bin() -> PathBuf {
     if let Some(path) = std::env::var_os(AST_GREP_BIN_ENV).filter(|path| !path.is_empty()) {
         return PathBuf::from(path);

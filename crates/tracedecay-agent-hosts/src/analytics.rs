@@ -4,11 +4,9 @@
 //! `runner::evidence` scores tool families through [`underused_tool_family_signals`],
 //! and `skill_writer` reports [`ToolFamilySignal`]. The module names no other
 //! subsystem — it is pure classification over `serde_json` values.
-//!
-//! Root wiring: `src/analytics.rs` is
-//! `pub use tracedecay_agent_hosts::analytics::*;`, keeping every
-//! `crate::analytics::…` path resolving for the hook and MCP readers that stay
-//! in the root crate.
+
+/// Deterministic tool-task classification used by analytics accounting.
+pub mod classifier;
 
 use std::collections::{BTreeMap, BTreeSet};
 

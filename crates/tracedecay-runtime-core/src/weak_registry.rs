@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 /// A `Mutex`-guarded map from `K` to `Weak<V>`, upgraded and swept lazily on
 /// access.
-pub(crate) struct WeakRegistry<K, V> {
+pub struct WeakRegistry<K, V> {
     entries: Mutex<HashMap<K, Weak<V>>>,
 }
 
@@ -31,7 +31,7 @@ impl<K, V> Default for WeakRegistry<K, V> {
 }
 
 impl<K: Eq + Hash, V> WeakRegistry<K, V> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -40,25 +40,25 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     }
 
     /// Drops entries whose last strong `Arc` has already gone away.
-    pub(crate) fn retain_live(&self) {
+    pub fn retain_live(&self) {
         self.lock().retain(|_, weak| weak.strong_count() > 0);
     }
 
     /// Looks up `key` and upgrades it if still live. Does not sweep other
     /// entries and does not register anything on a miss.
-    pub(crate) fn get_live(&self, key: &K) -> Option<Arc<V>> {
+    pub fn get_live(&self, key: &K) -> Option<Arc<V>> {
         self.lock().get(key).and_then(Weak::upgrade)
     }
 
     /// Registers `value` under `key`, replacing whatever was there.
-    pub(crate) fn insert(&self, key: K, value: &Arc<V>) {
+    pub fn insert(&self, key: K, value: &Arc<V>) {
         self.lock().insert(key, Arc::downgrade(value));
     }
 
     /// Removes `key` only if it still points at `value` (by pointer
     /// identity), so a leader clearing its own registration never clobbers a
     /// newer registration that has since replaced it.
-    pub(crate) fn remove_if_same(&self, key: &K, value: &Arc<V>) -> bool {
+    pub fn remove_if_same(&self, key: &K, value: &Arc<V>) -> bool {
         let mut entries = self.lock();
         let still_registered = entries
             .get(key)
@@ -75,7 +75,7 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     /// it. The `bool` reports whether the entry was already live (`true`) or
     /// freshly inserted (`false`), so callers can distinguish a hit from a
     /// miss (e.g. leader/follower counters).
-    pub(crate) fn get_or_insert_with(
+    pub fn get_or_insert_with(
         &self,
         key: K,
         make: impl FnOnce() -> Arc<V>,
@@ -91,7 +91,7 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
     }
 
     /// Number of entries currently tracked, without sweeping dead ones.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.lock().len()
     }
 }

@@ -11,7 +11,7 @@ use crate::common::host_sources;
 use tempfile::TempDir;
 use tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
-use tracedecay::external_tools::ast_grep_command;
+use tracedecay_code_index::external_tools::ast_grep_command;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the

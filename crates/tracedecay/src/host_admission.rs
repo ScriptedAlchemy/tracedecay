@@ -16,7 +16,7 @@ use tracedecay_usecases::host_admission::{
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use crate::support::weak_registry::WeakRegistry;
+use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
