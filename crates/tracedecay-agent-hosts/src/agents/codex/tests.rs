@@ -1230,6 +1230,35 @@ fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
 }
 
 #[test]
+fn deactivation_fails_on_corrupt_plugins_table() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home.path()),
+        "personal",
+        "Personal",
+        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
+    )
+    .unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "plugins = \"corrupt\"\n").unwrap();
+
+    let error = CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .expect_err("a corrupt plugins table must fail deactivate");
+    assert!(
+        error
+            .to_string()
+            .contains("could not read Codex native plugin activation state"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "plugins = \"corrupt\"\n"
+    );
+}
+
+#[test]
 fn detected_host_surface_reports_codex_home() {
     let home = tempfile::tempdir().unwrap();
     assert_eq!(CodexIntegration.detected_host_surface(home.path()), None);

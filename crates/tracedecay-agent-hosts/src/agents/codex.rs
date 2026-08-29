@@ -379,7 +379,12 @@ impl AgentIntegration for CodexIntegration {
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
-            || codex_plugin_enabled(&ctx.home).unwrap_or(false)
+            || codex_plugin_enabled(&ctx.home).map_err(|()| TraceDecayError::Config {
+                message: format!(
+                    "could not read Codex native plugin activation state at {}",
+                    codex_config_path(&ctx.home).display()
+                ),
+            })?
         {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
