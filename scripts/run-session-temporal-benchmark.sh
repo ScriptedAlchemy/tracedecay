@@ -94,7 +94,7 @@ require(stats.get("p99_label") == p99_label, "p99 label mismatch")
 require(workload.get("production_path", {}).get("available_to_benchmark_target") is True,
         "production path must be available")
 implementation = workload.get("implementation") or {}
-require(implementation.get("path") == "src/session_temporal_benchmark.rs",
+require(implementation.get("path") == "crates/tracedecay/src/session_temporal_benchmark.rs",
         "implementation path mismatch")
 require(implementation.get("sha256") == sha256(root / implementation["path"]),
         "implementation hash mismatch")
@@ -147,10 +147,10 @@ elif provisional == "result-current.json":
     require(result.get("workload_manifest_sha256") == sha256(workload_path),
             "current result workload hash mismatch")
     require(result.get("source_identity", {}).get("harness")
-            == "src/session_temporal_benchmark.rs",
+            == "crates/tracedecay/src/session_temporal_benchmark.rs",
             "current result harness identity mismatch")
     require(result.get("source_identity", {}).get("harness_sha256")
-            == sha256(root / "src/session_temporal_benchmark.rs"),
+            == sha256(root / "crates/tracedecay/src/session_temporal_benchmark.rs"),
             "current result harness hash mismatch")
     provenance = workload.get("refresh_provenance") or {}
     require(provenance.get("source_mode") == "clean_git_worktree_v1",
@@ -223,7 +223,7 @@ run_benchmark() {
   export CARGO_HOME="$cargo_home"
   export RUSTUP_HOME="$rustup_home"
   mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
-  cargo bench --bench session_temporal --all-features -- "$mode"
+  cargo bench -p tracedecay --bench session_temporal --all-features -- "$mode"
 }
 
 if [[ $# -ne 1 ]]; then
