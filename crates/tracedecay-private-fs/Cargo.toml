@@ -19,6 +19,8 @@ hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
 test-helpers = []
 
 [dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 hotpath.workspace = true
 thiserror = "2"
 

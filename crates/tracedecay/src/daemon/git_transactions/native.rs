@@ -21,7 +21,7 @@ use tracedecay_domain::{
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
-    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256,
+    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256, parse_hunk_header,
 };
 use tracedecay_store::GitIndexTransactionRecordV1;
 
@@ -823,14 +823,8 @@ fn unsupported_hunk_selection(
         if hunk.original_path.is_some() {
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
         }
-        let line_count = normalize_hunk_header(&hunk.hunk_header)
-            .and_then(|header| {
-                let mut fields = header.split_whitespace();
-                fields.next()?;
-                let old = parse_hunk_range(fields.next()?.strip_prefix('-')?)?;
-                let new = parse_hunk_range(fields.next()?.strip_prefix('+')?)?;
-                Some(old.1.max(new.1))
-            })
+        let line_count = parse_hunk_header(&hunk.hunk_header)
+            .map(|header| header.old_count.max(header.new_count))
             .unwrap_or_default();
         if hunk.selected_line_bitmap != tracedecay_domain::full_hunk_selection_bitmap(line_count) {
             return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
@@ -1085,19 +1079,11 @@ fn marker_path(line: &str) -> Option<&str> {
 }
 
 fn normalize_hunk_header(header: &str) -> Option<String> {
-    let mut fields = header.split_whitespace();
-    (fields.next()? == "@@").then_some(())?;
-    let old = parse_hunk_range(fields.next()?.strip_prefix('-')?)?;
-    let new = parse_hunk_range(fields.next()?.strip_prefix('+')?)?;
-    (fields.next()? == "@@").then_some(())?;
-    Some(format!("@@ -{},{} +{},{} @@", old.0, old.1, new.0, new.1))
-}
-
-fn parse_hunk_range(value: &str) -> Option<(u32, u32)> {
-    match value.split_once(',') {
-        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
-        None => Some((value.parse().ok()?, 1)),
-    }
+    let parsed = parse_hunk_header(header)?;
+    Some(format!(
+        "@@ -{},{} +{},{} @@",
+        parsed.old_start, parsed.old_count, parsed.new_start, parsed.new_count
+    ))
 }
 
 fn read_git_command(repository_root: &Path) -> Command {

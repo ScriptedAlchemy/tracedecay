@@ -63,6 +63,51 @@ impl GitIndexEntryExpectationV1 {
     }
 }
 
+/// One parsed `@@ -old[,count] +new[,count] @@[ section]` unified hunk header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParsedHunkHeader<'a> {
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    /// The optional trailing section heading. Callers whose envelope forbids
+    /// a section (normalized stored headers) reject `Some`.
+    pub section: Option<&'a str>,
+}
+
+/// Parses one unified hunk header exactly as git emits it: single-space
+/// separation, numeric start/count fields (an omitted count is 1), a
+/// mandatory ` @@` terminator, and an optional space-separated section
+/// heading after it. Anything looser is not a hunk header.
+pub fn parse_hunk_header(line: &str) -> Option<ParsedHunkHeader<'_>> {
+    let body = line.strip_prefix("@@ -")?;
+    let (old, rest) = body.split_once(' ')?;
+    let rest = rest.strip_prefix('+')?;
+    let (new, rest) = rest.split_once(" @@")?;
+    let (old_start, old_count) = parse_hunk_range(old)?;
+    let (new_start, new_count) = parse_hunk_range(new)?;
+    let section = if rest.is_empty() {
+        None
+    } else {
+        let section = rest.strip_prefix(' ')?.trim();
+        (!section.is_empty()).then_some(section)
+    };
+    Some(ParsedHunkHeader {
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+        section,
+    })
+}
+
+fn parse_hunk_range(range: &str) -> Option<(u32, u32)> {
+    match range.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((range.parse().ok()?, 1)),
+    }
+}
+
 pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
     if line_count == 0 {
         return vec![0];
@@ -213,3 +258,62 @@ crate::canonical_text::validated_string_newtype!(
     GitIndexReceiptId => "git index receipt id",
     GitIndexIdempotencyKey => "git index idempotency key",
 );
+
+#[cfg(test)]
+mod hunk_header_tests {
+    use super::{ParsedHunkHeader, parse_hunk_header};
+
+    #[test]
+    fn parses_explicit_counts_and_section() {
+        assert_eq!(
+            parse_hunk_header("@@ -10,6 +12,8 @@ fn example() {"),
+            Some(ParsedHunkHeader {
+                old_start: 10,
+                old_count: 6,
+                new_start: 12,
+                new_count: 8,
+                section: Some("fn example() {"),
+            })
+        );
+    }
+
+    #[test]
+    fn omitted_counts_default_to_one_and_no_section_is_none() {
+        assert_eq!(
+            parse_hunk_header("@@ -5 +0,0 @@"),
+            Some(ParsedHunkHeader {
+                old_start: 5,
+                old_count: 1,
+                new_start: 0,
+                new_count: 0,
+                section: None,
+            })
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_after_the_terminator_is_not_a_section() {
+        assert_eq!(
+            parse_hunk_header("@@ -1,2 +3,4 @@ ").and_then(|header| header.section),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_headers_are_rejected() {
+        for header in [
+            "@@ -,2 +3,4 @@",     // empty old start
+            "@@ -1,2 +3, @@",     // empty new count
+            "@@ -x,2 +3,4 @@",    // non-numeric start
+            "@@ -1,2 +3,4",       // missing terminator
+            "@@ -1,2 +3,4 @@x",   // terminator glued to trailing text
+            "@@  -1,2 +3,4 @@",   // double separator
+            "@@ +1,2 -3,4 @@",    // swapped signs
+            "@@ -1,2,3 +4,5 @@",  // extra range field
+            "-1,2 +3,4 @@",       // missing prefix
+            "@@ -1,2 +18446744073709551616,4 @@", // start exceeds u32
+        ] {
+            assert_eq!(parse_hunk_header(header), None, "must reject {header:?}");
+        }
+    }
+}

@@ -1,15 +1,16 @@
 //! Durable two-phase quarantine for destructive orphan-store retention.
 
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_fs_ext::DirExt;
-#[cfg(not(windows))]
-use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::{
+    remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
+};
 #[cfg(test)]
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -134,7 +135,17 @@ impl QuarantinedStore {
         if control.completion().is_some() {
             return QuarantineFinalizeOutcome::Interrupted { quarantine_path };
         }
-        match remove_open_dir_all_controlled(root, control) {
+        // The descent is capability-relative and no-follow; the interrupt
+        // check runs before every child operation so a cancelled admission
+        // leaves the journal and remaining bytes for the mounted reconciler.
+        let interrupted = &mut || {
+            if control.completion().is_some() {
+                Err(interrupted_remove_error())
+            } else {
+                Ok(())
+            }
+        };
+        match remove_open_dir_all_nofollow(root, interrupted) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                 return QuarantineFinalizeOutcome::Interrupted { quarantine_path };
@@ -151,39 +162,6 @@ impl QuarantinedStore {
         let journal_pending = clear_journal(&parent, &journal_name).is_err();
         QuarantineFinalizeOutcome::Removed { journal_pending }
     }
-}
-
-/// Remove an already-open quarantine directory with a cancellation check
-/// before every child operation. All descent is capability-relative and
-/// no-follow, so an entry swapped for a symlink cannot redirect cleanup out
-/// of the quarantined store. An interruption intentionally leaves the journal
-/// and remaining bytes in place for the mounted reconciler.
-fn remove_open_dir_all_controlled(
-    directory: Dir,
-    control: CollectionControl<'_>,
-) -> std::io::Result<()> {
-    if control.completion().is_some() {
-        return Err(interrupted_remove_error());
-    }
-    let entries = directory.read_dir(".")?;
-    for entry in entries {
-        if control.completion().is_some() {
-            return Err(interrupted_remove_error());
-        }
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            let name = entry.file_name();
-            let child = directory.open_dir_nofollow(&name)?;
-            remove_open_dir_all_controlled(child, control)?;
-        } else {
-            entry.remove_file()?;
-        }
-    }
-    if control.completion().is_some() {
-        return Err(interrupted_remove_error());
-    }
-    directory.remove_open_dir()
 }
 
 fn interrupted_remove_error() -> std::io::Error {
@@ -248,6 +226,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     if rename_noreplace(
         &capability.parent,
         &capability.leaf_name,
+        &capability.parent,
         OsStr::new(&quarantine_name),
     )
     .is_err()
@@ -342,7 +321,7 @@ fn recover_original_name(
     journal_name: Option<String>,
 ) -> QuarantineStoreOutcome {
     drop(root);
-    if rename_noreplace(&parent, OsStr::new(&quarantine_name), &original_name).is_ok() {
+    if rename_noreplace(&parent, OsStr::new(&quarantine_name), &parent, &original_name).is_ok() {
         // A directory sync failure occurs after the atomic rename. Preserve
         // any journal and return the true, restored path for that state.
         let journal_pending = sync_directory(&parent).is_err()
@@ -404,7 +383,7 @@ fn write_journal(parent: &Dir, name: &str, journal: &QuarantineJournalV1) -> std
         return Err(error);
     }
     drop(file);
-    if let Err(error) = rename_noreplace(parent, OsStr::new(&temporary), OsStr::new(name)) {
+    if let Err(error) = rename_noreplace(parent, OsStr::new(&temporary), parent, OsStr::new(name)) {
         let _ = parent.remove_file(&temporary);
         return Err(error);
     }
@@ -525,7 +504,14 @@ pub(super) fn recover_named_store_quarantine(
             quarantine_path,
         }));
     }
-    if rename_noreplace(&capability.parent, quarantine_name, &capability.leaf_name).is_ok() {
+    if rename_noreplace(
+        &capability.parent,
+        quarantine_name,
+        &capability.parent,
+        &capability.leaf_name,
+    )
+    .is_ok()
+    {
         Ok(Some(QuarantineRecoveryOutcome::Restored {
             restored_path: data_root.to_path_buf(),
             // Legacy quarantines have no journal, but an unsynced rename is
@@ -661,89 +647,3 @@ fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf 
     }
 }
 
-/// Atomically renames one sibling directory without allowing an occupied
-/// destination to be replaced. Platforms without a suitable primitive fail
-/// closed: retaining bytes is always preferable to risking a replacement.
-fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both C strings are component names, and the borrowed fd is
-        // the same parent directory for source and destination.
-        let result = unsafe {
-            libc::renameat2(
-                parent.as_raw_fd(),
-                from.as_ptr(),
-                parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
-
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both names are component C strings and RENAME_EXCL rejects
-        // an occupied destination.
-        let result = unsafe {
-            libc::renameatx_np(
-                parent.as_raw_fd(),
-                from.as_ptr(),
-                parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
-    }
-    #[cfg(windows)]
-    {
-        return parent.rename(from, parent, to);
-    }
-    #[cfg(not(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        windows
-    )))]
-    {
-        let _ = (parent, from, to);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "atomic no-replace rename is unavailable on this platform",
-        ))
-    }
-}
-
-fn sync_directory(directory: &Dir) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        directory.dir_metadata().map(|_| ())
-    }
-    #[cfg(not(windows))]
-    {
-        let mut options = OpenOptions::new();
-        options.read(true).maybe_dir(true);
-        directory
-            .open_with(".", &options)
-            .and_then(|file| file.sync_all())
-    }
-}
