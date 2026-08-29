@@ -65,7 +65,7 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         projection: &GraphProjectionIdentityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.recover.direct_sealed")?;
         require_projection_binding(&registration, projection)?;
         let head = authority
             .verified_head(projection, context)
@@ -88,7 +88,7 @@ impl GraphDbRegistry {
         }
         let source = crate::generation::checked_decode_replay_source(
             &replay.publication.canonical_replay_source,
-            &|| check_all(&registration, context),
+            &|| check_all(&registration, context, "generation.recover.direct_sealed"),
         )?;
         let GraphGenerationReplaySource::SealedCodeGeneration(source) = source else {
             return Err(GraphDbError::unavailable(
@@ -114,15 +114,16 @@ impl GraphDbRegistry {
             Arc::clone(&registration.authority_lease),
         )?
         .ok_or_else(|| GraphDbError::unavailable("sealed generation store is absent"))?;
-        if identity.dependency_closure_digest(&|| check_all(&registration, context))?
-            != head.dependency_generation_closure_digest
+        if identity.dependency_closure_digest(&|| {
+            check_all(&registration, context, "generation.recover.direct_sealed")
+        })? != head.dependency_generation_closure_digest
         {
             return Err(GraphDbError::Corrupt {
                 message: "sealed generation dependency closure does not match its verified head"
                     .to_owned(),
             });
         }
-        check_all(&registration, context)?;
+        check_all(&registration, context, "generation.recover.direct_sealed")?;
         let lease = generation_lease(&identity, head, BTreeMap::new());
         Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
     }
