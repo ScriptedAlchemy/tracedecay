@@ -148,17 +148,17 @@ const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 128;
 /// as `Cancelled` even while the owning open is inside one long read or
 /// digest call that has not yet reached its own checkpoint.
 const TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1: Duration = Duration::from_millis(100);
-/// Anti-livelock ceiling on the advances one activation will drive.
+/// Anti-livelock ceiling on the advances owner-warmup will drive.
 ///
 /// A single `TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1` advance never
-/// finalizes even a one-file generation, so an activation that stopped after
-/// one advance could never seat the owners and always reported typed warming
-/// to its caller. Each advance is guaranteed to make progress -- it either
-/// finalizes or consumes its full page/finalization budget -- so this is a
-/// bound against a source that never reports completion, not a work budget or
-/// a tunable. At 64 operations per advance it covers far more pages than any
-/// real repository's sealed generation contains; exceeding it still yields the
-/// same retryable warming error the caller already handles.
+/// finalizes even a one-file generation, so [`LatestCodeTextGenerationV1::production_query_owners`]
+/// keeps advancing until the build reports completion. Each advance is
+/// guaranteed to make progress -- it either finalizes or consumes its full
+/// page/finalization budget -- so this is a bound against a source that never
+/// reports completion, not a work budget or a tunable. Exceeding it still
+/// yields the same retryable warming error the caller already handles.
+/// Activation itself stays one bounded advance so graph warm and oversized
+/// hints never wait on the text projection.
 #[cfg(test)]
 const TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// Rows digested by one scheduler finalization operation. The builder persists
@@ -2931,23 +2931,20 @@ impl LatestCodeTextGenerationV1 {
             .artifact_occurrence_by_chunk(chunk)
     }
 
-    /// Drive the resumable text-artifact build to completion for activation.
+    /// One bounded activation advance: start (or resume) the text-artifact
+    /// build and report typed warming when it is not yet servable.
     ///
-    /// One bounded advance cannot finalize even a one-file generation, so
-    /// activation must keep advancing until the build reports completion.
-    /// Every advance stays bounded and cancellation-checkpointed, so a
-    /// shutdown or epoch bump still surfaces immediately through `?` rather
-    /// than being absorbed by this loop.
+    /// Deliberately not a completion loop. Activation callers (the graph
+    /// worker's cache warm, latency-sensitive admission) must stay bounded so
+    /// graph activation never waits on the text projection and oversized
+    /// hints abstain instead of scanning the worktree. Callers that need
+    /// finished owners drive the loop in [`Self::production_query_owners`].
     #[cfg(test)]
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        let mut advances = 0_usize;
-        while !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
-            advances += 1;
-            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
-                return Err(RetrievalPortError::AuthorityUnavailable(
-                    "code-index text serving owners are warming".to_owned(),
-                ));
-            }
+        if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "code-index text serving owners are warming".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -3051,12 +3048,27 @@ impl LatestCompleteCodeIndexV1 {
 
 impl LatestCodeTextGenerationV1 {
     /// Return exact and lexical query owners bound to the latest complete
-    /// published generation.
+    /// published generation, driving the resumable text-artifact build to
+    /// completion first.
+    ///
+    /// One bounded advance cannot finalize even a one-file generation, so
+    /// this owner-warmup entry keeps advancing until the build reports
+    /// completion. Every advance stays bounded and
+    /// cancellation-checkpointed, so a shutdown or epoch bump still surfaces
+    /// immediately through `?` rather than being absorbed by this loop.
     #[cfg(test)]
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        self.activate_text_serving()?;
+        let mut advances = 0_usize;
+        while !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
+            advances += 1;
+            if advances >= TEXT_ARTIFACT_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ));
+            }
+        }
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 

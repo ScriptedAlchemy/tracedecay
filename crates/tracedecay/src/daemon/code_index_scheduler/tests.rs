@@ -3153,12 +3153,12 @@ fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
     assert!(active_text_artifact_path(store.path()).is_file());
 }
 
-/// A cold generation must finish text-serving activation in one call.
+/// A cold generation must finish text-serving owner warmup in one call.
 ///
-/// One bounded advance never finalizes even a small generation, so an
-/// activation that stopped after a single advance always reported typed
-/// warming and never seated the owners it is responsible for. Assert the
-/// activation outcome and the resulting owner readiness -- never elapsed time.
+/// One bounded advance never finalizes even a small generation, so
+/// [`LatestCodeTextGenerationV1::production_query_owners`] keeps driving the
+/// resumable build. Activation itself stays one bounded advance.
+/// Assert owner readiness -- never elapsed time.
 #[test]
 fn cold_activation_completes_text_serving_in_one_call() {
     let fixture = GitFixture::new(&[
@@ -3180,15 +3180,15 @@ fn cold_activation_completes_text_serving_in_one_call() {
         "a freshly published generation must start cold"
     );
     latest
-        .activate_text_serving()
-        .expect("cold activation must drive the artifact build to completion");
+        .production_query_owners()
+        .expect("cold owner warmup must drive the artifact build to completion");
     assert!(
         latest.text_serving_is_ready(),
-        "activation must leave the text serving owners installed"
+        "owner warmup must leave the text serving owners installed"
     );
     assert!(
         !latest.text_serving_needs_work(),
-        "a completed activation must leave no resumable build behind"
+        "a completed warmup must leave no resumable build behind"
     );
 }
 
