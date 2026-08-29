@@ -6322,6 +6322,8 @@ dependencies = [
 name = "tracedecay-private-fs"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "hotpath",
  "libc",
  "tempfile",

@@ -5,23 +5,18 @@
 //! requires that identity before either restoring or recursively unlinking it.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-use std::ffi::CString;
 use std::ffi::OsStr;
 use std::io;
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-use std::os::fd::AsRawFd;
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-#[cfg(not(windows))]
-use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, ambient_authority};
+use cap_std::fs::Dir;
 #[cfg(any(unix, windows))]
 use cap_std::fs::MetadataExt;
-use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::{
+    remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
+};
 
 use super::{
     CodeGenerationRetentionErrorV1, SCOPE_RETENTION_QUARANTINE_DIRECTORY, StrandedCodeIndexScopeV1,
@@ -269,7 +264,7 @@ impl ScopeQuarantineAuthority {
                 if actual != expected || directory_identity(&staged).map_err(storage)? != expected {
                     return Err(identity_changed(&scope.scope_hash, "before unlink"));
                 }
-                remove_open_dir_all_nofollow(staged).map_err(storage)?;
+                remove_open_dir_all_nofollow(staged, &mut || Ok(())).map_err(storage)?;
                 if let Some(stage) = self.stage.as_ref() {
                     sync_directory(stage).map_err(storage)?;
                 }
@@ -423,35 +418,6 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
     })
 }
 
-fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
-    for entry in directory.read_dir(".")? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if entry.file_type()?.is_dir() {
-            let child = directory.open_dir_nofollow(&name)?;
-            remove_open_dir_all_nofollow(child)?;
-        } else {
-            entry.remove_file()?;
-        }
-    }
-    directory.remove_open_dir()
-}
-
-fn sync_directory(directory: &Dir) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        directory.dir_metadata().map(|_| ())
-    }
-    #[cfg(not(windows))]
-    {
-        let mut options = OpenOptions::new();
-        options.read(true).maybe_dir(true);
-        directory
-            .open_with(".", &options)
-            .and_then(|file| file.sync_all())
-    }
-}
-
 fn validate_scope_name(scope_hash: &str) -> Result<(), CodeGenerationRetentionErrorV1> {
     if is_code_index_scope_hash(scope_hash) {
         Ok(())
@@ -484,77 +450,6 @@ fn identity_changed(scope_hash: &str, boundary: &str) -> CodeGenerationRetention
 
 fn unsafe_state(message: impl Into<String>) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::UnsafeState(message.into())
-}
-
-/// Capability-relative no-replace rename, matching orphan-store retirement.
-fn rename_noreplace(
-    from_parent: &Dir,
-    from: &OsStr,
-    to_parent: &Dir,
-    to: &OsStr,
-) -> io::Result<()> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both names are single component C strings and both fds are
-        // already-open directory capabilities.
-        let result = unsafe {
-            libc::renameat2(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let from = CString::new(from.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-        let to = CString::new(to.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-        // SAFETY: both names are single component C strings and RENAME_EXCL
-        // refuses an occupied destination.
-        let result = unsafe {
-            libc::renameatx_np(
-                from_parent.as_raw_fd(),
-                from.as_ptr(),
-                to_parent.as_raw_fd(),
-                to.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-    #[cfg(windows)]
-    {
-        return from_parent.rename(from, to_parent, to);
-    }
-    #[cfg(not(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        windows
-    )))]
-    {
-        let _ = (from_parent, from, to_parent, to);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "atomic no-replace rename is unavailable on this platform",
-        ))
-    }
 }
 
 #[cfg(all(test, unix))]
