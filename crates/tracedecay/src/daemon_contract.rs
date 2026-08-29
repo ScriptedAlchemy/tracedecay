@@ -2468,6 +2468,11 @@ impl DaemonInvocationRequest {
 
 /// Parse an invocation only when it explicitly selects this protocol. Ordinary
 /// MCP JSON-RPC frames continue through the established daemon route.
+///
+/// Measured as the wire decode phase: this full-line parse runs between
+/// `daemon.wire.read_line` and the dispatch span, so without its own label a
+/// slow request could not be attributed between payload decode and handling.
+#[hotpath::measure(label = "daemon.wire.decode_invocation")]
 pub(crate) fn parse_daemon_invocation_request(
     line: &str,
 ) -> Option<Result<DaemonInvocationRequest, DaemonInvocationResponse>> {
