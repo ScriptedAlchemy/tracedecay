@@ -2865,7 +2865,7 @@ impl LatestCompleteCodeIndexV1 {
     /// Drive the retained text lane to completion so tests can assert exact
     /// and lexical owners without depending on a request-path warm.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
@@ -2910,7 +2910,7 @@ impl LatestCompleteCodeIndexV1 {
     /// success is memoized, so every serving path still runs — and still fails
     /// closed on — the exact same checks.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn warm_serving_caches(&self) {
         let _ = self.activate_text_serving();
         let generation_id = self.generation.manifest().generation_id.clone();
@@ -3056,7 +3056,7 @@ impl LatestCodeTextGenerationV1 {
     /// cancellation-checkpointed, so a shutdown or epoch bump still surfaces
     /// immediately through `?` rather than being absorbed by this loop.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
@@ -5346,7 +5346,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Canonical active publication generation id for tests that must observe
     /// the durable pointer without reading the private publication store.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_publication_generation_id_for_test(&self) -> Option<String> {
         self.publication
             .read_publication_pointer()

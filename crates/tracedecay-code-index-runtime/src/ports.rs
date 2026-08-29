@@ -31,14 +31,6 @@ impl PreparedQueryActivationViewV1 {
     }
 }
 
-/// Commit port for a prepared query activation. Root's provider implements this.
-pub trait QueryActivationCommitPortV1: Send + Sync {
-    fn commit_prepared_activation(
-        &self,
-        prepared: &PreparedQueryActivationViewV1,
-    ) -> Result<(), String>;
-}
-
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///
 /// Root maps `tracedecay::config::SyncConfig` into this type at construction.
@@ -142,7 +134,7 @@ pub const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
 ///
 /// Outside a connection scope (tests, background reconcile) this is a
 /// transparent passthrough — matching the pre-extract helper.
-#[hotpath::measure(label = "code_index_runtime.admission.park", future = true)]
+#[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
 pub async fn park_admission<F>(future: F) -> F::Output
 where
     F: Future,

@@ -737,7 +737,7 @@ async fn disabled_watcher_never_registers() {
 
 #[tokio::test]
 async fn ambient_user_profile_root_is_never_watched() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
     let watcher = GitWatcher::new(fast_watch_config());
 

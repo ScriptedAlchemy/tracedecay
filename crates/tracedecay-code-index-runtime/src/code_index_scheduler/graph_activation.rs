@@ -54,14 +54,12 @@ fn injected_activation_gates()
     GATES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct InjectedActivationGateV1 {
     state: Arc<InjectedActivationGateStateV1>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+#[cfg(test)]
 impl InjectedActivationGateV1 {
     pub async fn wait_until_started(&self) {
         self.state.started.notified().await;
@@ -72,15 +70,14 @@ impl InjectedActivationGateV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl Drop for InjectedActivationGateV1 {
     fn drop(&mut self) {
         self.release();
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn install_injected_activation_gate(
     worktree_id: &WorktreeId,
 ) -> InjectedActivationGateV1 {
@@ -95,8 +92,7 @@ pub fn install_injected_activation_gate(
     InjectedActivationGateV1 { state }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usize) {
     let mut injected = injected_activation_failures()
         .lock()
@@ -108,8 +104,7 @@ pub fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usiz
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: bool) {
     let mut refusals = injected_resident_memory_refusals()
         .lock()

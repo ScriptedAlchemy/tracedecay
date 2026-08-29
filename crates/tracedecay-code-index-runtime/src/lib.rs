@@ -79,7 +79,7 @@ pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use ports::{
     AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, ApplicationCatalogSnapshotFn,
     CONNECTION_ADMISSION, GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1,
-    PreparedQueryActivationViewV1, QueryActivationCommitPortV1,
+    PreparedQueryActivationViewV1,
     install_application_catalog_snapshot, park_admission,
 };
 pub use semantic_evaluation_shutdown::{

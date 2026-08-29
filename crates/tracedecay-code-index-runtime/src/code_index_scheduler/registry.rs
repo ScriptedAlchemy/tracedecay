@@ -992,7 +992,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn pause_next_cold_mount_before_final_commit(
         &self,
         project_root: PathBuf,
@@ -1075,7 +1075,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// (parallelism across distinct stores vs. serialization at a bound of one)
     /// independent of the host's core count.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_background_reconcile_permits(max_worktrees: usize, permits: usize) -> Self {
         let mut registry = Self::new(max_worktrees);
         registry.background_reconcile_admission = Arc::new(tokio::sync::Semaphore::new(permits));
@@ -1085,7 +1085,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// The bounded background-reconcile admission, so a test can occupy it and
     /// hold the worker at its dequeue point while asserting on the pending wake.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.background_reconcile_admission)
     }
@@ -1653,7 +1653,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Clear the pending-wake slot so a test starts from a known due window.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn clear_pending_wake_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -2229,7 +2229,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn memory_stats(&self) -> CodeIndexSchedulerMemoryStatsV1 {
         let mounted = self.mounted.lock().await;
         CodeIndexSchedulerMemoryStatsV1 {
@@ -2278,7 +2278,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn mount_worktree(
         &self,
         project_id: ProjectId,
@@ -2300,8 +2300,7 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn mount_worktree_with_graph_policy(
         &self,
         project_id: ProjectId,
@@ -3869,7 +3868,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn has_query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -3878,7 +3877,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn query_authority_installation_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -3924,7 +3923,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
@@ -5050,7 +5049,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// support for proving that holding one worktree's scheduler lock does not
     /// block another worktree's freshness query on the registry map.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn scheduler_handle(
         &self,
         project_root: &Path,

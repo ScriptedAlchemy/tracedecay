@@ -65,20 +65,6 @@ pub(crate) enum QueryMcpAdmissionUnavailableV1 {
     Revoked,
 }
 
-impl QueryMcpAdmissionUnavailableV1 {
-    pub(crate) const fn reason(self) -> &'static str {
-        match self {
-            Self::Unauthenticated => "mcp_route_unauthenticated",
-            Self::InvalidGrant => "mcp_read_grant_invalid",
-            Self::CapabilityMismatch => "mcp_read_capability_mismatch",
-            Self::ScopeMismatch => "mcp_read_scope_mismatch",
-            Self::AuthorizationStale => "mcp_read_authorization_stale",
-            Self::Expired => "mcp_read_grant_expired",
-            Self::Revoked => "mcp_read_grant_revoked",
-        }
-    }
-}
-
 /// Tallies one admission refusal against its exact policy reason. The reason
 /// set is the closed [`QueryMcpAdmissionUnavailableV1`] enum, so every gauge
 /// key stays compile-time static.

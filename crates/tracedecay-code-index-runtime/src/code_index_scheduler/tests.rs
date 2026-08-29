@@ -32,7 +32,7 @@ use tracedecay_domain::{
 };
 
 #[cfg(feature = "semantic-fastembed")]
-use crate::config::SemanticResourceCeilings;
+use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
@@ -7291,7 +7291,10 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .expect("Jina lifecycle"),
     );
     lifecycle
-        .select_model(Some(crate::config::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(
+            Some(tracedecay_global_db::configuration::semantic::DEFAULT_FASTEMBED_MODEL_ID),
+            true,
+        )
         .expect("select configured Jina model");
     lifecycle
         .acquire_blocking_for_tests()
@@ -11794,7 +11797,7 @@ async fn wait_for_event_to_ready(
 /// observability store is busy.
 #[tokio::test]
 async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
@@ -11875,7 +11878,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
 /// one project observation store.
 #[tokio::test]
 async fn installed_observability_lane_records_index_and_retrieval_observations() {
-    let _pin = crate::config::PinnedUserDataDir::new();
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);

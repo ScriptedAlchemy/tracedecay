@@ -10,7 +10,7 @@ use super::CodeIndexSchedulerRegistryV1;
 
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(max_worktrees: usize) -> Self {
         Self::with_resident_memory_and_progress_producer_incarnation(
             max_worktrees,

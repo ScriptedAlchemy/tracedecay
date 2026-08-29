@@ -289,7 +289,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
-    pub fn capture_candidate_bytes_with_progress(
+    pub(super) fn capture_candidate_bytes_with_progress(
         &self,
         registry: &StaticLanguageRegistry,
         logical_path: &str,
@@ -352,7 +352,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     #[hotpath::measure(label = "daemon.code_index.capture.exact_git_tree")]
-    pub fn capture_exact_git_tree_snapshot(
+    pub(super) fn capture_exact_git_tree_snapshot(
         &self,
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,

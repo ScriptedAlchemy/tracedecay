@@ -8,14 +8,8 @@
 
 pub use tracedecay_domain::source_path_policy::is_generated_dir_segment;
 #[cfg(test)]
-pub use tracedecay_global_db::configuration::semantic::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
-};
-#[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_runtime_core::config::{TRACEDECAY_DIR, is_ambient_project_root};
-#[cfg(any(test, feature = "test-helpers"))]
-pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 pub use tracedecay_usecases::config::retrieval;
 
 /// Path-level generated/vendored check used by the scheduler snapshot filter.
