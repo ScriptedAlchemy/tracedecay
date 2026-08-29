@@ -900,7 +900,7 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
 #[hotpath::measure(label = "maintenance.storage_report.scan_profile_size")]
-pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
+pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     fn walk(path: &Path, total_bytes: &mut u64, unavailable_entry_count: &mut usize) {
         let entries = match std::fs::read_dir(path) {
             Ok(entries) => entries,

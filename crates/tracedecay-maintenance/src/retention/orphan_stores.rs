@@ -1721,7 +1721,7 @@ pub(crate) fn newest_mtime_secs_controlled(
 /// one pointing outside the store would bill another directory's bytes to
 /// this one. `file_type` reports the link itself, so the walk stays inside
 /// the directory it was given.
-pub fn dir_size_bytes(dir: &Path) -> u64 {
+pub(crate) fn dir_size_bytes(dir: &Path) -> u64 {
     walk_store_stats(dir).size_bytes
 }
 

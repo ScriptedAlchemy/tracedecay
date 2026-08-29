@@ -198,19 +198,23 @@ fn interrupted_report(
 fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
     match report.completion {
         UnregisteredSweepCompletionV1::Complete => {
-            hotpath::gauge!("retention.orphan.unregistered.page_complete_total").inc(1_u64);
+            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_complete_total")
+                .inc(1_u64);
         }
         UnregisteredSweepCompletionV1::Cancelled => {
-            hotpath::gauge!("retention.orphan.unregistered.page_cancelled_total").inc(1_u64);
+            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_cancelled_total")
+                .inc(1_u64);
         }
         UnregisteredSweepCompletionV1::DeadlineExceeded => {
-            hotpath::gauge!("retention.orphan.unregistered.page_deadline_total").inc(1_u64);
+            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_deadline_total")
+                .inc(1_u64);
         }
     }
-    hotpath::gauge!("retention.orphan.unregistered.collected_total")
+    hotpath::gauge!("maintenance.orphan_stores.unregistered.collected_total")
         .inc(report.outcome.collected.len());
-    hotpath::gauge!("retention.orphan.unregistered.failed_total").inc(report.outcome.errors.len());
-    hotpath::gauge!("retention.orphan.unregistered.reclaimed_bytes_total")
+    hotpath::gauge!("maintenance.orphan_stores.unregistered.failed_total")
+        .inc(report.outcome.errors.len());
+    hotpath::gauge!("maintenance.orphan_stores.unregistered.reclaimed_bytes_total")
         .inc(report.outcome.reclaimed_bytes);
     report
 }

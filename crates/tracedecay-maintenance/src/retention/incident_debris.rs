@@ -171,11 +171,11 @@ pub fn sweep_incident_debris(
 /// Items-moved/removed census for the one outer sweep wall span, including
 /// the fail-closed early exits that touch nothing but report every store.
 fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSweepReport {
-    hotpath::gauge!("retention.incident.quarantined_total").inc(report.quarantined);
-    hotpath::gauge!("retention.incident.collected_total").inc(report.collected);
-    hotpath::gauge!("retention.incident.failed_total").inc(report.errors.len());
-    hotpath::gauge!("retention.incident.reclaimed_bytes_total").inc(report.reclaimed_bytes);
-    hotpath::gauge!("retention.incident.retained").set(report.retained);
+    hotpath::gauge!("maintenance.incident_debris.quarantined_total").inc(report.quarantined);
+    hotpath::gauge!("maintenance.incident_debris.collected_total").inc(report.collected);
+    hotpath::gauge!("maintenance.incident_debris.failed_total").inc(report.errors.len());
+    hotpath::gauge!("maintenance.incident_debris.reclaimed_bytes_total").inc(report.reclaimed_bytes);
+    hotpath::gauge!("maintenance.incident_debris.retained").set(report.retained);
     report
 }
 
