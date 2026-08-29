@@ -123,6 +123,9 @@ impl ExactMismatchReplay {
     }
 
     pub fn replay(mut self) -> VerifiedGraphSnapshot {
+        // `prepare` closed the store to persist the mismatch; the timed
+        // replay publishes against a freshly mounted runtime.
+        self.graph.mount_runtime();
         self.graph.sequence += 1;
         let (control, probe) = operation_control(self.graph.sequence);
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
