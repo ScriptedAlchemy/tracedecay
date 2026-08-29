@@ -370,8 +370,15 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             Some(entries.swap_remove(index))
         });
         if let Some(entry) = reusable {
+            let reaped = reap_expired_locked(&mut state, now, self.inner.config.idle_timeout);
+            if reaped != 0 {
+                state.mark_availability_changed();
+            }
             state.active += 1;
             drop(state);
+            if reaped != 0 {
+                self.inner.wakeups.notify_all();
+            }
             crate::hotpath_observe::record_session_acquire("warm");
             return Ok(self.make_guard(identity, entry.session, entry.resident_bytes));
         }
@@ -1545,6 +1552,30 @@ mod tests {
             stats.sessions_opened, 1,
             "the already-warmed exact session must be reused after idle"
         );
+    }
+
+    #[test]
+    fn warm_acquire_reaps_expired_sibling_sessions() {
+        let pool = fake_pool(2, Duration::from_secs(10), 1 << 20);
+        let authority = authority();
+        let first = pool.acquire(&authority).expect("first acquire");
+        let second = pool.acquire(&authority).expect("second acquire");
+        drop(first);
+        drop(second);
+        assert_eq!(pool.stats().idle, 2, "both exact sessions are idle");
+
+        pool.inner.clock.advance(Duration::from_secs(11));
+        let _reused = pool.acquire(&authority).expect("reuse exact session");
+        let stats = pool.stats();
+        assert_eq!(
+            stats.sessions_opened, 2,
+            "the selected exact session stays warm"
+        );
+        assert_eq!(
+            stats.sessions_reaped, 1,
+            "the expired exact sibling is reclaimed"
+        );
+        assert_eq!(stats.idle, 0, "no expired sibling remains resident");
     }
 
     #[test]
