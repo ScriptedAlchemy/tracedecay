@@ -392,7 +392,7 @@ impl HfHubModelMemberSourceV1 {
 }
 
 impl ModelMemberSourceV1 for HfHubModelMemberSourceV1 {
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.model_lifecycle.fetch_member")]
     fn fetch_member(
         &self,
         model: &CatalogedFastEmbedModelV1,

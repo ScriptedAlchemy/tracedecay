@@ -8,9 +8,8 @@ use crate::ToolDefinition;
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
 pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
-    let registry = tracedecay_application::mcp_executable_binding_registry().map_err(|error| {
-        crate::McpCatalogError::Initialization(error.to_string())
-    })?;
+    let registry = tracedecay_application::mcp_executable_binding_registry()
+        .map_err(|error| crate::McpCatalogError::Initialization(error.to_string()))?;
     let operation_id = OperationId::new("operation.application.observatory_read".to_owned())
         .map_err(|_| invalid_observatory_discovery("MCP Observatory operation identity"))?;
     let binding = registry
@@ -29,9 +28,7 @@ pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> 
     }])
 }
 
-fn invalid_observatory_discovery(
-    field: &'static str,
-) -> crate::McpCatalogError {
+fn invalid_observatory_discovery(field: &'static str) -> crate::McpCatalogError {
     tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
         field,
         reason: "must expose the canonical Observatory executable binding",

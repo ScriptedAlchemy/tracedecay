@@ -96,7 +96,6 @@ impl AgentTaskRequest {
         self
     }
 
-    #[hotpath::measure(label = "automation.backend.message")]
     pub fn backend_message(&self) -> Result<String> {
         serde_json::to_string_pretty(&serde_json::json!({
             "run_id": self.run_id,
@@ -557,7 +556,6 @@ pub struct AgentBackendAvailability {
     pub reason: Option<String>,
 }
 
-#[hotpath::measure(label = "automation.backend.extract_json_prefix")]
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     let candidate = strip_optional_json_fence(text)?;
     parse_json_object_prefix(candidate)
@@ -617,7 +615,6 @@ fn parse_json_object_prefix(candidate: &str) -> Result<Value> {
     Ok(value)
 }
 
-#[hotpath::measure(label = "automation.backend.validate_schema")]
 pub fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Result<()> {
     let Some(required) = contract
         .response_schema

@@ -706,7 +706,7 @@ impl PersistentWriter {
             .await
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "rusqlite_runtime.writer.submit_authorized", future = true)]
     pub async fn submit_authorized(
         &self,
         request: RuntimeSubmitRequestV1,

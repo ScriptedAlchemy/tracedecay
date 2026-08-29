@@ -116,7 +116,7 @@ pub(in crate::daemon) async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
@@ -134,7 +134,7 @@ pub(in crate::daemon) async fn mount_core_query_authority_for_committed_fallback
     project_root: &Path,
     scope: &ResolvedScope,
     expected_revision: &ConfigurationRevisionId,
-    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
@@ -152,7 +152,7 @@ pub(in crate::daemon) async fn mount_core_query_authority_for_committed_fallback
 async fn prepare_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
     let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
         text.metadata().manifest().privacy_domain.clone()
