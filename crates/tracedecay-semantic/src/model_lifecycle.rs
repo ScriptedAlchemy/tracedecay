@@ -1,9 +1,10 @@
 //! Daemon-owned `FastEmbed` model acquisition lifecycle.
 //!
 //! Settings select a cataloged model (default [`DEFAULT_FASTEMBED_MODEL_ID`]).
-//! Installation stays offline-safe; after startup, the daemon may acquire the
-//! immutable catalog revision in the background. Search never discovers an
-//! ambient hub/cache or downloads model bytes at query time.
+//! Installation stays offline-safe. Project open only records the catalog
+//! selection; strict semantic demand may queue acquisition of the immutable
+//! revision in the background. The request never waits for model bytes and no
+//! ambient hub or cache becomes serving authority.
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

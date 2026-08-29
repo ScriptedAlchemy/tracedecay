@@ -710,8 +710,8 @@ impl SemanticModelLifecycleOwnerV1 {
         }))
     }
 
-    /// Queue background acquisition when a selected model is not yet installed.
-    pub fn enqueue_startup_acquisition_if_needed(&self) -> bool {
+    /// Queue background acquisition after semantic retrieval is demanded.
+    pub fn enqueue_demand_acquisition_if_needed(&self) -> bool {
         let status = self.status();
         let selected_model = status.selected_model.clone();
         if !status.auto_download {

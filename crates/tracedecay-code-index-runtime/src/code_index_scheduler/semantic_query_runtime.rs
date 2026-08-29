@@ -361,6 +361,13 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.query.semantic.canonical"
         )
         .await?;
+        if matches!(mode, SemanticQueryModeV1::StrictSemantic) {
+            hotpath::measure_block!("daemon.query.semantic.model_demand", {
+                if let Some(owner) = crate::semantic_code::shared_lifecycle_owner() {
+                    let _ = owner.enqueue_demand_acquisition_if_needed();
+                }
+            });
+        }
         if hotpath::future!(
             self.semantic_query_authority_for_scope(scope),
             label = "daemon.query.semantic.activation_lookup"

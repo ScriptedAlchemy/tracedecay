@@ -686,7 +686,7 @@ async fn production_project_server_inner(
         let semantic_startup_project = canonical_project_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let _ = crate::semantic_code::apply_config_and_queue_startup(
+            let _ = crate::semantic_code::apply_config_selection(
                 semantic_startup_selection.as_deref(),
                 semantic_auto_download_enabled,
             );
@@ -694,7 +694,7 @@ async fn production_project_server_inner(
                 "project_open_phase",
                 &[
                     ("project", semantic_startup_project.display().to_string()),
-                    ("phase", "semantic_startup_configured".to_owned()),
+                    ("phase", "semantic_config_selected".to_owned()),
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
