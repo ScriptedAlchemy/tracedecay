@@ -17,6 +17,7 @@ use tracedecay_domain::{
     SessionProjectionGenerationV1, TemporalAssertionKindV1, TemporalAssertionRecordV1,
     TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     ObservationProjectionStore, ObservationStore, ObservationWrite, SessionFrozenWatermarksV1,
@@ -27,7 +28,6 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 pub(crate) async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))

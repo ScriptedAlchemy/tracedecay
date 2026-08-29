@@ -16,21 +16,16 @@ use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_hooks::core_events::{
     DaemonHookEvent, HookAgent, HookRouteMetadata, HookTerminalReceipt,
 };
+use tracedecay_host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
+};
 use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_sessions::admission::{
-    HostAdmissionOutcome,
-    HostAdmissionScope,
-    HostAdmissionStatus,
-};
-use tracedecay_host_admission::{
-    HostAdmissionBroker,
-    HostAdmissionRuntime,
-    SharedHostAdmissionBroker,
-    SpoolBounds,
-};
 
 fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()

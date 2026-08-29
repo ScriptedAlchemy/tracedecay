@@ -46,11 +46,8 @@ type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
 #[cfg(not(feature = "hotpath"))]
 type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
-type HostAdmissionBrokers = Arc<
-    ProfiledTokioMutex<
-        HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>,
-    >,
->;
+type HostAdmissionBrokers =
+    Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -413,9 +410,7 @@ impl ProfileHostAdmissionBootstrapContext {
         let (runtime, _) = tokio::task::spawn_blocking(move || {
             hotpath::measure_block!(
                 "daemon.branch_admin.host_admission_runtime.open",
-                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
-                    &open_path
-                )
+                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
             )
         })
         .await
@@ -426,8 +421,7 @@ impl ProfileHostAdmissionBootstrapContext {
                 "host-admission spool runtime task failed",
             )
         })??;
-        let broker =
-            Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         self.host_admission_brokers
             .lock()
             .await
@@ -858,9 +852,7 @@ impl StoreAdministration {
                         "host-admission spool runtime task failed",
                     )
                 })??;
-                let broker = Arc::new(
-                    tracedecay_host_admission::HostAdmissionBroker::new(runtime),
-                );
+                let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
                 self.host_admission_brokers
                     .lock()
                     .await

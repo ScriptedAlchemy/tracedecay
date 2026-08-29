@@ -768,8 +768,8 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::{SessionId, TemporalCoverageCountsV1, UtcMicros};
-    use tracedecay_store::{SessionRefreshBeginOrJoinRequestV1, SessionTemporalProjectionBatchV1};
     use tracedecay_sessions::admission::HostAdmissionScope;
+    use tracedecay_store::{SessionRefreshBeginOrJoinRequestV1, SessionTemporalProjectionBatchV1};
 
     use crate::host_admission::HostAdmissionTestRuntimeV1;
 

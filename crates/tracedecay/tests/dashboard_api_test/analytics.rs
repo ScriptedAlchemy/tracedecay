@@ -21,8 +21,8 @@ use tracedecay_domain::{
     RetrievalQueryObservedV1,
 };
 use tracedecay_global_db::AnalyticsEventInsert;
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 struct Fixture {
     _tmp: TempDir,

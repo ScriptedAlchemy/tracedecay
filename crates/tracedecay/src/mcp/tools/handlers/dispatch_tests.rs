@@ -512,9 +512,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         .await
         .unwrap();
     let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime.registered_database_arc(
-            tracedecay_sessions::admission::HostAdmissionScope::Project,
-        ),
+        registered_project_session_db: runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
         ..Default::default()
     };
     let status = handle_tool_call_with_registry_options(

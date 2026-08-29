@@ -239,10 +239,7 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use tracedecay_sessions::admission::{
-    is_wire_oversized_io_error,
-    read_bounded_mcp_line,
-};
+    use tracedecay_sessions::admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
 
     // Pin one frame-read future for the whole wait. Liveness polls must not
     // recreate `read_bounded_mcp_line`: that future owns the partial-frame

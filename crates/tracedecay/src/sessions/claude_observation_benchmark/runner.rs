@@ -14,6 +14,7 @@ use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 use tracedecay_sessions::runtime::claude_observation::{
     ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
@@ -22,7 +23,6 @@ use tracedecay_sessions::runtime::cline_like::{
     ClineLikeSource, capture_cline_like_snapshot_observations,
 };
 use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
-use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 /// Installs the process-wide background CPU authority these benchmarks need.

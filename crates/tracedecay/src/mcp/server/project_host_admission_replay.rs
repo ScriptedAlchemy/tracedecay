@@ -13,14 +13,11 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_host_admission::{
-    REPLAY_BACKOFF_SHIFT_CAP,
-    ReplayPassDecision,
-    SharedHostAdmissionBroker,
-    classify_replay_pass,
+    REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
     replay_backoff,
 };
+use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
@@ -247,8 +244,7 @@ mod tests {
             tracedecay_host_admission::SpoolBounds::default(),
         )
         .unwrap();
-        let broker =
-            Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         broker.admit("test:pending", b"pending").await.unwrap();
         let passes = Arc::new(AtomicUsize::new(0));
         let passes_for_run = Arc::clone(&passes);
@@ -284,8 +280,7 @@ mod tests {
             tracedecay_host_admission::SpoolBounds::default(),
         )
         .unwrap();
-        let broker =
-            Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         let started = Arc::new(Notify::new());
         let started_for_run = Arc::clone(&started);
         let pass: PassFn = Arc::new(move || {

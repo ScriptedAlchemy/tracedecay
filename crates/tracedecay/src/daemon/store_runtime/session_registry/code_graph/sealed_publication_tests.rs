@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
@@ -27,7 +28,6 @@ use tracedecay_store::{
     RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
-use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use super::{

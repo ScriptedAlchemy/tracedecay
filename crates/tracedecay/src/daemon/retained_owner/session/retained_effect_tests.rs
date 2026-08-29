@@ -20,11 +20,11 @@ use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, SessionId,
     SessionRefreshOperationIdV1, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
 };
 use tracedecay_usecases::context::{SessionRootId, SessionStoreId};
-use tracedecay_sessions::admission::HostAdmissionScope;
 
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;

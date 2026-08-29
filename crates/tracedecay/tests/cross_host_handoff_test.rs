@@ -13,11 +13,8 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
+use tracedecay_sessions::admission::{HostAdmissionScope, HostAdmissionStatus};
 use tracedecay_store::{ObservationReplayRequest, StoredObservation};
-use tracedecay_sessions::admission::{
-    HostAdmissionScope,
-    HostAdmissionStatus,
-};
 use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 const PROJECT_ID: &str = "project.cross-host-handoff";

@@ -465,8 +465,8 @@ mod tests {
         ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     };
     use tracedecay_domain::{ObservabilityEnvelopeV1, ObservabilityPayloadV1, ProjectId};
-    use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_sessions::admission::HostAdmissionScope;
+    use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
 
     use super::*;

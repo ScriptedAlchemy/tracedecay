@@ -9,10 +9,7 @@ use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngest
 
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_host_admission::{
-    HostAdmissionAuthorities,
-    HostAdmissionFacade,
-};
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 
 /// Session-ingest authority over one registered database.
 ///
