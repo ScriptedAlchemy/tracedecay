@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use tempfile::TempDir;
-use tracedecay::graph::git::file_churn;
-use tracedecay::graph::health::{
+use tracedecay_usecases::git_intelligence::churn::file_churn;
+use tracedecay_usecases::graph::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };

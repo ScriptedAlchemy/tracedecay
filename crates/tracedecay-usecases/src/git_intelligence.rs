@@ -55,6 +55,8 @@ use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, cano
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::GitRepositoryError;
 
+/// Git churn reads for structural-health and test-risk analysis.
+pub mod churn;
 mod topology;
 
 /// Read subcommands the adapter is allowed to run. Anything outside this

@@ -227,7 +227,7 @@ pub(crate) async fn analyze_test_risk(
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let churn_map = crate::graph::git::file_churn(cg.project_root(), 90).await?;
+    let churn_map = tracedecay_usecases::git_intelligence::churn::file_churn(cg.project_root(), 90).await?;
     for risk in &mut risks {
         let churn = churn_map.get(&risk.file).copied().unwrap_or(0);
         risk.churn = churn;

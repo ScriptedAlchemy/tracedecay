@@ -1,10 +1,5 @@
-/// Structural health analysis algorithms.
-pub mod health;
-
-/// Git integration helpers for churn analysis.
-pub mod git;
+/// Test-risk analysis over the verified code graph.
+pub mod test_risk;
 
 /// AST-level functional-duplicate scanning over the code graph.
 pub mod redundancy_scan;
-
-pub use tracedecay_usecases::graph::queries::GraphQueryManager;

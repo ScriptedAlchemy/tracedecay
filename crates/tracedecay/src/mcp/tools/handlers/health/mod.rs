@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::graph::health::{
+use tracedecay_usecases::graph::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
 use crate::tracedecay::TraceDecay;

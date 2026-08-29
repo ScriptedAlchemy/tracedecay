@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracedecay_runtime_core::errors::Result;
-use crate::graph::GraphQueryManager;
+use tracedecay_usecases::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_application::RequestContext;
