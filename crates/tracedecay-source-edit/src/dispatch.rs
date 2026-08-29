@@ -19,7 +19,7 @@ pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
     pub(super) cancellation: Arc<dyn GraphCancellation>,
 }
 
-#[hotpath::measure(label = "source_edit.graph_read", future = true)]
+#[hotpath::measure(label = "usecases.edit.graph_read", future = true)]
 async fn admitted_graph(
     authority: &SourceEditGraphReadAuthorityV1<'_>,
 ) -> Result<SourceEditGraphReadV1> {
@@ -45,7 +45,7 @@ async fn admitted_graph(
     ))
 }
 
-#[hotpath::measure(label = "source_edit.dispatch", future = true)]
+#[hotpath::measure(label = "usecases.edit.dispatch", future = true)]
 pub(super) async fn run_source_edit(
     graph: &SourceEditRuntime,
     graph_read: SourceEditGraphReadAuthorityV1<'_>,

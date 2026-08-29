@@ -24,7 +24,7 @@ use super::records::{
 };
 use super::verify::{application_contract_error, application_problem, config_error};
 
-#[hotpath::measure(label = "source_edit.reconcile", future = true)]
+#[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
@@ -226,7 +226,7 @@ fn reconcile_prepared_source_edit(
     reconcile_prepared_source_edit_controlled(durability, project_root, operation, request, None)
 }
 
-#[hotpath::measure(label = "source_edit.reconcile_prepared")]
+#[hotpath::measure(label = "usecases.edit.reconcile_prepared")]
 fn reconcile_prepared_source_edit_controlled(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -326,7 +326,7 @@ fn reconcile_prepared_source_edit_controlled(
     Ok(result)
 }
 
-#[hotpath::measure(label = "source_edit.recover", future = true)]
+#[hotpath::measure(label = "usecases.edit.recover", future = true)]
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
@@ -382,7 +382,7 @@ pub(super) async fn recover_source_edit_transaction(
     if journal.predicted_state.as_ref() == Some(&observed_state) {
         hotpath::future!(
             graph.commit_source_edit_postimages(&journal.recovery_files),
-            label = "source_edit.recover.commit"
+            label = "usecases.edit.recover.commit"
         )
         .await?;
         let outcome = SourceEditOutcome::Reconciled {
@@ -416,7 +416,7 @@ pub(super) async fn recover_source_edit_transaction(
     }
     hotpath::future!(
         graph.recover_source_edit_preimages(&journal.recovery_files),
-        label = "source_edit.recover.preimage"
+        label = "usecases.edit.recover.preimage"
     )
     .await?;
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
@@ -444,7 +444,7 @@ pub(super) async fn recover_source_edit_transaction(
     durability.clear_journal()
 }
 
-#[hotpath::measure(label = "source_edit.replay")]
+#[hotpath::measure(label = "usecases.edit.replay")]
 pub(super) fn recover_or_replay(
     durability: &SourceEditDurability,
     request: &SourceEditEffectRequestV1,

@@ -51,7 +51,7 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
     Ok(normalized)
 }
 
-#[hotpath::measure(label = "source_edit.state_digest")]
+#[hotpath::measure(label = "usecases.edit.state_digest")]
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
@@ -60,7 +60,7 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
             Path::new(relative),
         )? {
             Some(bytes) => {
-                hotpath::gauge!("source_edit.digest_bytes").inc(bytes.len() as f64);
+                hotpath::gauge!("usecases.edit.digest_bytes").inc(bytes.len() as f64);
                 Some(hash_source_edit_content(&bytes)?)
             }
             None => None,
@@ -76,7 +76,7 @@ pub(super) fn source_edit_recovery_digest(
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
 
-#[hotpath::measure(label = "source_edit.planned_state_digest")]
+#[hotpath::measure(label = "usecases.edit.planned_state_digest")]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
     planned_files: &[tracedecay_usecases::tracedecay::PlannedSourceEditFile],
@@ -152,7 +152,7 @@ pub(super) fn reconciliation_attempt_effect_id(
     )
 }
 
-#[hotpath::measure(label = "source_edit.persist_record")]
+#[hotpath::measure(label = "usecases.edit.persist_record")]
 pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(|error| config_error(error.to_string()))?;
     if bytes.len() > MAX_DURABLE_RECORD_BYTES {
@@ -179,7 +179,7 @@ pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -
     .map_err(|error| io_error("persist source edit durable record", error))
 }
 
-#[hotpath::measure(label = "source_edit.load_record")]
+#[hotpath::measure(label = "usecases.edit.load_record")]
 pub(super) fn load_record<T>(path: &Path, kind: &'static str) -> Result<Option<T>>
 where
     T: for<'de> Deserialize<'de>,

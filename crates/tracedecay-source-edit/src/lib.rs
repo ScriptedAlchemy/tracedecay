@@ -4,6 +4,9 @@
 //! consumes it. Plan capture and apply still go through
 //! `tracedecay_usecases::tracedecay`; graph reads go through
 //! `tracedecay_usecases::graph`.
+//!
+//! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
+//! dual-rename to `source_edit.*` can land with the dashboard cutover.
 
 use tracedecay_application::{
     ApplicationOperation, SourceEditAuthorizationPort, SourceEditEffectRequestV1,

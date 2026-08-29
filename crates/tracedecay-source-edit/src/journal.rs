@@ -169,7 +169,7 @@ impl SourceEditDurability {
         }
     }
 
-    #[hotpath::measure(label = "source_edit.lock")]
+    #[hotpath::measure(label = "usecases.edit.lock")]
     pub(super) fn lock(&self) -> Result<tracedecay_usecases::tracedecay::SyncLockGuard> {
         tracedecay_usecases::tracedecay::try_acquire_sync_lock_at(
             &self.root.join("source-edit.lock"),
