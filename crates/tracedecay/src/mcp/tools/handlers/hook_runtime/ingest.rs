@@ -704,7 +704,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         && !user_scope
     {
         let settlement = hotpath::future!(
-            crate::hint_outcomes::settle_project_hint_outcomes(
+            tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
                 accounting_db,
                 session_authorities.project.map(std::convert::AsRef::as_ref),
                 tracedecay_usecases::analytics_bridge::hook_import_sources(Some(cg.project_root())),

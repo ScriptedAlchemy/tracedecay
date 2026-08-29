@@ -771,9 +771,9 @@ impl HostAdmissionTestRuntimeV1 {
     /// authority returned by [`Self::registered_database`] is intentionally a
     /// different shard; callers that correlate analytics with sessions must
     /// bind both explicitly, just as production composition does.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
-    pub(crate) fn profile_database_for_test(&self) -> &RegisteredGlobalDb {
+    pub fn profile_database_for_test(&self) -> &RegisteredGlobalDb {
         self.profile_database.as_ref()
     }
 

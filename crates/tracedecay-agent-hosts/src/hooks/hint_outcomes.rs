@@ -49,6 +49,9 @@ use tracedecay_application::{
 
 use super::tool_hints::expected_tools_for_key;
 
+/// Registered-store port composition and the post-ingest settlement pass.
+pub mod settlement;
+
 /// Wall-clock horizon after a hint within which a matching tool counts as
 /// "acted": 30 minutes.
 const HORIZON_SECS: i64 = 30 * 60;
