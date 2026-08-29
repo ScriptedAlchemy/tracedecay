@@ -89,7 +89,8 @@ use crate::{
             LexicalLaneRetriever,
         },
         ports::RetrievalPortError,
-    }};
+    },
+};
 use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_usecases::retention::code_index_generations::{
     DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,

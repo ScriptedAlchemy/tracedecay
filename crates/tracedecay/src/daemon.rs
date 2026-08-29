@@ -18,7 +18,6 @@ use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
 use crate::client_identity::DaemonClientIdentity;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{
     McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
@@ -39,6 +38,7 @@ use scheduler::{
 };
 use tracedecay_jsonrpc::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";

@@ -23,8 +23,8 @@ use super::{
     ProfileAuthorityPin, ProjectRuntimeOwnerRegistryV1, Result, StoreRuntimeKey,
     StoreRuntimeRegistry, session_registry_error,
 };
-use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::db::DatabaseAuthority;
 
 const BACKUP_MANIFEST_VERSION: &str = "tracedecay.remote-backup.v1";
 const CONTROL_POLL: Duration = Duration::from_millis(10);

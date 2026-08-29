@@ -46,8 +46,8 @@ use crate::daemon::session_retrieval::{
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 
 mod refresh;

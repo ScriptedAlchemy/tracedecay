@@ -42,8 +42,11 @@ const BOOTSTRAP_TERMINAL_CACHE_FOR: Duration = Duration::from_secs(2);
 /// profile starts a fresh worker, and a daemon restart always retries.
 const BOOTSTRAP_RETRY_BUDGET: Duration = Duration::from_mins(1);
 
-pub(super) type ProfileHostAdmissionBootstrapOperation =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send>> + Send + Sync>;
+pub(super) type ProfileHostAdmissionBootstrapOperation = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[cfg(test)]
 type ReplayPassOverride = Arc<
@@ -585,7 +588,9 @@ impl ProfileHostAdmissionBootstrapWorker {
     }
 }
 
-fn bootstrap_error_disposition(error: &tracedecay_runtime_core::errors::TraceDecayError) -> (&str, bool) {
+fn bootstrap_error_disposition(
+    error: &tracedecay_runtime_core::errors::TraceDecayError,
+) -> (&str, bool) {
     if error.reset_required_context().is_some() {
         ("reset_required", false)
     } else if let Some((reason_code, retryable, _)) = error.hook_runtime_context() {
@@ -913,11 +918,13 @@ mod tests {
             let attempts = Arc::clone(&operation_attempts);
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
-                Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                    "test_bootstrap_terminal",
-                    false,
-                    "repair required",
-                ))
+                Err(
+                    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                        "test_bootstrap_terminal",
+                        false,
+                        "repair required",
+                    ),
+                )
             })
         });
 
@@ -957,10 +964,12 @@ mod tests {
             let attempts = Arc::clone(&operation_attempts);
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
-                Err(tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                    "host-admission spool",
-                    "future spool version 3 is incompatible with required version 2",
-                ))
+                Err(
+                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                        "host-admission spool",
+                        "future spool version 3 is incompatible with required version 2",
+                    ),
+                )
             })
         });
 
@@ -1005,11 +1014,13 @@ mod tests {
             let attempts = Arc::clone(&operation_attempts);
             Box::pin(async move {
                 if attempts.fetch_add(1, Ordering::AcqRel) == 0 {
-                    Err(tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
-                        "spool_io_failed",
-                        true,
-                        "host-admission spool open failed",
-                    ))
+                    Err(
+                        tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
+                            "spool_io_failed",
+                            true,
+                            "host-admission spool open failed",
+                        ),
+                    )
                 } else {
                     Ok(())
                 }
@@ -1035,11 +1046,13 @@ mod tests {
 
         let terminal_operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
             Box::pin(async move {
-                Err(tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
-                    "spool_corrupted",
-                    false,
-                    "host-admission spool is corrupted",
-                ))
+                Err(
+                    tracedecay_runtime_core::errors::TraceDecayError::hook_runtime(
+                        "spool_corrupted",
+                        false,
+                        "host-admission spool is corrupted",
+                    ),
+                )
             })
         });
         registry
@@ -1081,11 +1094,13 @@ mod tests {
             Box::pin(async move {
                 let attempt = attempts.fetch_add(1, Ordering::AcqRel);
                 if attempt < 2 {
-                    Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                        "test_bootstrap_unavailable",
-                        true,
-                        "transient test failure",
-                    ))
+                    Err(
+                        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                            "test_bootstrap_unavailable",
+                            true,
+                            "transient test failure",
+                        ),
+                    )
                 } else {
                     Ok(())
                 }
@@ -1120,11 +1135,13 @@ mod tests {
             let attempts = Arc::clone(&operation_attempts);
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
-                Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-                    "test_bootstrap_unavailable",
-                    true,
-                    "permanently retryable test failure",
-                ))
+                Err(
+                    tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                        "test_bootstrap_unavailable",
+                        true,
+                        "permanently retryable test failure",
+                    ),
+                )
             })
         });
 

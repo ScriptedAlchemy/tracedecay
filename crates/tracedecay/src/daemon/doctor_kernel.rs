@@ -587,7 +587,9 @@ pub fn ingest_refusal_read_from_censuses(
         std::collections::BTreeMap::new();
     for census in censuses {
         match census {
-            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed { refusals } => {
+            tracedecay_global_db::observation::ObservationRefusalCensusV1::Observed {
+                refusals,
+            } => {
                 for refusal in refusals {
                     let key = (refusal.provider.clone(), refusal.reason.clone());
                     let entry = merged.entry(key).or_insert(0);
@@ -1549,9 +1551,9 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 Err(_) => HostIntegrationReadV1::Unknown,
             };
             let inputs = DoctorKernelInputsV1 {
-                configuration: configuration_read_from_pin::<tracedecay_runtime_core::errors::TraceDecayError>(
-                    &pinned,
-                ),
+                configuration: configuration_read_from_pin::<
+                    tracedecay_runtime_core::errors::TraceDecayError,
+                >(&pinned),
                 runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
                     serving: true,
                     startup_converged: graph_authority_current && registered_authority_current,

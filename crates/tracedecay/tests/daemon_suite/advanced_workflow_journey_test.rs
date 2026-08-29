@@ -535,7 +535,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("pinned executable configuration")
         .result;
 
-    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project).expect("Git common dir");
+    let common_dir =
+        tracedecay_runtime_core::worktree::git_common_dir(&project).expect("Git common dir");
     let repository_id: RepositoryId =
         id(&format!("repository.daemon.{}", sha256_path(&common_dir)));
     let worktree_id: WorktreeId = id(&format!("worktree.daemon.{}", sha256_path(&project)));

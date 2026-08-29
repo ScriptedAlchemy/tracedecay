@@ -56,9 +56,9 @@ use tracedecay_lsp::analyzer::broker::{
     enclosing_node_for_line,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::ToolResult;
 use super::super::render;

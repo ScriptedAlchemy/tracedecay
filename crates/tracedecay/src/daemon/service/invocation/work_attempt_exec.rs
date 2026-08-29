@@ -1068,8 +1068,10 @@ async fn execute_app_server<S>(
                     }
                 })?,
             )
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: format!("Codex app-server session identity is invalid: {error}"),
+            .map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!("Codex app-server session identity is invalid: {error}"),
+                }
             })?;
             Ok(AppServerSessionOutput {
                 answer: summary.text,

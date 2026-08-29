@@ -1865,7 +1865,10 @@ mod runtime_configuration_cutover {
             .await
             .expect_err("a layout without project identity has no resolvable authority");
         assert!(
-            matches!(error, tracedecay_runtime_core::errors::TraceDecayError::Config { .. }),
+            matches!(
+                error,
+                tracedecay_runtime_core::errors::TraceDecayError::Config { .. }
+            ),
             "genuine unavailability must stay a typed configuration error, got {error:?}"
         );
     }

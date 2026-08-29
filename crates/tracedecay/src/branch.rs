@@ -50,7 +50,11 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
     if !tracedecay_runtime_core::worktree::git_may_resolve_repo(project_root) {
         return false;
     }
-    tracedecay_runtime_core::git::git_output(project_root, &["show-ref", "--verify", "--quiet", &refname]).is_some()
+    tracedecay_runtime_core::git::git_output(
+        project_root,
+        &["show-ref", "--verify", "--quiet", &refname],
+    )
+    .is_some()
 }
 
 fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
@@ -507,7 +511,10 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
     // Load-modify-save under the shared branch lock; the preparation no
     // longer holds it across the sync.
-    tracedecay_runtime_core::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
+    tracedecay_runtime_core::branch_meta::update_synced_timestamp(
+        tracedecay_dir,
+        &prepared.branch_name,
+    );
 }
 
 pub fn rollback_prepared_branch_tracking(
@@ -515,7 +522,8 @@ pub fn rollback_prepared_branch_tracking(
     prepared: &PreparedBranchTracking,
 ) -> tracedecay_runtime_core::errors::Result<PreparedBranchRollbackOutcome> {
     let _branch_lock = acquire_branch_lock_blocking(tracedecay_dir)?;
-    let Some(mut meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir) else {
+    let Some(mut meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(tracedecay_dir)
+    else {
         return Ok(PreparedBranchRollbackOutcome::NoMatch);
     };
     if meta.branches.get(&prepared.branch_name) != Some(&prepared.entry) {

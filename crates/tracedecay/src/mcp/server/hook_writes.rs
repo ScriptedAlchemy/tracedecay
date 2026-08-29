@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 /// Complete detached reconciliation admission requested by the MCP server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

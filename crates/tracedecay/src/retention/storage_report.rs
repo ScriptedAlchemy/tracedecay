@@ -261,7 +261,9 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
 #[hotpath::measure(label = "retention.storage.report", future = true)]
-pub async fn build_storage_report(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<StorageReport> {
+pub async fn build_storage_report(
+    profile_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not

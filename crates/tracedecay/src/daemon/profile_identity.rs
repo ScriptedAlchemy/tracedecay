@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::storage::PROFILE_IDENTITY_FILENAME;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::authority::canonical_identity_path;
 
@@ -189,14 +189,16 @@ fn read_existing_record(path: &Path) -> Result<Option<LocalProfileIdentityRecord
         Err(error) => return Err(profile_identity_io("inspect", path, &error)),
     };
     validate_private_identity_file(path, &metadata)?;
-    let encoded =
-        tracedecay_runtime_core::db::DatabaseAuthority::read_record_strict(path, PROFILE_IDENTITY_RECORD_NAME)?
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared while being read",
-                    path.display()
-                ),
-            })?;
+    let encoded = tracedecay_runtime_core::db::DatabaseAuthority::read_record_strict(
+        path,
+        PROFILE_IDENTITY_RECORD_NAME,
+    )?
+    .ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared while being read",
+            path.display()
+        ),
+    })?;
     let record =
         serde_json::from_str::<LocalProfileIdentityRecordV1>(&encoded).map_err(|error| {
             TraceDecayError::Config {

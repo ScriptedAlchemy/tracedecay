@@ -121,7 +121,9 @@ fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
                     message: format!("git index transaction project identity is invalid: {error}"),
                 }
             })?;
-        let Some(repository_root) = tracedecay_runtime_core::worktree::git_worktree_root(project_root) else {
+        let Some(repository_root) =
+            tracedecay_runtime_core::worktree::git_worktree_root(project_root)
+        else {
             // Non-Git projects remain valid TraceDecay projects. They advertise no
             // Git mutation authority and must not fail project-open admission.
             return Ok(());

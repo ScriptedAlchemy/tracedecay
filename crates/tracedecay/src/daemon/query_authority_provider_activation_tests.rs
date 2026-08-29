@@ -33,9 +33,12 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let profile_root = cursor_store.path().join("profile");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _cursor_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
-            .expect("database scope");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-semantic-activation",
+    )
+    .expect("database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
@@ -530,9 +533,12 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
         .expect("production project enrollment");
     let profile_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
-    let _scope_guard =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
-            .expect("daemon database scope");
+    let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "query-cursor-restart",
+    )
+    .expect("daemon database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),

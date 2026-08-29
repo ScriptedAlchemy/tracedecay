@@ -12,9 +12,9 @@ use tracedecay_application::session_sync::{
 use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::ToolResult;
 use super::json_result;

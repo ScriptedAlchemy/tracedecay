@@ -348,7 +348,10 @@ impl RetainedVerifiedGraphRuntimeV1 {
 
     pub(crate) fn reserve_database_retirement(
         &self,
-    ) -> std::result::Result<tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1, GraphDbError> {
+    ) -> std::result::Result<
+        tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1,
+        GraphDbError,
+    > {
         self.database.reserve_retirement().map_err(|error| {
             GraphDbError::unavailable(format!(
                 "memory database owner cannot reserve retirement: {error:?}"

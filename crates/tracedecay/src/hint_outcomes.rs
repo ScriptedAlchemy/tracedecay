@@ -21,10 +21,10 @@ use tracedecay_domain::{AdoptionOutcomeLinkedV1, CoverageStateV1};
 use tracedecay_usecases::observability::record_adoption_outcome;
 
 use crate::analytics_bridge::HookImportSource;
+use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
 };
-use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 
 pub(crate) struct RegisteredHintOutcomeCorrelationPort<'a> {
     analytics: &'a RegisteredGlobalDb,

@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
 use super::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::DaemonDatabaseScope;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::db::DaemonDatabaseScope;
 
 const DAY: i64 = 24 * 60 * 60;
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -31,9 +31,12 @@ async fn open_registered_db(
     }
     let identity = crate::daemon::profile_identity::load_or_create(profile_root).unwrap();
     let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
-    let scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, "orphan store sweep test")
-            .unwrap();
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        profile_root,
+        nonce,
+        "orphan store sweep test",
+    )
+    .unwrap();
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .unwrap();

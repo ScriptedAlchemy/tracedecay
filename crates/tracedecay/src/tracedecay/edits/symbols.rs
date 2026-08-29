@@ -5,8 +5,8 @@ use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
 use tracedecay_usecases::graph::{map_code_graph_read_runtime_error, map_projection_error};
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::types::{NodeKind, Visibility};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const MAX_EDIT_SYMBOL_MATCHES: usize = 100;
 

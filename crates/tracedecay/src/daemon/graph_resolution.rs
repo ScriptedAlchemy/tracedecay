@@ -104,10 +104,12 @@ pub(super) fn retained_project_server_resolver(
                                     let requested =
                                         authority::canonical_identity_path(requested).ok();
                                     let mounted =
-                                        tracedecay_runtime_core::worktree::git_common_dir(graph.project_root())
-                                            .and_then(|path| {
-                                                authority::canonical_identity_path(&path).ok()
-                                            });
+                                        tracedecay_runtime_core::worktree::git_common_dir(
+                                            graph.project_root(),
+                                        )
+                                        .and_then(|path| {
+                                            authority::canonical_identity_path(&path).ok()
+                                        });
                                     mounted.is_none() || mounted == requested
                                 })
                     })

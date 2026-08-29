@@ -9,8 +9,8 @@ use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 use crate::daemon::automation_effect::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::{

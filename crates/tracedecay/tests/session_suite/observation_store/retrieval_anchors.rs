@@ -2,13 +2,13 @@
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, ClaudeSourceCursorV1,
     FactOwnerV1, ObservationScopeV1, ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
 };
+use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationStoreError, ObservationWrite,
@@ -233,7 +233,8 @@ async fn project_move_reresolves_retained_anchor_through_registered_identity() {
 
     std::fs::create_dir_all(moved_root.parent().unwrap()).unwrap();
     std::fs::rename(&old_root, &moved_root).unwrap();
-    let moved_git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&moved_root).unwrap();
+    let moved_git_common_dir =
+        tracedecay_runtime_core::worktree::git_common_dir(&moved_root).unwrap();
     let profile_runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
