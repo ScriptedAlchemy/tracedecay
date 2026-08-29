@@ -4505,9 +4505,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let planned_bytes =
             tracedecay_code_index::parallelism::worker_reservation_bytes(planned_workers);
         let snapshot = self.resident_memory.snapshot();
-        let remaining = snapshot
-            .limit_bytes
-            .saturating_sub(snapshot.used_bytes);
+        let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
         // The process-global worker plan may have been installed against a
         // larger authority (standalone seed, or a host-RAM plan). This
         // scheduler's resident authority can already hold the seated text

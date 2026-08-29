@@ -3677,32 +3677,29 @@ pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
-    let activation = super::project_semantic_activation_gate(project_root);
-    let _activation = activation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let activation_receipt = super::project_semantic_activation_receipt_under_gate(project_root);
-    if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        let lifecycle = runtime.lifecycle_status();
-        let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
-        if let Some(configuration) = configuration {
-            backend.bind_configuration(configuration);
+    super::with_project_semantic_activation_receipt(project_root, |activation_receipt| {
+        if let Some(runtime) = project_semantic_production_runtime(project_root) {
+            let lifecycle = runtime.lifecycle_status();
+            let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
+            if let Some(configuration) = configuration {
+                backend.bind_configuration(configuration);
+            }
+            return Some(prefer_lifecycle_over_generic_unavailable(
+                backend.application_status_with_receipt(activation_receipt),
+                &lifecycle,
+            ));
         }
-        return Some(prefer_lifecycle_over_generic_unavailable(
-            backend.application_status_with_receipt(activation_receipt),
-            &lifecycle,
-        ));
-    }
-    let handle = project_semantic_handles()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .cloned()?;
-    Some(application_status_from_projection(
-        &handle.status_projection(),
-        configuration,
-        activation_receipt,
-    ))
+        let handle = project_semantic_handles()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned()?;
+        Some(application_status_from_projection(
+            &handle.status_projection(),
+            configuration,
+            activation_receipt,
+        ))
+    })
 }
 
 /// Hook invoked after a code generation publishes; must not block search.

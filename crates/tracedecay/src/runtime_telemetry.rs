@@ -540,10 +540,12 @@ impl ProcessSampler {
                 .outcome
                 .as_ref()
                 .is_none_or(|sample| sample.completed.elapsed() >= self.refresh_interval);
-        let telemetry = cache.outcome.as_ref().map_or(
-            ProcessTelemetry::NotYetSampled,
-            |sample| sample.telemetry.clone(),
-        );
+        let telemetry = cache
+            .outcome
+            .as_ref()
+            .map_or(ProcessTelemetry::NotYetSampled, |sample| {
+                sample.telemetry.clone()
+            });
         if needs_refresh {
             cache.sample_in_flight = true;
             drop(cache);
@@ -1138,9 +1140,7 @@ mod tests {
 
     #[test]
     fn text_report_names_the_pending_and_failed_sample_states() {
-        assert!(
-            process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled")
-        );
+        assert!(process_text_block(&ProcessTelemetry::NotYetSampled).contains("not yet sampled"));
         assert!(
             process_text_block(&ProcessTelemetry::SampleFailed {
                 error: "sampler unavailable".to_string(),

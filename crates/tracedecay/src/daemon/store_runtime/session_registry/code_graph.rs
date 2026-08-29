@@ -1841,7 +1841,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 GraphReplayCollectionOutcome::Retired(source) => {
                     let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
                         source,
-                    ) = source
+                    ) = *source
                     else {
                         return Err(GraphDbError::Corrupt {
                             message: "code generation retirement selected an inline graph replay"

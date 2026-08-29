@@ -103,6 +103,26 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .await
         .expect("reserve semantic activation");
     registry
+        .mount_query_authority_for_committed_fallback(
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            Arc::clone(&standalone_query_authority),
+        )
+        .await
+        .expect("mount core fallback under the exact committed fence");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "semantic warm-up must not remove exact, lexical, and graph search"
+    );
+    registry
         .install_committed_query_authorities(
             project.path(),
             &scope,
@@ -560,18 +580,34 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     );
 
     // Core exact/lexical/graph lanes must stay mountable while the committed
-    // semantic restore is deferred.
-    crate::daemon::code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
-        &registry,
-        project.path(),
-        &scope,
-        &cursor_keys,
-    )
-    .await
-    .expect("core fallback mounts while the committed restore is deferred");
+    // semantic restore is deferred: the revision-bound committed fallback
+    // seats them without abandoning the reserved fence, while the plain
+    // standalone mount stays refused by that fence.
+    crate::daemon::code_index_scheduler::query_runtime::
+        mount_core_query_authority_for_committed_fallback_on_project_open(
+            &registry,
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            &cursor_keys,
+        )
+        .await
+        .expect("core fallback mounts while the committed restore is deferred");
     assert!(
         registry.has_query_authority_for_scope(&scope).await,
         "exact/lexical/graph must stay callable while semantic restore is deferred"
+    );
+    assert!(
+        crate::daemon::code_index_scheduler::query_runtime::
+            mount_core_query_authority_on_project_open(
+                &registry,
+                project.path(),
+                &scope,
+                &cursor_keys,
+            )
+            .await
+            .is_err(),
+        "the standalone core mount stays refused by the committed fence"
     );
 
     // Semantic restoration stays deferred: no standalone semantic mount.

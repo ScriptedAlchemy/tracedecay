@@ -154,12 +154,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let socket_path = crate::daemon::default_socket_path()?;
     if !crate::daemon::should_proxy_serve_to_daemon(&socket_path).await {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "TraceDecay daemon socket '{}' is not available. Run `tracedecay daemon install-service` and ensure the service is running.",
-                socket_path.display()
-            ),
-        });
+        return Err(crate::daemon::unavailable_error(&socket_path));
     }
     let handshake = proxy_serve_handshake(path_arg, original_cwd.as_deref(), timings)?;
     crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await

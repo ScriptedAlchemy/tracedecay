@@ -104,6 +104,7 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
     );
 
     check_binary(&mut dc);
+    check_daemon_service(&mut dc);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -488,6 +489,45 @@ fn database_recovery_guidance(db_path: &Path) -> String {
 fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
     for line in database_recovery_guidance(db_path).lines() {
         dc.info(line);
+    }
+}
+
+/// Diagnose the managed user-service unit without contacting the daemon.
+///
+/// A stopped or disabled installed unit is the outage shape that the generic
+/// "run install-service and ensure the service is running" text used to hide.
+fn check_daemon_service(dc: &mut DoctorCounters) {
+    eprintln!("\n\x1b[1mDaemon service\x1b[0m");
+    match crate::daemon::installed_service_state() {
+        Ok(state) => {
+            let message = state.lifecycle_operator_advice();
+            match daemon_service_doctor_verdict(state) {
+                DaemonServiceDoctorVerdict::Pass => dc.pass(&message),
+                DaemonServiceDoctorVerdict::Warn => dc.warn(&message),
+                DaemonServiceDoctorVerdict::Fail => dc.fail(&message),
+            }
+        }
+        Err(error) => dc.warn(&format!("Daemon service state could not be read: {error}")),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonServiceDoctorVerdict {
+    Pass,
+    Warn,
+    Fail,
+}
+
+fn daemon_service_doctor_verdict(
+    state: crate::daemon::DaemonServiceState,
+) -> DaemonServiceDoctorVerdict {
+    match state {
+        crate::daemon::DaemonServiceState::RunningEnabled => DaemonServiceDoctorVerdict::Pass,
+        crate::daemon::DaemonServiceState::Missing
+        | crate::daemon::DaemonServiceState::RunningDisabled => DaemonServiceDoctorVerdict::Warn,
+        crate::daemon::DaemonServiceState::StoppedEnabled
+        | crate::daemon::DaemonServiceState::StoppedDisabled
+        | crate::daemon::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Fail,
     }
 }
 

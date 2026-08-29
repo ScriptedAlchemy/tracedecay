@@ -193,24 +193,23 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
 pub fn project_semantic_activation_receipt(
     project_root: &Path,
 ) -> Option<SemanticActivationReceiptV1> {
+    with_project_semantic_activation_receipt(project_root, |receipt| receipt)
+}
+
+pub(crate) fn with_project_semantic_activation_receipt<T>(
+    project_root: &Path,
+    reader: impl FnOnce(Option<SemanticActivationReceiptV1>) -> T,
+) -> T {
     let activation = project_semantic_activation_gate(project_root);
     let _activation = activation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    project_semantic_activation_receipt_under_gate(project_root)
-}
-
-/// [`project_semantic_activation_receipt`] for callers that already hold this
-/// project's activation gate and must read further activation-coupled state
-/// (for example the scheduler status projection) under the same acquisition.
-pub(crate) fn project_semantic_activation_receipt_under_gate(
-    project_root: &Path,
-) -> Option<SemanticActivationReceiptV1> {
-    redundancy_states()
+    let receipt = redundancy_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
-        .and_then(|state| state.activation_receipt.clone())
+        .and_then(|state| state.activation_receipt.clone());
+    reader(receipt)
 }
 
 pub fn project_semantic_retained_vector_generations(
@@ -595,14 +594,13 @@ mod tests {
     use super::project_semantic_activation_gate;
     use std::path::Path;
 
-    /// The application-status reader snapshots the durable activation receipt
-    /// and the scheduler status projection under one acquisition of the
-    /// project activation gate. A concurrent activation that mutates the
-    /// receipt under that gate is therefore never interleaved into the
-    /// snapshot: the reader waits, then observes the post-mutation truth
-    /// instead of pairing a stale Ready receipt with the newer registry state.
+    /// End-to-end status coherence: a concurrent activation that mutates the
+    /// receipt under the project activation gate is never interleaved into
+    /// the public status snapshot. The reader waits behind the gate, then
+    /// observes the post-mutation truth instead of pairing a stale Ready
+    /// receipt with the newer registry state.
     #[tokio::test]
-    async fn activation_receipt_snapshot_holds_the_project_gate_for_its_reader() {
+    async fn application_status_observes_activation_mutations_coherently() {
         use super::{SemanticProjectRedundancyStateV1, redundancy_states};
         use crate::semantic_runtime::{
             SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
@@ -736,6 +734,34 @@ mod tests {
         );
         reader.join().expect("status reader thread");
         unregister_project_semantic_runtime(&project_root);
+    }
+
+    #[test]
+    fn activation_receipt_snapshot_holds_the_project_gate_for_its_reader() {
+        use std::sync::{Arc, Barrier};
+
+        let project_root = Path::new("/fast/tmp/tracedecay-semantic-status-snapshot");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let reader = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                super::with_project_semantic_activation_receipt(project_root, |_| {
+                    entered.wait();
+                    release.wait();
+                });
+            })
+        };
+
+        entered.wait();
+        let activation = project_semantic_activation_gate(project_root);
+        assert!(
+            activation.try_lock().is_err(),
+            "the receipt and scheduler projection must share one activation snapshot"
+        );
+        release.wait();
+        reader.join().expect("activation snapshot reader");
     }
 
     #[test]
