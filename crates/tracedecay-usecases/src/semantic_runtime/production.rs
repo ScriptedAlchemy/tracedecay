@@ -3484,18 +3484,23 @@ impl SemanticLaneRetriever for NeverCalledSemanticLane {
 }
 
 /// Daemon backend that surfaces schedule projection through the application port.
-#[cfg(test)]
 pub struct DaemonSemanticRuntimeBackendV1 {
     handle: DaemonSemanticRuntimeHandleV1,
     configuration: Mutex<Option<SemanticConfigurationPinV1>>,
 }
 
-#[cfg(test)]
 impl DaemonSemanticRuntimeBackendV1 {
     #[cfg(test)]
     pub fn new(handle: DaemonSemanticRuntimeHandleV1) -> Self {
         Self {
             handle,
+            configuration: Mutex::new(None),
+        }
+    }
+
+    pub fn from_production(runtime: ProductionSemanticRuntimeV1) -> Self {
+        Self {
+            handle: runtime.handle.clone(),
             configuration: Mutex::new(None),
         }
     }
@@ -3528,7 +3533,6 @@ impl DaemonSemanticRuntimeBackendV1 {
     }
 }
 
-#[cfg(test)]
 impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
     fn status<'a>(
         &'a self,
@@ -3668,28 +3672,29 @@ pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
-    let activation_receipt = super::project_semantic_activation_receipt(project_root);
-    if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        let lifecycle = runtime.lifecycle_status();
-        let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
-        if let Some(configuration) = configuration {
-            backend.bind_configuration(configuration);
+    super::with_project_semantic_activation_receipt(project_root, |activation_receipt| {
+        if let Some(runtime) = project_semantic_production_runtime(project_root) {
+            let lifecycle = runtime.lifecycle_status();
+            let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
+            if let Some(configuration) = configuration {
+                backend.bind_configuration(configuration);
+            }
+            return Some(prefer_lifecycle_over_generic_unavailable(
+                backend.application_status_with_receipt(activation_receipt),
+                &lifecycle,
+            ));
         }
-        return Some(prefer_lifecycle_over_generic_unavailable(
-            backend.application_status_with_receipt(activation_receipt),
-            &lifecycle,
-        ));
-    }
-    let handle = project_semantic_handles()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .cloned()?;
-    Some(application_status_from_projection(
-        &handle.status_projection(),
-        configuration,
-        activation_receipt,
-    ))
+        let handle = project_semantic_handles()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned()?;
+        Some(application_status_from_projection(
+            &handle.status_projection(),
+            configuration,
+            activation_receipt,
+        ))
+    })
 }
 
 /// Hook invoked after a code generation publishes; must not block search.

@@ -185,21 +185,6 @@ pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCo
         .map(|authority| authority.activation.compatibility.clone())
 }
 
-pub(crate) fn project_committed_semantic_activation(
-    project_root: &Path,
-) -> Option<SemanticCurrentLinkedActivationV1> {
-    let activation = project_semantic_activation_gate(project_root);
-    let _activation = activation
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    redundancy_states()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .and_then(|state| state.authority.as_ref())
-        .map(|authority| authority.activation.clone())
-}
-
 /// Durable Ready receipt last installed for this project, if any.
 ///
 /// Process-local only: unmount drops it. Restart remount must recommit the
@@ -208,15 +193,23 @@ pub(crate) fn project_committed_semantic_activation(
 pub fn project_semantic_activation_receipt(
     project_root: &Path,
 ) -> Option<SemanticActivationReceiptV1> {
+    with_project_semantic_activation_receipt(project_root, |receipt| receipt)
+}
+
+pub(crate) fn with_project_semantic_activation_receipt<T>(
+    project_root: &Path,
+    reader: impl FnOnce(Option<SemanticActivationReceiptV1>) -> T,
+) -> T {
     let activation = project_semantic_activation_gate(project_root);
     let _activation = activation
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    redundancy_states()
+    let receipt = redundancy_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
-        .and_then(|state| state.activation_receipt.clone())
+        .and_then(|state| state.activation_receipt.clone());
+    reader(receipt)
 }
 
 pub fn project_semantic_retained_vector_generations(
@@ -600,6 +593,34 @@ fn redundancy_authority_from_committed(
 mod tests {
     use super::project_semantic_activation_gate;
     use std::path::Path;
+
+    #[test]
+    fn activation_receipt_snapshot_holds_the_project_gate_for_its_reader() {
+        use std::sync::{Arc, Barrier};
+
+        let project_root = Path::new("/fast/tmp/tracedecay-semantic-status-snapshot");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let reader = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                super::with_project_semantic_activation_receipt(project_root, |_| {
+                    entered.wait();
+                    release.wait();
+                });
+            })
+        };
+
+        entered.wait();
+        let activation = project_semantic_activation_gate(project_root);
+        assert!(
+            activation.try_lock().is_err(),
+            "the receipt and scheduler projection must share one activation snapshot"
+        );
+        release.wait();
+        reader.join().expect("activation snapshot reader");
+    }
 
     #[test]
     fn activation_in_one_project_does_not_block_another_projects_reads() {

@@ -114,8 +114,8 @@ pub use redundancy::{
     retain_project_semantic_code_sources,
 };
 pub(crate) use redundancy::{
-    project_committed_semantic_activation, register_project_semantic_redundancy_generation,
-    unregister_project_semantic_redundancy_generation,
+    register_project_semantic_redundancy_generation,
+    unregister_project_semantic_redundancy_generation, with_project_semantic_activation_receipt,
 };
 pub use retention::SemanticRetainedVectorGenerationsV1;
 
