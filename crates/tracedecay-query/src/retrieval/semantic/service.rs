@@ -18,7 +18,7 @@ use super::{
     CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticLaneRetriever,
     SemanticRetrievalRequestV1,
 };
-use crate::retrieval::fusion::CompositionLaneInput;
+use crate::retrieval::fusion::{CompositionLaneInput, FusionStageError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticQueryModeV1 {
@@ -301,8 +301,15 @@ where
         if let Err(abstention) = preflight_calibration(request, calibration) {
             return self.abstain(on_abstention, abstention, fallback);
         }
-        let Ok(outcome) = self.lane.retrieve_semantic(request) else {
-            return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
+        let outcome = match self.lane.retrieve_semantic(request) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                super::observe_semantic_lane_failure(
+                    "service_retrieval",
+                    super::port_error_class(&error),
+                );
+                return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
+            }
         };
         let batch = match outcome {
             RetrieverOutcome::Complete(batch) => batch,
@@ -344,10 +351,15 @@ where
             Ok(evidence) => evidence,
             Err(abstention) => return self.abstain(on_abstention, abstention, fallback),
         };
-        let Ok(semantic_lane) =
-            CompositionLaneInput::new(RetrieverKind::Semantic, RetrieverOutcome::Complete(batch))
-        else {
-            return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
+        let semantic_lane = match CompositionLaneInput::new(
+            RetrieverKind::Semantic,
+            RetrieverOutcome::Complete(batch),
+        ) {
+            Ok(semantic_lane) => semantic_lane,
+            Err(error) => {
+                observe_semantic_composition_failure(&error);
+                return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
+            }
         };
         Ok(SemanticQueryServiceOutcomeV1::Augmented {
             semantic_lane,
@@ -372,6 +384,38 @@ where
             SemanticAbstentionDispositionV1::RejectUnavailable => {
                 Err(SemanticQueryServiceError::StrictUnavailable(abstention))
             }
+        }
+    }
+}
+
+fn observe_semantic_composition_failure(error: &FusionStageError) {
+    hotpath::gauge!("query.lane.semantic.failure.service_composition").inc(1_u64);
+    match error {
+        FusionStageError::RequiredLaneUnavailable => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.required_lane_unavailable")
+                .inc(1_u64);
+        }
+        FusionStageError::MissingOccurrenceEvidence => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.missing_occurrence_evidence")
+                .inc(1_u64);
+        }
+        FusionStageError::FixedPointOverflow => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.fixed_point_overflow")
+                .inc(1_u64);
+        }
+        FusionStageError::ProfileLaneMismatch => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.profile_lane_mismatch")
+                .inc(1_u64);
+        }
+        FusionStageError::DuplicateLane => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.duplicate_lane").inc(1_u64);
+        }
+        FusionStageError::InvalidCalibratedFeature => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.invalid_calibrated_feature")
+                .inc(1_u64);
+        }
+        FusionStageError::Contract(_) => {
+            hotpath::gauge!("query.lane.semantic.failure.composition.contract").inc(1_u64);
         }
     }
 }

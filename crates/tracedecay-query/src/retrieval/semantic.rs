@@ -625,7 +625,7 @@ where
     }
 }
 
-fn port_error_class(error: &RetrievalPortError) -> &'static str {
+pub(super) fn port_error_class(error: &RetrievalPortError) -> &'static str {
     match error {
         RetrievalPortError::CapabilityManifestRejected => "capability_manifest_rejected",
         RetrievalPortError::GenerationMismatch => "generation_mismatch",
@@ -638,7 +638,7 @@ fn port_error_class(error: &RetrievalPortError) -> &'static str {
     }
 }
 
-fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str) {
+pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str) {
     match stage {
         "request_validation" => {
             hotpath::gauge!("query.lane.semantic.failure.request_validation").inc(1_u64);
@@ -687,6 +687,9 @@ fn observe_semantic_lane_failure(stage: &'static str, error_class: &'static str)
         }
         "batch_validation" => {
             hotpath::gauge!("query.lane.semantic.failure.batch_validation").inc(1_u64);
+        }
+        "service_retrieval" => {
+            hotpath::gauge!("query.lane.semantic.failure.service_retrieval").inc(1_u64);
         }
         _ => {
             hotpath::gauge!("query.lane.semantic.failure.unknown_stage").inc(1_u64);
