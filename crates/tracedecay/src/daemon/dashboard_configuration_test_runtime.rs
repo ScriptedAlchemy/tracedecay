@@ -22,7 +22,7 @@ use super::service::invocation::{
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::daemon_client::invocation_now_micros;
 use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
-use crate::dashboard::{
+use tracedecay_dashboard_api::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
@@ -152,7 +152,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
         &self,
         control: DashboardHttpRequestControlV1,
         transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
-    ) -> crate::dashboard::DashboardNativeIntegrationStatusFuture<'_> {
+    ) -> tracedecay_dashboard_api::DashboardNativeIntegrationStatusFuture<'_> {
         Box::pin(async move {
             crate::mcp::tools::handlers::dashboard::dashboard_native_integration_status(
                 self,
@@ -273,7 +273,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> Result<(
     Arc<dyn DashboardApplicationRuntime>,
-    Arc<dyn crate::dashboard::DashboardProfileCodeIndexWorkerSettingsPort>,
+    Arc<dyn tracedecay_dashboard_api::DashboardProfileCodeIndexWorkerSettingsPort>,
 )> {
     let project_root = cg.project_root().canonicalize()?;
     let project_id = cg

@@ -463,11 +463,11 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     assert!(matches!(
         (first, second),
         (
-            crate::dashboard::AutomationSchedulerReconcileOutcome::Started,
-            crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started,
+            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
         ) | (
-            crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified,
-            crate::dashboard::AutomationSchedulerReconcileOutcome::Started
+            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified,
+            tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Started
         )
     ));
 }
@@ -794,7 +794,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
 #[cfg(unix)]
 #[tokio::test]
 async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exits() {
-    use crate::dashboard::AutomationSchedulerReconcileOutcome;
+    use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
     use tracedecay_agent_hosts::automation::config::{
         AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };

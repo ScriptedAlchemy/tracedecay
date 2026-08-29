@@ -1321,7 +1321,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
-) -> crate::dashboard::DoctorReportReader {
+) -> tracedecay_dashboard_api::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();
         let project_id = project_id.clone();
@@ -1583,7 +1583,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 storage,
             };
             let report = compose_doctor_report(&context, &inputs).await?;
-            Ok(crate::dashboard::AdmittedDoctorReportV1::new(report)
+            Ok(tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                 .with_table_growth_evidence(store_telemetry.table_growth_evidence))
         })
     })

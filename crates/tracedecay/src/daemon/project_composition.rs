@@ -472,7 +472,7 @@ async fn production_project_server_inner(
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
     let configuration_client = cg.configuration_runtime().client();
-    let dashboard_explorer_semantic_reader: crate::dashboard::ExplorerSemanticReader = Arc::new(
+    let dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader = Arc::new(
         move |project_root: std::path::PathBuf| {
             let configuration_client = Arc::clone(&configuration_client);
             Box::pin(async move {
@@ -500,11 +500,11 @@ async fn production_project_server_inner(
                         configuration,
                     ),
                 );
-                crate::dashboard::ExplorerSemanticReadV1 { activated, status }
+                tracedecay_dashboard_api::ExplorerSemanticReadV1 { activated, status }
             })
         },
     );
-    let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
+    let dashboard_feedback_status_reader = tracedecay_dashboard_api::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
     let application_invocation_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
@@ -1374,8 +1374,8 @@ fn project_code_index_authorities(
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader {
-    let reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
+    let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })

@@ -127,7 +127,7 @@ pub(crate) async fn handle_status(
     scope_prefix: Option<&str>,
     project_session_db: Option<&RegisteredGlobalDb>,
     code_index_freshness_reader: Option<
-        &crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
     generation_census_reader: Option<&tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {

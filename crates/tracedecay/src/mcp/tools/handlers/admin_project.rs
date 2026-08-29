@@ -36,7 +36,7 @@ enum AdminProjectAction {
         id: String,
     },
     AutomationReconcile {
-        scope: crate::dashboard::AutomationReconcileScope,
+        scope: tracedecay_dashboard_api::AutomationReconcileScope,
     },
 }
 
@@ -142,7 +142,7 @@ pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    automation_scheduler_reconciler: Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     application_deadline: Deadline,
     application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
@@ -161,7 +161,7 @@ pub(super) async fn handle_admin_project(
             json!({ "reset": true })
         }
         AdminProjectAction::AutomationReconcile { scope } => {
-            if scope != crate::dashboard::AutomationReconcileScope::Project {
+            if scope != tracedecay_dashboard_api::AutomationReconcileScope::Project {
                 return Err(TraceDecayError::Config {
                     message:
                         "profile automation reconciliation requires a projectless daemon request"
@@ -170,7 +170,7 @@ pub(super) async fn handle_admin_project(
             }
             let outcome = match automation_scheduler_reconciler {
                 Some(reconcile) => reconcile().await,
-                None => crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+                None => tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
             };
             json!({ "scope": "project", "outcome": outcome })
         }
@@ -532,7 +532,7 @@ mod tests {
             }))
             .unwrap(),
             AdminProjectAction::AutomationReconcile {
-                scope: crate::dashboard::AutomationReconcileScope::Project
+                scope: tracedecay_dashboard_api::AutomationReconcileScope::Project
             }
         ));
     }

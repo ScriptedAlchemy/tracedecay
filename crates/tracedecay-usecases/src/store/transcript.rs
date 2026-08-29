@@ -34,7 +34,7 @@ impl<D> GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    pub(crate) const fn new(db: D) -> Self {
+    pub const fn new(db: D) -> Self {
         Self { db }
     }
 

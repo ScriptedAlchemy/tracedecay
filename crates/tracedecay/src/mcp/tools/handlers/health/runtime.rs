@@ -118,7 +118,7 @@ async fn literal_workspace_placeholder_transcript_paths(
 
 async fn attach_doctor_report(
     value: &mut Value,
-    reader: Option<&crate::dashboard::DoctorReportReader>,
+    reader: Option<&tracedecay_dashboard_api::DoctorReportReader>,
 ) {
     value["doctor_report"] = match reader {
         Some(reader) => match reader().await {
@@ -147,7 +147,7 @@ pub(crate) async fn handle_runtime(
     args: Value,
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
     project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
-    doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
+    doctor_report_reader: Option<&tracedecay_dashboard_api::DoctorReportReader>,
     generation_census_reader: Option<&tracedecay_usecases::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {
     let authority_audit = args

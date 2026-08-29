@@ -155,7 +155,7 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
         id: id.to_string(),
         kind,
         name: name.to_string(),
-        qualified_name: format!("crate::dashboard::{name}"),
+        qualified_name: format!("tracedecay_dashboard_api::{name}"),
         file_path: file_path.to_string(),
         start_line,
         attrs_start_line: start_line,
@@ -723,7 +723,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(status, 200);
         assert_eq!(
             node["payload"]["node"]["qualified_name"],
-            "crate::dashboard::route_graph"
+            "tracedecay_dashboard_api::route_graph"
         );
         assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
         assert_eq!(

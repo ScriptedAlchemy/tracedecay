@@ -657,11 +657,11 @@ impl DaemonAdvisoryRuntimeRegistrar {
     }
 }
 
-impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
+impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
     fn read_feedback_status(
         &self,
         project_root: PathBuf,
-    ) -> crate::dashboard::feedback_api::FeedbackStatusReadFuture {
+    ) -> tracedecay_dashboard_api::feedback_api::FeedbackStatusReadFuture {
         let registrar = self.clone();
         Box::pin(async move {
             let store = registrar.doctor_read_store(&project_root).await.ok_or(

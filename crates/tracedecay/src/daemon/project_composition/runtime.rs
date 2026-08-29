@@ -70,7 +70,7 @@ impl ProductionProjectCompositionRuntime {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         handshake: DaemonHandshake,
-    ) -> Option<crate::dashboard::AutomationSchedulerReconciler> {
+    ) -> Option<tracedecay_dashboard_api::AutomationSchedulerReconciler> {
         match self {
             #[cfg(unix)]
             Self::Unix(engine) => Some(engine.automation_scheduler_reconciler(

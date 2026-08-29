@@ -23,7 +23,7 @@ use tracedecay_usecases::git_reads::{
 };
 
 use crate::daemon::DaemonInvocationService;
-use crate::dashboard::{
+use tracedecay_dashboard_api::{
     DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1, DashboardHttpRequestControlV1,
 };
 

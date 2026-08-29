@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
+use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
 use tracedecay_usecases::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 

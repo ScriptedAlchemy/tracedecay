@@ -1,15 +1,19 @@
-//! Root-side shim for the dashboard HTTP surface.
+//! Root-side dashboard composition: the embedded-asset bridge plus the
+//! daemon-coupled integration fixtures.
 //!
 //! The dashboard API — routes, read models, services and their tests — lives
-//! in `crates/tracedecay-dashboard-api`. Everything that used to be reachable
-//! at `crate::dashboard::…` is re-exported here so existing root modules,
-//! command adapters and integration tests keep compiling unchanged.
+//! in `crates/tracedecay-dashboard-api`; callers import it directly.
 //!
 //! [`assets`] retains only the root build-script bridge: the embedded
 //! single-app dist is generated into this crate's `OUT_DIR`. The canonical API
 //! crate owns the resulting HTTP router and transport policy.
 
-pub use tracedecay_dashboard_api::*;
+#[cfg(feature = "test-transport")]
+use tracedecay_dashboard_api::{
+    DashboardApplicationRuntime, DashboardAutomationAuthorityV1, DashboardAutomationWriter,
+    DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
+    DashboardProfileCodeIndexWorkerSettingsPort, standalone_dashboard_automation_writer,
+};
 
 pub(crate) mod assets;
 

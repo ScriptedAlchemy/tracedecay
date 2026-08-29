@@ -113,7 +113,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     });
     let event_rows: Vec<Value> = events
         .iter()
-        .map(crate::dashboard::analytics_api::durable_analytics_event_row)
+        .map(tracedecay_dashboard_api::analytics_api::durable_analytics_event_row)
         .collect();
 
     let store_root = project_root.and_then(|root| {
@@ -124,7 +124,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = hotpath::measure_block!(
         "analytics.hooks",
-        crate::dashboard::analytics_api::read_hook_analytics_rows_at(
+        tracedecay_dashboard_api::analytics_api::read_hook_analytics_rows_at(
             store_root.as_deref(),
             hook_filter_root,
         )
@@ -140,7 +140,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     };
     let mut summary = hotpath::measure_block!(
         "analytics.assemble",
-        crate::dashboard::analytics_api::diagnostics_summary_from_parts(
+        tracedecay_dashboard_api::analytics_api::diagnostics_summary_from_parts(
             message_count,
             &hook_analytics,
             durable,

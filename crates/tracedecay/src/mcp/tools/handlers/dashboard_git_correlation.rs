@@ -8,7 +8,7 @@
 //! published a verified head is the typed empty start, never an error, and a
 //! store without its graph runtime mount stays a typed failed read.
 
-use crate::dashboard::{
+use tracedecay_dashboard_api::{
     DashboardGitCorrelationReadErrorV1, DashboardGitCorrelationReadFutureV1,
     DashboardGitCorrelationReadPortV1, DashboardGitCorrelationReadV1,
 };

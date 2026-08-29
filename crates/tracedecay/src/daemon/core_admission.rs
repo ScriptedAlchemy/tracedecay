@@ -641,7 +641,7 @@ pub(crate) async fn reject_saturated_daemon_client(
 
 pub(super) fn coordinated_dashboard_automation_writer(
     administration: StoreAdministration,
-) -> crate::dashboard::DashboardAutomationWriter {
+) -> tracedecay_dashboard_api::DashboardAutomationWriter {
     Arc::new(move |operation| {
         let administration = administration.clone();
         Box::pin(async move { administration.with_writer(operation).await })

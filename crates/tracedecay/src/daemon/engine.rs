@@ -905,7 +905,7 @@ impl DaemonEngine {
                 .await;
             if matches!(
                 automation_outcome,
-                crate::dashboard::AutomationSchedulerReconcileOutcome::Retiring
+                tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Retiring
             ) {
                 MaintenanceRekeyOutcome::Retiring
             } else {

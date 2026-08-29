@@ -98,20 +98,20 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) own_project_host_admission_replay: bool,
     pub(crate) startup_catch_up_enabled: bool,
     pub(crate) automation_scheduler_reconciler:
-        Option<crate::dashboard::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    pub(crate) dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     /// Live Remote Brain operational read composed from the mounted remote
     /// authorities. Daemon-owned servers install it; direct servers leave it
     /// absent and remote operator surfaces report typed unavailable.
     pub(crate) remote_operational_status:
         Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
-    pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
-        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    pub(crate) dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
+        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
-        Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
+        Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
@@ -142,7 +142,7 @@ pub(crate) struct McpServerConstructionContext {
 }
 
 pub(crate) struct McpServerWriters {
-    dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+    dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
     background_refresh: BackgroundRefreshWriter,
 }
 
@@ -186,7 +186,7 @@ pub(crate) struct McpServerDaemonCoreAuthority {
 
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
-        dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+        dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
         background_refresh: BackgroundRefreshWriter,
     ) -> Self {
         Self {
@@ -218,7 +218,7 @@ impl McpServerConstructionContext {
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
-            dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
+            dashboard_automation_writer: tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
             remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
@@ -520,7 +520,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
-        reconciler: crate::dashboard::AutomationSchedulerReconciler,
+        reconciler: tracedecay_dashboard_api::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
         self
@@ -533,7 +533,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_doctor_report_reader(
         mut self,
-        reader: crate::dashboard::DoctorReportReader,
+        reader: tracedecay_dashboard_api::DoctorReportReader,
     ) -> Self {
         self.dashboard_doctor_report_reader = Some(reader);
         self
@@ -549,7 +549,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_code_index_freshness_reader(
         mut self,
-        reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+        reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
         self
@@ -557,7 +557,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_explorer_semantic_reader(
         mut self,
-        reader: crate::dashboard::ExplorerSemanticReader,
+        reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     ) -> Self {
         self.dashboard_explorer_semantic_reader = Some(reader);
         self
@@ -565,7 +565,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_feedback_status_reader(
         mut self,
-        reader: crate::dashboard::feedback_api::FeedbackStatusReader,
+        reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     ) -> Self {
         self.dashboard_feedback_status_reader = Some(reader);
         self

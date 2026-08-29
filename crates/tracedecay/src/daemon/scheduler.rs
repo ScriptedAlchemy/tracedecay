@@ -466,7 +466,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
         let scope = super::branch_admin::owner_writer_scope(&key);
@@ -483,8 +483,8 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
-        use crate::dashboard::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
@@ -636,7 +636,7 @@ impl DaemonEngine {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         handshake: DaemonHandshake,
-    ) -> crate::dashboard::AutomationSchedulerReconciler {
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconciler {
         let engine = self.clone();
         std::sync::Arc::new(move || {
             let engine = engine.clone();
@@ -660,8 +660,8 @@ impl DaemonEngine {
         project_path: PathBuf,
         handshake: DaemonHandshake,
         cg: Arc<TraceDecay>,
-    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
-        use crate::dashboard::AutomationSchedulerReconcileOutcome;
+    ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
+        use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
 
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;

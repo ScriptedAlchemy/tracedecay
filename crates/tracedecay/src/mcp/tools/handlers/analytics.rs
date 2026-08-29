@@ -6,7 +6,7 @@
 //! diagnostics` CLI and dashboard analytics API use
 //! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
 //! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
-//! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
+//! [`tracedecay_dashboard_api::analytics_api::hint_summary_from_counts`],
 //! [`tracedecay_agent_hosts::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
 
@@ -395,7 +395,7 @@ pub(super) async fn handle_analytics(
         )
         .await
         .map_err(config_error)?;
-        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
+        let hints = tracedecay_dashboard_api::analytics_api::hint_summary_from_counts(&counts);
         if let Some(object) = value.as_object_mut() {
             object.insert("hints".to_string(), hints);
         }

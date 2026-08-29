@@ -180,7 +180,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub fn dashboard_test_authority(
         self: &Arc<Self>,
-    ) -> Result<crate::dashboard::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
         let project_sessions =
             self.project_registered
                 .clone()
@@ -189,7 +189,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "registered ProjectSessions mount is unavailable".to_owned(),
                 })?;
         Ok(
-            crate::dashboard::DashboardHostAdmissionTestAuthorityV1::new(
+            tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1::new(
                 Arc::clone(self),
                 self.profile_database.clone(),
                 project_sessions,
