@@ -57,7 +57,7 @@ fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
         loop {
             match lines.next() {
                 Some(line) if line == *command => break,
-                Some(_) => continue,
+                Some(_) => {}
                 None => return false,
             }
         }

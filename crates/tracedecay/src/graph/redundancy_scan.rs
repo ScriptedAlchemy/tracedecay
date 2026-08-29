@@ -1843,9 +1843,10 @@ mod tests {
 
     #[test]
     fn redacted_code_source_span_is_valid_against_the_raw_file() {
-        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
-            panic!("rust grammar must be available to prove the span-units regression");
-        }
+        assert!(
+            tracedecay_code_extraction::ts_provider::language("rust").is_ok(),
+            "rust grammar must be available to prove the span-units regression"
+        );
         let secret = ["sk", "-test-", "1234567890abcdef"].concat();
         let raw = format!("const TOKEN: &str = \"{secret}\";\n{}", after_secret_body());
         let sanitized = crate::privacy::sanitize_code_source_bytes(
@@ -1899,9 +1900,10 @@ mod tests {
 
     #[test]
     fn shortened_raw_file_is_still_typed_stale() {
-        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
-            panic!("rust grammar must be available to prove genuine staleness still refuses");
-        }
+        assert!(
+            tracedecay_code_extraction::ts_provider::language("rust").is_ok(),
+            "rust grammar must be available to prove genuine staleness still refuses"
+        );
         let body = after_secret_body();
         let temp = tempfile::tempdir().unwrap();
         let src_dir = temp.path().join("src");

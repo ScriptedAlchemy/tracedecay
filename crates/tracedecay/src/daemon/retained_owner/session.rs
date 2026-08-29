@@ -645,46 +645,6 @@ fn message_search_cursor_manifest_refusal(
     RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
 }
 
-#[cfg(test)]
-mod refusal_tests {
-    use tracedecay_application::{
-        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
-    };
-    use tracedecay_domain::CursorManifestLimitKindV1;
-
-    use super::message_search_cursor_manifest_refusal;
-
-    #[test]
-    fn message_search_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
-        for (kind, expected_code) in [
-            (
-                CursorManifestLimitKindV1::Participants,
-                "application.retained.session-cursor-manifest-participants-limit-exceeded",
-            ),
-            (
-                CursorManifestLimitKindV1::CanonicalBytes,
-                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
-            ),
-        ] {
-            let error = message_search_cursor_manifest_refusal(kind, 257, 256);
-            assert!(!matches!(
-                &error,
-                tracedecay_application::RetainedSurfaceExecutionErrorV1::Saturated
-            ));
-            let problem = retained_surface_execution_problem(error);
-            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
-            assert_eq!(problem.retry(), RetryDirective::Never);
-            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
-            assert_eq!(
-                problem
-                    .diagnostic()
-                    .map(|diagnostic| diagnostic.code.as_str()),
-                Some(expected_code)
-            );
-        }
-    }
-}
-
 fn ensure_project_message_scope(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &MessageSearchRequestV1,
@@ -1094,5 +1054,45 @@ const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
         HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
         HydrationStateV1::Locked => HydrationStateResultV1::Locked,
         HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use tracedecay_application::{
+        ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
+    };
+    use tracedecay_domain::CursorManifestLimitKindV1;
+
+    use super::message_search_cursor_manifest_refusal;
+
+    #[test]
+    fn message_search_cursor_manifest_kinds_have_distinct_invalid_request_diagnostics() {
+        for (kind, expected_code) in [
+            (
+                CursorManifestLimitKindV1::Participants,
+                "application.retained.session-cursor-manifest-participants-limit-exceeded",
+            ),
+            (
+                CursorManifestLimitKindV1::CanonicalBytes,
+                "application.retained.session-cursor-manifest-canonical-bytes-limit-exceeded",
+            ),
+        ] {
+            let error = message_search_cursor_manifest_refusal(kind, 257, 256);
+            assert!(!matches!(
+                &error,
+                tracedecay_application::RetainedSurfaceExecutionErrorV1::Saturated
+            ));
+            let problem = retained_surface_execution_problem(error);
+            assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
+            assert_eq!(problem.retry(), RetryDirective::Never);
+            assert_eq!(problem.legal_actions(), &[LegalAction::CorrectRequest]);
+            assert_eq!(
+                problem
+                    .diagnostic()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some(expected_code)
+            );
+        }
     }
 }

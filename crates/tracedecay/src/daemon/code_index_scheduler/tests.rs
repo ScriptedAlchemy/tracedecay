@@ -5280,10 +5280,9 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
             .serving_code_scope(fixture.path())
             .await
             .and_then(|scope| scope.serving_generation)
+            && generation.manifest().generation_id == newer
         {
-            if generation.manifest().generation_id == newer {
-                break generation;
-            }
+            break generation;
         }
         assert!(
             Instant::now() <= serving_deadline,
