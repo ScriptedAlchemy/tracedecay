@@ -1,9 +1,8 @@
-//! Kernel-owned slice of the root `project_registry` module.
+//! Kernel-owned primary-checkout derivation for project identity.
 //!
 //! `worktree::repository_identity_root` needs the primary-checkout derivation
 //! and moved into this crate. The rule is pure path logic with no registry
-//! state, so it moved down rather than becoming an injected parameter. The
-//! root `project_registry` module re-exports it.
+//! state, so it moved down rather than becoming an injected parameter.
 
 use std::path::{Path, PathBuf};
 
