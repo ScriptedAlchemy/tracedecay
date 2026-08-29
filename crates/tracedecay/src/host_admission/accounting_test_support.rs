@@ -51,9 +51,9 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn import_profile_hook_analytics_for_test(
         &self,
-        sources: &[crate::analytics_bridge::HookImportSource],
-    ) -> crate::analytics_bridge::HookImportOutcome {
-        crate::analytics_bridge::import_hook_analytics(
+        sources: &[tracedecay_usecases::analytics_bridge::HookImportSource],
+    ) -> tracedecay_usecases::analytics_bridge::HookImportOutcome {
+        tracedecay_usecases::analytics_bridge::import_hook_analytics(
             self.profile_database.as_ref(),
             sources.to_vec(),
         )

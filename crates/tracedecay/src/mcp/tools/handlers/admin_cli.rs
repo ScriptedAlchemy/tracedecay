@@ -308,7 +308,7 @@ async fn dispatch_admin_cli(
             sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(
+            tracedecay_usecases::analytics_bridge::analytics_sync_with_db(
                 context.require_accounting_db()?,
                 context.project_root(),
             )

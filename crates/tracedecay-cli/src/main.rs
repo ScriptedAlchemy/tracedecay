@@ -18,6 +18,7 @@ use std::process::ExitCode;
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod agent_cmd;
+mod analytics_cmd;
 mod automation_cli;
 mod cli;
 mod commands;
@@ -1648,14 +1649,14 @@ async fn dispatch_knowledge_command(command: Commands) -> tracedecay_runtime_cor
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync, .. } => {
                 hotpath::future!(
-                    tracedecay::analytics_bridge::run_analytics_diagnostics(all, no_sync),
+                    analytics_cmd::run_analytics_diagnostics(all, no_sync),
                     label = "cli.analytics.diagnostics"
                 )
                 .await?;
             }
             AnalyticsAction::Sync => {
                 hotpath::future!(
-                    tracedecay::analytics_bridge::run_analytics_sync(),
+                    analytics_cmd::run_analytics_sync(),
                     label = "cli.analytics.sync"
                 )
                 .await?;

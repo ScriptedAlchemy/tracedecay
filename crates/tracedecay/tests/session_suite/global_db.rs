@@ -1377,7 +1377,7 @@ async fn session_ingest_health_can_filter_by_provider() {
 
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
-    use tracedecay::analytics_bridge::HookImportSource;
+    use tracedecay_usecases::analytics_bridge::HookImportSource;
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;

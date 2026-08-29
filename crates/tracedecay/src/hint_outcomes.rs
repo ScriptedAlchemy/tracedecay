@@ -20,7 +20,7 @@ use tracedecay_application::{
 use tracedecay_domain::{AdoptionOutcomeLinkedV1, CoverageStateV1};
 use tracedecay_usecases::observability::record_adoption_outcome;
 
-use crate::analytics_bridge::HookImportSource;
+use tracedecay_usecases::analytics_bridge::HookImportSource;
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
 };
@@ -270,7 +270,7 @@ pub(crate) async fn settle_project_hint_outcomes(
     };
 
     let import = hotpath::future!(
-        crate::analytics_bridge::import_hook_analytics(analytics, sources),
+        tracedecay_usecases::analytics_bridge::import_hook_analytics(analytics, sources),
         label = "hints.import"
     )
     .await;
