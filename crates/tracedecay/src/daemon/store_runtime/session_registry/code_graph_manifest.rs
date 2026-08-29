@@ -777,14 +777,6 @@ impl DaemonCodeGraphManifestProviderV1 {
         self.decoded.release_shard(project_shard)
     }
 
-    /// Drop every retained decoded seal, reporting the census bytes released.
-    /// Exposed for the pressure backstop's test coverage and for callers that
-    /// retire a registry outright.
-    #[cfg(test)]
-    pub(super) fn release_decoded_offers(&self) -> u64 {
-        self.decoded.release_all()
-    }
-
     #[cfg(test)]
     pub(super) fn retained_decoded_offer_count(&self) -> usize {
         self.decoded.retained_offer_count()

@@ -4,12 +4,15 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
+use tracedecay::global_db::ParseOffset;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_agent_hosts::automation::automatic_facts::record_session_automatic_facts;
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
+use tracedecay_agent_hosts::ports::project_runtime::ProjectRuntime;
+use tracedecay_domain::FactOwnerV1;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
@@ -53,6 +56,72 @@ pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     TraceDecay::init_with_options(&project_root, fixture_open_options(&project_root))
         .await
         .unwrap()
+}
+
+/// Seeds one timestamped session message into the project's registered
+/// sessions store so session-evidence tasks have activity authority.
+///
+/// Combined review shares the scheduler due-gate: without this, reflector
+/// stays dormant (`no_new_session_activity`) and every later skip reason is
+/// remapped to `session_reflector_not_due`.
+pub(crate) async fn seed_project_session_activity(cg: &TraceDecay) {
+    seed_project_session_activity_at(cg, current_timestamp()).await;
+}
+
+pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp: i64) {
+    let FactOwnerV1::Project { project_id } = project_memory_owner(cg) else {
+        panic!("combined-review fixtures require an authoritative project owner");
+    };
+    let sessions = cg
+        .project_sessions(project_id, vec![cg.project_root().to_path_buf()])
+        .await
+        .expect("project sessions mount");
+    let session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: format!("combined-activity-{timestamp}"),
+        project_key: cg.project_root().display().to_string(),
+        project_path: cg.project_root().display().to_string(),
+        title: Some("Combined review activity fixture".to_string()),
+        started_at: Some(timestamp.saturating_sub(1)),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(
+        sessions.upsert_session(&session).await,
+        "activity fixture must persist the session"
+    );
+    let message = SessionMessageRecord {
+        provider: "cursor".to_string(),
+        message_id: format!("combined-activity-{timestamp}-message"),
+        session_id: session.session_id.clone(),
+        role: "user".to_string(),
+        timestamp: Some(timestamp),
+        ordinal: 1,
+        text: "Remember this repeated workflow correction: prefer the skill tool pattern."
+            .to_string(),
+        kind: Some("message".to_string()),
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: None,
+    };
+    assert!(
+        sessions
+            .upsert_transcript_batch(
+                &session,
+                std::slice::from_ref(&message),
+                &format!("combined-review-activity:{timestamp}"),
+                ParseOffset::default(),
+            )
+            .await,
+        "activity fixture must persist a timestamped message"
+    );
 }
 
 #[cfg(feature = "test-transport")]

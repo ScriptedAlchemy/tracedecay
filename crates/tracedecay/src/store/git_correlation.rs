@@ -18,13 +18,17 @@ use crate::global_db::{
     VerifiedGraphRuntimeWeakProxyV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
-    BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
-    CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
-    GitCorrelationSessionStore, GitEvidenceProjectionStore, GitReflogSource,
+    AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
+    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS,
+    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
     SessionGitCorrelationHit, SessionsForQuery, SpanObservation, git_evidence_projection_identity,
     publish_transcript_graph_evidence, read_meta_value, recover_git_evidence_projection,
-    run_backfill, run_bounded_history_index_page, run_incremental_backfill,
+    run_bounded_history_index_page,
+};
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_sessions::runtime::git_correlation::{
+    AnalyticsSessionTimestampSource, BackfillStats, GitReflogSource, run_backfill,
+    run_incremental_backfill,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
@@ -186,6 +190,7 @@ where
         )
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::measure(label = "store.git_correlation.backfill", future = true)]
     pub(crate) async fn run_backfill<E, G>(
         &self,
@@ -200,6 +205,7 @@ where
         run_backfill(self, analytics_events, git, opts).await
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::measure(label = "store.git_correlation.incremental_backfill", future = true)]
     pub(crate) async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
         &self,
@@ -252,6 +258,7 @@ where
         })
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::measure(label = "store.git_correlation.session_ids")]
     pub(crate) fn session_ids_for_scope(
         &self,
