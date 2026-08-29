@@ -1476,6 +1476,8 @@ fn compression_response_with_attempt_state(
     } = attempt_state;
     let replay_token_estimate = replay_token_estimate(&replay_messages);
     let context_recovery_hint = context_recovery_hint(&summary_nodes);
+    // Persist has not applied the Grafeo projection yet. The guarded
+    // commit settles `Pending` to `Applied` after apply succeeds.
     let relation_projection_status = if summary_nodes.is_empty() {
         LcmRelationProjectionStatus::NotApplicable
     } else {
