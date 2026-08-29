@@ -511,7 +511,11 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _cursor_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 2, "query-deferred-core-restore")
+        tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            2,
+            "query-deferred-core-restore",
+        )
             .expect("database scope");
     let session_registry =
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
