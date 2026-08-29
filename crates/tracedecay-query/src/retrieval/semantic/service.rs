@@ -390,6 +390,15 @@ where
 
 fn observe_semantic_composition_failure(error: &FusionStageError) {
     hotpath::gauge!("query.lane.semantic.failure.service_composition").inc(1_u64);
+    observe_semantic_composition_error(error);
+}
+
+pub(super) fn observe_semantic_execution_composition_failure(error: &FusionStageError) {
+    hotpath::gauge!("query.lane.semantic.failure.execution_composition").inc(1_u64);
+    observe_semantic_composition_error(error);
+}
+
+fn observe_semantic_composition_error(error: &FusionStageError) {
     match error {
         FusionStageError::RequiredLaneUnavailable => {
             hotpath::gauge!("query.lane.semantic.failure.composition.required_lane_unavailable")

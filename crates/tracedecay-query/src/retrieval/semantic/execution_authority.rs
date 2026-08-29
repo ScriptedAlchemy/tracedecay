@@ -162,7 +162,8 @@ impl SemanticCompositionExecutionAuthorityV1 {
             &self.diversity,
         ) {
             Ok(composition) => composition,
-            Err(_) => {
+            Err(error) => {
+                super::service::observe_semantic_execution_composition_failure(&error);
                 return semantic_abstention(
                     on_abstention,
                     SemanticAbstentionV1::LaneFailure,
