@@ -249,6 +249,7 @@ impl MmapReader {
     }
 
     /// Re-read the mmap to pick up new writes.
+    #[hotpath::measure(label = "runtime_core.monitor_ring.refresh")]
     pub fn refresh(&mut self) -> std::io::Result<()> {
         let mmap_path = self.dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;

@@ -52,6 +52,7 @@ where
         )
     }
 
+    #[hotpath::measure(label = "global_db.workflow.read_watermark", future = true)]
     pub async fn read_ingest_watermark(&self) -> Option<i64> {
         let Ok(snapshot) = self.db().read_snapshot().await else {
             return None;
@@ -79,6 +80,7 @@ where
         WorkflowIngestWriteTxn::commit(transaction).await
     }
 
+    #[hotpath::measure(label = "global_db.workflow.bump_watermark", future = true)]
     pub async fn bump_ingest_watermark(&self, value: i64) {
         let Ok(transaction) = self.db().begin_write_transaction().await else {
             tracing::debug!("workflow ingest writer unavailable");

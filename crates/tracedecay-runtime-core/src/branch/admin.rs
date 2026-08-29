@@ -100,6 +100,7 @@ impl PreparedBranchAdminMutation {
         self.commit_with_hook(|_| Ok(()))
     }
 
+    #[hotpath::measure(label = "runtime_core.branch.commit_destructive")]
     fn commit_with_hook<H>(self, mut hook: H) -> crate::errors::Result<BranchAdminReport>
     where
         H: FnMut(BranchAdminCommitBoundary) -> crate::errors::Result<()>,

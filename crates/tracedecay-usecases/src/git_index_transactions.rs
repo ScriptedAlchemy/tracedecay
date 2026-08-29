@@ -562,6 +562,7 @@ impl FixedGitIndexRunner {
         Ok(())
     }
 
+    #[hotpath::measure(label = "usecases.git_index_tx.verify_preconditions")]
     fn verify_native_preconditions(
         &self,
         lock: &NativeIndexLock,

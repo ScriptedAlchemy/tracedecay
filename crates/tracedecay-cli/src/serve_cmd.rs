@@ -64,6 +64,7 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
 }
 
 /// Runs the `serve` command as a database-free proxy to the managed daemon.
+#[hotpath::measure(label = "cli.serve.proxy", future = true)]
 pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let socket_path = tracedecay::daemon::default_socket_path()?;
