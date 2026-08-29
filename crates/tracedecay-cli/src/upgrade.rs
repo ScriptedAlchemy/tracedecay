@@ -48,6 +48,7 @@ struct ReleaseDownload {
 
 /// Resolves both the platform archive and its checksum manifest from one
 /// GitHub release. An archive without `SHA256SUMS` is not installable.
+#[hotpath::measure(label = "cli.upgrade.fetch_release")]
 fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
@@ -106,6 +107,7 @@ fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload
     })
 }
 
+#[hotpath::measure(label = "cli.upgrade.download")]
 fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     agent
@@ -150,6 +152,7 @@ fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
     Ok(digest.to_ascii_lowercase())
 }
 
+#[hotpath::measure(label = "cli.upgrade.verify_sha256")]
 fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
     let actual = sha256_hex(bytes);
     if actual == expected {
@@ -162,6 +165,7 @@ fn verify_sha256(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
 
 /// Downloads and verifies the archive, then extracts the first entry matching
 /// any of `bin_names` to a temp path. Returns the temp path.
+#[hotpath::measure(label = "cli.upgrade.download_and_extract")]
 fn download_and_extract(
     download: &ReleaseDownload,
     bin_names: &[&str],
@@ -203,6 +207,7 @@ fn download_and_extract(
 /// Extracts the first entry matching any of `bin_names` from a `.tar.gz`
 /// archive (Unix).
 #[cfg(not(windows))]
+#[hotpath::measure(label = "cli.upgrade.extract_targz")]
 fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
     use std::io::Cursor;
@@ -244,6 +249,7 @@ fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
 /// Extracts the first entry matching any of `bin_names` from a `.zip`
 /// archive (Windows).
 #[cfg(windows)]
+#[hotpath::measure(label = "cli.upgrade.extract_zip")]
 fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use std::io::Cursor;
 
@@ -274,6 +280,7 @@ fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
 /// appropriate strategy for the detected install method. Cleans up the
 /// temp file afterwards regardless of outcome. Returns the path the new
 /// binary was installed at, when known.
+#[hotpath::measure(label = "cli.upgrade.replace_binary")]
 fn replace_binary(
     new_exe: &Path,
     method: &InstallMethod,
@@ -966,6 +973,7 @@ pub fn show_channel() {
 }
 
 /// Switch to a different channel by downloading the latest release from it.
+#[hotpath::measure(label = "cli.channel.switch")]
 pub fn switch_channel(target_channel: &str) -> Result<String> {
     let current = env!("CARGO_PKG_VERSION");
     let current_is_beta = cloud::is_beta();

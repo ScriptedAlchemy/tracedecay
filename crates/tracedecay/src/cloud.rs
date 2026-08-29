@@ -42,6 +42,7 @@ pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
 
 /// Uploads pending tokens to the worldwide counter.
 /// Returns the new worldwide total on success, or None on any failure.
+#[hotpath::measure(label = "cloud.flush_pending")]
 pub fn flush_pending(amount: u64) -> Option<u64> {
     if amount == 0 {
         return None;
@@ -60,6 +61,7 @@ pub fn flush_pending(amount: u64) -> Option<u64> {
 
 /// Fetches the current worldwide total from the worker.
 /// Returns None on timeout, network error, or parse failure.
+#[hotpath::measure(label = "cloud.fetch_worldwide_total")]
 pub fn fetch_worldwide_total() -> Option<u64> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let parsed: WorkerResponse = agent
@@ -80,6 +82,7 @@ struct CountriesResponse {
 
 /// Fetches country flags from the worldwide counter.
 /// Returns a list of emoji flags, or an empty vec on failure.
+#[hotpath::measure(label = "cloud.fetch_country_flags")]
 pub fn fetch_country_flags() -> Vec<String> {
     let agent = agent_with_timeout(Duration::from_millis(500));
     let Ok(mut resp) = agent.get(&format!("{WORKER_URL}/countries")).call() else {
@@ -194,6 +197,7 @@ pub fn fetch_latest_version() -> Option<String> {
 }
 
 /// Fetches the latest stable release version from GitHub.
+#[hotpath::measure(label = "cloud.fetch_latest_stable_version")]
 pub fn fetch_latest_stable_version() -> Option<String> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let release: GitHubRelease = agent
@@ -211,6 +215,7 @@ pub fn fetch_latest_stable_version() -> Option<String> {
 }
 
 /// Fetches the latest prerelease version from GitHub.
+#[hotpath::measure(label = "cloud.fetch_latest_beta_version")]
 pub fn fetch_latest_beta_version() -> Option<String> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let releases: Vec<GitHubRelease> = agent
