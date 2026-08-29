@@ -440,7 +440,7 @@ pub async fn run_session_retention_authorized(
 type RetentionAuthorization<'a> = dyn Fn(&str) -> Result<(), LcmError> + Send + Sync + 'a;
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "sessions.lcm.retention", future = true)]
 async fn run_session_retention_inner(
     store: RetentionStore<'_>,
     storage_root: &Path,

@@ -566,7 +566,7 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     /// Apply a settings selection. `None` disables semantics without download.
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.model_lifecycle.select_model")]
     pub fn select_model(
         &self,
         model_id: Option<&str>,

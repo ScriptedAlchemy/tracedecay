@@ -29,8 +29,8 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionScope};
 
 pub fn repository_root() -> &'static Path {
     repository_layout::repository_root()

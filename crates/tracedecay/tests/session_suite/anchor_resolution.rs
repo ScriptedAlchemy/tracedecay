@@ -30,7 +30,8 @@ use tracedecay_store::{
 use tracedecay_usecases::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
-use tracedecay_usecases::host_admission::{HostAdmissionFacade, HostAdmissionScope};
+use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionFacade;
 use tracedecay_usecases::memory::MemoryApplication;
 
 const GENERATION: u64 = 7;

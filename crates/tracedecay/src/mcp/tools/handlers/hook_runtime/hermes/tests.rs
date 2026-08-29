@@ -1,6 +1,9 @@
 use super::super::*;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_usecases::host_admission::{HostAdmissionScope, HostAdmissionStatus};
+use tracedecay_sessions::admission::{
+    HostAdmissionScope,
+    HostAdmissionStatus,
+};
 
 use super::super::test_support::*;
 use super::*;

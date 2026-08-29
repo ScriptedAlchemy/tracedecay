@@ -22,7 +22,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
 /// that must NOT be classified as "ephemeral" by

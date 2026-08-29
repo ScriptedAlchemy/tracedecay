@@ -161,7 +161,7 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
         Ok(candidate_count.div_ceil(self.authority.max_batch_size))
     }
 
-    #[hotpath::measure]
+    #[hotpath::measure(label = "semantic.embedding.rerank")]
     fn rerank(
         &self,
         _policy: &RerankPolicy,

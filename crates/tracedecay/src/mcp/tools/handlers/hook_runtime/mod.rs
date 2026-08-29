@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::Result;
-use tracedecay_usecases::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
+use tracedecay_sessions::admission::HostAdmissionOutcome;
+use tracedecay_host_admission::SharedHostAdmissionBroker;
 
 use super::SessionAuthorities;
 use super::support::tool_json;

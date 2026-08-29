@@ -31,7 +31,7 @@ use tracedecay_semantic::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
     SemanticResourceCeilings,
 };
-use tracedecay_usecases::retention::code_index_generations::{
+use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_usecases::semantic_runtime::{

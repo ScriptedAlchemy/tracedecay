@@ -21,7 +21,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     SessionsForQuery, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common;
 

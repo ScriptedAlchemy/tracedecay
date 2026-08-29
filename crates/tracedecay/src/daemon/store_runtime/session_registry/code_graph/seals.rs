@@ -191,7 +191,7 @@ pub(super) fn lock_project_graph_replay_pool(
     replay_root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<
-    tracedecay_usecases::retention::code_index_generations::CodeGenerationStoreLockV1,
+    tracedecay_code_index_retention::code_index_generations::CodeGenerationStoreLockV1,
     GraphDbError,
 > {
     tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(replay_root)
@@ -212,12 +212,12 @@ fn lock_code_generation_store(
     root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<
-    tracedecay_usecases::retention::code_index_generations::CodeGenerationStoreLockV1,
+    tracedecay_code_index_retention::code_index_generations::CodeGenerationStoreLockV1,
     GraphDbError,
 > {
     loop {
         check()?;
-        match tracedecay_usecases::retention::code_index_generations::try_acquire_code_generation_store_lock(root)
+        match tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock(root)
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?
         {
             Some(lock) => return Ok(lock),
