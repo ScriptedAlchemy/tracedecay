@@ -112,7 +112,7 @@ fn handle_branch_action_inner(
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
                     let size = if db_exists {
-                        tracedecay::display::format_bytes(
+                        tracedecay_runtime_core::text::format_bytes(
                             branch
                                 .get("size_bytes")
                                 .and_then(serde_json::Value::as_u64)

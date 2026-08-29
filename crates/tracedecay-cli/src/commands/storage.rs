@@ -443,7 +443,7 @@ fn handle_list_inner(
     // Erase the deeply nested list future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        use tracedecay::display::format_token_count;
+        use tracedecay_runtime_core::text::format_token_count;
 
         let home_tracedecay = tracedecay::config::user_data_dir();
         let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
@@ -568,7 +568,7 @@ fn handle_list_inner(
             let path_str = format!("{} [{}]", r.path.display(), r.status_label);
             let pad = path_w.saturating_sub(path_str.chars().count());
             let size_str = if r.has_data {
-                tracedecay::display::format_bytes(r.size)
+                tracedecay_runtime_core::text::format_bytes(r.size)
             } else {
                 "—".to_string()
             };
@@ -598,7 +598,7 @@ fn handle_list_inner(
         };
         println!(
             "Total: {} on disk · {} tokens saved{}",
-            tracedecay::display::format_bytes(total_size),
+            tracedecay_runtime_core::text::format_bytes(total_size),
             total_tokens_str,
             total_suffix
         );

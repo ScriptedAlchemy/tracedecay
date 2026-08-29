@@ -283,7 +283,7 @@ async fn handle_status_command_within(
         let branch_info = daemon_status
             .get("serving_branch")
             .and_then(Value::as_str)
-            .map(|branch| tracedecay::display::BranchInfo {
+            .map(|branch| crate::display::BranchInfo {
                 branch: branch.to_string(),
                 parent: daemon_status
                     .get("parent_branch")
@@ -293,7 +293,7 @@ async fn handle_status_command_within(
             });
         let cost_info = None;
         if short {
-            tracedecay::display::print_status_header(
+            crate::display::print_status_header(
                 &census,
                 freshness.as_ref(),
                 tokens_saved,
@@ -304,7 +304,7 @@ async fn handle_status_command_within(
                 cost_info.as_ref(),
             );
         } else {
-            tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
+            crate::display::print_status_table_with(crate::display::StatusTable {
                 census: &census,
                 freshness: freshness.as_ref(),
                 tokens_saved,

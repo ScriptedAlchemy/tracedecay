@@ -141,7 +141,7 @@ fn print_model_table(summary: &CostSummaryPayload) {
             .unwrap_or_else(|| "n/a".to_owned());
         let token_count = model
             .total_tokens
-            .map(tracedecay::display::format_token_count)
+            .map(tracedecay_runtime_core::text::format_token_count)
             .unwrap_or_else(|| "unknown".to_owned());
         let cost = model
             .cost_usd
@@ -184,7 +184,7 @@ fn print_default_summary(
     );
 
     if summary.tokens_saved > 0 {
-        let saved = tracedecay::display::format_token_count(summary.tokens_saved);
+        let saved = tracedecay_runtime_core::text::format_token_count(summary.tokens_saved);
         println!();
         match summary.efficiency_ratio {
             Some(ratio) => {
@@ -237,10 +237,10 @@ fn print_cost_row(
         (denominator > 0).then_some((cache_read as f64 / denominator as f64) * 100.0)
     });
     let input = input
-        .map(tracedecay::display::format_token_count)
+        .map(tracedecay_runtime_core::text::format_token_count)
         .unwrap_or_else(|| "unknown".to_owned());
     let output = output
-        .map(tracedecay::display::format_token_count)
+        .map(tracedecay_runtime_core::text::format_token_count)
         .unwrap_or_else(|| "unknown".to_owned());
     let cost = cost
         .map(|cost| format!("${cost:.2}"))

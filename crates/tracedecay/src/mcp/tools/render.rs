@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::mcp::tools::context_headings::CONTEXT_PRIORITY_HEADINGS;
 use crate::daemon_client::RequestedOutputFormat;
-use crate::display::format_relative_time;
+use tracedecay_runtime_core::text::format_relative_time;
 use crate::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
     note_response_handle_store_skipped_no_project_root, observe_response_truncation,

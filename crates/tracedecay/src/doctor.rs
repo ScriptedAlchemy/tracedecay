@@ -17,7 +17,7 @@ use crate::application_surface::{
     resolve_application_surface_dispatch,
 };
 use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
-use crate::display::format_token_count;
+use tracedecay_runtime_core::text::format_token_count;
 use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 use tracedecay_usecases::request_identity::{GlobalRequestSurface, mint_global_request_id};
 

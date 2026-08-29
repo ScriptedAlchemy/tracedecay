@@ -72,7 +72,6 @@ pub mod daemon_contract;
 pub mod dashboard;
 pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;
-pub mod display;
 pub mod doctor;
 pub use tracedecay_usecases::git_query;
 pub mod graph;

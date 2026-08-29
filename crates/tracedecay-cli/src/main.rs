@@ -23,6 +23,7 @@ mod automation_cli;
 mod cli;
 mod commands;
 mod cost_cmd;
+mod display;
 mod git_cmd;
 mod global;
 mod hook_capture_cmd;

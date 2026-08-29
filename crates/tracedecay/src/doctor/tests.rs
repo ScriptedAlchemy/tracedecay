@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use super::*;
 use crate::agents::AgentIntegration;
-use crate::display::format_bytes;
+use tracedecay_runtime_core::text::format_bytes;
 
 #[test]
 fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
