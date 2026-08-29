@@ -1,5 +1,13 @@
 # tracedecay vs token-savior
 
+> **Superseded comparison snapshot.** The implementation row ("Rust + SQLite")
+> and "per-branch DB" claim describe the retired pre-V2 model. Current graph
+> storage is Grafeo via `tracedecay-graph-db`; one project store, branch as
+> provenance only — see
+> [Plan 38](plans/tracedecay-v2/38-storage-retention-size-and-efficiency.md)
+> and the [V2 operating model](V2-OPERATING-MODEL.md). Benchmark numbers below
+> are historical.
+
 A capability + performance comparison between the two tools, with measured
 results from a synthetic indexer benchmark and a 96-task agent benchmark
 (`Mibayy/tsbench`).
