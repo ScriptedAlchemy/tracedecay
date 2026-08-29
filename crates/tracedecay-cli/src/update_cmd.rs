@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tracedecay::upgrade::UpgradeOutcome;
+use crate::upgrade::UpgradeOutcome;
 use tracedecay_usecases::user_config::UserConfig;
 
 // Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
@@ -384,7 +384,7 @@ fn run_update_flow(
     no_reinstall: bool,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
-        run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
+        run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
             run_post_update_subcommand(no_reinstall, binary, lease_token)
         })
     })
@@ -715,7 +715,7 @@ mod tests {
         run_install_then_refresh,
     };
     use tempfile::TempDir;
-    use tracedecay::upgrade::UpgradeOutcome;
+    use crate::upgrade::UpgradeOutcome;
 
     #[test]
     fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {

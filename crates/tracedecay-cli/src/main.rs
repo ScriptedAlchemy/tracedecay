@@ -32,6 +32,7 @@ mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 mod update_cmd;
+mod upgrade;
 mod work_command;
 mod workflow_command;
 
@@ -1527,11 +1528,11 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_runtime_core::
             Some(target) => {
                 hotpath::measure_block!(
                     "cli.channel.switch",
-                    tracedecay::upgrade::switch_channel(&target)
+                    crate::upgrade::switch_channel(&target)
                 )?;
             }
             None => {
-                hotpath::measure_block!("cli.channel.show", tracedecay::upgrade::show_channel())
+                hotpath::measure_block!("cli.channel.show", crate::upgrade::show_channel())
             }
         },
         _ => unreachable!("non-update command passed to update dispatcher"),

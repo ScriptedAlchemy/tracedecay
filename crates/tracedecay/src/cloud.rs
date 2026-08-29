@@ -109,7 +109,7 @@ struct GitHubAsset {
 /// Returns the platform slug matching the CI release matrix. Must stay in
 /// sync with the `matrix.name` field in `.github/workflows/release.yml`
 /// and `release-beta.yml`.
-pub(crate) fn current_platform() -> &'static str {
+pub fn current_platform() -> &'static str {
     if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
         "aarch64-macos"
     } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
@@ -131,7 +131,7 @@ pub(crate) fn current_platform() -> &'static str {
 ///
 /// - Stable: `tracedecay-v{version}-{platform}.{ext}`
 /// - Beta:   `tracedecay-beta-v{version}-{platform}.{ext}`
-pub(crate) fn asset_name(version: &str, is_beta: bool) -> String {
+pub fn asset_name(version: &str, is_beta: bool) -> String {
     let prefix = if is_beta {
         "tracedecay-beta"
     } else {

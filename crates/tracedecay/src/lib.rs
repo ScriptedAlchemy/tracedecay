@@ -111,7 +111,6 @@ pub mod store;
 pub(crate) mod support;
 pub mod tracedecay;
 pub mod types;
-pub mod upgrade;
 pub mod version;
 pub mod work_cli;
 pub mod workflow_cli;

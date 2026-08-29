@@ -145,6 +145,7 @@ lang-lean = ["tracedecay/lang-lean"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
 hotpath.workspace = true
@@ -152,9 +153,11 @@ open = "5.3"
 rayon = "1"
 regex = { version = "1.12.3", optional = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+self-replace = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+tar = "0.4"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
 tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false }
@@ -172,6 +175,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 tracing = "0.1"
+ureq = { version = "3", features = ["json"] }
 url = "2"
 
 [dev-dependencies]

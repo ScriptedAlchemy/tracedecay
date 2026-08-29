@@ -15,18 +15,18 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 
-use crate::cloud::{self, InstallMethod};
+use tracedecay::cloud::{self, InstallMethod};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::user_config::UserConfig;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
-// Asset-naming and platform helpers live in `crate::cloud` so the version-
+// Asset-naming and platform helpers live in `tracedecay::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use crate::cloud::asset_name;
+use tracedecay::cloud::asset_name;
 #[cfg(test)]
-use crate::cloud::current_platform;
+use tracedecay::cloud::current_platform;
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
