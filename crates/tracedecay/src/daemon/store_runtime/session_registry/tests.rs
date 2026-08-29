@@ -54,6 +54,33 @@ async fn project_sessions_pending_convergence(
     PathBuf,
     tracedecay_runtime_core::db::DaemonDatabaseScope,
 ) {
+    project_sessions_convergence_fixture(project_name, true).await
+}
+
+async fn project_sessions_current_convergence(
+    project_name: &str,
+) -> (
+    tempfile::TempDir,
+    LocalProfileIdentityAuthorityV1,
+    ProjectId,
+    PathBuf,
+    PathBuf,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
+) {
+    project_sessions_convergence_fixture(project_name, false).await
+}
+
+async fn project_sessions_convergence_fixture(
+    project_name: &str,
+    remove_checkpoint: bool,
+) -> (
+    tempfile::TempDir,
+    LocalProfileIdentityAuthorityV1,
+    ProjectId,
+    PathBuf,
+    PathBuf,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
+) {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
         .path()
@@ -98,13 +125,15 @@ async fn project_sessions_pending_convergence(
     )
     .await
     .expect("seed complete registered schema");
-    database
-        .execute_write_batch(
-            "remove durable convergence checkpoint",
-            "DELETE FROM authority_audit_checkpoints",
-        )
-        .await
-        .expect("remove durable convergence checkpoint");
+    if remove_checkpoint {
+        database
+            .execute_write_batch(
+                "remove durable convergence checkpoint",
+                "DELETE FROM authority_audit_checkpoints",
+            )
+            .await
+            .expect("remove durable convergence checkpoint");
+    }
     drop(database);
     (
         temporary,
@@ -824,6 +853,52 @@ async fn background_convergence_commits_the_durable_authority_checkpoint() {
             .get::<i64>(0)
             .expect("decode checkpoint"),
         0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_current_convergence("project.schema-trusted-checkpoint").await;
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("checkpoint read snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT bounded_passes_since_exhaustive
+             FROM authority_audit_checkpoints
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .expect("read durable authority checkpoint");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("read checkpoint")
+            .expect("durable checkpoint row")
+            .get::<i64>(0)
+            .expect("decode checkpoint"),
+        1,
+        "daemon reopen must audit only the suffix after a trusted checkpoint"
     );
 }
 
