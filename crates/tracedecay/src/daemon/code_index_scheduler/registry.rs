@@ -1777,7 +1777,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         };
-        let (serving_generation, serving_epoch, active_installation) = {
+        let (serving_generation, serving_epoch, active_installation, text_generation) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return ServingGenerationRollbackOutcomeV1::NoMatch;
@@ -1786,6 +1786,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.serving_generation_epoch),
                 Arc::clone(&worktree.serving_generation_installation),
+                Arc::clone(&worktree.text_generation),
             )
         };
         let mut serving = serving_generation
@@ -1808,6 +1809,18 @@ impl CodeIndexSchedulerRegistryV1 {
         if retire {
             *serving = None;
             serving_epoch.fetch_add(1, Ordering::AcqRel);
+            // `latest_generation_id` falls through to the text slot when
+            // serving is empty. Leaving the retired generation there would
+            // keep it publicly addressable after the exact rollback token
+            // cleared the serving seat.
+            let mut text = text_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if text.as_ref().is_some_and(|current| {
+                current.metadata().manifest().generation_id == installation.generation_id
+            }) {
+                *text = None;
+            }
         }
         ServingGenerationRollbackOutcomeV1::Cleared
     }
