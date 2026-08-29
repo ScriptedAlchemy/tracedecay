@@ -10,7 +10,6 @@ use std::path::Path;
 use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
@@ -28,6 +27,7 @@ use tracedecay_domain::{
     RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId, canonical_sha256,
 };
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);

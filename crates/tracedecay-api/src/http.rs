@@ -969,7 +969,7 @@ where
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
     };
-    match hotpath::future!(async move { invocation.await }, label = "api.http.handler").await {
+    match hotpath::future!(invocation, label = "api.http.handler").await {
         Ok(result) => result.into_http_response(),
         Err(error) => application_contract_error_response(error),
     }

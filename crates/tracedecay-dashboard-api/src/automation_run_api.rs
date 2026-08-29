@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::http_detail;
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
 };
@@ -28,7 +28,7 @@ pub async fn run_list(
     // The locked ledger tail read is this route's only I/O; row projection
     // after it is linear in the (bounded) page.
     match hotpath::future!(
-        tracedecay_agent_hosts::automation::run_ledger::load_run_records_page(
+        tracedecay_automation_runtime::automation::run_ledger::load_run_records_page(
             &state.dashboard_root,
             limit,
         ),

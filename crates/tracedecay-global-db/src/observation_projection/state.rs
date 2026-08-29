@@ -665,6 +665,16 @@ async fn message_projection(
     provider: &str,
     message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
+    if let Some(projection) = super::apply::derive_projection(observation)?
+        .messages()
+        .find(|projection| {
+            projection.message().provider == provider
+                && projection.message().message_id == message_id
+        })
+        .cloned()
+    {
+        return Ok(projection);
+    }
     derive_projection_with_alias(conn, observation)
         .await?
         .messages()
@@ -777,13 +787,14 @@ fn output_authority_batch_sql() -> String {
                    provenance.output_message_id AS output_message_id,
                    MAX(provenance.message_created) AS projector_owned,
                    COUNT(*) AS owner_count
-            FROM observation_projection_provenance AS provenance
-            JOIN json_each(?2) AS requested
-              ON provenance.output_provider =
-                   json_extract(requested.value, '$.provider')
-             AND provenance.output_message_id =
-                   json_extract(requested.value, '$.message_id')
+            FROM json_each(?2) AS requested
+            CROSS JOIN observation_projection_provenance AS provenance
+              INDEXED BY idx_observation_projection_provenance_output
             WHERE provenance.projector_version = ?1
+              AND provenance.output_provider =
+                    json_extract(requested.value, '$.provider')
+              AND provenance.output_message_id =
+                    json_extract(requested.value, '$.message_id')
             GROUP BY provenance.projector_version, provenance.output_provider,
                      provenance.output_message_id
          ),

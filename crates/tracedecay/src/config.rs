@@ -26,12 +26,13 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
     ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -258,38 +259,6 @@ fn default_incident_debris_retention_days() -> Option<u64> {
 
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
     Some(CompactionThresholdConfig::default())
-}
-
-/// Incremental-vacuum compaction trigger for the daemon background lane
-/// (Plan 38 §6). Threads [`tracedecay_application::storage::compaction::CompactionTriggerPolicyV1`]
-/// through owner config: the daemon samples a store's free-page ratio and, when
-/// this threshold is met, schedules a bounded incremental vacuum off the hot
-/// path.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CompactionThresholdConfig {
-    /// Free-page ratio at or above which an incremental vacuum is scheduled.
-    pub free_page_ratio_threshold: f64,
-    /// Minimum reclaimable free bytes below which compaction is not worth it.
-    #[serde(default)]
-    pub minimum_reclaimable_bytes: u64,
-    /// Upper bound on freelist pages reclaimed per tick, keeping each vacuum
-    /// bounded and off the hot path.
-    #[serde(default = "default_compaction_max_pages_per_tick")]
-    pub max_pages_per_tick: u32,
-}
-
-fn default_compaction_max_pages_per_tick() -> u32 {
-    1024
-}
-
-impl Default for CompactionThresholdConfig {
-    fn default() -> Self {
-        Self {
-            free_page_ratio_threshold: 0.25,
-            minimum_reclaimable_bytes: 64 * 1024 * 1024,
-            max_pages_per_tick: default_compaction_max_pages_per_tick(),
-        }
-    }
 }
 
 /// The daemon retention/compaction policy tree (Plan 38). Safe, bounded
@@ -1870,8 +1839,8 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
     if let Some(root) = discover_project_root(start) {
         return Some(root);
     }
-    let candidate =
-        tracedecay_runtime_core::worktree::git_worktree_root(start).unwrap_or_else(|| start.to_path_buf());
+    let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
+        .unwrap_or_else(|| start.to_path_buf());
     if crate::tracedecay::TraceDecay::has_initialized_store(&candidate).await {
         Some(candidate)
     } else {

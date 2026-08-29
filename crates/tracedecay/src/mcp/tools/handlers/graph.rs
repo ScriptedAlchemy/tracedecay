@@ -19,10 +19,10 @@ use tracedecay_application::retrieval::{
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 
-use crate::mcp::tools::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
+use tracedecay_mcp::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
@@ -615,7 +615,9 @@ fn context_graph_projection(
         for symbol in selected.iter().take(max_code_blocks) {
             let metadata = required_graph_metadata(symbol)?;
             let file_path = required_graph_file_path(symbol)?;
-            let source = tracedecay_runtime_core::sync::read_source_file(&cg.project_root().join(file_path))?;
+            let source = tracedecay_runtime_core::sync::read_source_file(
+                &cg.project_root().join(file_path),
+            )?;
             code_blocks.push(ContextCodeBlockV1 {
                 node_id: symbol.occurrence.as_str().to_owned(),
                 file: file_path.to_owned(),

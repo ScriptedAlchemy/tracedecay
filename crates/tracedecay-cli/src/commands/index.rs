@@ -176,11 +176,13 @@ async fn handle_init_with_daemon_availability(
     if daemon_available {
         return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
     }
-    Err(tracedecay_runtime_core::errors::TraceDecayError::project_route(
-        "code_index_scheduler_unavailable",
-        true,
-        "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
-    ))
+    Err(
+        tracedecay_runtime_core::errors::TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
+        ),
+    )
 }
 
 async fn brokered_init(

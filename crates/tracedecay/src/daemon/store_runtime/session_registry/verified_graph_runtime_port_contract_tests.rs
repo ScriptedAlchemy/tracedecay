@@ -40,8 +40,9 @@ impl ContractFixture {
         let profile_root = temp.path().join("profile");
         let identity =
             profile_identity::load_or_create(&profile_root).expect("profile identity authority");
-        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 29, label)
-            .expect("daemon database scope");
+        let database_scope =
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 29, label)
+                .expect("daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("daemon session runtime registry");
@@ -63,7 +64,10 @@ impl ContractFixture {
     async fn mount_unbound(
         &self,
         project_id: &ProjectId,
-    ) -> (Arc<tracedecay_runtime_core::db::Database>, RegisteredGlobalDbLeaseV1) {
+    ) -> (
+        Arc<tracedecay_runtime_core::db::Database>,
+        RegisteredGlobalDbLeaseV1,
+    ) {
         let roots = self.project_roots(project_id);
         for root in &roots {
             std::fs::create_dir_all(root).expect("worktree root");
@@ -87,7 +91,10 @@ impl ContractFixture {
     async fn bind(
         &self,
         project_id: &ProjectId,
-    ) -> (Arc<tracedecay_runtime_core::db::Database>, RegisteredGlobalDbLeaseV1) {
+    ) -> (
+        Arc<tracedecay_runtime_core::db::Database>,
+        RegisteredGlobalDbLeaseV1,
+    ) {
         let (project_database, sessions) = self.mount_unbound(project_id).await;
         let runtime = project_database
             .memory_graph_runtime()
@@ -660,8 +667,12 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 31, "verified graph restart")
-        .expect("first database scope");
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        31,
+        "verified graph restart",
+    )
+    .expect("first database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("first registry");
@@ -700,9 +711,12 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     drop(profile_snapshot);
     drop((project_database, profile_database, registry, scope));
 
-    let _restarted_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 32, "verified graph restart reopen")
-            .expect("restarted database scope");
+    let _restarted_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        32,
+        "verified graph restart reopen",
+    )
+    .expect("restarted database scope");
     let restarted = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("restarted registry");

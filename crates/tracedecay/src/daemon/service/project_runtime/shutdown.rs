@@ -304,11 +304,15 @@ async fn shut_down_semantic(
             reconciler.cancel_and_join().await;
         }
         if let Some(configuration) = runtime.configuration.as_ref() {
-            clean &= configuration
-                .semantic_evaluation_workers()
-                .cancel_and_join_until(deadline)
-                .await
-                .is_clean();
+            let receipt =
+                crate::daemon::shutdown_orchestration::collect_semantic_evaluation_shutdown(
+                    configuration.semantic_evaluation_workers().as_ref(),
+                    deadline,
+                )
+                .await;
+            clean &=
+                crate::daemon::shutdown_orchestration::semantic_evaluation_shutdown_status(receipt)
+                    .is_clean();
         }
         if let Some(semantic) = runtime.semantic.as_ref() {
             clean &= semantic.cancel_and_join_until(deadline).await.is_clean();

@@ -17,7 +17,6 @@ hotpath = [
     "tracedecay-capture/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-graph-db/hotpath",
-    "tracedecay-lsp/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-store/hotpath",
@@ -30,7 +29,6 @@ hotpath-alloc = [
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-lsp/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
@@ -43,7 +41,6 @@ hotpath-cpu = [
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-lsp/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
@@ -68,7 +65,6 @@ tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

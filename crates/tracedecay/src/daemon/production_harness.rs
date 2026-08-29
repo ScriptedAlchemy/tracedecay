@@ -208,10 +208,11 @@ impl ProductionProjectCompositionHarnessV1 {
         let (profile_identity, lifecycle_lease, database_scope) =
             hotpath::measure_block!("daemon.harness.identity", {
                 let profile_identity = profile_identity::load_or_create(&profile_root)?;
-                let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-                    &profile_root,
-                    "in-process production composition",
-                )?;
+                let lifecycle_lease =
+                    tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                        &profile_root,
+                        "in-process production composition",
+                    )?;
                 let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
                     &profile_root,
                     1,

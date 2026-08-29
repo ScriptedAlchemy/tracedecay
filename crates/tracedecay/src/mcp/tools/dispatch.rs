@@ -18,6 +18,7 @@ use crate::application_surface::{
 };
 use crate::daemon_client::{DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat};
 use crate::mcp::tools::ToolDefinition;
+use tracedecay_mcp::McpCatalogError;
 
 pub(crate) const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
 
@@ -33,6 +34,17 @@ pub enum McpDispatchMetadataError {
     Initialization(String),
     #[error("advertised MCP tool '{0}' has no dispatch contract")]
     MissingContract(String),
+}
+
+impl From<McpCatalogError> for McpDispatchMetadataError {
+    fn from(error: McpCatalogError) -> Self {
+        match error {
+            McpCatalogError::Catalog(error) => Self::Catalog(error),
+            McpCatalogError::CatalogValidation(error) => Self::CatalogValidation(error),
+            McpCatalogError::Initialization(message) => Self::Initialization(message),
+            McpCatalogError::MissingContract(name) => Self::MissingContract(name),
+        }
+    }
 }
 
 pub(crate) fn attach_dispatch_metadata(

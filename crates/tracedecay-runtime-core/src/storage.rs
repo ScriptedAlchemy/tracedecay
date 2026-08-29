@@ -424,6 +424,7 @@ mod layout;
 mod legacy_layouts;
 mod manifest;
 mod paths_and_io;
+mod profile_identity;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use identity::pin_fixture_repository_identity;
@@ -445,6 +446,10 @@ pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
     retry_transient_file_op, set_private_dir_permissions, try_acquire_sidecar_lock,
     validate_project_id,
+};
+pub use profile_identity::{
+    PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION, ProfileIdentityRecordV1,
+    read_existing_profile_identity_record,
 };
 
 #[cfg(test)]

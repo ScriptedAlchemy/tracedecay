@@ -154,8 +154,6 @@ pub(crate) use crate::daemon_contract::{
     HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
 };
-use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::TraceDecayError;
 use crate::production_semantic_authorities;
 #[cfg(test)]
 use tracedecay_application::{
@@ -163,6 +161,8 @@ use tracedecay_application::{
     ProblemTerminality,
 };
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_usecases::request_identity::{
     GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
     mint_global_opaque_id,

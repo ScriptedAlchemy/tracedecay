@@ -840,7 +840,7 @@ mod tests {
                     .map_err(|_| TraceDecayError::Io(std::io::Error::other("gate closed")))?;
                 Ok(test_process_snapshot())
             }),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
@@ -868,7 +868,7 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 Ok(test_process_snapshot())
             }),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
@@ -923,7 +923,7 @@ mod tests {
                     "process table unreadable",
                 )))
             }),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);

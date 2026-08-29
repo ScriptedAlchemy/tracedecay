@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_sessions::runtime::lcm::LcmStorageKind;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
@@ -98,7 +98,8 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>
+    {
         self.query_profile_analytics_events_for_test(query).await
     }
 

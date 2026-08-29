@@ -5,12 +5,12 @@
 
 use crate::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval;
+use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval;
 #[cfg(feature = "test-transport")]
-use tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval_for_retained_settlement;
-use tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock;
+use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval_for_retained_settlement;
+use tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock;
 #[cfg(feature = "test-transport")]
-use tracedecay_agent_hosts::automation::scheduler::{SessionActivity, schedule_decision};
+use tracedecay_automation_runtime::automation::scheduler::{SessionActivity, schedule_decision};
 use tracedecay_domain::SessionId;
 
 struct CountingAutomationSessionRetrieval {
@@ -604,7 +604,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     let retrieval = EmptyAutomationSessionRetrieval::new();
 
     let dispatch =
-        tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
             &cg,
             &config,
             &test_configuration_revision(),
@@ -642,7 +642,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
 
         let dispatch =
-            tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+            tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
                 &cg,
                 &config,
                 &test_configuration_revision(),
@@ -678,7 +678,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let dispatch =
-        tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
             &cg,
             &config,
             &test_configuration_revision(),

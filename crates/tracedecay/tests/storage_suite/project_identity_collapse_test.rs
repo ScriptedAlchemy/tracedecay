@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ReapEntryKind;
+use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_runtime_core::storage::{default_profile_project_id, repository_identity_path, resolve_layout};
 
 fn git(cwd: &Path, args: &[&str]) {

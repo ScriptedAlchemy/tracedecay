@@ -26,7 +26,7 @@ use tracedecay_global_db::{
 };
 
 use super::{HintOutcomeStats, correlate_hint_outcomes};
-use crate::analytics::split_tool_names;
+use tracedecay_automation::analytics::split_tool_names;
 
 /// [`HintOutcomeCorrelationPort`] over the registered analytics and session
 /// store authorities. The correlation kernel ([`correlate_hint_outcomes`])

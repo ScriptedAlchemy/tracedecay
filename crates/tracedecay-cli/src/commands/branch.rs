@@ -17,14 +17,20 @@ fn branch_list_rpc_args() -> serde_json::Value {
 }
 
 #[hotpath::measure(label = "cli.branch.dispatch", future = true)]
-pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_branch_action(
+    action: BranchAction,
+) -> tracedecay_runtime_core::errors::Result<()> {
     handle_branch_action_inner(action).await
 }
 
 fn handle_branch_action_inner(
     action: BranchAction,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
+    Box<
+        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+            + Send
+            + 'static,
+    >,
 > {
     // Erase the deeply nested branch-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -516,7 +522,9 @@ async fn handle_branch_autotrack_action(
 }
 
 #[cfg(unix)]
-async fn resolve_branch_data_root(project_path: &Path) -> tracedecay_runtime_core::errors::Result<PathBuf> {
+async fn resolve_branch_data_root(
+    project_path: &Path,
+) -> tracedecay_runtime_core::errors::Result<PathBuf> {
     Ok(
         tracedecay::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_path)
             .await?

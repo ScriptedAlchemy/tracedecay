@@ -35,7 +35,7 @@ impl TraceDecay {
 
         let check_output = hotpath::measure_block!(
             "edits.ast_grep.probe",
-            tracedecay_code_index::external_tools::ast_grep_command()
+            tracedecay_mcp::host_cli::ast_grep_command()
                 .args(["--version"])
                 .output()
         );
@@ -114,7 +114,7 @@ impl TraceDecay {
         ast_grep_args.push(snapshot_path_arg.as_ref());
         let output = hotpath::measure_block!(
             "edits.ast_grep.match",
-            tracedecay_code_index::external_tools::ast_grep_command()
+            tracedecay_mcp::host_cli::ast_grep_command()
                 .args(&ast_grep_args)
                 .output()
         )

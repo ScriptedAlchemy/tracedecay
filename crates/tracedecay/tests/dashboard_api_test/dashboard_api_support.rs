@@ -283,8 +283,8 @@ pub(crate) async fn record_dashboard_automatic_fact(
     content: &str,
 ) -> DashboardAutomaticFactReceipt {
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::automatic_facts::{
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_automation_runtime::automation::automatic_facts::{
         AutomaticFactState, record_session_automatic_facts,
     };
     use tracedecay_usecases::memory::MemoryApplication;

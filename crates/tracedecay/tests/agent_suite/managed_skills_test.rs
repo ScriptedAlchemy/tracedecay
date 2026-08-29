@@ -1,11 +1,11 @@
-use tracedecay_agent_hosts::automation::managed_skills::{
+use tracedecay_automation_runtime::automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
     ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
     apply_managed_skill_update, archive_managed_skill, create_managed_skill, disable_managed_skill,
     list_managed_skills, load_managed_skill, managed_skill_dir, restore_managed_skill,
     save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
 };
-use tracedecay_agent_hosts::automation::skill_usage::{
+use tracedecay_automation_runtime::automation::skill_usage::{
     AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
     load_skill_usage_records, record_skill_usage, record_skill_usage_event,
     skill_usage_ledger_path, summarize_skill_usage, summarize_skill_usage_for,

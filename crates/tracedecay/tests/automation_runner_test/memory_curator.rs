@@ -103,7 +103,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -597,7 +597,7 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -644,7 +644,7 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     config.tasks.memory_curator.interval_secs = Some(1);
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -690,7 +690,7 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -781,7 +781,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -871,7 +871,7 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -934,7 +934,7 @@ async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustio
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let error = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -1006,7 +1006,7 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),
@@ -1101,7 +1101,7 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let error = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
         &test_configuration_revision(),

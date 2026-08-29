@@ -231,9 +231,10 @@ impl FixedGitIndexRunner {
                     NativeGitIndexError::Io(error.to_string())
                 }
             })?;
+        let file = hotpath::io!(file, label = "usecases.git_index_tx.lock.file");
         Ok(NativeIndexLock {
             path,
-            file: hotpath::io!(file, label = "usecases.git_index_tx.lock.file"),
+            file,
             published: false,
         })
     }

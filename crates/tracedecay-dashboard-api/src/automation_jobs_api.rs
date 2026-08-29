@@ -21,7 +21,7 @@ use super::{
     DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1,
     automation_authority_error_response, exact_automation_authority,
 };
-use tracedecay_agent_hosts::automation::jobs::{
+use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, find_job, job_task_key, load_jobs, save_jobs, validate_job,
     validate_job_id,
 };

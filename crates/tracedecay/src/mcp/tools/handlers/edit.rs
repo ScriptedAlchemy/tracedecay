@@ -8,13 +8,13 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::mcp::server::{
     SourceEditExecutor, SourceEditInvocationV1, SourceEditReconciliationExecutor,
     SourceEditReconciliationInvocationV1, SourceEditRollbackExecutor,
     SourceEditRollbackInvocationV1,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::ToolResult;
 use super::super::render;
@@ -660,7 +660,9 @@ mod tests {
         ManifestDigest::new(value).unwrap()
     }
 
-    async fn fixture_graph(project_root: &Path) -> (TraceDecay, tracedecay_runtime_core::db::DaemonDatabaseScope) {
+    async fn fixture_graph(
+        project_root: &Path,
+    ) -> (TraceDecay, tracedecay_runtime_core::db::DaemonDatabaseScope) {
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),

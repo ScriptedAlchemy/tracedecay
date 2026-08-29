@@ -462,7 +462,7 @@ fn buffered_sink_preserves_written_bytes() {
         direct.write(chunk);
         buffered.write(chunk);
     }
-    assert_eq!(buffered.finish(), direct);
+    assert_eq!(buffered.finish_reuse().0, direct);
 }
 
 /// Objects whose keys already arrive sorted take the collect-free path; it

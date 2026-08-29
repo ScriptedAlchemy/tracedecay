@@ -114,28 +114,77 @@ impl DaemonSessionSyncService {
     ) -> tracedecay_runtime_core::errors::Result<bool> {
         let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
         let prefix = journal_prefix(&scope);
-        let journals = context
-            .registry
-            .list_session_sync_journals(&prefix)
-            .await
-            .map_err(store_error)?;
         let mut recovered_import = false;
-        for (key, encoded) in journals {
-            let mut journal: SessionSyncJournalV1 =
-                serde_json::from_str(&encoded).map_err(journal_decode_error)?;
-            if journal.scope != scope || journal.status == SessionSyncJournalStatusV1::Complete {
-                continue;
-            }
-            journal = self
-                .refresh_source_frontiers_with_project_sessions(context, project_sessions, &key)
-                .await?;
-            if let Some(primary) = journal.coalesced_primary.clone() {
-                let primary_key = journal_key(&scope, &primary);
-                if self
-                    .mirror_primary_terminal(context, &key, &primary_key)
-                    .await?
-                    .is_some()
+        let mut after_key = None;
+        loop {
+            let journals = context
+                .registry
+                .list_incomplete_session_sync_journal_page(&prefix, after_key.as_deref())
+                .await
+                .map_err(store_error)?;
+            let Some((last_key, _)) = journals.last() else {
+                break;
+            };
+            after_key = Some(last_key.clone());
+            for (key, encoded) in journals {
+                let mut journal: SessionSyncJournalV1 =
+                    serde_json::from_str(&encoded).map_err(journal_decode_error)?;
+                if journal.scope != scope || journal.status == SessionSyncJournalStatusV1::Complete
                 {
+                    continue;
+                }
+                journal = self
+                    .refresh_source_frontiers_with_project_sessions(context, project_sessions, &key)
+                    .await?;
+                if let Some(primary) = journal.coalesced_primary.clone() {
+                    let primary_key = journal_key(&scope, &primary);
+                    if self
+                        .mirror_primary_terminal(context, &key, &primary_key)
+                        .await?
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    if journal.cancel_requested_at.is_some() {
+                        self.persist_terminal(
+                            context,
+                            &key,
+                            OperationTermination::Cancelled,
+                            journal.stats,
+                            journal.coverage,
+                            journal.source_frontiers,
+                            Vec::new(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    if journal.deadline.is_elapsed_at(now_micros()) {
+                        self.persist_terminal(
+                            context,
+                            &key,
+                            OperationTermination::TimedOut,
+                            journal.stats,
+                            journal.coverage,
+                            journal.source_frontiers,
+                            Vec::new(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let cancellation = CancellationSignal::active(format!(
+                        "session-sync.recovered-alias.{}",
+                        journal.admission.operation_id.as_str()
+                    ))
+                    .map_err(contract_error)?;
+                    recovered_import = true;
+                    self.coalesce_import(
+                        Arc::clone(context),
+                        project_sessions.clone(),
+                        key,
+                        journal,
+                        primary_key,
+                        cancellation,
+                    );
                     continue;
                 }
                 if journal.cancel_requested_at.is_some() {
@@ -164,107 +213,66 @@ impl DaemonSessionSyncService {
                     .await?;
                     continue;
                 }
+                let active_import =
+                    matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
+                        .then(|| {
+                            self.active_imports
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .get(&import_scope_key(&journal.scope))
+                                .cloned()
+                        })
+                        .flatten();
+                if let Some(active_import) = active_import {
+                    recovered_import = true;
+                    journal = self
+                        .update_journal(context, &key, |journal| {
+                            journal.coalesced_primary =
+                                Some(active_import.admission.idempotency_key.clone());
+                            journal.updated_at = now_micros();
+                        })
+                        .await?;
+                    let cancellation = CancellationSignal::active(format!(
+                        "session-sync.recovered-coalesced.{}",
+                        journal.admission.operation_id.as_str()
+                    ))
+                    .map_err(contract_error)?;
+                    self.coalesce_import(
+                        Arc::clone(context),
+                        project_sessions.clone(),
+                        key,
+                        journal,
+                        active_import.journal_key,
+                        cancellation,
+                    );
+                    continue;
+                }
                 let cancellation = CancellationSignal::active(format!(
-                    "session-sync.recovered-alias.{}",
+                    "session-sync.recovered.{}",
                     journal.admission.operation_id.as_str()
                 ))
                 .map_err(contract_error)?;
-                recovered_import = true;
-                self.coalesce_import(
+                let admission = journal.admission.clone();
+                let request = SessionSyncRequestV1::new(
+                    journal.admission.operation_id,
+                    journal.admission.idempotency_key,
+                    journal.scope,
+                    journal.deadline,
+                    cancellation,
+                    journal.source,
+                );
+                recovered_import |= matches!(
+                    request.command(),
+                    SessionSyncCommandV1::ImportTranscripts(_)
+                );
+                let _ = self.enqueue(
                     Arc::clone(context),
                     project_sessions.clone(),
                     key,
-                    journal,
-                    primary_key,
-                    cancellation,
+                    request,
+                    admission,
                 );
-                continue;
             }
-            if journal.cancel_requested_at.is_some() {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::Cancelled,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            if journal.deadline.is_elapsed_at(now_micros()) {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::TimedOut,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            let active_import =
-                matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
-                    .then(|| {
-                        self.active_imports
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .get(&import_scope_key(&journal.scope))
-                            .cloned()
-                    })
-                    .flatten();
-            if let Some(active_import) = active_import {
-                recovered_import = true;
-                journal = self
-                    .update_journal(context, &key, |journal| {
-                        journal.coalesced_primary =
-                            Some(active_import.admission.idempotency_key.clone());
-                        journal.updated_at = now_micros();
-                    })
-                    .await?;
-                let cancellation = CancellationSignal::active(format!(
-                    "session-sync.recovered-coalesced.{}",
-                    journal.admission.operation_id.as_str()
-                ))
-                .map_err(contract_error)?;
-                self.coalesce_import(
-                    Arc::clone(context),
-                    project_sessions.clone(),
-                    key,
-                    journal,
-                    active_import.journal_key,
-                    cancellation,
-                );
-                continue;
-            }
-            let cancellation = CancellationSignal::active(format!(
-                "session-sync.recovered.{}",
-                journal.admission.operation_id.as_str()
-            ))
-            .map_err(contract_error)?;
-            let admission = journal.admission.clone();
-            let request = SessionSyncRequestV1::new(
-                journal.admission.operation_id,
-                journal.admission.idempotency_key,
-                journal.scope,
-                journal.deadline,
-                cancellation,
-                journal.source,
-            );
-            recovered_import |= matches!(
-                request.command(),
-                SessionSyncCommandV1::ImportTranscripts(_)
-            );
-            let _ = self.enqueue(
-                Arc::clone(context),
-                project_sessions.clone(),
-                key,
-                request,
-                admission,
-            );
         }
         Ok(recovered_import)
     }

@@ -12,7 +12,6 @@
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
 
-pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::{git_query, graph, request_identity, user_config};
 pub mod tracedecay;
@@ -155,8 +154,8 @@ use tower::ServiceExt;
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_agent_hosts::automation::backend;
-use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_automation_runtime::automation::backend;
+use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::{
@@ -216,7 +215,7 @@ pub type AutomationSchedulerReconcileFuture =
 pub type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
 pub type DashboardAutomationObservationRecorderV1 = Arc<
-    dyn Fn(tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord)
+    dyn Fn(tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord)
         + Send
         + Sync
         + 'static,

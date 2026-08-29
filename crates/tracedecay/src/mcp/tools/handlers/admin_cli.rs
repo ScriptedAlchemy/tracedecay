@@ -12,9 +12,9 @@ use tracedecay_application::session_sync::{
 use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::super::ToolResult;
 use super::json_result;
@@ -379,7 +379,7 @@ async fn dispatch_admin_cli(
                                 .to_owned(),
                         });
                     }
-                    crate::retention::storage_report::build_project_storage_report_from_daemon(
+                    tracedecay_maintenance::retention::storage_report::build_project_storage_report_from_daemon(
                         profile_root,
                         &project_id,
                         &project_root,
@@ -387,7 +387,7 @@ async fn dispatch_admin_cli(
                     .await?
                 }
                 (None, None) => {
-                    crate::retention::storage_report::build_storage_report_page_from_registered_global_db(
+                    tracedecay_maintenance::retention::storage_report::build_storage_report_page_from_registered_global_db(
                         profile_root,
                         global_db,
                         cursor.as_deref(),

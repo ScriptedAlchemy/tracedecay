@@ -2,7 +2,7 @@
 use super::*;
 
 #[cfg(unix)]
-use tracedecay_agent_hosts::automation::config::{
+use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
 };
 
@@ -22,7 +22,7 @@ impl Drop for AutomationExitBarrierRelease {
 #[cfg(unix)]
 #[test]
 fn automation_scheduler_starts_when_any_task_has_interval() {
-    use tracedecay_agent_hosts::automation::config::{
+    use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
     };
 
@@ -89,7 +89,7 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
 #[test]
 fn fresh_v2_configuration_is_scheduler_work() {
     assert!(super::super::automation_scheduler_configured(
-        &tracedecay_agent_hosts::automation::config::AutomationConfig::default()
+        &tracedecay_automation_runtime::automation::config::AutomationConfig::default()
     ));
 }
 
@@ -646,7 +646,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
 #[cfg(unix)]
 #[tokio::test]
 async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() {
-    use tracedecay_agent_hosts::automation::config::{
+    use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };
 
@@ -795,10 +795,10 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
 #[tokio::test]
 async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exits() {
     use tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome;
-    use tracedecay_agent_hosts::automation::config::{
+    use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };
-    use tracedecay_agent_hosts::automation::scheduler::{
+    use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
     };
 

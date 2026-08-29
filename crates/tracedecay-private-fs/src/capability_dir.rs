@@ -210,7 +210,10 @@ pub fn remove_open_dir_all_nofollow(
     directory.remove_open_dir()
 }
 
-#[cfg(all(test, any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+))]
 mod tests {
     use cap_std::ambient_authority;
 

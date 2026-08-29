@@ -22,9 +22,12 @@ pub(super) async fn bind_verified_project_graph_runtime(
     };
     sessions
         .bind_project_graph_runtime(graph_proxy)
-        .map_err(|_| tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "project graph runtime was already mounted for project sessions".to_owned(),
-        })
+        .map_err(
+            |_| tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "project graph runtime was already mounted for project sessions"
+                    .to_owned(),
+            },
+        )
 }
 
 #[derive(Clone)]

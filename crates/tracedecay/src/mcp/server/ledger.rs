@@ -438,9 +438,9 @@ impl McpServer {
                 })
                 .map(str::to_string)
         };
-        let Some(session_id) = bounded_identifier(route.session_id.as_deref())
-            .and_then(|value| tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok())
-        else {
+        let Some(session_id) = bounded_identifier(route.session_id.as_deref()).and_then(|value| {
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
+        }) else {
             return;
         };
         let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
@@ -453,8 +453,9 @@ impl McpServer {
         let Some(db) = self.session_db.clone() else {
             return;
         };
-        let thread_id = bounded_identifier(route.thread_id.as_deref())
-            .and_then(|value| tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok());
+        let thread_id = bounded_identifier(route.thread_id.as_deref()).and_then(|value| {
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
+        });
         let ts = crate::tracedecay::current_timestamp();
         // Session-only pre-debounce: the full key needs branch/worktree, which
         // cost gix/git discovery. A burst for one session almost always shares
@@ -490,7 +491,8 @@ impl McpServer {
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
             let derived = tokio::task::spawn_blocking(move || {
-                let worktree_raw = tracedecay_runtime_core::worktree::git_worktree_root(&cwd).unwrap_or(project_root);
+                let worktree_raw = tracedecay_runtime_core::worktree::git_worktree_root(&cwd)
+                    .unwrap_or(project_root);
                 let worktree_raw =
                     hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
                         .ok()?;

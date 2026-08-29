@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_agent_hosts::automation::AutomationRunControl;
+use tracedecay_automation_runtime::automation::AutomationRunControl;
 
 use super::super::DaemonLifecycle;
 

@@ -1619,7 +1619,9 @@ pub(crate) fn capture_exact_snapshot_for_test(
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-fn test_snapshot_error(error: impl std::fmt::Display) -> tracedecay_runtime_core::errors::TraceDecayError {
+fn test_snapshot_error(
+    error: impl std::fmt::Display,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     tracedecay_runtime_core::errors::TraceDecayError::Config {
         message: format!("failed to capture exact Git test snapshot: {error}"),
     }

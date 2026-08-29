@@ -34,8 +34,6 @@ use tracedecay_domain::{
 #[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
-use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-#[cfg(feature = "semantic-fastembed")]
 use crate::semantic_code::{
     CatalogedFastEmbedModelV1, DaemonSemanticRuntimeHandleV1, FastEmbedModelCatalogV1,
     ModelLifecycleErrorV1, ModelMemberSourceV1, SemanticModelLifecycleOwnerV1,
@@ -43,6 +41,8 @@ use crate::semantic_code::{
 };
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
@@ -5280,10 +5280,9 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
             .serving_code_scope(fixture.path())
             .await
             .and_then(|scope| scope.serving_generation)
+            && generation.manifest().generation_id == newer
         {
-            if generation.manifest().generation_id == newer {
-                break generation;
-            }
+            break generation;
         }
         assert!(
             Instant::now() <= serving_deadline,
@@ -9537,9 +9536,11 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     let database_root = TempDir::new().expect("database root");
     let database_path = database_root.path().join("diagnostics.db");
     crate::daemon::store_runtime::register_registered_schema_installer();
-    let authority =
-        tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(&database_path, "diagnostics absent resolver")
-            .expect("database authority");
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "diagnostics absent resolver",
+    )
+    .expect("database authority");
     let (database, _guard) = tracedecay_runtime_core::db::Database::publish_test_runtime(
         &database_path,
         &authority,
@@ -9922,9 +9923,12 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
         .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 93, "failed cold-mount graph replay")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        93,
+        "failed cold-mount graph replay",
+    )
+    .expect("daemon database scope");
     let graph_runtime = Arc::new(
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
@@ -9961,7 +9965,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            Arc::clone(&graph_runtime),
+            graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             super::CodeGraphActivationPolicyV1::Enabled,
         )
@@ -10088,7 +10092,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     let native_graph_before = std::fs::read(&native_graph_path).unwrap_or_default();
 
     let graph_activation = super::graph_activation::CodeGraphActivationAuthorityV1::Persistent {
-        runtime: Arc::clone(&graph_runtime),
+        runtime: graph_runtime.code_graph_seat_port(),
         project_database,
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };

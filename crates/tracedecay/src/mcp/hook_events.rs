@@ -256,7 +256,8 @@ fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, (
 }
 
 fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
-    tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
+    tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value)
+        .map_err(|_| ())
 }
 
 fn protect_hook_route_structural_ids(
@@ -1460,7 +1461,8 @@ mod tests {
     #[test]
     fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
-        let protected = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let protected =
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&raw).unwrap();
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
         let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {

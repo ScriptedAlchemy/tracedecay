@@ -10,6 +10,18 @@ use std::collections::HashSet;
 #[cfg(unix)]
 mod shutdown;
 
+type CachedProjectServerFutureV1<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>> + Send + 'a>,
+>;
+type OpenProjectServerFutureV1<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 #[cfg(unix)]
 #[derive(Clone, Default)]
 pub(super) struct DaemonEngine {
@@ -109,7 +121,9 @@ fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
                     message: format!("git index transaction project identity is invalid: {error}"),
                 }
             })?;
-        let Some(repository_root) = tracedecay_runtime_core::worktree::git_worktree_root(project_root) else {
+        let Some(repository_root) =
+            tracedecay_runtime_core::worktree::git_worktree_root(project_root)
+        else {
             // Non-Git projects remain valid TraceDecay projects. They advertise no
             // Git mutation authority and must not fail project-open admission.
             return Ok(());
@@ -423,13 +437,7 @@ impl DaemonEngine {
         &'a self,
         handshake: &'a DaemonHandshake,
         requirement: ProjectServerRequirement,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> CachedProjectServerFutureV1<'a> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
@@ -700,14 +708,7 @@ impl DaemonEngine {
         &'a self,
         handshake: &'a DaemonHandshake,
         cancellation: &'a CancellationToken,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)>,
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> OpenProjectServerFutureV1<'a> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {

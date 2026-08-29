@@ -344,9 +344,10 @@ impl ConfigurationMutationGrantReceiptV1 {
     }
 }
 
-use crate::canonical_text::is_canonical_text_within;
-use crate::canonical_text::validate_canonical_string as validate_canonical_label;
 use crate::canonical_text::validated_string_newtype;
+use crate::canonical_text::{
+    is_canonical_text, validate_canonical_string as validate_canonical_label,
+};
 
 fn validate_setting_key(value: &str) -> Result<(), DomainError> {
     validate_canonical_label(value, "configuration setting key")?;
@@ -1239,14 +1240,6 @@ impl ConfigurationSettlementAuthorityV1 {
     }
 }
 
-/// Byte bound for [`ConfigurationValueV1::Text`] payloads.
-///
-/// Text settings carry serialized typed documents (for example
-/// `semantic.runtime.v1` activation payloads are ~700+ bytes and grow with
-/// artifact path length). Identity labels stay at
-/// [`crate::canonical_text::CANONICAL_TEXT_MAX_BYTES`] (512).
-pub const CONFIGURATION_TEXT_VALUE_MAX_BYTES: usize = 4096;
-
 /// Values that the typed registry can accept. Credentials are references only.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
@@ -1331,7 +1324,7 @@ fn validate_configuration_text_value(value: &str) -> Result<(), DomainError> {
     if value.is_empty() {
         return Err(DomainError::Empty { field: FIELD });
     }
-    if !is_canonical_text_within(value, CONFIGURATION_TEXT_VALUE_MAX_BYTES) {
+    if !is_canonical_text(value) {
         return Err(DomainError::NonCanonical { field: FIELD });
     }
     Ok(())
@@ -1350,20 +1343,15 @@ fn ensure_strict_order<'a, T: Ord + 'a>(
 
 #[cfg(test)]
 mod configuration_text_value_tests {
-    use super::{CONFIGURATION_TEXT_VALUE_MAX_BYTES, ConfigurationValueV1};
+    use super::ConfigurationValueV1;
     use crate::research::DomainError;
 
     #[test]
-    fn text_values_use_the_serialized_payload_bound() {
-        let at_bound = "a".repeat(CONFIGURATION_TEXT_VALUE_MAX_BYTES);
-        assert!(ConfigurationValueV1::Text(at_bound).validate().is_ok());
-
-        let over_bound = "a".repeat(CONFIGURATION_TEXT_VALUE_MAX_BYTES + 1);
-        assert_eq!(
-            ConfigurationValueV1::Text(over_bound).validate(),
-            Err(DomainError::NonCanonical {
-                field: "configuration text value",
-            })
+    fn text_values_are_canonical_but_not_identity_bounded() {
+        assert!(
+            ConfigurationValueV1::Text("a".repeat(16 * 1024))
+                .validate()
+                .is_ok()
         );
 
         assert_eq!(

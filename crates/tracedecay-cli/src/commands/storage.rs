@@ -86,7 +86,10 @@ fn validate_complete_wipe_profile_root(
     Ok(())
 }
 
-fn remove_fixed_profile_path(profile_root: &Path, name: &str) -> tracedecay_runtime_core::errors::Result<bool> {
+fn remove_fixed_profile_path(
+    profile_root: &Path,
+    name: &str,
+) -> tracedecay_runtime_core::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
     let path = profile_root.join(name);
@@ -144,11 +147,11 @@ fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::
         Ok(metadata) if metadata.is_dir() => {
             std::fs::remove_dir_all(path)
                 .map_err(|error| wipe_io("remove local wipe directory", path, &error))?;
-            let parent =
-                path.parent()
-                    .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                        message: format!("local wipe target '{}' has no parent", path.display()),
-                    })?;
+            let parent = path.parent().ok_or_else(|| {
+                tracedecay_runtime_core::errors::TraceDecayError::Config {
+                    message: format!("local wipe target '{}' has no parent", path.display()),
+                }
+            })?;
             sync_directory(parent, DirectorySyncPolicy::Strict)
                 .map_err(|error| wipe_io("sync local wipe parent", parent, &error))?;
             verify_wipe_path_absent(path)?;
@@ -165,7 +168,9 @@ fn remove_local_wipe_directory(path: &Path) -> tracedecay_runtime_core::errors::
     }
 }
 
-fn wipe_complete_profile_database_state(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<usize> {
+fn wipe_complete_profile_database_state(
+    profile_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<usize> {
     let mut removed = 0usize;
     for name in PROFILE_DATABASE_PATHS {
         removed += usize::from(remove_fixed_profile_path(profile_root, name)?);
@@ -271,7 +276,10 @@ mod wipe_safety_tests {
 /// takes, so a scripted caller no longer has to feed `go!` through a pipe on
 /// stdin to reach the wipe.
 #[hotpath::measure(label = "cli.wipe.run", future = true)]
-pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay_runtime_core::errors::Result<()> {
+pub(crate) async fn handle_wipe(
+    all: bool,
+    assume_yes: bool,
+) -> tracedecay_runtime_core::errors::Result<()> {
     handle_wipe_inner(all, assume_yes).await
 }
 
@@ -279,7 +287,11 @@ fn handle_wipe_inner(
     all: bool,
     assume_yes: bool,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
+    Box<
+        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+            + Send
+            + 'static,
+    >,
 > {
     // Erase the deeply nested wipe future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
@@ -293,7 +305,10 @@ fn handle_wipe_inner(
             )?;
         }
         let lifecycle_lease =
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, "wipe")?;
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                &profile_root,
+                "wipe",
+            )?;
         let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
             &lifecycle_lease,
             &profile_root,
@@ -438,7 +453,11 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay_runtime_core::errors::R
 fn handle_list_inner(
     all: bool,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send + 'static>,
+    Box<
+        dyn std::future::Future<Output = tracedecay_runtime_core::errors::Result<()>>
+            + Send
+            + 'static,
+    >,
 > {
     // Erase the deeply nested list future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.

@@ -1122,37 +1122,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()
     }
 
-    /// Text slot only — no Git open, no freshness ladder, no wake.
-    #[cfg(test)]
-    pub(super) async fn latest_text_serving_for_test(
-        &self,
-        project_root: &Path,
-    ) -> Option<LatestCodeTextGenerationV1> {
-        let project_root = project_root.canonicalize().ok()?;
-        let text = {
-            let mounted = self.mounted.lock().await;
-            Arc::clone(&mounted.get(&project_root)?.text_generation)
-        };
-        text.read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Outstanding worker arrival for one mounted root.
-    #[cfg(test)]
-    pub(super) async fn has_pending_arrival_for_test(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
-            return false;
-        };
-        let pending_wake = {
-            let mounted = self.mounted.lock().await;
-            mounted
-                .get(&project_root)
-                .map(|worktree| Arc::clone(&worktree.pending_wake))
-        };
-        pending_wake.is_some_and(|pending_wake| pending_wake.has_pending_arrival())
-    }
-
     #[cfg(test)]
     pub(super) fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
         let project_root = project_root
@@ -2287,9 +2256,7 @@ impl CodeIndexSchedulerRegistryV1 {
         semantic_schedule: Option<
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
-        graph_runtime: Arc<
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-        >,
+        graph_runtime: Arc<dyn crate::daemon::store_runtime::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
@@ -3557,6 +3524,58 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         worktree.query_authority = Some((scope.scope_digest.clone(), authority));
+        Ok(())
+    }
+
+    /// Seat the core query fallback while an exact committed semantic
+    /// activation is still warming. Unlike a standalone mount, this preserves
+    /// the committed revision fence and never replaces an already-usable query
+    /// authority (including one installed by a completed activation).
+    pub(in crate::daemon) async fn mount_query_authority_for_committed_fallback(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        expected_revision: &ConfigurationRevisionId,
+        authority: Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot mount committed query fallback before its worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "committed query fallback scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        let activation =
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if worktree.query_activation_revision.as_ref() != Some(expected_revision)
+            || worktree
+                .query_activation_redundancy
+                .as_ref()
+                .map(
+                    tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1::configuration_revision,
+                )
+                != Some(expected_revision)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "committed query fallback revision is no longer desired".to_owned(),
+            ));
+        }
+        if worktree.query_authority.is_none() {
+            worktree.query_authority = Some((scope.scope_digest.clone(), authority));
+        }
         Ok(())
     }
 

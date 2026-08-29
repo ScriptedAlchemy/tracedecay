@@ -381,7 +381,10 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
 
     // Hysteresis: between the watermarks the refusal stands rather than flapping.
-    let between = (pressure.low_watermark_bytes() + pressure.high_watermark_bytes()) / 2;
+    let between = u64::midpoint(
+        pressure.low_watermark_bytes(),
+        pressure.high_watermark_bytes(),
+    );
     for _ in 0..3 {
         pressure.publish_observed_resident_bytes(between);
         assert!(

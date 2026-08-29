@@ -15,11 +15,11 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreRuntimeRegistryFailure, StoreShardIdV1,
     TraceDecayError, process_runtime_generation, registry_open_error,
 };
-use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
+use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
     ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
@@ -54,6 +54,33 @@ async fn project_sessions_pending_convergence(
     PathBuf,
     tracedecay_runtime_core::db::DaemonDatabaseScope,
 ) {
+    project_sessions_convergence_fixture(project_name, true).await
+}
+
+async fn project_sessions_current_convergence(
+    project_name: &str,
+) -> (
+    tempfile::TempDir,
+    LocalProfileIdentityAuthorityV1,
+    ProjectId,
+    PathBuf,
+    PathBuf,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
+) {
+    project_sessions_convergence_fixture(project_name, false).await
+}
+
+async fn project_sessions_convergence_fixture(
+    project_name: &str,
+    remove_checkpoint: bool,
+) -> (
+    tempfile::TempDir,
+    LocalProfileIdentityAuthorityV1,
+    ProjectId,
+    PathBuf,
+    PathBuf,
+    tracedecay_runtime_core::db::DaemonDatabaseScope,
+) {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
         .path()
@@ -67,8 +94,9 @@ async fn project_sessions_pending_convergence(
     // Production enters the daemon database scope before constructing the
     // session registry. Keep that authority alive for the whole fixture so
     // these daemon-maintenance tests never rely on ambient temp-path authority.
-    let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, project_name)
-        .expect("daemon database scope");
+    let database_scope =
+        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, project_name)
+            .expect("daemon database scope");
     let project_id = ProjectId::new(project_name).expect("typed project identity");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
@@ -97,13 +125,15 @@ async fn project_sessions_pending_convergence(
     )
     .await
     .expect("seed complete registered schema");
-    database
-        .execute_write_batch(
-            "remove durable convergence checkpoint",
-            "DELETE FROM authority_audit_checkpoints",
-        )
-        .await
-        .expect("remove durable convergence checkpoint");
+    if remove_checkpoint {
+        database
+            .execute_write_batch(
+                "remove durable convergence checkpoint",
+                "DELETE FROM authority_audit_checkpoints",
+            )
+            .await
+            .expect("remove durable convergence checkpoint");
+    }
     drop(database);
     (
         temporary,
@@ -273,9 +303,12 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "existing profile memory schema")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "existing profile memory schema",
+    )
+    .expect("daemon database scope");
     let memory_path =
         tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
@@ -370,9 +403,12 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "profile sessions identity pin")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "profile sessions identity pin",
+    )
+    .expect("daemon database scope");
     let user_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
 
@@ -821,6 +857,52 @@ async fn background_convergence_commits_the_durable_authority_checkpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_current_convergence("project.schema-trusted-checkpoint").await;
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("checkpoint read snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT bounded_passes_since_exhaustive
+             FROM authority_audit_checkpoints
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .expect("read durable authority checkpoint");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("read checkpoint")
+            .expect("durable checkpoint row")
+            .get::<i64>(0)
+            .expect("decode checkpoint"),
+        1,
+        "daemon reopen must audit only the suffix after a trusted checkpoint"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_convergence_failure_remains_observable_as_degraded() {
     let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-degraded").await;
@@ -929,9 +1011,12 @@ async fn worktree_graph_mount_does_not_require_git() {
     let project_id = ProjectId::new("project.non-git-worktree").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 13, "non-git worktree graph")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        13,
+        "non-git worktree graph",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
@@ -972,9 +1057,12 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     let project_id = ProjectId::new("project.generic-graph").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
         .expect("project enrollment");
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 19, "generic graph runtime")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        19,
+        "generic graph runtime",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
@@ -1115,9 +1203,12 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id.as_str())
             .expect("project enrollment");
     }
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 17, "shared code graph")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        17,
+        "shared code graph",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
@@ -1275,8 +1366,10 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     assert_eq!(reopened.database_path(), database_path);
     assert!(matches!(
         reopened.issue_memory_graph_runtime_operation(),
-        Err(tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-            | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable)
+        Err(
+            tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable
+        )
     ));
     drop(reopened);
     tokio::time::timeout(
@@ -1431,9 +1524,12 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
     gix::init(&project_root).expect("initialize project repository");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 11, "project graph publication")
-            .expect("daemon database scope");
+    let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        11,
+        "project graph publication",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");

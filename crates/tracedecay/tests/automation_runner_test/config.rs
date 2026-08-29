@@ -1,6 +1,6 @@
 use std::any::TypeId;
 
-use tracedecay_agent_hosts::automation::config::{
+use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
     AutomationTaskPatch, effective_config,
 };
@@ -85,15 +85,15 @@ fn validation_rejects_invalid_task_schedule() {
 #[test]
 fn production_automation_contracts_use_leaf_owned_type_identity() {
     assert_eq!(
-        TypeId::of::<tracedecay_agent_hosts::automation::config::AutomationConfig>(),
+        TypeId::of::<tracedecay_automation_runtime::automation::config::AutomationConfig>(),
         TypeId::of::<tracedecay_automation::config::AutomationConfig>(),
     );
     assert_eq!(
-        TypeId::of::<tracedecay_agent_hosts::automation::backend::AgentTaskKind>(),
+        TypeId::of::<tracedecay_automation_runtime::automation::backend::AgentTaskKind>(),
         TypeId::of::<tracedecay_automation::backend::AgentTaskKind>(),
     );
     assert_eq!(
-        TypeId::of::<tracedecay::retention::RetentionConfig>(),
+        TypeId::of::<tracedecay_maintenance::retention::RetentionConfig>(),
         TypeId::of::<tracedecay_automation::config::RetentionConfig>(),
     );
 }

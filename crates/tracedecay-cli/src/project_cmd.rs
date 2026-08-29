@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_dashboard_api::project_registry::{ProjectRegistryView, render_project_registry_view};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use crate::cli::ProjectsAction;
 
@@ -224,11 +224,11 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
     use tracedecay_global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
     };
-    use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
 
     const CREDENTIAL_REMOTE_URL: &str =
         "https://user:sekret-token@github.com/example/private-repo.git";

@@ -2,7 +2,7 @@ use crate::support::*;
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
-use tracedecay_agent_hosts::automation::run_ledger::{
+use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
 };
 
@@ -11,7 +11,7 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
         schema_version: 2,
         run_id: run_id.to_owned(),
         trigger: AutomationTrigger::Scheduler,
-        task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+        task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
         task_key: Some("session_reflector".to_owned()),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,

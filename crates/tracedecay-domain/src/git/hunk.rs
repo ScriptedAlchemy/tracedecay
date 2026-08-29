@@ -302,15 +302,15 @@ mod hunk_header_tests {
     #[test]
     fn malformed_headers_are_rejected() {
         for header in [
-            "@@ -,2 +3,4 @@",     // empty old start
-            "@@ -1,2 +3, @@",     // empty new count
-            "@@ -x,2 +3,4 @@",    // non-numeric start
-            "@@ -1,2 +3,4",       // missing terminator
-            "@@ -1,2 +3,4 @@x",   // terminator glued to trailing text
-            "@@  -1,2 +3,4 @@",   // double separator
-            "@@ +1,2 -3,4 @@",    // swapped signs
-            "@@ -1,2,3 +4,5 @@",  // extra range field
-            "-1,2 +3,4 @@",       // missing prefix
+            "@@ -,2 +3,4 @@",                     // empty old start
+            "@@ -1,2 +3, @@",                     // empty new count
+            "@@ -x,2 +3,4 @@",                    // non-numeric start
+            "@@ -1,2 +3,4",                       // missing terminator
+            "@@ -1,2 +3,4 @@x",                   // terminator glued to trailing text
+            "@@  -1,2 +3,4 @@",                   // double separator
+            "@@ +1,2 -3,4 @@",                    // swapped signs
+            "@@ -1,2,3 +4,5 @@",                  // extra range field
+            "-1,2 +3,4 @@",                       // missing prefix
             "@@ -1,2 +18446744073709551616,4 @@", // start exceeds u32
         ] {
             assert_eq!(parse_hunk_header(header), None, "must reject {header:?}");

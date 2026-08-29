@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::mcp::project_route::{
     HookProjectRouteCache, ProjectRouteFailure, ProjectRouteFailureKind, WorkspaceProjectRoute,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
 
 /// Exact selected-project response authority retained until the transport has
 /// emitted (or refused) the response. This is runtime lifecycle state, never a
@@ -399,8 +399,8 @@ mod tests {
         let registry = runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
-        let git_common_dir =
-            tracedecay_runtime_core::worktree::git_common_dir(&old_root).expect("resolve git common dir");
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&old_root)
+            .expect("resolve git common dir");
         registry
             .upsert_code_project(
                 "proj_renamed",
@@ -467,8 +467,8 @@ mod tests {
         let registry = runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
-        let git_common_dir =
-            tracedecay_runtime_core::worktree::git_common_dir(&primary_root).expect("resolve git common dir");
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&primary_root)
+            .expect("resolve git common dir");
         registry
             .upsert_code_project(
                 "proj_primary",

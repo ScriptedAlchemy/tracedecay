@@ -20,8 +20,8 @@
 use std::fmt;
 use std::path::Path;
 
-use tracedecay_global_db::ProjectRegistryContext;
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
+use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_usecases::context::ApplicationScopeError;
 
 /// The explicit failure states when a query-facing MCP entry point resolves

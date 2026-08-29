@@ -1332,9 +1332,12 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
-    let _database_scope =
-        tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
-            .expect("daemon database scope");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "linked-worktree-route-test",
+    )
+    .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let project_id = tracedecay_runtime_core::storage::read_repository_identity_marker(&primary)
         .expect("read primary repository identity")
