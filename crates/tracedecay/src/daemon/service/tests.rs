@@ -334,7 +334,10 @@ fn user_service_runs_daemon_with_socket_path() {
     );
     assert!(unit.contains("Environment=\"PATH="));
     assert!(unit.contains("Environment=\"MALLOC_ARENA_MAX=2\""));
-    assert!(unit.contains("Restart=on-failure"));
+    assert!(unit.contains("Restart=always"));
+    assert!(unit.contains("RestartSec=2"));
+    assert!(unit.contains("StartLimitIntervalSec=0"));
+    assert!(!unit.contains("Restart=on-failure"));
     assert!(unit.contains("LimitNOFILE=8192"));
 }
 

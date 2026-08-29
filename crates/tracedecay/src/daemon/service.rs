@@ -52,8 +52,8 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 /// self-imposed budget raced whatever `DefaultTimeoutStopSec` the host was
 /// configured with. When the supervisor's bound is the tighter one, systemd
 /// SIGKILLs the cgroup mid-drain: the typed shutdown receipts that name the
-/// stuck owner are exactly the thing that never gets written, and on
-/// `Restart=on-failure` the kill can catch the replacement instance too.
+/// stuck owner are exactly the thing that never gets written, and on a
+/// restarting unit the kill can catch the replacement instance too.
 ///
 /// Stating the bound explicitly, strictly above `DAEMON_SHUTDOWN_DEADLINE`,
 /// makes the daemon's deadline the one that fires first — so a slow shutdown
@@ -62,6 +62,12 @@ const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 const DAEMON_STOP_TIMEOUT_SECS: u64 =
     super::DAEMON_SHUTDOWN_DEADLINE.as_secs() + DAEMON_STOP_TIMEOUT_MARGIN_SECS;
 const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
+
+/// Backoff between supervisor restarts of the generated user unit.
+///
+/// Two seconds matches the launchd `ThrottleInterval` and is long enough to
+/// let an OOM-killed cgroup release memory before the next `ExecStart`.
+const DAEMON_RESTART_SEC: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -290,14 +296,21 @@ impl DaemonServiceSpec {
             "[Unit]\n\
              Description=TraceDecay daemon\n\
              After=network.target\n\
+             # A dead user unit stays dead through every `tracedecay update`\n\
+             # until an operator heals it. Disable start-rate limiting so\n\
+             # Restart=always is not abandoned after an OOM burst.\n\
+             StartLimitIntervalSec=0\n\
              \n\
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
              Environment=\"MALLOC_ARENA_MAX=2\"\n\
              ExecStart={} daemon run --socket {}{}\n\
-             Restart=on-failure\n\
-             RestartSec=2\n\
+             # Restart=always (not on-failure): come back after OOM SIGKILL,\n\
+             # crash, or a clean-but-unexpected exit. A looping daemon is\n\
+             # preferable to a permanently silent socket.\n\
+             Restart=always\n\
+             RestartSec={}\n\
              TimeoutStopSec={}\n\
              LimitNOFILE={}\n\
              \n\
@@ -307,6 +320,7 @@ impl DaemonServiceSpec {
             self.tracedecay_bin.display(),
             self.socket_path.display(),
             remote_arguments,
+            DAEMON_RESTART_SEC,
             DAEMON_STOP_TIMEOUT_SECS,
             DAEMON_OPEN_FILE_LIMIT,
         ))
