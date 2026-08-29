@@ -356,11 +356,9 @@ impl CodeIndexSchedulerRegistryV1 {
     where
         C: SemanticExecutionControl + Send + Sync + 'static,
     {
-        let query = hotpath::future!(
-            self.execute_controlled_query(scope, input, control.clone()),
-            label = "daemon.query.semantic.canonical"
-        )
-        .await?;
+        // The request is already admitted at this boundary. Start the
+        // single-flight model worker before canonical generation resolution so
+        // model acquisition can overlap a truthful text-index rebuild.
         if matches!(mode, SemanticQueryModeV1::StrictSemantic) {
             hotpath::measure_block!("daemon.query.semantic.model_demand", {
                 if let Some(owner) = crate::semantic_code::shared_lifecycle_owner() {
@@ -368,6 +366,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             });
         }
+        let query = hotpath::future!(
+            self.execute_controlled_query(scope, input, control.clone()),
+            label = "daemon.query.semantic.canonical"
+        )
+        .await?;
         if hotpath::future!(
             self.semantic_query_authority_for_scope(scope),
             label = "daemon.query.semantic.activation_lookup"
