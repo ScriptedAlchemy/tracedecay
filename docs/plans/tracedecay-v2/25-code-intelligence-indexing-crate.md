@@ -8,10 +8,8 @@ diagnostic/test, exact, lexical, and graph paths. Delivery is not complete until
 direct behavioral tests, Plan 15 Linux evaluation, and normal CI pass.
 The product must deliver one complete single-root vertical:
 deterministic code indexing, immutable generations, generation-bound Git/
-diagnostic/test evidence, and accepted exact/lexical/graph retrieval. Start as
-a focused module; extract `tracedecay-code-index` only when independent reuse,
-dependency isolation, and same-host compile measurements justify the crate
-boundary. Production indexing and retrieval paths emit incremental, no-op,
+diagnostic/test evidence, and accepted exact/lexical/graph retrieval.
+Production indexing and retrieval paths emit incremental, no-op,
 generation, and resource measurements directly to the end-to-end performance
 journey.
 Generation-bound diagnostics compose with the daemon gateway defined by
@@ -41,13 +39,15 @@ tip. The hint/reconcile cadence diagnosis produced a three-tier freshness
 ladder run at query admission rather than trusting a hint to arrive —
 `fix(daemon): close code-index freshness cadence` (cbac4ae64e); tier-1 is the
 cheap `.git`-metadata fingerprint
-(`src/daemon/code_index_scheduler/identity.rs:150`) and tier-2 is the bounded
+(`crates/tracedecay-code-index-runtime/src/code_index_scheduler/identity.rs`)
+and tier-2 is the bounded
 staleness reconcile, with direct regressions covering the no-watcher and
-HEAD-moved paths at `src/daemon/code_index_scheduler/tests.rs:4446-4588`
+HEAD-moved paths at
+`crates/tracedecay-code-index-runtime/src/code_index_scheduler/tests.rs`
 (`threshold_expiry_reconciles_out_of_band_write_without_watcher`,
 `identity_move_reconciles_and_never_mixes_identity`). The event-to-ready
 measurements are implemented as receipts in
-`src/daemon/code_index_scheduler/cadence.rs` —
+`crates/tracedecay-code-index-runtime/src/code_index_scheduler/cadence.rs` —
 `feat(code-index): measure event-to-ready arrival, wait, and service`
 (325ea665e4) — which records arrival, dequeue, and terminal instants
 separately so queue wait and service time are distinct, and withholds latency

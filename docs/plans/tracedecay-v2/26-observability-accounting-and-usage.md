@@ -111,11 +111,11 @@ behavior, or unavailable state is reduced or deferred by this framing.
   latency, observed native-merge success, stale-stack age, blocked time,
   runtime/test/CI reruns, operational leaks, and runtime/delivery
   fanout.
-- The canonical versioned independent-review and task-outcome label vocabulary,
-  evidence requirements, transition-validity inputs, and measurement schema
-  consumed by Plan 24 graph state, Plan 06 policy, Plan 11 UI, and public
-  application/surface contracts.
 - Trace and retrieval anchors needed to explain aggregate results without exposing private content.
+
+Archival: the independent-review and task-outcome label vocabulary
+(`review_labels`) was deleted; Plan 26 measurements remain. Do not treat that
+vocabulary as current ownership.
 
 ## Does not own
 
