@@ -1829,7 +1829,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         };
-        let (serving_generation, serving_epoch, active_installation, text_generation) = {
+        let (
+            serving_generation,
+            serving_epoch,
+            active_installation,
+            text_generation,
+            published_generation_id,
+        ) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return ServingGenerationRollbackOutcomeV1::NoMatch;
@@ -1839,6 +1845,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_epoch),
                 Arc::clone(&worktree.serving_generation_installation),
                 Arc::clone(&worktree.text_generation),
+                Arc::clone(&worktree.published_generation_id),
             )
         };
         let mut serving = serving_generation
@@ -1872,6 +1879,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 current.metadata().manifest().generation_id == installation.generation_id
             }) {
                 *text = None;
+            }
+            // `latest_generation_id` prefers the published id over both
+            // serving and text. A matching rollback must withdraw that
+            // broadcast too, or the retired generation stays addressable.
+            let mut published = published_generation_id
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if published.as_ref() == Some(&installation.generation_id) {
+                *published = None;
             }
         }
         ServingGenerationRollbackOutcomeV1::Cleared
@@ -3004,7 +3020,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Ready text owner's generation. Source reconciliation is
                 // complete either way: release its public freshness guard
                 // before the optional O(store) full decode and native graph
-                // activation begin.
+                // activation begin. Keep the pass through text seating so
+                // `reconcile_in_progress` stays truthful while this worker
+                // still owns source/text work; optional graph must not.
+                drop(_reconcile_pass);
                 let gate = GraphSeatGateV1::decide(
                     graph_activation_enabled,
                     graph_activation_deferred,
