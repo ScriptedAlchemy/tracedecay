@@ -34,8 +34,25 @@ impl Drop for HostFileWriteLock {
     fn drop(&mut self) {
         // Unlink before releasing: removing the entry after unlock would let
         // two late waiters lock different inodes for the same host file.
-        let _ = self.directory.remove_file(&self.lock_name);
-        let _ = FileExt::unlock(self.handle.as_file());
+        // The lock handle is opened with FILE_SHARE_DELETE on Windows so this
+        // unlink can succeed while the exclusive lock is still held. Cleanup
+        // is best-effort; a failure is traced rather than swallowed.
+        if let Err(error) = self.directory.remove_file(&self.lock_name) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    lock_name = %self.lock_name,
+                    error = %error,
+                    "host config lock file could not be unlinked while held"
+                );
+            }
+        }
+        if let Err(error) = FileExt::unlock(self.handle.as_file()) {
+            tracing::warn!(
+                lock_name = %self.lock_name,
+                error = %error,
+                "host config lock could not be released"
+            );
+        }
     }
 }
 
@@ -88,6 +105,18 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
         .follow(FollowSymlinks::No);
     let mut probe = CapOpenOptions::new();
     probe.read(true).follow(FollowSymlinks::No);
+    // cap-std already defaults to FILE_SHARE_READ|WRITE|DELETE; set it
+    // explicitly so Drop can unlink the still-open lock on Windows even if
+    // that default ever changes.
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        probe.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
     for _ in 0..HOST_FILE_LOCK_ACQUIRE_ATTEMPTS {
         let lock = directory
             .open_with(&lock_name, &options)
