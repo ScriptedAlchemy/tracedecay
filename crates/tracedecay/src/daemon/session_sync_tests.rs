@@ -840,10 +840,10 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let service = DaemonSessionSyncService::default();
     service

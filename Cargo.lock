@@ -5921,6 +5921,7 @@ dependencies = [
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
+ "tracedecay-host-admission",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
  "tracedecay-maintenance",
@@ -6287,6 +6288,26 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-private-fs",
+]
+
+[[package]]
+name = "tracedecay-host-admission"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]

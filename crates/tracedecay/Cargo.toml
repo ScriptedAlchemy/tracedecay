@@ -105,6 +105,7 @@ hotpath = [
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-hooks/hotpath",
+    "tracedecay-host-admission/hotpath",
     "tracedecay-lsp/hotpath",
     "tracedecay-maintenance/hotpath",
     "tracedecay-policy/hotpath",
@@ -139,6 +140,7 @@ hotpath-alloc = [
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-admission/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-maintenance/hotpath-alloc",
     "tracedecay-policy/hotpath-alloc",
@@ -173,6 +175,7 @@ hotpath-cpu = [
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-admission/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-maintenance/hotpath-cpu",
     "tracedecay-policy/hotpath-cpu",
@@ -282,7 +285,10 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 # live in the product library rather than a test crate. This feature keeps them
 # out of a default or `production` build: they compile only under `cfg(test)`
 # or when a consumer asks for them explicitly.
-test-helpers = ["tracedecay-maintenance/test-helpers"]
+test-helpers = [
+    "tracedecay-host-admission/test-helpers",
+    "tracedecay-maintenance/test-helpers",
+]
 
 test-transport = [
     "test-helpers",
@@ -290,6 +296,7 @@ test-transport = [
     "tracedecay-runtime-core/test-transport",
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-dashboard-api/test-transport",
+    "tracedecay-host-admission/test-transport",
     "tracedecay-usecases/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
     # test-transport-gated and drives the global-db session-temporal refresh
@@ -394,6 +401,7 @@ tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention",
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
 tracedecay-jsonrpc = { path = "../tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
@@ -506,6 +514,7 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", fe
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]

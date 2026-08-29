@@ -8,7 +8,7 @@ use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode
 use tracedecay_sessions::runtime::source::{
     ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,

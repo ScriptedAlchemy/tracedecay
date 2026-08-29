@@ -5,12 +5,12 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
     HostAdmissionStatus,
 };
 #[cfg(test)]
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
 };
 

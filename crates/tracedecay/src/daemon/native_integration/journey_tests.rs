@@ -28,7 +28,7 @@ use tracedecay_domain::{
     WorktreeInventorySnapshotId, canonical_sha256,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);

@@ -7,7 +7,7 @@ use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 

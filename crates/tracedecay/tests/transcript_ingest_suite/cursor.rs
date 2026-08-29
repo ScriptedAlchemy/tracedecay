@@ -14,7 +14,7 @@ use tracedecay_sessions::runtime::cursor::{
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestResult;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 #[cfg(unix)]
 use crate::common::spawn_tracedecay_daemon;

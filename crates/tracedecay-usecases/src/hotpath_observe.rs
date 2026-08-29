@@ -161,16 +161,6 @@ pub(crate) fn feedback_query(findings: usize) {
     hotpath::gauge!("usecases.feedback.findings").set(findings as f64);
 }
 
-#[inline]
-pub(crate) fn admission_capture_frames(frames: usize) {
-    hotpath::gauge!("usecases.admission.capture_frames").set(frames as f64);
-}
-
-#[inline]
-pub(crate) fn admission_persist_frames(frames: usize) {
-    hotpath::gauge!("usecases.admission.persist_frames").set(frames as f64);
-}
-
 /// Count one bounded session-retrieval budget stage. Keys stay static; the
 /// stage is never a dynamic label.
 #[inline]

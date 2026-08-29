@@ -13,7 +13,7 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::SessionRecord;
 #[cfg(feature = "test-transport")]
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
     let status: serde_json::Value = serde_json::from_str(text).unwrap();

@@ -26,7 +26,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
-use tracedecay_usecases::host_admission::{HostAdmissionFacade, HostAdmissionOutcome};
+use tracedecay_host_admission::{HostAdmissionFacade, HostAdmissionOutcome};
 use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityResponse,

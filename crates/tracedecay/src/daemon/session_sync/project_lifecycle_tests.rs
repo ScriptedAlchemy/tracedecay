@@ -46,10 +46,10 @@ async fn register(
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
@@ -125,7 +125,7 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     let (runtime, project_sessions, profile_id) =
         register(&service, &root, project_id.clone()).await;
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let session_registry = runtime.session_registry_for_test();
     let cancellation = CancellationSignal::active("session-sync.shutdown-task-owner").unwrap();
@@ -346,7 +346,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     .await
     .unwrap();
     let replacement_a = replacement_runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .unwrap();
     let recovery_request = SessionSyncRequestV1::new(
         RequestId::new("session-sync.rebind-recovery").unwrap(),
@@ -440,10 +440,10 @@ async fn registration_recovery_fences_concurrent_execute() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();
@@ -530,10 +530,10 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let brain_id = project_sessions.binding().shard_id.brain_id.clone();
     let profile_id = project_sessions.binding().shard_id.profile_id.clone();

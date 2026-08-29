@@ -32,7 +32,7 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 const GENERATION: u64 = 7;
 

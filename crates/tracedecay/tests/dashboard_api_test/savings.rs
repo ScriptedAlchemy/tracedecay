@@ -21,7 +21,7 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::SessionRecord;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 struct Fixture {
     _tmp: TempDir,

@@ -11,7 +11,7 @@ use tracedecay_sessions::runtime::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 

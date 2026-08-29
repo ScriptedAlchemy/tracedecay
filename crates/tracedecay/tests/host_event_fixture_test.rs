@@ -25,7 +25,7 @@ use tracedecay_runtime_core::privacy::{
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
 use tracedecay_store::ObservationReplayRequest;
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
     HostAdmissionStatus,
 };

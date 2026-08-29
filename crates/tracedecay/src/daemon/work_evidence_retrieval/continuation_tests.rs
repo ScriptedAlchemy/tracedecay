@@ -30,7 +30,7 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
     .await
     .expect("registered project session runtime");
     let database = runtime
-        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_host_admission::HostAdmissionScope::Project)
         .expect("registered project session database");
     let session_id = id::<SessionId>("session.work-task-session-continuation");
     let task_id = id::<TaskId>("task.work-task-session-continuation");

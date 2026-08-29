@@ -7,7 +7,7 @@ use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::errors::Result;
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
 };
 

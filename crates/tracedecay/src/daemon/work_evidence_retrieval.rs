@@ -872,7 +872,7 @@ pub(crate) mod tests {
         .expect("registered project session runtime");
         let database = runtime
             .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_host_admission::HostAdmissionScope::Project,
             )
             .expect("registered project session database");
         let session_id = id::<SessionId>("session.work-task-session");

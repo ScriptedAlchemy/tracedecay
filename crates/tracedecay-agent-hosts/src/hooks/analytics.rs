@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::errors::TraceDecayError;
 use tracedecay_hooks::HookTransportDispositionV1;
-use tracedecay_usecases::host_admission::{
+use tracedecay_sessions::admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
     HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };

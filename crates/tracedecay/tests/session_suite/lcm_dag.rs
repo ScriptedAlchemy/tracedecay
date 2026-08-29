@@ -7,7 +7,7 @@ use tracedecay_sessions::runtime::lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message as raw_message, lcm_dag_session as sample_session};
 

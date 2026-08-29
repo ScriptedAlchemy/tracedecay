@@ -20,7 +20,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionScope,
     HostAdmissionStatus, SharedHostAdmissionBroker, SpoolBounds,
 };

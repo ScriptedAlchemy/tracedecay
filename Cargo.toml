@@ -14,6 +14,7 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",
     "crates/tracedecay-graph-db",
+    "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
     "crates/tracedecay-jsonrpc",

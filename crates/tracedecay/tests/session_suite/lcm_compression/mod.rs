@@ -9,7 +9,7 @@ use tracedecay_sessions::runtime::lcm::{
     LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 use crate::common::{self, LcmTestRuntime, open_lcm_db};
 

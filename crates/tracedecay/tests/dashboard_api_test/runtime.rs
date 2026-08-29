@@ -24,7 +24,7 @@ use tracedecay_usecases::graph::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 
 #[derive(Clone)]
 struct DashboardTestCodeGraphProjectionV1 {

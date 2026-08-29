@@ -54,7 +54,7 @@ pub(crate) use tracedecay_agent_hosts::automation::{AutomationRunControl, Automa
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
+pub(crate) use tracedecay_host_admission::HostAdmissionScope;
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

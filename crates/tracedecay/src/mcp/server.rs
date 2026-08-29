@@ -23,7 +23,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use tracedecay_usecases::host_admission::{
+use tracedecay_host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
 use tracedecay_usecases::request_identity::McpConnectionIdentityAuthority;
@@ -275,7 +275,7 @@ pub struct McpServer {
     registered_user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
-    host_admission_broker: Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
+    host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     project_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     user_session_refresh_wake:
@@ -593,7 +593,7 @@ impl McpServer {
         {
             let database_path = session_db.db_path().to_path_buf();
             let admission_runtime = tokio::task::spawn_blocking(move || {
-                tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
+                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
                     &database_path,
                 )
             })
@@ -605,7 +605,7 @@ impl McpServer {
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
-                tracedecay_usecases::host_admission::HostAdmissionBroker::new(admission_runtime),
+                tracedecay_host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
         }
         Self::new_with_registered_test_context(context, retained_servers).await

@@ -22,7 +22,7 @@ use tracedecay_sessions::runtime::cline_like::{
     ClineLikeSource, capture_cline_like_snapshot_observations,
 };
 use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
-use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_host_admission::HostAdmissionScope;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 /// Installs the process-wide background CPU authority these benchmarks need.

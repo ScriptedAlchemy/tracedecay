@@ -1263,7 +1263,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = host_runtime
             .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         crate::config::install_usecase_runtime_configuration_authority()
@@ -1423,7 +1423,7 @@ mod runtime_configuration_cutover {
             .expect("seed canonical configuration");
         let database = runtime
             .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         let setting = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
@@ -1527,7 +1527,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         let store =
@@ -1724,7 +1724,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(
-                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+                tracedecay_host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         let store =

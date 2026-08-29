@@ -43,9 +43,10 @@ impl HostAdmissionFacade<'_> {
                 ..HostProjectionDrainOutcome::default()
             });
         }
-        let external_source = crate::external_source_store::RuntimeExternalSourceStore::new(
-            database.runtime_client(),
-        );
+        let external_source =
+            tracedecay_usecases::external_source_store::RuntimeExternalSourceStore::new(
+                database.runtime_client(),
+            );
         let external_replay = external_source
             .drain_host_projection_replay(max, cancellation)
             .await
