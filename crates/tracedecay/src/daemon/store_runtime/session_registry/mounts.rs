@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;

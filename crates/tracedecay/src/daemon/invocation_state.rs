@@ -339,7 +339,7 @@ impl DaemonInvocationState {
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-        cursor_keys: &tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider,
+        cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
         code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
@@ -363,7 +363,7 @@ impl DaemonInvocationState {
         profile_id: tracedecay_domain::configuration::UserProfileId,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     ) -> std::result::Result<
         query_authority_provider::QueryAuthorityProviderStatusV1,
         query_authority_provider::QueryAuthorityUpdateErrorV1,

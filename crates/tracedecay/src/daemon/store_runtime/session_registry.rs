@@ -33,7 +33,7 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
 use tracedecay_runtime_core::store_runtime::registry::{

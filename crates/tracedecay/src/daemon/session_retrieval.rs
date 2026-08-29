@@ -27,7 +27,7 @@ use tracedecay_usecases::session::{
 };
 
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use tracedecay_global_db::session_temporal::{
+use tracedecay_session_temporal_store::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
     SessionPageReconstructionRequest,
 };
@@ -458,7 +458,10 @@ impl DaemonSessionRetrievalService {
 
     fn registered_execution(
         &self,
-    ) -> Result<RegisteredGlobalDbSessionTemporalExecution<'_>, SessionTemporalExecutionError> {
+    ) -> Result<
+        RegisteredGlobalDbSessionTemporalExecution<'_, RegisteredGlobalDb>,
+        SessionTemporalExecutionError,
+    > {
         Ok(RegisteredGlobalDbSessionTemporalExecution::new(
             self.database.as_ref(),
         ))

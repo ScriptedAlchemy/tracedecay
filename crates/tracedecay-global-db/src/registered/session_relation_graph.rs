@@ -1,7 +1,9 @@
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use super::{RegisteredGlobalDb, registered_error};
-use crate::session_temporal::relations::{SessionRelationGraphStore, SessionRelationScope};
+use tracedecay_session_temporal_store::relations::{
+    SessionRelationGraphStore, SessionRelationScope,
+};
 
 impl RegisteredGlobalDb {
     /// Mounts the daemon-owned native graph handle for this exact session

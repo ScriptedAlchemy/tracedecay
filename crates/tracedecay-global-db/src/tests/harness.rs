@@ -897,9 +897,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<
-        crate::session_temporal::GlobalDbSessionTemporalStore<'_>,
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+            '_,
+            crate::RegisteredGlobalDb,
+        >,
     > {
-        Ok(crate::session_temporal::GlobalDbSessionTemporalStore::new(
+        Ok(tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
             self.session_database_for_test(scope)?,
         ))
     }
@@ -1140,7 +1143,7 @@ pub async fn publish_test_session_relation_projection(
         }
     })?;
     let snapshot = database.read_snapshot().await?;
-    let projection = crate::session_temporal::seed_session_relation_projection(
+    let projection = tracedecay_session_temporal_store::seed_session_relation_projection(
         database,
         &snapshot,
         &session_id,
@@ -1164,7 +1167,7 @@ pub async fn publish_test_session_relation_projection(
         });
     }
     let transaction = database.begin_write_transaction().await?;
-    crate::session_temporal::record_relation_receipt(&transaction, &projection, 1)
+    tracedecay_session_temporal_store::record_relation_receipt(&transaction, &projection, 1)
         .await
         .map_err(
             |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
@@ -1173,7 +1176,7 @@ pub async fn publish_test_session_relation_projection(
             },
         )?;
     transaction.commit().await?;
-    crate::session_temporal::apply_relation_projection(
+    tracedecay_session_temporal_store::apply_relation_projection(
         database,
         &projection,
         Arc::new(NeverCancelled),
@@ -1213,7 +1216,7 @@ fn bind_test_session_relation_graph_with_registry(
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use crate::session_temporal::relations::SessionRelationScope;
+    use tracedecay_session_temporal_store::relations::SessionRelationScope;
     use tracedecay_graph_db::{GraphDbOwnerRegistrationV1, GraphDbRegistration, NeverCancelled};
     use tracedecay_store::{
         RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,

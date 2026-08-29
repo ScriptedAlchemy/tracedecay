@@ -25,7 +25,7 @@ use tracedecay_domain::{
     HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalCursor, RetrievalGrainV1,
     RetrievalRequest, RetrievalScope, SanitizerRevision, SingleRootScopeV1, VectorWatermark,
 };
-use tracedecay_global_db::session_temporal::execution::{
+use tracedecay_session_temporal_store::execution::{
     TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
     TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
 };

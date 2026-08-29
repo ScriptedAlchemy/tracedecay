@@ -102,8 +102,8 @@ pub fn register_test_schema_installer() {
     });
 }
 
-pub mod session_temporal;
-pub use session_temporal::operations as session_temporal_operations;
+mod session_temporal_handle;
+mod session_temporal_schema;
 mod transcript;
 
 pub use git_index_transactions::{
@@ -134,10 +134,6 @@ pub use remote_deletion::{
     RemoteDeletionCleanupState, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
     RemoteDeletionTombstoneTransitionOutcome,
-};
-pub use session_temporal::{
-    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
-    SessionTemporalRefreshDiscoveryPage,
 };
 pub use tracedecay_runtime_core::store_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
