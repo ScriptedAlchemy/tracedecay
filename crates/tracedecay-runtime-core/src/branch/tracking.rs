@@ -487,7 +487,6 @@ pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &Prepa
 }
 
 #[hotpath::measure(label = "runtime_core.branch.rollback_prepared")]
-#[hotpath::measure(label = "runtime_core.branch.rollback_prepared")]
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,

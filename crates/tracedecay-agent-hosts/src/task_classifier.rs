@@ -65,7 +65,7 @@ impl TaskCategory {
 ///
 /// `tool_names`: names of all `tool_use` blocks in the turn (e.g. "Edit", "Bash").
 /// `bash_commands`: content of Bash tool inputs (the `command` field).
-#[hotpath::measure(label = "hosts.analytics.classify")]
+#[hotpath::measure(label = "hosts.task_classifier.classify")]
 pub fn classify(tool_names: &[&str], bash_commands: &[&str]) -> TaskCategory {
     if tool_names.is_empty() {
         return TaskCategory::Conversation;
