@@ -1094,6 +1094,20 @@ mod semantic_runtime_payload_tests {
     }
 
     #[test]
+    fn semantic_runtime_accepts_an_explicitly_disabled_selected_model() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let mut config = SemanticConfig::default();
+        config.selected_model = None;
+        let payload = serde_json::to_string(&config).expect("disabled semantic runtime JSON");
+        registry
+            .validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            )
+            .expect("selected_model null disables the semantic lane");
+    }
+
+    #[test]
     fn semantic_runtime_rejects_an_invalid_artifact_digest() {
         let registry = ConfigurationRegistry::core().expect("registry");
         let mut config = realistic_activation_config();
