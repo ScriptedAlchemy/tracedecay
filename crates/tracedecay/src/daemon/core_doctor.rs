@@ -82,7 +82,7 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
 }
 
 fn doctor_runtime_temporal_report(
-    report: tracedecay_global_db::SessionTemporalHealthReport,
+    report: tracedecay_session_temporal_store::SessionTemporalHealthReport,
 ) -> serde_json::Value {
     serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")

@@ -438,7 +438,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(
             db.recover_pending_session_relation_projections(
                 1,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &read_control,
                 ),
             )
@@ -470,7 +470,7 @@ mod tests {
                 &session_id,
                 &relation_ids,
                 4_096,
-                tracedecay_global_db::session_temporal::store::execution_control_graph_cancellation(
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                     &restart_control,
                 ),
             )

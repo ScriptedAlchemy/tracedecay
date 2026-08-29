@@ -27,7 +27,6 @@ use super::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
@@ -36,6 +35,7 @@ use tracedecay_runtime_core::db::{
     DatabaseOwnerWeakLeaseIssuerV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
 };
