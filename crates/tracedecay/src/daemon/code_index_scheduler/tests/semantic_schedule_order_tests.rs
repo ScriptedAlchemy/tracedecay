@@ -14,7 +14,7 @@ use tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1;
 use super::super::CodeIndexGenerationPublishedV1;
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, test_project_id, wait_for_generation_change,
-    wait_for_initial_generation,
+    wait_for_initial_generation, wait_for_live_complete_generation,
 };
 
 async fn published_generation_for_root(
@@ -165,7 +165,7 @@ async fn semantic_schedule_reuses_the_serving_generation_handle() {
             .await
             .expect("mount scheduler")
     );
-    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
 
     let scheduler = registry
         .scheduler_handle(fixture.path())
@@ -361,11 +361,22 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
-    let second_publication = published_generation_for_root(&mut publications, &project_root).await;
-    let second_generation = registry
-        .latest_generation_id(fixture.path())
-        .await
-        .expect("edited serving generation");
+    // Early publish can leave the first generation on the broadcast bus
+    // (and remount may rebroadcast it). Wait for a distinct id.
+    let second_publication = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = publications.recv().await.expect("generation publication");
+            if event.project_root.as_path() == project_root
+                && event.generation_id != first_generation
+            {
+                break event.generation_id;
+            }
+        }
+    })
+    .await
+    .expect("edited generation published");
+    let second_generation =
+        wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
     tokio::time::timeout(Duration::from_secs(3), async {
         while replacement_calls.load(Ordering::SeqCst) < 2 {
             tokio::task::yield_now().await;

@@ -2327,6 +2327,20 @@ mod tests {
         digests
     }
 
+    /// Reminting the same sealed file twice (cold then warm reusable sink)
+    /// must keep the exact authority digest map.
+    #[test]
+    fn reminted_authority_digests_match_across_reusable_sink_calls() {
+        let chunks = wide_chunks(48);
+        let first = ExactExtractionAuthorityV1::restore(&chunks).expect("first remint");
+        let second = ExactExtractionAuthorityV1::restore(&chunks).expect("warm remint");
+        assert_eq!(first.chunk_digests, second.chunk_digests);
+        assert_eq!(
+            first.chunk_digests,
+            sequential_digest_reference(&chunks.chunks)
+        );
+    }
+
     /// The fanned-out digest sweep must produce byte-identical digests, in the
     /// same association, as the single-threaded reference it replaced.
     #[test]

@@ -2276,11 +2276,12 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
     );
 }
 
-/// Config dispatch is full-scope exact. A store matching on a partial key
-/// (repository-only pointer) must never get a generation sealed for one
-/// branch/worktree dispatched onto another scope — neither onto a different
-/// worktree (the PR checkout) nor onto the same worktree under a different
-/// sealed branch label.
+/// Config dispatch is full-scope exact for reuse. A store matching on a
+/// partial key (repository-only pointer) must never adopt a generation
+/// sealed for another checkout. A same-checkout label move is a rebuild
+/// that still names the incumbent as the compare-and-swap expected token
+/// (`active_generation` stays `Option<Published>` — reuse denied is
+/// `Ok(None)`; CAS is proven by a successful publish against the slot).
 #[test]
 fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let store = PartialKeyPublicationStore::default();
@@ -2308,22 +2309,29 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
         reference: Some(id::<RefId>("refs/heads/pr-1234")),
         worktree: hawk_scope.worktree.clone(),
     };
-    for foreign_scope in [&pr_worktree_scope, &moved_label_scope] {
-        let refused = owner
-            .active_generation(foreign_scope)
-            .expect_err("a generation sealed for hawk never dispatches onto another scope");
-        assert!(
-            matches!(
-                &refused,
-                CodeIndexProductionErrorV1::Publication(
-                    CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
-                )
-            ),
-            "full-scope dispatch mismatch must be the terminal reset state: {refused}"
-        );
-    }
+    let refused = owner
+        .active_generation(&pr_worktree_scope)
+        .expect_err("a generation sealed for hawk never dispatches onto a foreign checkout");
+    assert!(
+        matches!(
+            &refused,
+            CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            )
+        ),
+        "foreign-checkout dispatch mismatch must be the terminal reset state: {refused}"
+    );
 
-    // The exact sealed full scope still dispatches.
+    assert!(
+        owner
+            .active_generation(&moved_label_scope)
+            .expect("same-checkout label move rebuilds instead of resetting")
+            .is_none(),
+        "a label move must not reuse the previous label's generation"
+    );
+
+    // The exact sealed full scope still dispatches while the incumbent sits
+    // in the slot — before the label-move publish replaces it.
     assert_eq!(
         owner
             .active_generation(&hawk_scope)
@@ -2331,6 +2339,24 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
             .expect("hawk stays active for its own scope")
             .manifest(),
         hawk.manifest()
+    );
+
+    let moved = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.dispatch.moved",
+                1_200_000,
+                "refs/heads/pr-1234",
+                Some("worktree.hawk"),
+                "commit.pr.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("label-move publish must CAS against the prior-label incumbent");
+    assert_ne!(
+        moved.manifest().generation_id,
+        hawk.manifest().generation_id,
+        "the rebuilt generation is a new publication, not the reused hawk seal"
     );
 }
 

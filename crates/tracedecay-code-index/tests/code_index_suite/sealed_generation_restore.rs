@@ -11,7 +11,8 @@ use tracedecay_code_index::parallelism::{
 };
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublishedGenerationV1, sealed_generation_payload_digest,
+    CodeIndexPublishedGenerationV1, UninterruptibleCodeIndexControlV1,
+    sealed_generation_payload_digest,
 };
 
 /// The legacy sealed format revision this store still reads (the writer-side
@@ -145,6 +146,29 @@ fn sealed_restore_reencodes_identically_at_serial_and_parallel_widths() {
         parallel
             .encode_sealed()
             .expect("full-width restored generation seals"),
+        sealed
+    );
+}
+
+/// Streaming seat from a seekable reader must keep the same envelope bytes
+/// as the in-memory decode: the digest proof and per-file restore cannot
+/// change generation identity.
+#[test]
+fn sealed_seek_reader_restore_reencodes_identically() {
+    let sealed = sealed_multi_file_generation();
+    let admitted = u64::try_from(sealed.len()).expect("sealed length fits u64");
+    let restored = CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+        std::io::Cursor::new(sealed.as_slice()),
+        admitted,
+        None,
+        &UninterruptibleCodeIndexControlV1,
+    )
+    .expect("seek restore")
+    .expect("compatible revision");
+    assert_eq!(
+        restored
+            .encode_sealed()
+            .expect("seek-restored generation seals"),
         sealed
     );
 }
