@@ -1397,6 +1397,10 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         initial.project_root,
         fixture.path().canonicalize().expect("canonical fixture")
     );
+    // Publication is not the seated dashboard identity. Wait for the seat
+    // before asserting the projected generation id.
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
 
     let freshness = registry
         .dashboard_freshness(fixture.path())
@@ -4486,11 +4490,7 @@ async fn core_query_profile_composes_live_code_index_lanes() {
         )
         .await
         .expect("mount daemon-owned scheduler");
-    wait_for_initial_generation(&registry, fixture.path()).await;
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("live generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
         test_project_id(),
@@ -4815,11 +4815,7 @@ async fn mounted_core_query_worktree_in(
         )
         .await
         .expect("mount daemon-owned scheduler");
-    wait_for_initial_generation(&registry, fixture.path()).await;
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("live generation");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
         test_project_id(),
@@ -5570,16 +5566,13 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
         )
         .await
         .expect("mount daemon-owned scheduler");
-    wait_for_initial_generation(&registry, fixture.path()).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
 
     let projected = registry
         .dashboard_freshness(fixture.path())
         .await
         .expect("mounted scheduler projection");
-    let latest = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("latest generation");
 
     assert_eq!(
         projected.latest_generation_id.as_deref(),
@@ -8673,11 +8666,8 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         .await
         .expect("mount target worktree");
     wait_for_initial_generation(&registry, first.path()).await;
-    let target_generation = wait_for_initial_generation(&registry, target.path()).await;
-    let target_latest = registry
-        .latest_complete_fresh(target.path())
-        .await
-        .expect("target generation");
+    let target_latest = wait_for_live_complete_generation(&registry, target.path()).await;
+    let target_generation = target_latest.generation.manifest().generation_id.clone();
     let repository = target_latest.generation.snapshot().repository.clone();
     let worktree = target_latest
         .generation
@@ -8738,11 +8728,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         )
         .await
         .expect("mount worktree");
-    wait_for_initial_generation(&registry, fixture.path()).await;
-    let initial = registry
-        .latest_complete_fresh(fixture.path())
-        .await
-        .expect("initial generation");
+    let initial = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(
