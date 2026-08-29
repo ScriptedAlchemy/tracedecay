@@ -105,7 +105,7 @@ impl AgentIntegration for OpenCodeIntegration {
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
-        uninstall_mcp_server(&project_path.join("opencode.json"));
+        uninstall_mcp_server(&project_path.join("opencode.json"))?;
         remove_opencode_plugin(&project_path.join(".opencode/plugins/tracedecay.ts"))?;
         let agents_md = project_path.join("AGENTS.md");
         super::remove_managed_skill_prompt_index(
@@ -806,10 +806,8 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Remove MCP server from opencode.json.
-fn uninstall_mcp_server(config_path: &Path) {
-    if let Err(error) = remove_registration_entries(config_path, true, true, true) {
-        eprintln!("  Could not remove OpenCode registration: {error}");
-    }
+fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
+    remove_registration_entries(config_path, true, true, true)
 }
 
 fn remove_registration_entries(
@@ -1286,6 +1284,28 @@ mod tests {
         assert!(error.contains("changed since it was read"), "{error}");
         assert_eq!(std::fs::read(&prompt).unwrap(), before);
         assert_eq!(std::fs::metadata(&prompt).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn project_uninstall_propagates_registration_removal_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("opencode.json");
+        std::fs::write(&config, "{not-json").unwrap();
+        let ctx = InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "/usr/bin/tracedecay".to_string(),
+            tool_permissions: Vec::new(),
+            project_root: Some(project.path().to_path_buf()),
+            dashboard: false,
+        };
+
+        let error = OpenCodeIntegration
+            .deactivate_project_host_component_registration(&[], &ctx, project.path())
+            .expect_err("corrupt project opencode.json must fail uninstall");
+
+        assert!(error.to_string().contains("cannot parse"), "{error}");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{not-json");
     }
 
     #[test]
