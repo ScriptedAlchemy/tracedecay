@@ -34,7 +34,9 @@ use crate::store::vector_generations::{
 mod application_status;
 mod publication_failure;
 mod vector_projection_support;
+#[cfg(test)]
 pub use application_status::application_status_from_projection;
+use application_status::application_status_from_projection_with_receipt;
 use publication_failure::SemanticPublicationFailureRecorderV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
@@ -91,15 +93,17 @@ use super::acceptance_calibration::{
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
 };
-use super::ports::{
-    SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticConfigurationPinV1,
-    SemanticExecutableGenerationLeaseV1, SemanticExecutableGenerationV1, SemanticRollbackCommandV1,
-    SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
-    SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
-};
 #[cfg(test)]
-use super::ports::{SemanticActivationRequestV1, SemanticFallbackReasonV1};
+use super::ports::{
+    SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
+    SemanticFallbackReasonV1, SemanticRollbackCommandV1, SemanticRollbackReceiptV1,
+    SemanticRuntimeBackendV1, SemanticRuntimeStateV1,
+};
+use super::ports::{
+    SemanticConfigurationPinV1, SemanticExecutableGenerationLeaseV1,
+    SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
+    SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStatusV1,
+};
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
@@ -3474,23 +3478,18 @@ impl SemanticLaneRetriever for NeverCalledSemanticLane {
 }
 
 /// Daemon backend that surfaces schedule projection through the application port.
+#[cfg(test)]
 pub struct DaemonSemanticRuntimeBackendV1 {
     handle: DaemonSemanticRuntimeHandleV1,
     configuration: Mutex<Option<SemanticConfigurationPinV1>>,
 }
 
+#[cfg(test)]
 impl DaemonSemanticRuntimeBackendV1 {
     #[cfg(test)]
     pub fn new(handle: DaemonSemanticRuntimeHandleV1) -> Self {
         Self {
             handle,
-            configuration: Mutex::new(None),
-        }
-    }
-
-    pub fn from_production(runtime: ProductionSemanticRuntimeV1) -> Self {
-        Self {
-            handle: runtime.handle.clone(),
             configuration: Mutex::new(None),
         }
     }
@@ -3512,6 +3511,7 @@ impl DaemonSemanticRuntimeBackendV1 {
     }
 }
 
+#[cfg(test)]
 impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
     fn status<'a>(
         &'a self,
@@ -3651,21 +3651,23 @@ pub fn project_semantic_application_status(
     project_root: &Path,
     configuration: Option<SemanticConfigurationPinV1>,
 ) -> Option<SemanticRuntimeStatusV1> {
+    let activation = super::project_committed_semantic_activation(project_root);
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
-        if let Some(configuration) = configuration {
-            backend.bind_configuration(configuration);
-        }
-        return Some(backend.application_status());
+        return Some(application_status_from_projection_with_receipt(
+            &runtime.handle.status_projection(),
+            configuration,
+            activation.as_ref().map(|activation| &activation.receipt),
+        ));
     }
     let handle = project_semantic_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .cloned()?;
-    Some(application_status_from_projection(
+    Some(application_status_from_projection_with_receipt(
         &handle.status_projection(),
         configuration,
+        activation.as_ref().map(|activation| &activation.receipt),
     ))
 }
 
@@ -4913,6 +4915,60 @@ mod tests {
             restarted_status, status,
             "status must not synthesize a time-varying activation receipt"
         );
+    }
+
+    #[tokio::test]
+    async fn current_scheduler_pointer_with_exact_persisted_receipt_is_ready() {
+        let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
+        let published = pointer('s', 's');
+        let generation = published.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('s'),
+            1,
+            move |_progress| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(published)
+                }))
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.current().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current generation published");
+
+        let configuration = configuration_pin();
+        let command = SemanticActivationCommandV1::new(
+            configuration.clone(),
+            SemanticActivationRequestV1::new(generation, None, None).expect("activation request"),
+        )
+        .expect("activation command");
+        let receipt = SemanticActivationReceiptV1::issue(&command, UtcMicros(10))
+            .expect("persisted activation receipt");
+
+        let status = application_status_from_projection_with_receipt(
+            &handle.status_projection(),
+            Some(configuration),
+            Some(&receipt),
+        );
+
+        assert_eq!(
+            status.state,
+            SemanticRuntimeStateV1::Current {
+                receipt: receipt.clone(),
+            }
+        );
+        status.validate().expect("ready runtime status");
+        assert!(matches!(
+            status.route(),
+            crate::semantic_runtime::SemanticRuntimeRouteV1::Semantic {
+                generation,
+                activation_receipt_digest,
+            } if generation == receipt.activated_generation
+                && activation_receipt_digest == receipt.receipt_digest
+        ));
     }
 
     #[tokio::test]

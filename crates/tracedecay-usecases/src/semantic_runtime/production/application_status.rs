@@ -4,17 +4,26 @@ use tracedecay_semantic::{
 };
 
 use super::super::ports::{
-    SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticActivationReceiptV1, SemanticConfigurationPinV1, SemanticFallbackReasonV1,
+    SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 
 /// Map daemon schedule projection into the application/Doctor status shape.
 ///
 /// Indexing never blocks exact/lexical/graph; the route remains lexical until
 /// [`SemanticRuntimeStateV1::Current`].
+#[cfg(test)]
 pub fn application_status_from_projection(
     projection: &SemanticRuntimeStatusProjectionV1,
     configuration: Option<SemanticConfigurationPinV1>,
+) -> SemanticRuntimeStatusV1 {
+    application_status_from_projection_with_receipt(projection, configuration, None)
+}
+
+pub(crate) fn application_status_from_projection_with_receipt(
+    projection: &SemanticRuntimeStatusProjectionV1,
+    configuration: Option<SemanticConfigurationPinV1>,
+    receipt: Option<&SemanticActivationReceiptV1>,
 ) -> SemanticRuntimeStatusV1 {
     let state = match &projection.status {
         SemanticRuntimeScheduleStatusV1::Unavailable => SemanticRuntimeStateV1::Unavailable {
@@ -55,9 +64,18 @@ pub fn application_status_from_projection(
             },
         },
         SemanticRuntimeScheduleStatusV1::Current { generation } => {
-            SemanticRuntimeStateV1::Degraded {
-                active_generation: Some(generation.clone()),
-                reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+            match receipt.filter(|receipt| {
+                receipt.validate().is_ok()
+                    && receipt.activated_generation == *generation
+                    && configuration.as_ref() == Some(&receipt.configuration)
+            }) {
+                Some(receipt) => SemanticRuntimeStateV1::Current {
+                    receipt: receipt.clone(),
+                },
+                None => SemanticRuntimeStateV1::Degraded {
+                    active_generation: Some(generation.clone()),
+                    reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+                },
             }
         }
     };
