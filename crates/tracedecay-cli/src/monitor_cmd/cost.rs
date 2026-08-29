@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::daemon::DaemonHandshake;
+use tracedecay::daemon::DaemonHandshake;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_usecases::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
 
@@ -211,21 +211,21 @@ fn map_cost_payloads(
 
 fn global_cost_handshake() -> Result<DaemonHandshake> {
     let cwd = std::env::current_dir()?;
-    let project_root = crate::config::discover_project_root(&cwd);
+    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
     DaemonHandshake::for_current_client(project_root, None, false, false)
 }
 
 async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<serde_json::Value> {
-    let result = crate::daemon::call_default_tool(
+    let result = tracedecay::daemon::call_default_tool(
         handshake,
         "tracedecay_admin_cli",
         serde_json::json!({ "action": "cost_summary", "range": range }),
     )
     .await?;
-    crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
+    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
-#[hotpath::measure(label = "doctor.monitor.cost.fetch", future = true)]
+#[hotpath::measure(label = "cli.monitor.cost_fetch", future = true)]
 async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
     let handshake = global_cost_handshake()?;
     let fetch = async {
@@ -393,7 +393,7 @@ mod tests {
         let handshake = global_cost_handshake().unwrap();
         assert_eq!(
             handshake.project_path,
-            crate::config::discover_project_root(&std::env::current_dir().unwrap())
+            tracedecay_runtime_core::config::discover_project_root(&std::env::current_dir().unwrap())
         );
     }
 

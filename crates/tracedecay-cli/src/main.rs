@@ -30,6 +30,7 @@ mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
 mod project_cmd;
+mod monitor_cmd;
 mod serve_cmd;
 mod sessions_cmd;
 mod status_cmd;
@@ -1632,7 +1633,7 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_runtime_c
             commands::handle_gain(all, history, &range, json).await?;
         }
         Commands::Monitor => {
-            hotpath::measure_block!("cli.monitor.run", tracedecay::monitor::run())?;
+            hotpath::measure_block!("cli.monitor.run", monitor_cmd::run())?;
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }

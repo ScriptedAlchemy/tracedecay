@@ -3,12 +3,12 @@ use tempfile::TempDir;
 
 /// Helper: write an entry to a specific mmap dir.
 fn write(dir: &Path, project: &Path, prefix: &str, tool: &str, delta: u64, before: u64) {
-    tracedecay::monitor::write_entry_to(dir, project, prefix, tool, delta, before);
+    tracedecay_runtime_core::monitor_ring::write_entry_to(dir, project, prefix, tool, delta, before);
 }
 
 /// Helper: open reader at a specific mmap dir.
-fn reader(dir: &Path) -> tracedecay::monitor::MmapReader {
-    tracedecay::monitor::MmapReader::open_at(dir).unwrap()
+fn reader(dir: &Path) -> tracedecay_runtime_core::monitor_ring::MmapReader {
+    tracedecay_runtime_core::monitor_ring::MmapReader::open_at(dir).unwrap()
 }
 
 #[test]

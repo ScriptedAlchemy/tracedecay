@@ -424,8 +424,6 @@ dirs = "6"
 hex = "0.4"
 rayon = "1"
 getrandom = "0.2"
-memmap2 = "0.9"
-crossterm = "0.28"
 fs2 = "0.4"
 same-file = "1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }

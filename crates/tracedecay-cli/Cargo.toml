@@ -144,6 +144,7 @@ lang-toml = ["tracedecay/lang-toml"]
 lang-lean = ["tracedecay/lang-lean"]
 
 [dependencies]
+crossterm = "0.28"
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3.33"

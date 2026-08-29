@@ -79,7 +79,6 @@ mod hooks;
 #[cfg(test)]
 mod host_admission_test;
 pub mod mcp;
-pub mod monitor;
 mod path_tree;
 pub mod profile_backup;
 pub mod profile_registry_maintenance;
