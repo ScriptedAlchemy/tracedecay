@@ -153,10 +153,8 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
 
 #[test]
 fn saturated_connect_advice_is_distinct_from_restart_advice() {
-    let saturated =
-        super::super::daemon_connect_failure_advice(std::io::ErrorKind::WouldBlock);
-    let restarting =
-        super::super::daemon_connect_failure_advice(std::io::ErrorKind::NotFound);
+    let saturated = super::super::daemon_connect_failure_advice(std::io::ErrorKind::WouldBlock);
+    let restarting = super::super::daemon_connect_failure_advice(std::io::ErrorKind::NotFound);
     let refused =
         super::super::daemon_connect_failure_advice(std::io::ErrorKind::ConnectionRefused);
 

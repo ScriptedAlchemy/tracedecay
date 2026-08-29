@@ -384,10 +384,8 @@ fn read_daemon_log_tail(max_lines: usize) -> String {
 }
 
 pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
-    let advice = super::unavailable_daemon_socket_advice(
-        socket_path,
-        super::installed_service_state().ok(),
-    );
+    let advice =
+        super::unavailable_daemon_socket_advice(socket_path, super::installed_service_state().ok());
     TraceDecayError::Config {
         message: format!(
             "TraceDecay daemon socket '{}' is not available. {advice}",

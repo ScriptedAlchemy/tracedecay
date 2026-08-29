@@ -199,10 +199,8 @@ fn after_update_restore_heals_stopped_installed_units() {
 #[test]
 fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
     let socket = PathBuf::from("/tmp/tracedecay.sock");
-    let advice = super::unavailable_daemon_socket_advice(
-        &socket,
-        Some(DaemonServiceState::StoppedDisabled),
-    );
+    let advice =
+        super::unavailable_daemon_socket_advice(&socket, Some(DaemonServiceState::StoppedDisabled));
     assert!(
         advice.contains("stopped and disabled"),
         "advice must distinguish stopped+disabled, got: {advice}"
@@ -1301,7 +1299,10 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     super::restore_installed_service_after_update(DaemonServiceState::Missing)
         .expect("missing stays missing");
     assert!(
-        !log.exists() || std::fs::read_to_string(&log).expect("systemctl log").is_empty(),
+        !log.exists()
+            || std::fs::read_to_string(&log)
+                .expect("systemctl log")
+                .is_empty(),
         "missing must not invoke systemctl"
     );
 
@@ -1309,13 +1310,19 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
         .join("systemd/user")
         .join(crate::daemon::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
-    std::fs::write(&service_path, "[Service]\nExecStart=/old/tracedecay daemon run\n")
-        .expect("masked unit");
+    std::fs::write(
+        &service_path,
+        "[Service]\nExecStart=/old/tracedecay daemon run\n",
+    )
+    .expect("masked unit");
 
     super::restore_installed_service_after_update(DaemonServiceState::Masked)
         .expect("masked stays masked");
     assert!(
-        !log.exists() || std::fs::read_to_string(&log).expect("systemctl log").is_empty(),
+        !log.exists()
+            || std::fs::read_to_string(&log)
+                .expect("systemctl log")
+                .is_empty(),
         "masked must not invoke systemctl"
     );
 }
